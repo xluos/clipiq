@@ -8,6 +8,7 @@ import { WorkspaceScreen } from './screens/WorkspaceScreen';
 import { ReportScreen } from './screens/ReportScreen';
 import { AnimatePresence, motion } from 'motion/react';
 import { TitleBar } from './components/TitleBar';
+import { YtDlpUpdateToast } from './components/YtDlpUpdateToast';
 
 export default function App() {
   const { currentScreen } = useApp();
@@ -35,6 +36,7 @@ export default function App() {
           </motion.div>
         </AnimatePresence>
       </div>
+      <YtDlpUpdateToast />
     </div>
   );
 }

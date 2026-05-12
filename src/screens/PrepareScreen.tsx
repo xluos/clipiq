@@ -3,16 +3,43 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
-import { ArrowLeft, Play, LayoutGrid } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { AlertTriangle, ArrowLeft, Play, LayoutGrid } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import type { AnalysisOptions } from "../types";
+import type { RuntimeStatus } from "../electron-api";
 
 export function PrepareScreen() {
-  const { setCurrentScreen, projects, activeProjectId, providers, activeProviderId } = useApp();
+  const { setCurrentScreen, projects, setProjects, activeProjectId, providers, activeProviderId } = useApp();
   
   const project = projects.find(p => p.id === activeProjectId);
   const provider = providers.find(p => p.id === activeProviderId);
   
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [mode, setMode] = useState<AnalysisOptions["mode"]>(project?.analysisOptions?.mode || "standard");
+  const [density, setDensity] = useState<AnalysisOptions["density"]>(project?.analysisOptions?.density || "standard");
+  const [focus, setFocus] = useState<AnalysisOptions["focus"]>(project?.analysisOptions?.focus || "all");
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [runtimeChecked, setRuntimeChecked] = useState(false);
+
+  useEffect(() => {
+    if (!window.videoAnalyzer) {
+      setRuntimeChecked(true);
+      return;
+    }
+    window.videoAnalyzer
+      .getRuntimeStatus()
+      .then((status) => setRuntimeStatus(status))
+      .catch(() => setRuntimeStatus(null))
+      .finally(() => setRuntimeChecked(true));
+  }, []);
+
+  const missingDeps: string[] = [];
+  if (window.videoAnalyzer && runtimeChecked) {
+    if (!runtimeStatus?.ffmpeg) missingDeps.push("ffmpeg");
+    if (!runtimeStatus?.ffprobe) missingDeps.push("ffprobe");
+  }
+  const hasMissingDeps = missingDeps.length > 0;
+  const missingApiKey = !provider?.apiKeyRef;
 
   if (!project) {
     return null;
@@ -25,6 +52,16 @@ export function PrepareScreen() {
   };
 
   const handleStartAnalysis = () => {
+    if (project) {
+      setProjects(prev => prev.map(p => p.id === project.id ? {
+        ...p,
+        status: "analyzing",
+        providerId: activeProviderId || undefined,
+        model: provider?.model,
+        analysisOptions: { mode, density, focus },
+        updatedAt: new Date().toISOString()
+      } : p));
+    }
     setCurrentScreen("progress");
   };
 
@@ -56,63 +93,63 @@ export function PrepareScreen() {
             <span>&bull;</span>
             <span>{project.width}x{project.height}</span>
             <span>&bull;</span>
-            <span className="capitalize">{project.orientation}</span>
+            <span>{project.orientation === "portrait" ? "竖屏" : project.orientation === "square" ? "方形" : "横屏"}</span>
           </div>
         </div>
 
         <Card className="bg-white dark:bg-slate-900/50 border-slate-200 dark:border-slate-800 shadow-sm dark:shadow-none">
           <CardContent className="p-6 space-y-6">
             <div className="space-y-2">
-              <Label>Analysis Mode</Label>
-              <Select defaultValue="standard">
+              <Label>分析模式</Label>
+              <Select value={mode} onValueChange={(value) => setMode(value as AnalysisOptions["mode"])}>
                 <SelectTrigger className="bg-slate-50 dark:bg-[#0A0A0B] border-slate-200 dark:border-slate-800">
-                  <SelectValue placeholder="Select mode" />
+                  <SelectValue placeholder="选择分析模式" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="quick">Quick Overview</SelectItem>
-                  <SelectItem value="standard">Standard Analysis</SelectItem>
-                  <SelectItem value="detailed">In-depth Breakdown</SelectItem>
+                  <SelectItem value="quick">快速概览</SelectItem>
+                  <SelectItem value="standard">标准分析</SelectItem>
+                  <SelectItem value="detailed">深度拆解</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             <div className="space-y-2">
-              <Label>Node Density</Label>
-              <Select defaultValue="standard">
+              <Label>节点密度</Label>
+              <Select value={density} onValueChange={(value) => setDensity(value as AnalysisOptions["density"])}>
                 <SelectTrigger className="bg-slate-50 dark:bg-[#0A0A0B] border-slate-200 dark:border-slate-800">
-                  <SelectValue placeholder="Select density" />
+                  <SelectValue placeholder="选择节点密度" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="sparse">Sparse (Key events only)</SelectItem>
-                  <SelectItem value="standard">Standard</SelectItem>
-                  <SelectItem value="dense">Dense (Every cut)</SelectItem>
+                  <SelectItem value="sparse">稀疏（只保留关键时刻）</SelectItem>
+                  <SelectItem value="standard">标准</SelectItem>
+                  <SelectItem value="dense">密集（每次切镜都标）</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             <div className="space-y-2">
-              <Label>Focus Areas</Label>
-              <Select defaultValue="all">
+              <Label>关注重点</Label>
+              <Select value={focus} onValueChange={(value) => setFocus(value as AnalysisOptions["focus"])}>
                 <SelectTrigger className="bg-slate-50 dark:bg-[#0A0A0B] border-slate-200 dark:border-slate-800">
-                  <SelectValue placeholder="Select focus" />
+                  <SelectValue placeholder="选择关注重点" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">Comprehensive</SelectItem>
-                  <SelectItem value="narrative">Narrative Structure</SelectItem>
-                  <SelectItem value="rhythm">Editing Rhythm</SelectItem>
-                  <SelectItem value="emotion">Emotional Arc</SelectItem>
+                  <SelectItem value="all">综合</SelectItem>
+                  <SelectItem value="narrative">叙事结构</SelectItem>
+                  <SelectItem value="rhythm">剪辑节奏</SelectItem>
+                  <SelectItem value="emotion">情绪曲线</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-            
+
             <div className="p-3 rounded-lg bg-slate-50 dark:bg-[#0A0A0B] border border-slate-200 dark:border-slate-800 text-sm space-y-1">
-              <div className="text-slate-500 text-xs font-semibold uppercase tracking-widest mb-2">Model Configuration</div>
+              <div className="text-slate-500 text-xs font-semibold uppercase tracking-widest mb-2">模型配置</div>
               <div className="flex justify-between">
                 <span className="text-slate-500 dark:text-slate-400">Provider</span>
                 <span className="font-medium text-slate-700 dark:text-slate-200">{provider?.name}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-500 dark:text-slate-400">Model</span>
+                <span className="text-slate-500 dark:text-slate-400">模型</span>
                 <span className="font-medium font-mono text-slate-700 dark:text-slate-200">{provider?.model}</span>
               </div>
             </div>
@@ -122,13 +159,38 @@ export function PrepareScreen() {
         <div className="flex-1" />
 
         <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-3">
+          {hasMissingDeps && (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                未检测到 {missingDeps.join("、")}，需要先安装才能进行真实拉片分析。
+                <button
+                  type="button"
+                  onClick={() => setCurrentScreen("settings")}
+                  className="ml-1 underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-200"
+                >
+                  打开设置
+                </button>
+              </span>
+            </div>
+          )}
+          {!hasMissingDeps && missingApiKey && (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">
+              当前未配置模型 API Key，将仅生成基于关键帧的本地启发式节点。
+            </div>
+          )}
           {project.status === "completed" && (
             <Button variant="secondary" className="w-full bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700" onClick={() => setCurrentScreen("workspace")}>
               <LayoutGrid className="w-4 h-4 mr-2" />
               查看已有分析
             </Button>
           )}
-          <Button size="lg" className="w-full bg-blue-600 hover:bg-blue-700 text-white" onClick={handleStartAnalysis}>
+          <Button
+            size="lg"
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white disabled:bg-slate-400 disabled:hover:bg-slate-400"
+            onClick={handleStartAnalysis}
+            disabled={hasMissingDeps}
+          >
             <Play className="w-4 h-4 mr-2 fill-current" />
             {project.status === "completed" ? "重新分析" : "开始分析"}
           </Button>

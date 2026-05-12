@@ -31,7 +31,8 @@ export type ProjectStatus =
 export type Project = {
   id: string;
   source: ProjectSource;
-  localVideoPath: string; // Object URL for browser demo
+  localVideoPath: string; // media:// URL in Electron or Object URL for browser demo
+  localFilePath?: string;
   videoName: string;
   durationSec: number;
   width: number;
@@ -40,7 +41,10 @@ export type Project = {
   status: ProjectStatus;
   providerId?: string;
   model?: string;
+  analysisOptions?: AnalysisOptions;
   thumbnailUrl?: string; // For recent projects list
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 export type AnalysisNodeType =
@@ -85,6 +89,31 @@ export type AnalysisReport = {
   editingStyle: string;
   composition: string;
   takeaways: string[];
+  providerSnapshot?: Pick<ModelProvider, "name" | "baseUrl" | "model" | "inputMode">;
+  pipelineVersion?: string;
+  schemaVersion?: string;
+  generatedAt?: string;
+};
+
+export type AnalysisOptions = {
+  mode: "quick" | "standard" | "detailed";
+  density: "sparse" | "standard" | "dense";
+  focus: "all" | "narrative" | "rhythm" | "emotion";
+};
+
+export type AnalysisProgressEvent = {
+  projectId: string;
+  progress: number;
+  stage: string;
+  message?: string;
+};
+
+export type AppPersistedState = {
+  projects: Project[];
+  providers: ModelProvider[];
+  activeProviderId: string | null;
+  nodesByProject: Record<string, AnalysisNode[]>;
+  reportByProject: Record<string, AnalysisReport>;
 };
 
 export type ScreenState = 
