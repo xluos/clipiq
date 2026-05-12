@@ -315,11 +315,11 @@ function ProviderGroup({
 }
 
 function ProviderCard({
-  provider,
+  provider: persisted,
   isDefault,
   onSetDefault,
   onDelete,
-  onUpdate,
+  onUpdate: persist,
   kind,
 }: {
   provider: ModelProvider;
@@ -332,9 +332,44 @@ function ProviderCard({
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [whisperCache, setWhisperCache] = useState<{ cached: boolean; sizeBytes?: number } | null>(null);
+  const [draft, setDraft] = useState<ModelProvider>(persisted);
 
-  const isLocalWhisper = provider.endpointType === "local_whisper_wasm";
-  const modelKey = isLocalWhisper ? provider.localWhisperModel || provider.model : null;
+  // 当外部 persisted 引用变化（保存后 / 切换默认 / 改名），同步 draft
+  useEffect(() => {
+    setDraft(persisted);
+  }, [persisted]);
+
+  const isDirty = useMemo(() => {
+    const keys: (keyof ModelProvider)[] = [
+      "name",
+      "baseUrl",
+      "apiKeyRef",
+      "model",
+      "endpointType",
+      "inputMode",
+      "language",
+      "localWhisperModel",
+      "localWhisperMirror",
+    ];
+    return keys.some((k) => (draft[k] ?? "") !== (persisted[k] ?? ""));
+  }, [draft, persisted]);
+
+  // 这两个别名让下方 JSX 的编辑控件直接走草稿 / 草稿写入,header 和保存提交才走 persisted
+  const provider = draft;
+  const onUpdate = (patch: Partial<ModelProvider>) => {
+    setDraft((prev) => ({ ...prev, ...patch }));
+  };
+
+  const handleSave = () => {
+    persist(draft);
+  };
+
+  const handleReset = () => {
+    setDraft(persisted);
+  };
+
+  const isLocalWhisper = draft.endpointType === "local_whisper_wasm";
+  const modelKey = isLocalWhisper ? draft.localWhisperModel || draft.model : null;
 
   useEffect(() => {
     if (!isLocalWhisper || !modelKey || !window.videoAnalyzer) {
@@ -358,7 +393,7 @@ function ProviderCard({
     setTestResult(null);
     try {
       if (window.videoAnalyzer) {
-        const result = await window.videoAnalyzer.testProvider(provider);
+        const result = await window.videoAnalyzer.testProvider(draft);
         setTestResult(result);
         if (isLocalWhisper && modelKey) {
           const refreshed = await window.videoAnalyzer.isWhisperModelCached(modelKey).catch(() => null);
@@ -366,9 +401,9 @@ function ProviderCard({
         }
         return;
       }
-      const response = await fetch(`${provider.baseUrl.replace(/\/+$/, "")}/models`, {
+      const response = await fetch(`${draft.baseUrl.replace(/\/+$/, "")}/models`, {
         method: "GET",
-        headers: provider.apiKeyRef ? { authorization: `Bearer ${provider.apiKeyRef}` } : {},
+        headers: draft.apiKeyRef ? { authorization: `Bearer ${draft.apiKeyRef}` } : {},
       });
       setTestResult({
         ok: response.ok,
@@ -397,22 +432,27 @@ function ProviderCard({
     <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] shadow-sm overflow-hidden">
       <header className="flex items-center justify-between px-5 py-3 border-b border-slate-100 dark:border-slate-800/60 bg-slate-50/60 dark:bg-slate-900/20">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="truncate font-medium text-slate-800 dark:text-slate-100">{provider.name}</span>
+          <span className="truncate font-medium text-slate-800 dark:text-slate-100">{persisted.name}</span>
           {isDefault && (
             <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
               默认
             </span>
           )}
-          {provider.endpointType === "local_whisper_wasm" ? (
+          {persisted.endpointType === "local_whisper_wasm" ? (
             <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
               本地
             </span>
           ) : (
-            !provider.apiKeyRef && (
+            !persisted.apiKeyRef && (
               <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
                 缺 Key
               </span>
             )
+          )}
+          {isDirty && (
+            <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-500/15 dark:text-blue-300">
+              未保存
+            </span>
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -616,7 +656,32 @@ function ProviderCard({
             </span>
           )}
         </div>
-        <span className="text-[10px] text-slate-400 font-mono shrink-0">{provider.id}</span>
+        <div className="flex items-center gap-2 shrink-0">
+          {isDirty && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleReset}
+              className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-100"
+            >
+              撤销
+            </Button>
+          )}
+          <Button
+            variant={isDirty ? "default" : "outline"}
+            size="sm"
+            onClick={handleSave}
+            disabled={!isDirty}
+            className={
+              isDirty
+                ? "bg-blue-600 hover:bg-blue-700 text-white"
+                : "border-slate-200 dark:border-slate-800 text-slate-400"
+            }
+          >
+            保存
+          </Button>
+          <span className="text-[10px] text-slate-400 font-mono">{persisted.id}</span>
+        </div>
       </footer>
     </div>
   );
