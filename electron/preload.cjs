@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   },
   exportProject: (payload) => ipcRenderer.invoke("project:export", payload),
   testProvider: (provider) => ipcRenderer.invoke("provider:testConnection", provider),
+  isWhisperModelCached: (modelId) => ipcRenderer.invoke("whisper:isModelCached", modelId),
   checkYtDlpUpdate: () => ipcRenderer.invoke("ytdlp:checkUpdate"),
   installYtDlp: () => ipcRenderer.invoke("ytdlp:install"),
   onYtDlpUpdateStatus: (callback) => {

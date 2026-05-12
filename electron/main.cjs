@@ -1565,6 +1565,43 @@ app.whenReady().then(async () => {
     return { canceled: false, filePath: result.filePath };
   });
 
+  ipcMain.handle("whisper:isModelCached", async (_event, modelId) => {
+    if (!modelId || typeof modelId !== "string") return { cached: false };
+    const cacheDir = path.join(app.getPath("userData"), "whisper-cache");
+    const modelDir = path.join(cacheDir, modelId);
+    try {
+      const entries = await fs.readdir(modelDir, { withFileTypes: true });
+      // 至少要有 onnx 子目录或 model.onnx 文件，且有 config.json
+      let hasConfig = false;
+      let hasOnnx = false;
+      for (const entry of entries) {
+        if (entry.name === "config.json") hasConfig = true;
+        if (entry.name === "onnx") {
+          const onnxFiles = await fs.readdir(path.join(modelDir, entry.name)).catch(() => []);
+          if (onnxFiles.some((f) => f.endsWith(".onnx") || f.endsWith(".onnx_data"))) hasOnnx = true;
+        }
+        if (entry.name.endsWith(".onnx")) hasOnnx = true;
+      }
+      if (!hasConfig || !hasOnnx) return { cached: false };
+      let totalBytes = 0;
+      async function walk(p) {
+        const items = await fs.readdir(p, { withFileTypes: true }).catch(() => []);
+        for (const i of items) {
+          const full = path.join(p, i.name);
+          if (i.isDirectory()) await walk(full);
+          else if (i.isFile()) {
+            const stat = await fs.stat(full).catch(() => null);
+            if (stat) totalBytes += stat.size;
+          }
+        }
+      }
+      await walk(modelDir);
+      return { cached: true, sizeBytes: totalBytes };
+    } catch {
+      return { cached: false };
+    }
+  });
+
   ipcMain.handle("provider:testConnection", async (_event, provider) => {
     if (provider?.endpointType === "local_whisper_wasm") {
       const modelId = provider.localWhisperModel || provider.model || "Xenova/whisper-base";

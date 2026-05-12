@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
+  ArrowLeft,
   CheckCircle2,
   DownloadCloud,
   FolderOpen,
@@ -41,13 +42,24 @@ function formatBytes(bytes: number) {
 }
 
 export function SettingsScreen() {
+  const { setCurrentScreen } = useApp();
   const [section, setSection] = useState<Section>("model");
 
   return (
     <div className="flex-1 flex h-full">
       <main className="flex-1 flex bg-slate-50 dark:bg-[#0A0A0B] overflow-hidden">
         <aside className="w-48 border-r border-slate-200 dark:border-slate-800/50 bg-white dark:bg-[#0E0E10] p-4 space-y-1 overflow-y-auto hidden md:block">
-          <div className="text-xs font-bold text-slate-500 uppercase tracking-widest pl-3 mt-2 mb-4">设置</div>
+          <div className="flex items-center gap-1.5 pl-1 mt-2 mb-4">
+            <button
+              type="button"
+              onClick={() => setCurrentScreen("home")}
+              className="p-1.5 -ml-1 text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100 rounded-md hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              title="返回首页"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <div className="text-xs font-bold text-slate-500 uppercase tracking-widest">设置</div>
+          </div>
           {SECTIONS.map((s) => (
             <button
               key={s.key}
@@ -293,6 +305,27 @@ function ProviderCard({
 }) {
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [whisperCache, setWhisperCache] = useState<{ cached: boolean; sizeBytes?: number } | null>(null);
+
+  const isLocalWhisper = provider.endpointType === "local_whisper_wasm";
+  const modelKey = isLocalWhisper ? provider.localWhisperModel || provider.model : null;
+
+  useEffect(() => {
+    if (!isLocalWhisper || !modelKey || !window.videoAnalyzer) {
+      setWhisperCache(null);
+      return;
+    }
+    let cancelled = false;
+    setWhisperCache(null);
+    window.videoAnalyzer.isWhisperModelCached(modelKey).then((res) => {
+      if (!cancelled) setWhisperCache(res);
+    }).catch(() => {
+      if (!cancelled) setWhisperCache({ cached: false });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isLocalWhisper, modelKey]);
 
   const handleTest = async () => {
     setIsTesting(true);
@@ -301,6 +334,10 @@ function ProviderCard({
       if (window.videoAnalyzer) {
         const result = await window.videoAnalyzer.testProvider(provider);
         setTestResult(result);
+        if (isLocalWhisper && modelKey) {
+          const refreshed = await window.videoAnalyzer.isWhisperModelCached(modelKey).catch(() => null);
+          if (refreshed) setWhisperCache(refreshed);
+        }
         return;
       }
       const response = await fetch(`${provider.baseUrl.replace(/\/+$/, "")}/models`, {
@@ -317,6 +354,18 @@ function ProviderCard({
       setIsTesting(false);
     }
   };
+
+  const cachedSizeLabel = whisperCache?.cached && whisperCache.sizeBytes
+    ? ` · ${formatBytes(whisperCache.sizeBytes)}`
+    : "";
+  const isWhisperReady = isLocalWhisper && whisperCache?.cached === true;
+  const buttonLabel = isTesting
+    ? isLocalWhisper
+      ? (whisperCache?.cached ? "加载中..." : "下载中...")
+      : "测试中..."
+    : isLocalWhisper
+      ? (isWhisperReady ? `已就绪${cachedSizeLabel}` : "下载并预热")
+      : "测试连接";
 
   return (
     <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] shadow-sm overflow-hidden">
@@ -506,15 +555,19 @@ function ProviderCard({
             variant="secondary"
             size="sm"
             onClick={handleTest}
-            disabled={isTesting || (provider.endpointType !== "local_whisper_wasm" && !provider.baseUrl)}
-            className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 shrink-0"
+            disabled={isTesting || (!isLocalWhisper && !provider.baseUrl)}
+            className={
+              isWhisperReady
+                ? "border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300 dark:hover:bg-emerald-500/20 shrink-0"
+                : "bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 shrink-0"
+            }
           >
-            <CheckCircle2 className="w-4 h-4 mr-2 text-slate-400" />
-            {isTesting
-              ? "测试中..."
-              : provider.endpointType === "local_whisper_wasm"
-                ? "预热模型"
-                : "测试连接"}
+            {isTesting ? (
+              <Loader2 className="w-4 h-4 mr-2 animate-spin text-slate-400" />
+            ) : (
+              <CheckCircle2 className={`w-4 h-4 mr-2 ${isWhisperReady ? "text-emerald-500" : "text-slate-400"}`} />
+            )}
+            {buttonLabel}
           </Button>
           {testResult && (
             <span className={`text-xs flex items-start gap-1.5 min-w-0 break-words ${testResult.ok ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>

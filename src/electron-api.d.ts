@@ -106,6 +106,7 @@ declare global {
         format: ExportFormat;
       }) => Promise<{ canceled: boolean; filePath?: string }>;
       testProvider: (provider: ModelProvider) => Promise<ProviderTestResult>;
+      isWhisperModelCached: (modelId: string) => Promise<{ cached: boolean; sizeBytes?: number }>;
       checkYtDlpUpdate: () => Promise<YtDlpUpdateInfo>;
       installYtDlp: () => Promise<YtDlpInstallResult>;
       onYtDlpUpdateStatus: (callback: (info: YtDlpUpdateInfo) => void) => () => void;
