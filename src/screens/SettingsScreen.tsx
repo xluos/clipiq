@@ -29,6 +29,32 @@ const SECTIONS: { key: Section; label: string }[] = [
   { key: "data", label: "项目数据" },
 ];
 
+function whisperModelHint(modelId?: string) {
+  switch (modelId) {
+    case "Xenova/whisper-tiny":
+      return "~40 MB · 最快，但中文准确率一般，适合英文 / 噪声小的素材。";
+    case "Xenova/whisper-small":
+      return "~250 MB · 中文较准，速度适中，常规拉片推荐。";
+    case "Xenova/whisper-medium":
+      return "~500 MB · 准确率高，速度慢，长视频耗时较多。";
+    case "Xenova/whisper-base":
+    default:
+      return "~75 MB · 默认选项，速度和准确率折中。";
+  }
+}
+
+function inputModeHint(mode?: string) {
+  switch (mode) {
+    case "direct_video":
+      return "把整段视频直接喂给模型，仅 Gemini Video / Qwen-VL 等少数模型支持。";
+    case "keyframe_sequence":
+      return "抽取关键帧序列调用模型，兼容性最好，目前默认走这条路径。";
+    case "auto":
+    default:
+      return "暂时等同于抽帧序列，未来会根据模型能力自动切换到直接视频上传。";
+  }
+}
+
 function formatBytes(bytes: number) {
   if (!bytes) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -412,7 +438,14 @@ function ProviderCard({
           <Input value={provider.name} onChange={(e) => onUpdate({ name: e.target.value })} placeholder="给这个 Provider 起个名字" />
         </Field>
         {kind === "audio" && (
-          <Field label="模式">
+          <Field
+            label="模式"
+            hint={
+              provider.endpointType === "local_whisper_wasm"
+                ? "首次使用会从镜像下载 ONNX 模型，体积 40 – 500 MB；推理在本机 CPU，离线可用。"
+                : "走 OpenAI 兼容 /audio/transcriptions，需要配 Base URL 和 API Key。"
+            }
+          >
             <Select
               value={provider.endpointType === "local_whisper_wasm" ? "local_whisper_wasm" : "openai_audio_transcriptions"}
               onValueChange={(v) => {
@@ -431,12 +464,12 @@ function ProviderCard({
             >
               <SelectTrigger className="w-[260px]">
                 <SelectValue>
-                  {provider.endpointType === "local_whisper_wasm" ? "本地 (whisper.cpp WASM)" : "云端 (OpenAI 兼容)"}
+                  {provider.endpointType === "local_whisper_wasm" ? "本地" : "云端"}
                 </SelectValue>
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="local_whisper_wasm">本地 (whisper.cpp WASM，按需下载模型)</SelectItem>
-                <SelectItem value="openai_audio_transcriptions">云端 (OpenAI /audio/transcriptions)</SelectItem>
+                <SelectItem value="local_whisper_wasm">本地</SelectItem>
+                <SelectItem value="openai_audio_transcriptions">云端</SelectItem>
               </SelectContent>
             </Select>
           </Field>
@@ -472,7 +505,7 @@ function ProviderCard({
             />
           </Field>
         ) : (
-          <Field label="本地模型">
+          <Field label="本地模型" hint={whisperModelHint(provider.localWhisperModel)}>
             <Select
               value={provider.localWhisperModel || "Xenova/whisper-base"}
               onValueChange={(v) => onUpdate({ localWhisperModel: v, model: v })}
@@ -481,17 +514,24 @@ function ProviderCard({
                 <SelectValue>{provider.localWhisperModel || "Xenova/whisper-base"}</SelectValue>
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="Xenova/whisper-tiny">whisper-tiny (~40 MB, 最快 / 准确率一般)</SelectItem>
-                <SelectItem value="Xenova/whisper-base">whisper-base (~75 MB, 推荐默认)</SelectItem>
-                <SelectItem value="Xenova/whisper-small">whisper-small (~250 MB, 中文较准)</SelectItem>
-                <SelectItem value="Xenova/whisper-medium">whisper-medium (~500 MB, 准确率高 / 慢)</SelectItem>
+                <SelectItem value="Xenova/whisper-tiny">whisper-tiny</SelectItem>
+                <SelectItem value="Xenova/whisper-base">whisper-base</SelectItem>
+                <SelectItem value="Xenova/whisper-small">whisper-small</SelectItem>
+                <SelectItem value="Xenova/whisper-medium">whisper-medium</SelectItem>
               </SelectContent>
             </Select>
           </Field>
         )}
         {kind === "video" ? (
           <>
-            <Field label="API 协议">
+            <Field
+              label="API 协议"
+              hint={
+                provider.endpointType === "openai_responses"
+                  ? "OpenAI 新版协议，部分网关 / 国产平台尚未完整实现，谨慎使用。"
+                  : "兼容性最广，OpenAI / DashScope / 字节豆包 / 智谱等大多数 OpenAI 兼容服务都支持。"
+              }
+            >
               <Select
                 value={provider.endpointType === "openai_responses" ? "openai_responses" : "openai_chat_completions"}
                 onValueChange={(v) => onUpdate({ endpointType: v as ModelProvider["endpointType"] })}
@@ -502,12 +542,12 @@ function ProviderCard({
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="openai_chat_completions">/v1/chat/completions（兼容性广）</SelectItem>
-                  <SelectItem value="openai_responses">/v1/responses（OpenAI 新协议）</SelectItem>
+                  <SelectItem value="openai_chat_completions">/v1/chat/completions</SelectItem>
+                  <SelectItem value="openai_responses">/v1/responses</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
-            <Field label="输入模式">
+            <Field label="输入模式" hint={inputModeHint(provider.inputMode)}>
               <Select
                 value={provider.inputMode}
                 onValueChange={(v) => onUpdate({ inputMode: v as ModelInputMode })}
@@ -518,7 +558,7 @@ function ProviderCard({
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="auto">自动选择（先 keyframe）</SelectItem>
+                  <SelectItem value="auto">自动选择</SelectItem>
                   <SelectItem value="direct_video">直接视频上传</SelectItem>
                   <SelectItem value="keyframe_sequence">抽帧序列</SelectItem>
                 </SelectContent>
@@ -582,11 +622,14 @@ function ProviderCard({
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
   return (
-    <div className="grid grid-cols-[110px_1fr] items-center gap-3">
-      <Label className="text-right text-slate-500 dark:text-slate-400 text-xs">{label}</Label>
-      <div>{children}</div>
+    <div className="grid grid-cols-[110px_1fr] items-start gap-3">
+      <Label className="text-right text-slate-500 dark:text-slate-400 text-xs pt-2">{label}</Label>
+      <div className="min-w-0">
+        {children}
+        {hint && <p className="mt-1.5 text-xs text-slate-400 dark:text-slate-500">{hint}</p>}
+      </div>
     </div>
   );
 }

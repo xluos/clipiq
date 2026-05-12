@@ -120,11 +120,18 @@ export function PrepareScreen() {
                   <SelectValue placeholder="选择节点密度" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="sparse">稀疏（只保留关键时刻）</SelectItem>
+                  <SelectItem value="sparse">稀疏</SelectItem>
                   <SelectItem value="standard">标准</SelectItem>
-                  <SelectItem value="dense">密集（每次切镜都标）</SelectItem>
+                  <SelectItem value="dense">密集</SelectItem>
                 </SelectContent>
               </Select>
+              <p className="text-xs text-slate-400 dark:text-slate-500">
+                {density === "sparse"
+                  ? "只保留关键转折时刻，节点数最少。"
+                  : density === "dense"
+                    ? "每个镜头切换都打标，节点数最多，模型耗时更长。"
+                    : "在关键时刻和镜头切换之间折中，默认推荐。"}
+              </p>
             </div>
 
             <div className="space-y-2">
