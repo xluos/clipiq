@@ -18,7 +18,7 @@ const STAGES = [
 ];
 
 export function ProgressScreen() {
-  const { setCurrentScreen, activeProjectId, projects, setProjects, providers, activeProviderId, setNodesForProject, setReportForProject } = useApp();
+  const { setCurrentScreen, activeProjectId, projects, setProjects, providers, activeVideoProviderId, activeAudioProviderId, setNodesForProject, setReportForProject } = useApp();
   const [progress, setProgress] = useState(0);
   const [stageIndex, setStageIndex] = useState(0);
   const [stageLabel, setStageLabel] = useState(STAGES[0]);
@@ -89,7 +89,10 @@ export function ProgressScreen() {
     return () => clearInterval(timer);
     }
 
-    const provider = providers.find(p => p.id === (project.providerId || activeProviderId)) || providers[0];
+    const provider = providers.find(p => p.id === (project.providerId || activeVideoProviderId)) || providers.find(p => p.kind === "video") || providers[0];
+    const audioProvider = activeAudioProviderId
+      ? providers.find(p => p.id === activeAudioProviderId && p.kind === "audio")
+      : undefined;
     const options: AnalysisOptions = project.analysisOptions || { mode: "standard", density: "standard", focus: "all" };
     const unsubscribe = window.videoAnalyzer.onAnalysisProgress((event) => {
       if (event.projectId !== project.id) return;
@@ -108,7 +111,7 @@ export function ProgressScreen() {
         return;
       }
       try {
-        const result = await window.videoAnalyzer!.analyzeProject({ project, provider, options });
+        const result = await window.videoAnalyzer!.analyzeProject({ project, provider, audioProvider, options });
         if (cancelledRef.current) return;
         setNodesForProject(project.id, result.nodes);
         setReportForProject(project.id, result.report);

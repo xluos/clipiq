@@ -9,10 +9,10 @@ import type { AnalysisOptions } from "../types";
 import type { RuntimeStatus } from "../electron-api";
 
 export function PrepareScreen() {
-  const { setCurrentScreen, projects, setProjects, activeProjectId, providers, activeProviderId } = useApp();
+  const { setCurrentScreen, projects, setProjects, activeProjectId, providers, activeVideoProviderId } = useApp();
   
   const project = projects.find(p => p.id === activeProjectId);
-  const provider = providers.find(p => p.id === activeProviderId);
+  const provider = providers.find(p => p.id === activeVideoProviderId);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const [mode, setMode] = useState<AnalysisOptions["mode"]>(project?.analysisOptions?.mode || "standard");
@@ -56,7 +56,7 @@ export function PrepareScreen() {
       setProjects(prev => prev.map(p => p.id === project.id ? {
         ...p,
         status: "analyzing",
-        providerId: activeProviderId || undefined,
+        providerId: activeVideoProviderId || undefined,
         model: provider?.model,
         analysisOptions: { mode, density, focus },
         updatedAt: new Date().toISOString()

@@ -36,4 +36,7 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
     ipcRenderer.on("ytdlp:progress", listener);
     return () => ipcRenderer.removeListener("ytdlp:progress", listener);
   },
+  getDataInfo: () => ipcRenderer.invoke("data:getInfo"),
+  openDataFolder: (which) => ipcRenderer.invoke("data:openFolder", which),
+  purgeProjects: () => ipcRenderer.invoke("data:purgeProjects"),
 });

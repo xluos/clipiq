@@ -85,6 +85,7 @@ declare global {
       analyzeProject: (payload: {
         project: Project;
         provider?: ModelProvider;
+        audioProvider?: ModelProvider | null;
         options: AnalysisOptions;
       }) => Promise<AnalysisResult>;
       cancelAnalysis: (projectId: string) => Promise<{ cancelled: boolean }>;
@@ -102,6 +103,9 @@ declare global {
       installYtDlp: () => Promise<YtDlpInstallResult>;
       onYtDlpUpdateStatus: (callback: (info: YtDlpUpdateInfo) => void) => () => void;
       onYtDlpProgress: (callback: (progress: YtDlpProgress) => void) => () => void;
+      getDataInfo: () => Promise<{ userDataPath: string; projectsPath: string; projectCount: number; totalBytes: number }>;
+      openDataFolder: (which?: "projects" | "userData") => Promise<{ ok: boolean; path: string }>;
+      purgeProjects: () => Promise<{ ok: boolean; message?: string }>;
     };
   }
 }

@@ -1,13 +1,17 @@
 export type ModelInputMode = "auto" | "direct_video" | "keyframe_sequence";
 
+export type ProviderKind = "video" | "audio";
+
 export type ModelProvider = {
   id: string;
   name: string;
   baseUrl: string;
   apiKeyRef: string;
   model: string;
-  endpointType: "openai_chat_completions";
+  kind: ProviderKind;
+  endpointType: "openai_chat_completions" | "openai_audio_transcriptions";
   inputMode: ModelInputMode;
+  language?: string; // audio: BCP-47 hint, e.g. "zh", "en"
   maxOutputTokens?: number;
   temperature?: number;
 };
@@ -90,6 +94,12 @@ export type AnalysisReport = {
   composition: string;
   takeaways: string[];
   providerSnapshot?: Pick<ModelProvider, "name" | "baseUrl" | "model" | "inputMode">;
+  audioProviderSnapshot?: Pick<ModelProvider, "name" | "baseUrl" | "model"> | null;
+  transcript?: {
+    language?: string;
+    segmentCount?: number;
+    textPreview?: string;
+  } | null;
   pipelineVersion?: string;
   schemaVersion?: string;
   generatedAt?: string;
@@ -111,7 +121,9 @@ export type AnalysisProgressEvent = {
 export type AppPersistedState = {
   projects: Project[];
   providers: ModelProvider[];
-  activeProviderId: string | null;
+  activeProviderId: string | null; // back-compat alias for activeVideoProviderId
+  activeVideoProviderId?: string | null;
+  activeAudioProviderId?: string | null;
   nodesByProject: Record<string, AnalysisNode[]>;
   reportByProject: Record<string, AnalysisReport>;
 };

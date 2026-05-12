@@ -10,8 +10,10 @@ interface AppState {
   setActiveProjectId: (id: string | null) => void;
   providers: ModelProvider[];
   setProviders: React.Dispatch<React.SetStateAction<ModelProvider[]>>;
-  activeProviderId: string | null;
-  setActiveProviderId: (id: string | null) => void;
+  activeVideoProviderId: string | null;
+  setActiveVideoProviderId: (id: string | null) => void;
+  activeAudioProviderId: string | null;
+  setActiveAudioProviderId: (id: string | null) => void;
   nodesByProject: Record<string, AnalysisNode[]>;
   setNodesForProject: (projectId: string, nodes: AnalysisNode[]) => void;
   reportByProject: Record<string, AnalysisReport>;
@@ -28,17 +30,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   
-  const [providers, setProviders] = useState<ModelProvider[]>([{
-    id: "default-openai-compatible",
-    name: "OpenAI Compatible",
-    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    apiKeyRef: "",
-    model: "qwen3.5-omni-plus",
-    endpointType: "openai_chat_completions",
-    inputMode: "auto"
-  }]);
-  
-  const [activeProviderId, setActiveProviderId] = useState<string | null>("default-openai-compatible");
+  const [providers, setProviders] = useState<ModelProvider[]>([
+    {
+      id: "default-video",
+      name: "默认视觉模型",
+      baseUrl: "https://api.openai.com/v1",
+      apiKeyRef: "",
+      model: "gpt-4o-mini",
+      kind: "video",
+      endpointType: "openai_chat_completions",
+      inputMode: "auto",
+    },
+    {
+      id: "default-audio",
+      name: "默认语音模型",
+      baseUrl: "https://api.openai.com/v1",
+      apiKeyRef: "",
+      model: "whisper-1",
+      kind: "audio",
+      endpointType: "openai_audio_transcriptions",
+      inputMode: "keyframe_sequence",
+      language: "zh",
+    },
+  ]);
+
+  const [activeVideoProviderId, setActiveVideoProviderId] = useState<string | null>("default-video");
+  const [activeAudioProviderId, setActiveAudioProviderId] = useState<string | null>(null);
 
   const [nodesByProject, setNodesByProject] = useState<Record<string, AnalysisNode[]>>({});
   const [reportByProject, setReportByProject] = useState<Record<string, AnalysisReport>>({});
@@ -70,8 +87,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const hydrateAppState = (state: AppPersistedState) => {
     setProjects(state.projects || []);
-    setProviders(state.providers?.length ? state.providers : providers);
-    setActiveProviderId(state.activeProviderId || state.providers?.[0]?.id || activeProviderId);
+    const normalizedProviders = (state.providers?.length ? state.providers : providers).map(p =>
+      (p as ModelProvider).kind ? (p as ModelProvider) : { ...(p as ModelProvider), kind: "video" as const }
+    );
+    setProviders(normalizedProviders);
+    const videoFromState = state.activeVideoProviderId ?? state.activeProviderId ?? null;
+    const audioFromState = state.activeAudioProviderId ?? null;
+    setActiveVideoProviderId(
+      videoFromState || normalizedProviders.find(p => p.kind === "video")?.id || null
+    );
+    setActiveAudioProviderId(
+      audioFromState && normalizedProviders.some(p => p.id === audioFromState && p.kind === "audio")
+        ? audioFromState
+        : null
+    );
     setNodesByProject(state.nodesByProject || {});
     setReportByProject(state.reportByProject || {});
   };
@@ -100,7 +129,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const state: AppPersistedState = {
       projects,
       providers,
-      activeProviderId,
+      activeProviderId: activeVideoProviderId,
+      activeVideoProviderId,
+      activeAudioProviderId,
       nodesByProject,
       reportByProject,
     };
@@ -114,7 +145,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [projects, providers, activeProviderId, nodesByProject, reportByProject]);
+  }, [projects, providers, activeVideoProviderId, activeAudioProviderId, nodesByProject, reportByProject]);
 
   return (
     <AppContext.Provider
@@ -127,8 +158,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setActiveProjectId,
         providers,
         setProviders,
-        activeProviderId,
-        setActiveProviderId,
+        activeVideoProviderId,
+        setActiveVideoProviderId,
+        activeAudioProviderId,
+        setActiveAudioProviderId,
         nodesByProject,
         setNodesForProject,
         reportByProject,
