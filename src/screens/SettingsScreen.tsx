@@ -382,23 +382,41 @@ function ProviderCard({
           />
         </Field>
         {kind === "video" ? (
-          <Field label="输入模式">
-            <Select
-              value={provider.inputMode}
-              onValueChange={(v) => onUpdate({ inputMode: v as ModelInputMode })}
-            >
-              <SelectTrigger className="w-[260px]">
-                <SelectValue>
-                  {provider.inputMode === "direct_video" ? "直接视频上传" : provider.inputMode === "keyframe_sequence" ? "抽帧序列" : "自动选择"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="auto">自动选择（先 keyframe）</SelectItem>
-                <SelectItem value="direct_video">直接视频上传</SelectItem>
-                <SelectItem value="keyframe_sequence">抽帧序列</SelectItem>
-              </SelectContent>
-            </Select>
-          </Field>
+          <>
+            <Field label="API 协议">
+              <Select
+                value={provider.endpointType === "openai_responses" ? "openai_responses" : "openai_chat_completions"}
+                onValueChange={(v) => onUpdate({ endpointType: v as ModelProvider["endpointType"] })}
+              >
+                <SelectTrigger className="w-[260px]">
+                  <SelectValue>
+                    {provider.endpointType === "openai_responses" ? "/v1/responses" : "/v1/chat/completions"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="openai_chat_completions">/v1/chat/completions（兼容性广）</SelectItem>
+                  <SelectItem value="openai_responses">/v1/responses（OpenAI 新协议）</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="输入模式">
+              <Select
+                value={provider.inputMode}
+                onValueChange={(v) => onUpdate({ inputMode: v as ModelInputMode })}
+              >
+                <SelectTrigger className="w-[260px]">
+                  <SelectValue>
+                    {provider.inputMode === "direct_video" ? "直接视频上传" : provider.inputMode === "keyframe_sequence" ? "抽帧序列" : "自动选择"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">自动选择（先 keyframe）</SelectItem>
+                  <SelectItem value="direct_video">直接视频上传</SelectItem>
+                  <SelectItem value="keyframe_sequence">抽帧序列</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+          </>
         ) : (
           <Field label="语言提示">
             <Input
@@ -542,7 +560,16 @@ function AnalysisDefaultsSection() {
 
 function DataSection() {
   const { projects } = useApp();
-  const [info, setInfo] = useState<{ userDataPath: string; projectsPath: string; projectCount: number; totalBytes: number } | null>(null);
+  const [info, setInfo] = useState<{
+    userDataPath: string;
+    projectsPath: string;
+    configPath: string;
+    dbPath: string;
+    projectCount: number;
+    dbProjectCount: number;
+    totalBytes: number;
+    dbBytes: number;
+  } | null>(null);
   const [purging, setPurging] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
 
@@ -582,9 +609,13 @@ function DataSection() {
       <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">项目数据</h2>
       <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4 text-sm">
         <Stat label="项目数量（应用内）" value={`${projects.length} 个`} />
-        <Stat label="项目数量（磁盘）" value={info ? `${info.projectCount} 个` : "—"} />
-        <Stat label="磁盘占用" value={info ? formatBytes(info.totalBytes) : "—"} />
+        <Stat label="项目数量（SQLite）" value={info ? `${info.dbProjectCount} 个` : "—"} />
+        <Stat label="项目数量（磁盘目录）" value={info ? `${info.projectCount} 个` : "—"} />
+        <Stat label="项目目录占用" value={info ? formatBytes(info.totalBytes) : "—"} />
+        <Stat label="SQLite 大小" value={info ? formatBytes(info.dbBytes) : "—"} />
         <Stat label="userData 路径" value={info?.userDataPath ?? "—"} mono />
+        <Stat label="config.json" value={info?.configPath ?? "—"} mono />
+        <Stat label="data.db" value={info?.dbPath ?? "—"} mono />
         <Stat label="项目根目录" value={info?.projectsPath ?? "—"} mono />
 
         <div className="flex flex-wrap gap-2 pt-2">

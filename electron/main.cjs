@@ -3,6 +3,7 @@ const { execFile } = require("node:child_process");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { DatabaseSync } = require("node:sqlite");
 const { pathToFileURL } = require("node:url");
 
 const REMOTE_DEBUG_PORT = process.env.VIDEO_ANALYZER_DEBUG_PORT || "";
@@ -307,12 +308,43 @@ async function directorySize(dirPath) {
   return total;
 }
 
-function getAppStatePath() {
-  return path.join(app.getPath("userData"), "app-state.json");
+function getConfigPath() {
+  return path.join(app.getPath("userData"), "config.json");
+}
+
+function getDbPath() {
+  return path.join(app.getPath("userData"), "data.db");
 }
 
 function getProjectDir(projectId) {
   return path.join(app.getPath("userData"), "projects", projectId);
+}
+
+let _db = null;
+function getDb() {
+  if (_db) return _db;
+  const dbPath = getDbPath();
+  fsSync.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  db.exec("PRAGMA journal_mode=WAL");
+  db.exec("PRAGMA foreign_keys=ON");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS projects (
+      id TEXT PRIMARY KEY,
+      data TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS analysis_nodes (
+      project_id TEXT PRIMARY KEY,
+      data TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS analysis_reports (
+      project_id TEXT PRIMARY KEY,
+      data TEXT NOT NULL
+    );
+  `);
+  _db = db;
+  return db;
 }
 
 async function readJson(filePath, fallback) {
@@ -788,17 +820,25 @@ async function callOpenAICompatible(provider, project, frames, transcript, fallb
     frames = frames.slice(0, 12);
   }
 
-  const images = [];
+  const imageDataUrls = [];
   for (const frame of frames) {
     const base64 = await fs.readFile(frame.framePath, "base64");
-    images.push({
-      type: "image_url",
-      image_url: { url: `data:image/jpeg;base64,${base64}` },
-    });
+    imageDataUrls.push(`data:image/jpeg;base64,${base64}`);
   }
 
   const userText = buildAnalysisPrompt(project, frames, visibleTranscript, options);
+  const systemText =
+    "你是一名严谨的短视频拉片分析师。所有回答必须是合法 JSON，不要使用 Markdown 围栏，不要解释。";
 
+  const useResponses = provider.endpointType === "openai_responses";
+  const parsed = useResponses
+    ? await callOpenAIResponses(provider, systemText, userText, imageDataUrls, handle)
+    : await callOpenAIChatCompletions(provider, systemText, userText, imageDataUrls, handle);
+
+  return { ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, provider), usedModel: true };
+}
+
+async function callOpenAIChatCompletions(provider, systemText, userText, imageDataUrls, handle) {
   const endpoint = `${provider.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const response = await fetch(endpoint, {
     method: "POST",
@@ -812,26 +852,72 @@ async function callOpenAICompatible(provider, project, frames, transcript, fallb
       temperature: provider.temperature ?? 0.2,
       max_tokens: provider.maxOutputTokens ?? 2400,
       messages: [
-        {
-          role: "system",
-          content: "你是一名严谨的短视频拉片分析师。所有回答必须是合法 JSON，不要使用 Markdown 围栏，不要解释。",
-        },
+        { role: "system", content: systemText },
         {
           role: "user",
-          content: [{ type: "text", text: userText }, ...images],
+          content: [
+            { type: "text", text: userText },
+            ...imageDataUrls.map((url) => ({ type: "image_url", image_url: { url } })),
+          ],
         },
       ],
     }),
   });
-
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
   }
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content;
-  const parsed = tryParseJsonFromText(typeof content === "string" ? content : JSON.stringify(content));
-  return { ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, provider), usedModel: true };
+  return tryParseJsonFromText(typeof content === "string" ? content : JSON.stringify(content));
+}
+
+async function callOpenAIResponses(provider, systemText, userText, imageDataUrls, handle) {
+  const endpoint = `${provider.baseUrl.replace(/\/+$/, "")}/responses`;
+  const response = await fetch(endpoint, {
+    method: "POST",
+    signal: handle?.abortController?.signal,
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${provider.apiKeyRef}`,
+    },
+    body: JSON.stringify({
+      model: provider.model,
+      temperature: provider.temperature ?? 0.2,
+      max_output_tokens: provider.maxOutputTokens ?? 2400,
+      input: [
+        {
+          role: "system",
+          content: [{ type: "input_text", text: systemText }],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: userText },
+            ...imageDataUrls.map((url) => ({ type: "input_image", image_url: url })),
+          ],
+        },
+      ],
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
+  }
+  const data = await response.json();
+  let text = typeof data?.output_text === "string" ? data.output_text : "";
+  if (!text && Array.isArray(data?.output)) {
+    for (const item of data.output) {
+      if (item?.type === "message" && Array.isArray(item.content)) {
+        for (const block of item.content) {
+          if ((block?.type === "output_text" || block?.type === "text") && typeof block.text === "string") {
+            text += block.text;
+          }
+        }
+      }
+    }
+  }
+  return tryParseJsonFromText(text);
 }
 
 async function extractAudioWav(ffmpeg, inputPath, outputPath, handle) {
@@ -1138,7 +1224,28 @@ app.whenReady().then(async () => {
     } catch {
       // projects dir not created yet
     }
-    return { userDataPath: userData, projectsPath: projectsDir, projectCount, totalBytes };
+    let dbBytes = 0;
+    try {
+      dbBytes = (await fs.stat(getDbPath())).size;
+    } catch {
+      // db not created yet
+    }
+    let dbProjectCount = 0;
+    try {
+      dbProjectCount = getDb().prepare("SELECT COUNT(*) AS n FROM projects").get().n;
+    } catch {
+      // db not opened
+    }
+    return {
+      userDataPath: userData,
+      projectsPath: projectsDir,
+      configPath: getConfigPath(),
+      dbPath: getDbPath(),
+      projectCount,
+      dbProjectCount,
+      totalBytes,
+      dbBytes,
+    };
   });
 
   ipcMain.handle("data:openFolder", async (_event, which) => {
@@ -1153,6 +1260,8 @@ app.whenReady().then(async () => {
     try {
       await fs.rm(projectsDir, { recursive: true, force: true });
       await fs.mkdir(projectsDir, { recursive: true });
+      const db = getDb();
+      db.exec("DELETE FROM analysis_nodes; DELETE FROM analysis_reports; DELETE FROM projects;");
       return { ok: true };
     } catch (error) {
       return { ok: false, message: error?.message || String(error) };
@@ -1210,16 +1319,73 @@ app.whenReady().then(async () => {
     return inspectVideo(filePath);
   });
 
-  ipcMain.handle("project:loadAppState", async () => {
-    return readJson(getAppStatePath(), null);
+  ipcMain.handle("config:load", async () => {
+    return readJson(getConfigPath(), null);
   });
 
-  ipcMain.handle("project:saveAppState", async (_event, state) => {
-    await writeJson(getAppStatePath(), {
-      ...state,
-      savedAt: new Date().toISOString(),
-      schemaVersion: SCHEMA_VERSION,
-    });
+  ipcMain.handle("config:save", async (_event, config) => {
+    await writeJson(getConfigPath(), { ...config, savedAt: new Date().toISOString() });
+    return { ok: true };
+  });
+
+  ipcMain.handle("projects:list", async () => {
+    const db = getDb();
+    const rows = db.prepare("SELECT data FROM projects ORDER BY updated_at DESC").all();
+    return rows.map((row) => JSON.parse(row.data));
+  });
+
+  ipcMain.handle("projects:upsert", async (_event, project) => {
+    if (!project?.id) throw new Error("projects:upsert 需要 project.id");
+    const db = getDb();
+    db.prepare(
+      "INSERT INTO projects (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
+    ).run(project.id, JSON.stringify(project), Date.now());
+    return { ok: true };
+  });
+
+  ipcMain.handle("projects:delete", async (_event, projectId) => {
+    if (!projectId) return { ok: false, message: "缺少 projectId" };
+    const db = getDb();
+    db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
+    db.prepare("DELETE FROM analysis_nodes WHERE project_id = ?").run(projectId);
+    db.prepare("DELETE FROM analysis_reports WHERE project_id = ?").run(projectId);
+    try {
+      await fs.rm(getProjectDir(projectId), { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+    return { ok: true };
+  });
+
+  ipcMain.handle("nodes:get", async (_event, projectId) => {
+    const db = getDb();
+    const row = db.prepare("SELECT data FROM analysis_nodes WHERE project_id = ?").get(projectId);
+    return row ? JSON.parse(row.data) : [];
+  });
+
+  ipcMain.handle("nodes:set", async (_event, projectId, nodes) => {
+    const db = getDb();
+    db.prepare(
+      "INSERT INTO analysis_nodes (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
+    ).run(projectId, JSON.stringify(Array.isArray(nodes) ? nodes : []));
+    return { ok: true };
+  });
+
+  ipcMain.handle("report:get", async (_event, projectId) => {
+    const db = getDb();
+    const row = db.prepare("SELECT data FROM analysis_reports WHERE project_id = ?").get(projectId);
+    return row ? JSON.parse(row.data) : null;
+  });
+
+  ipcMain.handle("report:set", async (_event, projectId, report) => {
+    const db = getDb();
+    if (report === null || report === undefined) {
+      db.prepare("DELETE FROM analysis_reports WHERE project_id = ?").run(projectId);
+    } else {
+      db.prepare(
+        "INSERT INTO analysis_reports (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
+      ).run(projectId, JSON.stringify(report));
+    }
     return { ok: true };
   });
 

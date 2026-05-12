@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useEffect, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppPersistedState } from "./types";
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from "react";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig } from "./types";
 
 interface AppState {
   currentScreen: ScreenState;
@@ -19,104 +19,130 @@ interface AppState {
   reportByProject: Record<string, AnalysisReport>;
   setReportForProject: (projectId: string, report: AnalysisReport) => void;
   removeProject: (projectId: string) => void;
-  hydrateAppState: (state: AppPersistedState) => void;
 }
 
 const AppContext = createContext<AppState | undefined>(undefined);
 
+const DEFAULT_PROVIDERS: ModelProvider[] = [
+  {
+    id: "default-video",
+    name: "默认视觉模型",
+    baseUrl: "https://api.openai.com/v1",
+    apiKeyRef: "",
+    model: "gpt-4o-mini",
+    kind: "video",
+    endpointType: "openai_chat_completions",
+    inputMode: "auto",
+  },
+  {
+    id: "default-audio",
+    name: "默认语音模型",
+    baseUrl: "https://api.openai.com/v1",
+    apiKeyRef: "",
+    model: "whisper-1",
+    kind: "audio",
+    endpointType: "openai_audio_transcriptions",
+    inputMode: "keyframe_sequence",
+    language: "zh",
+  },
+];
+
+const LOCAL_STORAGE_KEY = "video-analyzer-state";
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const hasHydrated = useRef(false);
+  const previousProjectIds = useRef<Set<string>>(new Set());
   const [currentScreen, setCurrentScreen] = useState<ScreenState>("home");
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
-  
-  const [providers, setProviders] = useState<ModelProvider[]>([
-    {
-      id: "default-video",
-      name: "默认视觉模型",
-      baseUrl: "https://api.openai.com/v1",
-      apiKeyRef: "",
-      model: "gpt-4o-mini",
-      kind: "video",
-      endpointType: "openai_chat_completions",
-      inputMode: "auto",
-    },
-    {
-      id: "default-audio",
-      name: "默认语音模型",
-      baseUrl: "https://api.openai.com/v1",
-      apiKeyRef: "",
-      model: "whisper-1",
-      kind: "audio",
-      endpointType: "openai_audio_transcriptions",
-      inputMode: "keyframe_sequence",
-      language: "zh",
-    },
-  ]);
-
+  const [providers, setProviders] = useState<ModelProvider[]>(DEFAULT_PROVIDERS);
   const [activeVideoProviderId, setActiveVideoProviderId] = useState<string | null>("default-video");
   const [activeAudioProviderId, setActiveAudioProviderId] = useState<string | null>(null);
-
   const [nodesByProject, setNodesByProject] = useState<Record<string, AnalysisNode[]>>({});
   const [reportByProject, setReportByProject] = useState<Record<string, AnalysisReport>>({});
 
-  const setNodesForProject = (projectId: string, nodes: AnalysisNode[]) => {
-    setNodesByProject(prev => ({ ...prev, [projectId]: nodes }));
-  };
+  const setNodesForProject = useCallback((projectId: string, nodes: AnalysisNode[]) => {
+    setNodesByProject((prev) => ({ ...prev, [projectId]: nodes }));
+    if (window.videoAnalyzer) {
+      window.videoAnalyzer.setNodes(projectId, nodes).catch((error) => {
+        console.warn("setNodes failed", error);
+      });
+    }
+  }, []);
 
-  const setReportForProject = (projectId: string, report: AnalysisReport) => {
-    setReportByProject(prev => ({ ...prev, [projectId]: report }));
-  };
+  const setReportForProject = useCallback((projectId: string, report: AnalysisReport) => {
+    setReportByProject((prev) => ({ ...prev, [projectId]: report }));
+    if (window.videoAnalyzer) {
+      window.videoAnalyzer.setReport(projectId, report).catch((error) => {
+        console.warn("setReport failed", error);
+      });
+    }
+  }, []);
 
-  const removeProject = (projectId: string) => {
-    setProjects(prev => prev.filter(p => p.id !== projectId));
-    setNodesByProject(prev => {
+  const removeProject = useCallback((projectId: string) => {
+    setProjects((prev) => prev.filter((p) => p.id !== projectId));
+    setNodesByProject((prev) => {
       if (!(projectId in prev)) return prev;
       const next = { ...prev };
       delete next[projectId];
       return next;
     });
-    setReportByProject(prev => {
+    setReportByProject((prev) => {
       if (!(projectId in prev)) return prev;
       const next = { ...prev };
       delete next[projectId];
       return next;
     });
-    setActiveProjectId(current => (current === projectId ? null : current));
-  };
-
-  const hydrateAppState = (state: AppPersistedState) => {
-    setProjects(state.projects || []);
-    const normalizedProviders = (state.providers?.length ? state.providers : providers).map(p =>
-      (p as ModelProvider).kind ? (p as ModelProvider) : { ...(p as ModelProvider), kind: "video" as const }
-    );
-    setProviders(normalizedProviders);
-    const videoFromState = state.activeVideoProviderId ?? state.activeProviderId ?? null;
-    const audioFromState = state.activeAudioProviderId ?? null;
-    setActiveVideoProviderId(
-      videoFromState || normalizedProviders.find(p => p.kind === "video")?.id || null
-    );
-    setActiveAudioProviderId(
-      audioFromState && normalizedProviders.some(p => p.id === audioFromState && p.kind === "audio")
-        ? audioFromState
-        : null
-    );
-    setNodesByProject(state.nodesByProject || {});
-    setReportByProject(state.reportByProject || {});
-  };
+    setActiveProjectId((current) => (current === projectId ? null : current));
+    if (window.videoAnalyzer) {
+      window.videoAnalyzer.deleteProject(projectId).catch((error) => {
+        console.warn("deleteProject failed", error);
+      });
+    }
+  }, []);
 
   useEffect(() => {
     const load = async () => {
       try {
         if (window.videoAnalyzer) {
-          const state = await window.videoAnalyzer.loadAppState();
-          if (state) hydrateAppState(state);
+          const config = await window.videoAnalyzer.loadConfig();
+          if (config?.providers?.length) {
+            setProviders(config.providers);
+          }
+          if (config?.activeVideoProviderId !== undefined) {
+            setActiveVideoProviderId(config.activeVideoProviderId);
+          }
+          if (config?.activeAudioProviderId !== undefined) {
+            setActiveAudioProviderId(config.activeAudioProviderId);
+          }
+          const projectList = await window.videoAnalyzer.listProjects();
+          setProjects(projectList);
+          previousProjectIds.current = new Set(projectList.map((p) => p.id));
+          const nodesEntries = await Promise.all(
+            projectList.map(async (p) => [p.id, await window.videoAnalyzer!.getNodes(p.id)] as const)
+          );
+          const reportEntries = await Promise.all(
+            projectList.map(async (p) => [p.id, await window.videoAnalyzer!.getReport(p.id)] as const)
+          );
+          setNodesByProject(Object.fromEntries(nodesEntries.filter(([, nodes]) => nodes && nodes.length)));
+          setReportByProject(
+            Object.fromEntries(reportEntries.filter(([, report]) => report)) as Record<string, AnalysisReport>
+          );
         } else {
-          const raw = window.localStorage.getItem("video-analyzer-state");
-          if (raw) hydrateAppState(JSON.parse(raw));
+          const raw = window.localStorage.getItem(LOCAL_STORAGE_KEY);
+          if (raw) {
+            const state = JSON.parse(raw);
+            if (state.providers?.length) setProviders(state.providers);
+            if (state.activeVideoProviderId !== undefined) setActiveVideoProviderId(state.activeVideoProviderId);
+            if (state.activeAudioProviderId !== undefined) setActiveAudioProviderId(state.activeAudioProviderId);
+            setProjects(state.projects || []);
+            setNodesByProject(state.nodesByProject || {});
+            setReportByProject(state.reportByProject || {});
+            previousProjectIds.current = new Set((state.projects || []).map((p: Project) => p.id));
+          }
         }
       } catch (error) {
-        console.warn("Failed to load persisted app state", error);
+        console.warn("Failed to load app state", error);
       } finally {
         hasHydrated.current = true;
       }
@@ -126,26 +152,41 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!hasHydrated.current) return;
-    const state: AppPersistedState = {
-      projects,
-      providers,
-      activeProviderId: activeVideoProviderId,
-      activeVideoProviderId,
-      activeAudioProviderId,
-      nodesByProject,
-      reportByProject,
-    };
+    const config: AppConfig = { providers, activeVideoProviderId, activeAudioProviderId };
     const timer = window.setTimeout(() => {
       if (window.videoAnalyzer) {
-        window.videoAnalyzer.saveAppState(state).catch((error) => {
-          console.warn("Failed to save app state", error);
+        window.videoAnalyzer.saveConfig(config).catch((error) => {
+          console.warn("saveConfig failed", error);
         });
       } else {
-        window.localStorage.setItem("video-analyzer-state", JSON.stringify(state));
+        const existing = JSON.parse(window.localStorage.getItem(LOCAL_STORAGE_KEY) || "{}");
+        window.localStorage.setItem(
+          LOCAL_STORAGE_KEY,
+          JSON.stringify({ ...existing, ...config })
+        );
       }
-    }, 350);
+    }, 250);
     return () => window.clearTimeout(timer);
-  }, [projects, providers, activeVideoProviderId, activeAudioProviderId, nodesByProject, reportByProject]);
+  }, [providers, activeVideoProviderId, activeAudioProviderId]);
+
+  useEffect(() => {
+    if (!hasHydrated.current) return;
+    const currentIds = new Set(projects.map((p) => p.id));
+    previousProjectIds.current = currentIds;
+    if (window.videoAnalyzer) {
+      for (const project of projects) {
+        window.videoAnalyzer.upsertProject(project).catch((error) => {
+          console.warn("upsertProject failed", error);
+        });
+      }
+    } else {
+      const existing = JSON.parse(window.localStorage.getItem(LOCAL_STORAGE_KEY) || "{}");
+      window.localStorage.setItem(
+        LOCAL_STORAGE_KEY,
+        JSON.stringify({ ...existing, projects, nodesByProject, reportByProject })
+      );
+    }
+  }, [projects, nodesByProject, reportByProject]);
 
   return (
     <AppContext.Provider
@@ -167,7 +208,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
         reportByProject,
         setReportForProject,
         removeProject,
-        hydrateAppState
       }}
     >
       {children}

@@ -9,7 +9,7 @@ export type ModelProvider = {
   apiKeyRef: string;
   model: string;
   kind: ProviderKind;
-  endpointType: "openai_chat_completions" | "openai_audio_transcriptions";
+  endpointType: "openai_chat_completions" | "openai_responses" | "openai_audio_transcriptions";
   inputMode: ModelInputMode;
   language?: string; // audio: BCP-47 hint, e.g. "zh", "en"
   maxOutputTokens?: number;
@@ -118,14 +118,10 @@ export type AnalysisProgressEvent = {
   message?: string;
 };
 
-export type AppPersistedState = {
-  projects: Project[];
+export type AppConfig = {
   providers: ModelProvider[];
-  activeProviderId: string | null; // back-compat alias for activeVideoProviderId
-  activeVideoProviderId?: string | null;
-  activeAudioProviderId?: string | null;
-  nodesByProject: Record<string, AnalysisNode[]>;
-  reportByProject: Record<string, AnalysisReport>;
+  activeVideoProviderId: string | null;
+  activeAudioProviderId: string | null;
 };
 
 export type ScreenState = 

@@ -3,7 +3,7 @@ import type {
   AnalysisOptions,
   AnalysisProgressEvent,
   AnalysisReport,
-  AppPersistedState,
+  AppConfig,
   ModelProvider,
   Project,
   ProjectSource,
@@ -80,8 +80,15 @@ declare global {
       inspectVideoPath: (filePath: string) => Promise<InspectedVideo>;
       getPathForFile: (file: File) => string;
       downloadVideo: (url: string) => Promise<DownloadedVideo>;
-      loadAppState: () => Promise<AppPersistedState | null>;
-      saveAppState: (state: AppPersistedState) => Promise<{ ok: true }>;
+      loadConfig: () => Promise<AppConfig | null>;
+      saveConfig: (config: AppConfig) => Promise<{ ok: true }>;
+      listProjects: () => Promise<Project[]>;
+      upsertProject: (project: Project) => Promise<{ ok: true }>;
+      deleteProject: (projectId: string) => Promise<{ ok: true }>;
+      getNodes: (projectId: string) => Promise<AnalysisNode[]>;
+      setNodes: (projectId: string, nodes: AnalysisNode[]) => Promise<{ ok: true }>;
+      getReport: (projectId: string) => Promise<AnalysisReport | null>;
+      setReport: (projectId: string, report: AnalysisReport | null) => Promise<{ ok: true }>;
       analyzeProject: (payload: {
         project: Project;
         provider?: ModelProvider;
@@ -103,7 +110,16 @@ declare global {
       installYtDlp: () => Promise<YtDlpInstallResult>;
       onYtDlpUpdateStatus: (callback: (info: YtDlpUpdateInfo) => void) => () => void;
       onYtDlpProgress: (callback: (progress: YtDlpProgress) => void) => () => void;
-      getDataInfo: () => Promise<{ userDataPath: string; projectsPath: string; projectCount: number; totalBytes: number }>;
+      getDataInfo: () => Promise<{
+        userDataPath: string;
+        projectsPath: string;
+        configPath: string;
+        dbPath: string;
+        projectCount: number;
+        dbProjectCount: number;
+        totalBytes: number;
+        dbBytes: number;
+      }>;
       openDataFolder: (which?: "projects" | "userData") => Promise<{ ok: boolean; path: string }>;
       purgeProjects: () => Promise<{ ok: boolean; message?: string }>;
     };
