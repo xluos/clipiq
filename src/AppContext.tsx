@@ -35,15 +35,17 @@ const DEFAULT_PROVIDERS: ModelProvider[] = [
     inputMode: "auto",
   },
   {
-    id: "default-audio",
-    name: "默认语音模型",
-    baseUrl: "https://api.openai.com/v1",
+    id: "local-whisper",
+    name: "本地语音识别 (whisper.cpp WASM)",
+    baseUrl: "",
     apiKeyRef: "",
-    model: "whisper-1",
+    model: "Xenova/whisper-base",
     kind: "audio",
-    endpointType: "openai_audio_transcriptions",
+    endpointType: "local_whisper_wasm",
     inputMode: "keyframe_sequence",
     language: "zh",
+    localWhisperModel: "Xenova/whisper-base",
+    localWhisperMirror: "https://hf-mirror.com",
   },
 ];
 
@@ -57,7 +59,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [providers, setProviders] = useState<ModelProvider[]>(DEFAULT_PROVIDERS);
   const [activeVideoProviderId, setActiveVideoProviderId] = useState<string | null>("default-video");
-  const [activeAudioProviderId, setActiveAudioProviderId] = useState<string | null>(null);
+  const [activeAudioProviderId, setActiveAudioProviderId] = useState<string | null>("local-whisper");
   const [nodesByProject, setNodesByProject] = useState<Record<string, AnalysisNode[]>>({});
   const [reportByProject, setReportByProject] = useState<Record<string, AnalysisReport>>({});
 

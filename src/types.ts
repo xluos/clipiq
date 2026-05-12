@@ -9,7 +9,13 @@ export type ModelProvider = {
   apiKeyRef: string;
   model: string;
   kind: ProviderKind;
-  endpointType: "openai_chat_completions" | "openai_responses" | "openai_audio_transcriptions";
+  endpointType:
+    | "openai_chat_completions"
+    | "openai_responses"
+    | "openai_audio_transcriptions"
+    | "local_whisper_wasm";
+  localWhisperModel?: string; // for local_whisper_wasm: HF model id, e.g. "Xenova/whisper-base"
+  localWhisperMirror?: string; // override HF mirror, default https://hf-mirror.com
   inputMode: ModelInputMode;
   language?: string; // audio: BCP-47 hint, e.g. "zh", "en"
   maxOutputTokens?: number;

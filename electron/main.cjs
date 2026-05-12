@@ -969,8 +969,12 @@ async function extractAudioWav(ffmpeg, inputPath, outputPath, handle) {
   );
 }
 
-async function transcribeAudio(audioProvider, wavPath, handle) {
-  if (!audioProvider?.baseUrl || !audioProvider?.apiKeyRef || !audioProvider?.model) {
+async function transcribeAudio(audioProvider, wavPath, handle, onProgress) {
+  if (!audioProvider) return null;
+  if (audioProvider.endpointType === "local_whisper_wasm") {
+    return transcribeLocalWhisper(audioProvider, wavPath, handle, onProgress);
+  }
+  if (!audioProvider.baseUrl || !audioProvider.apiKeyRef || !audioProvider.model) {
     return null;
   }
   const fileBytes = await fs.readFile(wavPath);
@@ -1001,6 +1005,99 @@ async function transcribeAudio(audioProvider, wavPath, handle) {
     text: fullText,
     segments,
     duration: Number(data?.duration) || 0,
+  };
+}
+
+const _localWhisperPipelines = new Map();
+let _undiciDispatcherApplied = false;
+
+async function applyProxyDispatcherOnce() {
+  if (_undiciDispatcherApplied) return;
+  _undiciDispatcherApplied = true;
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  if (!proxyUrl) return;
+  try {
+    const { ProxyAgent, setGlobalDispatcher } = require("undici");
+    setGlobalDispatcher(new ProxyAgent(proxyUrl));
+  } catch {
+    // undici 不可用就跳过；transformers.js 自己的 fetch 还能直连
+  }
+}
+
+async function getLocalWhisperPipeline(modelId, mirror) {
+  const cacheKey = `${modelId}|${mirror || ""}`;
+  if (_localWhisperPipelines.has(cacheKey)) return _localWhisperPipelines.get(cacheKey);
+  await applyProxyDispatcherOnce();
+  const transformers = await import("@huggingface/transformers");
+  const env = transformers.env;
+  env.allowLocalModels = false;
+  env.cacheDir = path.join(app.getPath("userData"), "whisper-cache");
+  if (mirror) env.remoteHost = mirror;
+  await fs.mkdir(env.cacheDir, { recursive: true });
+  const promise = transformers.pipeline("automatic-speech-recognition", modelId, {
+    device: "cpu",
+    dtype: "q8",
+  });
+  _localWhisperPipelines.set(cacheKey, promise);
+  promise.catch(() => _localWhisperPipelines.delete(cacheKey));
+  return promise;
+}
+
+function decodeWavToFloat32(buffer) {
+  // 假设 ffmpeg 输出 16kHz mono pcm_s16le，44 字节 RIFF header
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  let dataOffset = 44;
+  // 找 "data" chunk 起点（防御性，应对非标准 header）
+  for (let i = 12; i < buffer.length - 8; i += 1) {
+    if (
+      buffer[i] === 0x64 &&
+      buffer[i + 1] === 0x61 &&
+      buffer[i + 2] === 0x74 &&
+      buffer[i + 3] === 0x61
+    ) {
+      dataOffset = i + 8;
+      break;
+    }
+  }
+  const sampleCount = Math.floor((buffer.length - dataOffset) / 2);
+  const samples = new Float32Array(sampleCount);
+  for (let i = 0; i < sampleCount; i += 1) {
+    samples[i] = view.getInt16(dataOffset + i * 2, true) / 32768;
+  }
+  return samples;
+}
+
+async function transcribeLocalWhisper(audioProvider, wavPath, handle, onProgress) {
+  const modelId = audioProvider.localWhisperModel || audioProvider.model || "Xenova/whisper-base";
+  const mirror = audioProvider.localWhisperMirror || "https://hf-mirror.com";
+  if (onProgress) onProgress({ stage: "load", message: `加载模型 ${modelId}` });
+  const asr = await getLocalWhisperPipeline(modelId, mirror);
+  if (handle?.cancelled) throw new Error("cancelled");
+  if (onProgress) onProgress({ stage: "decode", message: "解析 WAV → Float32" });
+  const buffer = await fs.readFile(wavPath);
+  const samples = decodeWavToFloat32(buffer);
+  const duration = samples.length / 16000;
+  if (onProgress) onProgress({ stage: "infer", message: `推理 ${duration.toFixed(1)}s 音频` });
+  const result = await asr(samples, {
+    language: audioProvider.language || undefined,
+    return_timestamps: true,
+    chunk_length_s: 30,
+  });
+  const chunks = Array.isArray(result?.chunks) ? result.chunks : [];
+  const segments = chunks.map((c) => ({
+    start: Array.isArray(c.timestamp) ? Number(c.timestamp[0]) || 0 : 0,
+    end: Array.isArray(c.timestamp) ? Number(c.timestamp[1]) || 0 : 0,
+    text: String(c.text || "").trim(),
+  }));
+  const fullText =
+    typeof result?.text === "string" && result.text.trim()
+      ? result.text.trim()
+      : segments.map((s) => s.text).join(" ").trim();
+  return {
+    language: audioProvider.language || null,
+    text: fullText,
+    segments,
+    duration,
   };
 }
 
@@ -1069,14 +1166,19 @@ async function analyzeProject(event, { project, provider, audioProvider, options
     // 音频转录（可选）
     let transcript = null;
     let transcriptError = null;
-    if (audioProvider?.apiKeyRef && inspected.hasAudio) {
+    const audioReady = audioProvider && inspected.hasAudio && (
+      audioProvider.endpointType === "local_whisper_wasm" || audioProvider.apiKeyRef
+    );
+    if (audioReady) {
       try {
         send(55, "提取音轨", "ffmpeg 提取 16kHz 单声道 WAV。");
         const wavPath = path.join(artifactDir, "audio.wav");
         await extractAudioWav(ffmpeg, inputPath, wavPath, handle);
         send(60, "语音转录", `${audioProvider.name} / ${audioProvider.model}`);
         ensureNotCancelled(handle);
-        transcript = await transcribeAudio(audioProvider, wavPath, handle);
+        transcript = await transcribeAudio(audioProvider, wavPath, handle, (p) => {
+          send(62, "语音转录", p.message);
+        });
         if (transcript) {
           await writeJson(path.join(artifactDir, "transcript.json"), transcript);
           send(66, "转录完成", `${transcript.segments.length} 段, ${transcript.text.length} 字`);
@@ -1464,6 +1566,17 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("provider:testConnection", async (_event, provider) => {
+    if (provider?.endpointType === "local_whisper_wasm") {
+      const modelId = provider.localWhisperModel || provider.model || "Xenova/whisper-base";
+      const mirror = provider.localWhisperMirror || "https://hf-mirror.com";
+      try {
+        const t0 = Date.now();
+        await getLocalWhisperPipeline(modelId, mirror);
+        return { ok: true, message: `本地模型 ${modelId} 已就绪 (${((Date.now() - t0) / 1000).toFixed(1)}s)。` };
+      } catch (error) {
+        return { ok: false, message: `本地模型加载失败: ${error?.message || error}` };
+      }
+    }
     if (!provider?.baseUrl) {
       return { ok: false, message: "请先填写 Base URL。" };
     }

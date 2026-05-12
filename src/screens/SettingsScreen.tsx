@@ -328,10 +328,16 @@ function ProviderCard({
               默认
             </span>
           )}
-          {!provider.apiKeyRef && (
-            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
-              缺 Key
+          {provider.endpointType === "local_whisper_wasm" ? (
+            <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
+              本地
             </span>
+          ) : (
+            !provider.apiKeyRef && (
+              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
+                缺 Key
+              </span>
+            )
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -356,31 +362,84 @@ function ProviderCard({
         <Field label="名称">
           <Input value={provider.name} onChange={(e) => onUpdate({ name: e.target.value })} placeholder="给这个 Provider 起个名字" />
         </Field>
-        <Field label="API Base URL">
-          <Input
-            value={provider.baseUrl}
-            onChange={(e) => onUpdate({ baseUrl: e.target.value })}
-            placeholder="https://api.openai.com/v1"
-            className="font-mono"
-          />
-        </Field>
-        <Field label="API Key">
-          <Input
-            type="password"
-            value={provider.apiKeyRef}
-            onChange={(e) => onUpdate({ apiKeyRef: e.target.value })}
-            placeholder="sk-..."
-            className="font-mono"
-          />
-        </Field>
-        <Field label="模型名">
-          <Input
-            value={provider.model}
-            onChange={(e) => onUpdate({ model: e.target.value })}
-            placeholder={kind === "audio" ? "whisper-1 / large-v3 / ..." : "gpt-4o-mini / qwen-vl-max / ..."}
-            className="font-mono max-w-[260px]"
-          />
-        </Field>
+        {kind === "audio" && (
+          <Field label="模式">
+            <Select
+              value={provider.endpointType === "local_whisper_wasm" ? "local_whisper_wasm" : "openai_audio_transcriptions"}
+              onValueChange={(v) => {
+                const next = v as ModelProvider["endpointType"];
+                if (next === "local_whisper_wasm") {
+                  onUpdate({
+                    endpointType: next,
+                    localWhisperModel: provider.localWhisperModel || "Xenova/whisper-base",
+                    localWhisperMirror: provider.localWhisperMirror || "https://hf-mirror.com",
+                    model: provider.localWhisperModel || "Xenova/whisper-base",
+                  });
+                } else {
+                  onUpdate({ endpointType: next });
+                }
+              }}
+            >
+              <SelectTrigger className="w-[260px]">
+                <SelectValue>
+                  {provider.endpointType === "local_whisper_wasm" ? "本地 (whisper.cpp WASM)" : "云端 (OpenAI 兼容)"}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="local_whisper_wasm">本地 (whisper.cpp WASM，按需下载模型)</SelectItem>
+                <SelectItem value="openai_audio_transcriptions">云端 (OpenAI /audio/transcriptions)</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+        )}
+        {provider.endpointType !== "local_whisper_wasm" && (
+          <>
+            <Field label="API Base URL">
+              <Input
+                value={provider.baseUrl}
+                onChange={(e) => onUpdate({ baseUrl: e.target.value })}
+                placeholder="https://api.openai.com/v1"
+                className="font-mono"
+              />
+            </Field>
+            <Field label="API Key">
+              <Input
+                type="password"
+                value={provider.apiKeyRef}
+                onChange={(e) => onUpdate({ apiKeyRef: e.target.value })}
+                placeholder="sk-..."
+                className="font-mono"
+              />
+            </Field>
+          </>
+        )}
+        {kind === "video" || provider.endpointType !== "local_whisper_wasm" ? (
+          <Field label="模型名">
+            <Input
+              value={provider.model}
+              onChange={(e) => onUpdate({ model: e.target.value })}
+              placeholder={kind === "audio" ? "whisper-1 / large-v3 / ..." : "gpt-4o-mini / qwen-vl-max / ..."}
+              className="font-mono max-w-[260px]"
+            />
+          </Field>
+        ) : (
+          <Field label="本地模型">
+            <Select
+              value={provider.localWhisperModel || "Xenova/whisper-base"}
+              onValueChange={(v) => onUpdate({ localWhisperModel: v, model: v })}
+            >
+              <SelectTrigger className="w-[300px]">
+                <SelectValue>{provider.localWhisperModel || "Xenova/whisper-base"}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="Xenova/whisper-tiny">whisper-tiny (~40 MB, 最快 / 准确率一般)</SelectItem>
+                <SelectItem value="Xenova/whisper-base">whisper-base (~75 MB, 推荐默认)</SelectItem>
+                <SelectItem value="Xenova/whisper-small">whisper-small (~250 MB, 中文较准)</SelectItem>
+                <SelectItem value="Xenova/whisper-medium">whisper-medium (~500 MB, 准确率高 / 慢)</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+        )}
         {kind === "video" ? (
           <>
             <Field label="API 协议">
@@ -418,14 +477,26 @@ function ProviderCard({
             </Field>
           </>
         ) : (
-          <Field label="语言提示">
-            <Input
-              value={provider.language ?? ""}
-              onChange={(e) => onUpdate({ language: e.target.value || undefined })}
-              placeholder="zh / en / 留空自动"
-              className="font-mono max-w-[160px]"
-            />
-          </Field>
+          <>
+            <Field label="语言提示">
+              <Input
+                value={provider.language ?? ""}
+                onChange={(e) => onUpdate({ language: e.target.value || undefined })}
+                placeholder="zh / en / 留空自动"
+                className="font-mono max-w-[160px]"
+              />
+            </Field>
+            {provider.endpointType === "local_whisper_wasm" && (
+              <Field label="HF 镜像">
+                <Input
+                  value={provider.localWhisperMirror ?? "https://hf-mirror.com"}
+                  onChange={(e) => onUpdate({ localWhisperMirror: e.target.value })}
+                  placeholder="https://hf-mirror.com 或 https://huggingface.co"
+                  className="font-mono"
+                />
+              </Field>
+            )}
+          </>
         )}
       </div>
 
@@ -435,11 +506,15 @@ function ProviderCard({
             variant="secondary"
             size="sm"
             onClick={handleTest}
-            disabled={isTesting || !provider.baseUrl}
+            disabled={isTesting || (provider.endpointType !== "local_whisper_wasm" && !provider.baseUrl)}
             className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 shrink-0"
           >
             <CheckCircle2 className="w-4 h-4 mr-2 text-slate-400" />
-            {isTesting ? "测试中..." : "测试连接"}
+            {isTesting
+              ? "测试中..."
+              : provider.endpointType === "local_whisper_wasm"
+                ? "预热模型"
+                : "测试连接"}
           </Button>
           {testResult && (
             <span className={`text-xs flex items-start gap-1.5 min-w-0 break-words ${testResult.ok ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
