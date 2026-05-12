@@ -1,0 +1,167 @@
+// 独立 utilityProcess: 跑 transformers.js whisper ASR,主进程通过 parentPort 通信。
+// 设计要点:
+// - 一个 worker 内 cache 已经加载的 pipeline,后续同模型转录直接复用
+// - 任何崩溃 / OOM 都只影响本 worker,不会拖垮主进程
+// - 主进程发 { type: 'transcribe' | 'warmup' | 'shutdown', ... },worker 回
+//   { type: 'progress' | 'result' | 'error' }
+
+const fs = require("node:fs/promises");
+const path = require("node:path");
+
+const port = process.parentPort;
+if (!port) {
+  // 不是通过 utilityProcess.fork 启动的,正常退出
+  process.exit(0);
+}
+
+const pipelines = new Map();
+let dispatcherApplied = false;
+
+function send(message) {
+  try {
+    port.postMessage(message);
+  } catch {
+    // parent 已断开,忽略
+  }
+}
+
+function applyProxyOnce() {
+  if (dispatcherApplied) return;
+  dispatcherApplied = true;
+  const proxyUrl =
+    process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy;
+  if (!proxyUrl) return;
+  try {
+    const { ProxyAgent, setGlobalDispatcher } = require("undici");
+    setGlobalDispatcher(new ProxyAgent(proxyUrl));
+  } catch {
+    // undici 不可用就走默认 fetch
+  }
+}
+
+async function loadPipeline(modelId, mirror, cacheDir, onProgress) {
+  const cacheKey = `${modelId}|${mirror || ""}|${cacheDir}`;
+  if (pipelines.has(cacheKey)) return pipelines.get(cacheKey);
+  applyProxyOnce();
+  const transformers = await import("@huggingface/transformers");
+  const env = transformers.env;
+  env.allowLocalModels = false;
+  env.cacheDir = cacheDir;
+  if (mirror) env.remoteHost = mirror;
+  await fs.mkdir(cacheDir, { recursive: true });
+  const promise = transformers.pipeline("automatic-speech-recognition", modelId, {
+    device: "cpu",
+    dtype: "q8",
+    progress_callback: (p) => {
+      if (!onProgress) return;
+      if (p?.status === "downloading" && typeof p.progress === "number") {
+        onProgress({ stage: "download", message: `${p.file || modelId} · ${Math.floor(p.progress)}%` });
+      } else if (p?.status === "ready") {
+        onProgress({ stage: "ready", message: "模型就绪" });
+      }
+    },
+  });
+  pipelines.set(cacheKey, promise);
+  promise.catch(() => pipelines.delete(cacheKey));
+  return promise;
+}
+
+function decodeWavToFloat32(buffer) {
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  let dataOffset = 44;
+  for (let i = 12; i < buffer.length - 8; i += 1) {
+    if (
+      buffer[i] === 0x64 &&
+      buffer[i + 1] === 0x61 &&
+      buffer[i + 2] === 0x74 &&
+      buffer[i + 3] === 0x61
+    ) {
+      dataOffset = i + 8;
+      break;
+    }
+  }
+  const sampleCount = Math.floor((buffer.length - dataOffset) / 2);
+  const samples = new Float32Array(sampleCount);
+  for (let i = 0; i < sampleCount; i += 1) {
+    samples[i] = view.getInt16(dataOffset + i * 2, true) / 32768;
+  }
+  return samples;
+}
+
+async function handleTranscribe(requestId, payload) {
+  const { wavPath, modelId, mirror, cacheDir, language } = payload;
+  const onProgress = (p) => send({ type: "progress", requestId, ...p });
+  try {
+    onProgress({ stage: "load", message: `加载模型 ${modelId}` });
+    const asr = await loadPipeline(modelId, mirror, cacheDir, onProgress);
+    onProgress({ stage: "decode", message: "解析 WAV → Float32" });
+    const buffer = await fs.readFile(wavPath);
+    const samples = decodeWavToFloat32(buffer);
+    const duration = samples.length / 16000;
+    onProgress({ stage: "infer", message: `推理 ${duration.toFixed(1)}s 音频` });
+    const result = await asr(samples, {
+      language: language || undefined,
+      return_timestamps: true,
+      chunk_length_s: 30,
+    });
+    const chunks = Array.isArray(result?.chunks) ? result.chunks : [];
+    const segments = chunks.map((c) => ({
+      start: Array.isArray(c.timestamp) ? Number(c.timestamp[0]) || 0 : 0,
+      end: Array.isArray(c.timestamp) ? Number(c.timestamp[1]) || 0 : 0,
+      text: String(c.text || "").trim(),
+    }));
+    const fullText =
+      typeof result?.text === "string" && result.text.trim()
+        ? result.text.trim()
+        : segments.map((s) => s.text).join(" ").trim();
+    send({
+      type: "result",
+      requestId,
+      transcript: {
+        language: language || null,
+        text: fullText,
+        segments,
+        duration,
+      },
+    });
+  } catch (error) {
+    send({
+      type: "error",
+      requestId,
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
+  }
+}
+
+async function handleWarmup(requestId, payload) {
+  const { modelId, mirror, cacheDir } = payload;
+  const onProgress = (p) => send({ type: "progress", requestId, ...p });
+  try {
+    const t0 = Date.now();
+    await loadPipeline(modelId, mirror, cacheDir, onProgress);
+    send({ type: "result", requestId, warmup: { modelId, elapsedMs: Date.now() - t0 } });
+  } catch (error) {
+    send({
+      type: "error",
+      requestId,
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
+  }
+}
+
+port.on("message", (msg) => {
+  if (!msg || typeof msg !== "object") return;
+  if (msg.type === "transcribe") return handleTranscribe(msg.requestId, msg.payload);
+  if (msg.type === "warmup") return handleWarmup(msg.requestId, msg.payload);
+  if (msg.type === "shutdown") return process.exit(0);
+});
+
+process.on("uncaughtException", (error) => {
+  send({ type: "fatal", message: error?.message || String(error), stack: error?.stack });
+  // 让父进程 on('exit') 看到非 0 退出码
+  setTimeout(() => process.exit(2), 50);
+});
+
+send({ type: "ready" });

@@ -93,7 +93,7 @@ export function SettingsScreen() {
               onClick={() => setSection(s.key)}
               className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
                 section === s.key
-                  ? "bg-blue-50 dark:bg-blue-600/20 text-blue-600 dark:text-blue-400 font-medium"
+                  ? "bg-indigo-50 dark:bg-indigo-600/20 text-indigo-600 dark:text-indigo-400 font-medium"
                   : "text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800/50"
               }`}
             >
@@ -450,7 +450,7 @@ function ProviderCard({
             )
           )}
           {isDirty && (
-            <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-500/15 dark:text-blue-300">
+            <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300">
               未保存
             </span>
           )}
@@ -674,7 +674,7 @@ function ProviderCard({
             disabled={!isDirty}
             className={
               isDirty
-                ? "bg-blue-600 hover:bg-blue-700 text-white"
+                ? "bg-indigo-600 hover:bg-indigo-700 text-white"
                 : "border-slate-200 dark:border-slate-800 text-slate-400"
             }
           >
@@ -928,7 +928,7 @@ function DependencyRow({
             </span>
           )}
           {updateAvailable && (
-            <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700 whitespace-nowrap dark:bg-blue-500/15 dark:text-blue-300">
+            <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-medium text-indigo-700 whitespace-nowrap dark:bg-indigo-500/15 dark:text-indigo-300">
               有更新
             </span>
           )}

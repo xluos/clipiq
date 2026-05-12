@@ -149,7 +149,7 @@ export function ProgressScreen() {
         </div>
 
         {detail && (
-          <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-300">
+          <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm text-indigo-700 dark:border-indigo-500/20 dark:bg-indigo-500/10 dark:text-indigo-300">
             {detail}
           </div>
         )}
@@ -173,12 +173,12 @@ export function ProgressScreen() {
                   {isDone ? (
                     <CheckCircle2 className="w-5 h-5 text-emerald-500" />
                   ) : isActive ? (
-                    <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />
+                    <Loader2 className="w-5 h-5 text-indigo-500 animate-spin" />
                   ) : (
                     <div className="w-2 h-2 rounded-full bg-slate-300 dark:bg-slate-700" />
                   )}
                 </div>
-                <span className={`text-sm ${isActive ? 'text-blue-600 dark:text-slate-100 font-medium' : 'text-slate-500'}`}>
+                <span className={`text-sm ${isActive ? 'text-indigo-600 dark:text-slate-100 font-medium' : 'text-slate-500'}`}>
                   {isActive ? stageLabel : stage}
                 </span>
               </div>

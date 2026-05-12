@@ -100,8 +100,8 @@ export function UrlPullScreen() {
   return (
     <div className="flex-1 flex flex-col items-center justify-center bg-slate-50 dark:bg-[#0A0A0B] p-6">
       <div className="w-full max-w-md space-y-6 text-center">
-        <div className="w-16 h-16 bg-blue-600/20 rounded-2xl flex items-center justify-center mx-auto mb-6">
-           <InputIcon className="w-8 h-8 text-blue-500" />
+        <div className="w-16 h-16 bg-indigo-600/20 rounded-2xl flex items-center justify-center mx-auto mb-6">
+           <InputIcon className="w-8 h-8 text-indigo-500" />
         </div>
         <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">通过链接拉取视频</h2>
         <p className="text-slate-500 dark:text-slate-400 text-sm">
@@ -123,7 +123,7 @@ export function UrlPullScreen() {
 
         <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg font-mono text-xs text-left text-slate-500 overflow-hidden h-40 flex flex-col justify-end shadow-sm">
           {logs.map((line, index) => (
-            <p key={index} className={line.startsWith("[error]") ? "text-red-500" : index === logs.length - 1 && status === "downloading" ? "animate-pulse text-blue-500" : ""}>
+            <p key={index} className={line.startsWith("[error]") ? "text-red-500" : index === logs.length - 1 && status === "downloading" ? "animate-pulse text-indigo-500" : ""}>
               {line}
             </p>
           ))}
@@ -142,7 +142,7 @@ export function UrlPullScreen() {
             返回首页
           </Button>
           <Button variant="secondary" onClick={() => setCurrentScreen("home")}>改用本地视频</Button>
-          <Button onClick={handleStartPull} disabled={status === "downloading"} className="bg-blue-600 hover:bg-blue-700 text-white">
+          <Button onClick={handleStartPull} disabled={status === "downloading"} className="bg-indigo-600 hover:bg-indigo-700 text-white">
             {status === "downloading" ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <InputIcon className="w-4 h-4 mr-2" />}
             开始拉取
           </Button>

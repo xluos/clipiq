@@ -194,7 +194,7 @@ export function PrepareScreen() {
           )}
           <Button
             size="lg"
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white disabled:bg-slate-400 disabled:hover:bg-slate-400"
+            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white disabled:bg-slate-400 disabled:hover:bg-slate-400"
             onClick={handleStartAnalysis}
             disabled={hasMissingDeps}
           >

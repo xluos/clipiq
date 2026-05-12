@@ -63,7 +63,7 @@ export function YtDlpUpdateToast() {
   return (
     <div className="fixed bottom-6 right-6 z-50 w-[340px] rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900">
       <div className="flex items-start gap-3 p-4">
-        <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400">
+        <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-400">
           {status === "installing" ? (
             <Loader2 className="h-5 w-5 animate-spin" />
           ) : status === "installed" ? (
@@ -111,7 +111,7 @@ export function YtDlpUpdateToast() {
                 size="sm"
                 onClick={handleInstall}
                 disabled={status === "installing"}
-                className="bg-blue-600 text-white hover:bg-blue-700"
+                className="bg-indigo-600 text-white hover:bg-indigo-700"
               >
                 {status === "installing" ? "下载中" : needsInstall ? "立即安装" : "立即更新"}
               </Button>

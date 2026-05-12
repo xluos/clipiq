@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { FolderOpen, CloudDownload, UploadCloud, ChevronRight, CheckCircle2, Clock, XCircle, Film, Trash2 } from "lucide-react";
 import { type ChangeEvent, type DragEvent, type MouseEvent, useRef, useState } from "react";
 import type { InspectedVideo } from "../electron-api";
+import { BrandLogo } from "../components/BrandLogo";
 
 function formatDate(date: Date) {
   return date.toISOString().replace('T', ' ').substring(0, 16);
@@ -152,17 +153,26 @@ export function HomeScreen() {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        <div className="max-w-4xl mx-auto space-y-8 mt-4">
-          
+        <div className="max-w-4xl mx-auto space-y-10 mt-4">
+          <header className="flex items-center gap-5 select-none">
+            <BrandLogo size={72} className="shrink-0 drop-shadow-md" />
+            <div>
+              <h1 className="text-4xl font-bold tracking-tight bg-gradient-to-r from-indigo-500 via-violet-500 to-cyan-500 bg-clip-text text-transparent">
+                ClipIQ
+              </h1>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">看见视频，洞察价值 · 让每一帧，都有意义</p>
+            </div>
+          </header>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <button 
+            <button
               onClick={handleOpenVideo}
-              className="group flex flex-col p-6 bg-white dark:bg-[#20283e] hover:bg-slate-50 dark:hover:bg-[#27304a] border border-slate-200 dark:border-blue-500/20 rounded-2xl transition-all text-left shadow-sm hover:shadow relative overflow-hidden"
+              className="group flex flex-col p-6 bg-white dark:bg-[#181B2E] hover:bg-slate-50 dark:hover:bg-[#1F2440] border border-slate-200 dark:border-indigo-500/20 rounded-2xl transition-all text-left shadow-sm hover:shadow relative overflow-hidden"
             >
-              <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/5 rounded-full blur-3xl group-hover:bg-blue-500/10 transition-colors" />
+              <div className="absolute top-0 right-0 w-40 h-40 bg-indigo-500/10 rounded-full blur-3xl group-hover:bg-indigo-500/20 transition-colors" />
               <div className="flex items-center gap-4 relative z-10">
-                <div className="w-12 h-12 rounded-xl bg-blue-100 dark:bg-blue-600 flex items-center justify-center group-hover:scale-105 transition-transform shrink-0">
-                  <FolderOpen className="w-6 h-6 text-blue-600 dark:text-blue-100" />
+                <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center group-hover:scale-105 transition-transform shrink-0 shadow-md shadow-indigo-500/20">
+                  <FolderOpen className="w-6 h-6 text-white" />
                 </div>
                 <div>
                   <h3 className="font-semibold text-slate-800 dark:text-slate-100 text-lg">打开视频</h3>
@@ -172,14 +182,14 @@ export function HomeScreen() {
             </button>
             <input type="file" ref={fileInputRef} className="hidden" accept="video/*" onChange={handleFileChange} />
 
-            <button 
+            <button
               onClick={() => setCurrentScreen("url_pull")}
-              className="group flex flex-col p-6 bg-white dark:bg-[#291f3a] hover:bg-slate-50 dark:hover:bg-[#322646] border border-slate-200 dark:border-purple-500/20 rounded-2xl transition-all text-left shadow-sm hover:shadow relative overflow-hidden"
+              className="group flex flex-col p-6 bg-white dark:bg-[#1A1E36] hover:bg-slate-50 dark:hover:bg-[#222848] border border-slate-200 dark:border-cyan-500/20 rounded-2xl transition-all text-left shadow-sm hover:shadow relative overflow-hidden"
             >
-              <div className="absolute top-0 right-0 w-32 h-32 bg-purple-500/5 rounded-full blur-3xl group-hover:bg-purple-500/10 transition-colors" />
+              <div className="absolute top-0 right-0 w-40 h-40 bg-cyan-500/10 rounded-full blur-3xl group-hover:bg-cyan-500/20 transition-colors" />
               <div className="flex items-center gap-4 relative z-10">
-                <div className="w-12 h-12 rounded-xl bg-purple-100 dark:bg-purple-600 flex items-center justify-center group-hover:scale-105 transition-transform shrink-0">
-                  <CloudDownload className="w-6 h-6 text-purple-600 dark:text-purple-100" />
+                <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-cyan-500 to-sky-500 flex items-center justify-center group-hover:scale-105 transition-transform shrink-0 shadow-md shadow-cyan-500/20">
+                  <CloudDownload className="w-6 h-6 text-white" />
                 </div>
                 <div>
                   <h3 className="font-semibold text-slate-800 dark:text-slate-100 text-lg">拉取视频</h3>
@@ -193,14 +203,14 @@ export function HomeScreen() {
             onClick={handleOpenVideo}
             className={`border-2 border-dashed rounded-2xl p-16 flex flex-col items-center justify-center text-center cursor-pointer transition-all shadow-sm group ${
               isDragging
-                ? "border-blue-500 bg-blue-50 dark:bg-blue-500/10 dark:border-blue-400"
-                : "border-slate-300 dark:border-slate-800 bg-white/50 dark:bg-slate-900/20 hover:bg-white dark:hover:bg-slate-900/40 hover:border-blue-400 dark:hover:border-blue-500/50"
+                ? "border-indigo-500 bg-indigo-50 dark:bg-indigo-500/10 dark:border-indigo-400"
+                : "border-slate-300 dark:border-slate-800 bg-white/50 dark:bg-slate-900/20 hover:bg-white dark:hover:bg-slate-900/40 hover:border-indigo-400 dark:hover:border-indigo-500/50"
             }`}
           >
             <div className={`p-4 rounded-full mb-4 group-hover:scale-105 transition-transform ${
-              isDragging ? "bg-blue-100 dark:bg-blue-500/20" : "bg-slate-100 dark:bg-slate-800"
+              isDragging ? "bg-indigo-100 dark:bg-indigo-500/20" : "bg-slate-100 dark:bg-slate-800"
             }`}>
-              <UploadCloud className={`w-8 h-8 ${isDragging ? "text-blue-600 dark:text-blue-400" : "text-slate-500 dark:text-slate-400"}`} />
+              <UploadCloud className={`w-8 h-8 ${isDragging ? "text-indigo-600 dark:text-indigo-400" : "text-slate-500 dark:text-slate-400"}`} />
             </div>
             <h3 className="font-semibold text-slate-800 dark:text-slate-200 text-lg">
               {isDragging ? "松手即可导入视频" : "拖拽视频到这里"}
@@ -215,7 +225,7 @@ export function HomeScreen() {
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-slate-800 dark:text-slate-200">最近项目</h3>
               {projects.length > 0 && (
-                <button className="text-sm text-blue-600 dark:text-blue-400 font-medium hover:underline flex items-center">
+                <button className="text-sm text-indigo-600 dark:text-indigo-400 font-medium hover:underline flex items-center">
                   查看全部 <ChevronRight className="w-4 h-4 ml-0.5" />
                 </button>
               )}
@@ -237,7 +247,7 @@ export function HomeScreen() {
                       else if (proj.status === "download_failed") setCurrentScreen("url_pull");
                       else setCurrentScreen("prepare");
                     }}
-                    className="flex items-center p-3 rounded-xl bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 hover:border-blue-300 dark:hover:border-blue-500/50 shadow-sm cursor-pointer transition-all group"
+                    className="flex items-center p-3 rounded-xl bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 hover:border-indigo-300 dark:hover:border-indigo-500/50 shadow-sm cursor-pointer transition-all group"
                   >
                     <div className="w-[120px] h-[68px] rounded mr-4 shrink-0 relative overflow-hidden border border-slate-200 dark:border-slate-800 bg-gradient-to-br from-slate-200 to-slate-300 dark:from-slate-800 dark:to-slate-900">
                       {proj.thumbnailUrl ? (
@@ -258,7 +268,7 @@ export function HomeScreen() {
                       <h4 className="font-medium text-slate-800 dark:text-slate-200 text-sm truncate mb-1.5">{proj.videoName}</h4>
                       <div className="flex items-center gap-2 text-[11px]">
                         {proj.status === "completed" && <span className="flex items-center text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-200 dark:border-emerald-500/20"><CheckCircle2 className="w-3 h-3 mr-1" /> 已完成分析</span>}
-                        {proj.status === "analyzing" && <span className="flex items-center text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-200 dark:border-blue-500/20"><Clock className="w-3 h-3 mr-1" /> 分析中</span>}
+                        {proj.status === "analyzing" && <span className="flex items-center text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/10 px-1.5 py-0.5 rounded border border-indigo-200 dark:border-indigo-500/20"><Clock className="w-3 h-3 mr-1" /> 分析中</span>}
                         {proj.status === "failed" && <span className="flex items-center text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/10 px-1.5 py-0.5 rounded border border-red-200 dark:border-red-500/20"><XCircle className="w-3 h-3 mr-1" /> 分析失败</span>}
                         {proj.status === "download_failed" && <span className="flex items-center text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/10 px-1.5 py-0.5 rounded border border-red-200 dark:border-red-500/20"><XCircle className="w-3 h-3 mr-1" /> 下载失败</span>}
                         {proj.status === "not_analyzed" && <span className="flex items-center text-slate-600 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700"><Clock className="w-3 h-3 mr-1" /> 未分析</span>}

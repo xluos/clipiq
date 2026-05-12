@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, net, protocol, shell, utilityProcess } = require("electron");
 const { execFile } = require("node:child_process");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
@@ -1008,97 +1008,92 @@ async function transcribeAudio(audioProvider, wavPath, handle, onProgress) {
   };
 }
 
-const _localWhisperPipelines = new Map();
-let _undiciDispatcherApplied = false;
+// whisper 推理跑在独立 utilityProcess 里，崩溃不会拖垮主进程。
+// 每次任务 spawn 一个 worker，收到 result/error 后 kill。
+function runWhisperWorker({ type, payload, onProgress, handle }) {
+  return new Promise((resolve, reject) => {
+    const workerPath = path.join(__dirname, "whisper-worker.cjs");
+    const child = utilityProcess.fork(workerPath, [], {
+      serviceName: "whisper-asr",
+      stdio: "pipe",
+      env: {
+        ...process.env,
+        HTTPS_PROXY: process.env.HTTPS_PROXY || process.env.https_proxy || "",
+        HTTP_PROXY: process.env.HTTP_PROXY || process.env.http_proxy || "",
+      },
+    });
 
-async function applyProxyDispatcherOnce() {
-  if (_undiciDispatcherApplied) return;
-  _undiciDispatcherApplied = true;
-  const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-  if (!proxyUrl) return;
-  try {
-    const { ProxyAgent, setGlobalDispatcher } = require("undici");
-    setGlobalDispatcher(new ProxyAgent(proxyUrl));
-  } catch {
-    // undici 不可用就跳过；transformers.js 自己的 fetch 还能直连
-  }
-}
+    if (child.stdout) child.stdout.on("data", (chunk) => console.log("[whisper]", chunk.toString().trimEnd()));
+    if (child.stderr) child.stderr.on("data", (chunk) => console.error("[whisper]", chunk.toString().trimEnd()));
 
-async function getLocalWhisperPipeline(modelId, mirror) {
-  const cacheKey = `${modelId}|${mirror || ""}`;
-  if (_localWhisperPipelines.has(cacheKey)) return _localWhisperPipelines.get(cacheKey);
-  await applyProxyDispatcherOnce();
-  const transformers = await import("@huggingface/transformers");
-  const env = transformers.env;
-  env.allowLocalModels = false;
-  env.cacheDir = path.join(app.getPath("userData"), "whisper-cache");
-  if (mirror) env.remoteHost = mirror;
-  await fs.mkdir(env.cacheDir, { recursive: true });
-  const promise = transformers.pipeline("automatic-speech-recognition", modelId, {
-    device: "cpu",
-    dtype: "q8",
-  });
-  _localWhisperPipelines.set(cacheKey, promise);
-  promise.catch(() => _localWhisperPipelines.delete(cacheKey));
-  return promise;
-}
+    let settled = false;
+    let cancelWatcher = null;
+    const requestId = `req-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-function decodeWavToFloat32(buffer) {
-  // 假设 ffmpeg 输出 16kHz mono pcm_s16le，44 字节 RIFF header
-  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  let dataOffset = 44;
-  // 找 "data" chunk 起点（防御性，应对非标准 header）
-  for (let i = 12; i < buffer.length - 8; i += 1) {
-    if (
-      buffer[i] === 0x64 &&
-      buffer[i + 1] === 0x61 &&
-      buffer[i + 2] === 0x74 &&
-      buffer[i + 3] === 0x61
-    ) {
-      dataOffset = i + 8;
-      break;
+    const finish = (fn) => {
+      if (settled) return;
+      settled = true;
+      if (cancelWatcher) clearInterval(cancelWatcher);
+      try { child.kill(); } catch { /* ignore */ }
+      fn();
+    };
+
+    child.on("message", (msg) => {
+      if (!msg || typeof msg !== "object") return;
+      if (msg.type === "ready") {
+        child.postMessage({ type, requestId, payload });
+      } else if (msg.type === "progress") {
+        if (onProgress) onProgress({ stage: msg.stage, message: msg.message });
+      } else if (msg.type === "result") {
+        finish(() => resolve(msg));
+      } else if (msg.type === "error" || msg.type === "fatal") {
+        finish(() => reject(new Error(msg.message || "whisper worker error")));
+      }
+    });
+
+    child.on("exit", (code) => {
+      if (settled) return;
+      settled = true;
+      if (cancelWatcher) clearInterval(cancelWatcher);
+      reject(new Error(`whisper worker 退出 (code=${code})`));
+    });
+
+    if (handle) {
+      cancelWatcher = setInterval(() => {
+        if (handle.cancelled) finish(() => reject(new Error("cancelled")));
+      }, 200);
     }
-  }
-  const sampleCount = Math.floor((buffer.length - dataOffset) / 2);
-  const samples = new Float32Array(sampleCount);
-  for (let i = 0; i < sampleCount; i += 1) {
-    samples[i] = view.getInt16(dataOffset + i * 2, true) / 32768;
-  }
-  return samples;
+  });
 }
 
 async function transcribeLocalWhisper(audioProvider, wavPath, handle, onProgress) {
   const modelId = audioProvider.localWhisperModel || audioProvider.model || "Xenova/whisper-base";
   const mirror = audioProvider.localWhisperMirror || "https://hf-mirror.com";
-  if (onProgress) onProgress({ stage: "load", message: `加载模型 ${modelId}` });
-  const asr = await getLocalWhisperPipeline(modelId, mirror);
-  if (handle?.cancelled) throw new Error("cancelled");
-  if (onProgress) onProgress({ stage: "decode", message: "解析 WAV → Float32" });
-  const buffer = await fs.readFile(wavPath);
-  const samples = decodeWavToFloat32(buffer);
-  const duration = samples.length / 16000;
-  if (onProgress) onProgress({ stage: "infer", message: `推理 ${duration.toFixed(1)}s 音频` });
-  const result = await asr(samples, {
-    language: audioProvider.language || undefined,
-    return_timestamps: true,
-    chunk_length_s: 30,
+  const cacheDir = path.join(app.getPath("userData"), "whisper-cache");
+  const result = await runWhisperWorker({
+    type: "transcribe",
+    payload: {
+      wavPath,
+      modelId,
+      mirror,
+      cacheDir,
+      language: audioProvider.language || null,
+    },
+    onProgress,
+    handle,
   });
-  const chunks = Array.isArray(result?.chunks) ? result.chunks : [];
-  const segments = chunks.map((c) => ({
-    start: Array.isArray(c.timestamp) ? Number(c.timestamp[0]) || 0 : 0,
-    end: Array.isArray(c.timestamp) ? Number(c.timestamp[1]) || 0 : 0,
-    text: String(c.text || "").trim(),
-  }));
-  const fullText =
-    typeof result?.text === "string" && result.text.trim()
-      ? result.text.trim()
-      : segments.map((s) => s.text).join(" ").trim();
-  return {
-    language: audioProvider.language || null,
-    text: fullText,
-    segments,
-    duration,
-  };
+  return result.transcript;
+}
+
+async function warmupLocalWhisper(audioProvider) {
+  const modelId = audioProvider.localWhisperModel || audioProvider.model || "Xenova/whisper-base";
+  const mirror = audioProvider.localWhisperMirror || "https://hf-mirror.com";
+  const cacheDir = path.join(app.getPath("userData"), "whisper-cache");
+  const result = await runWhisperWorker({
+    type: "warmup",
+    payload: { modelId, mirror, cacheDir },
+  });
+  return result.warmup;
 }
 
 async function analyzeProject(event, { project, provider, audioProvider, options }) {
@@ -1605,10 +1600,9 @@ app.whenReady().then(async () => {
   ipcMain.handle("provider:testConnection", async (_event, provider) => {
     if (provider?.endpointType === "local_whisper_wasm") {
       const modelId = provider.localWhisperModel || provider.model || "Xenova/whisper-base";
-      const mirror = provider.localWhisperMirror || "https://hf-mirror.com";
       try {
         const t0 = Date.now();
-        await getLocalWhisperPipeline(modelId, mirror);
+        await warmupLocalWhisper(provider);
         return { ok: true, message: `本地模型 ${modelId} 已就绪 (${((Date.now() - t0) / 1000).toFixed(1)}s)。` };
       } catch (error) {
         return { ok: false, message: `本地模型加载失败: ${error?.message || error}` };

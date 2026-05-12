@@ -160,7 +160,7 @@ export function WorkspaceScreen() {
           <div className="h-4 w-px bg-slate-200 dark:bg-slate-800" />
           <div className="flex items-center gap-3 min-w-0">
             <span className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate max-w-[180px] md:max-w-xs">{project.videoName}</span>
-            <span className="px-2 py-0.5 rounded bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 text-[10px] border border-blue-100 dark:border-blue-500/20 shrink-0">
+            <span className="px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-[10px] border border-indigo-100 dark:border-indigo-500/20 shrink-0">
               {project.orientation === "portrait" ? "竖屏" : project.orientation === "square" ? "方形" : "横屏"}
             </span>
             <SourceBadge
@@ -180,9 +180,9 @@ export function WorkspaceScreen() {
         </div>
         <div className="flex items-center gap-2 md:gap-4">
           {project.status === "analyzing" ? (
-            <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/30 rounded-lg">
-              <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
-              <span className="text-xs font-medium text-blue-700 dark:text-blue-300 tracking-widest">分析中</span>
+            <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/30 rounded-lg">
+              <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
+              <span className="text-xs font-medium text-indigo-700 dark:text-indigo-300 tracking-widest">分析中</span>
             </div>
           ) : project.status === "completed" ? (
             <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 rounded-lg">
@@ -190,11 +190,11 @@ export function WorkspaceScreen() {
               <span className="text-xs font-medium text-emerald-700 dark:text-emerald-400 tracking-widest">已完成</span>
             </div>
           ) : null}
-          <Button variant="secondary" size="sm" onClick={() => setCurrentScreen("report")} className="bg-blue-600 hover:bg-blue-700 text-white border-0 hidden md:flex h-9 shadow-sm hover:shadow">
+          <Button variant="secondary" size="sm" onClick={() => setCurrentScreen("report")} className="bg-indigo-600 hover:bg-indigo-700 text-white border-0 hidden md:flex h-9 shadow-sm hover:shadow">
             <FileText className="w-4 h-4 mr-2" />
             查看报告
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => setCurrentScreen("report")} className="flex md:hidden text-blue-600 dark:text-blue-400">
+          <Button variant="ghost" size="sm" onClick={() => setCurrentScreen("report")} className="flex md:hidden text-indigo-600 dark:text-indigo-400">
              <FileText className="w-4 h-4" />
           </Button>
         </div>
@@ -231,18 +231,18 @@ export function WorkspaceScreen() {
             }}>
               {/* Playhead Area */}
               <div 
-                className="absolute top-0 bottom-0 bg-blue-100 dark:bg-blue-500/20 border-r border-blue-400 dark:border-blue-500/50 transition-all duration-75" 
+                className="absolute top-0 bottom-0 bg-indigo-100 dark:bg-indigo-500/20 border-r border-indigo-400 dark:border-indigo-500/50 transition-all duration-75" 
                 style={{ width: `${(currentTime / project.durationSec) * 100}%` }}
               />
               <div 
-                className="absolute top-0 bottom-0 w-0.5 bg-blue-600 dark:bg-white z-10 shadow-[0_0_10px_rgba(37,99,235,0.5)] dark:shadow-[0_0_10px_rgba(255,255,255,0.5)] transition-all duration-75" 
+                className="absolute top-0 bottom-0 w-0.5 bg-indigo-600 dark:bg-white z-10 shadow-[0_0_10px_rgba(37,99,235,0.5)] dark:shadow-[0_0_10px_rgba(255,255,255,0.5)] transition-all duration-75" 
                 style={{ left: `${(currentTime / project.durationSec) * 100}%` }}
               />
               {/* Markers */}
               {nodes.map(node => {
                 const isActive = node.id === activeNodeId;
                 const color = isActive
-                  ? "bg-blue-600 dark:bg-white"
+                  ? "bg-indigo-600 dark:bg-white"
                   : node.isHighlight
                     ? "bg-amber-500 dark:bg-amber-400"
                     : "bg-slate-400 dark:bg-slate-500";
@@ -355,17 +355,17 @@ export function WorkspaceScreen() {
                     onDoubleClick={() => handleNodeDoubleClick(node)}
                     className={`p-4 rounded-xl cursor-pointer border transition-all duration-200 shadow-sm
                       ${isActive 
-                        ? 'bg-blue-50/50 dark:bg-blue-600/10 border-blue-300 dark:border-blue-500/40 ring-1 ring-blue-400/30 dark:ring-blue-500/20' 
+                        ? 'bg-indigo-50/50 dark:bg-indigo-600/10 border-indigo-300 dark:border-indigo-500/40 ring-1 ring-indigo-400/30 dark:ring-indigo-500/20' 
                         : 'bg-white dark:bg-slate-900/40 border-slate-200 dark:border-slate-800/60 hover:border-slate-300 dark:hover:bg-slate-900/60'
                       }
                     `}
                   >
                     <div className="flex items-start justify-between mb-3">
                       <div className="flex items-center space-x-3">
-                        <span className={`text-xs font-mono px-2 py-0.5 rounded-md border ${isActive ? 'bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-500/20 dark:text-blue-400 dark:border-blue-500/30' : 'bg-slate-100/50 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700'}`}>
+                        <span className={`text-xs font-mono px-2 py-0.5 rounded-md border ${isActive ? 'bg-indigo-100 text-indigo-700 border-indigo-200 dark:bg-indigo-500/20 dark:text-indigo-400 dark:border-indigo-500/30' : 'bg-slate-100/50 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700'}`}>
                           {formatTime(node.startSec)}
                         </span>
-                        <h3 className={`font-semibold text-sm ${isActive ? 'text-blue-900 dark:text-slate-50' : 'text-slate-800 dark:text-slate-300'}`}>{node.title}</h3>
+                        <h3 className={`font-semibold text-sm ${isActive ? 'text-indigo-900 dark:text-slate-50' : 'text-slate-800 dark:text-slate-300'}`}>{node.title}</h3>
                       </div>
                       <button
                         onClick={(event) => {
@@ -392,7 +392,7 @@ export function WorkspaceScreen() {
                       <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800/50 space-y-4 animate-in fade-in slide-in-from-top-2">
                         <div>
                           <p className="text-[11px] text-slate-500 uppercase tracking-widest mb-1.5 font-bold flex items-center">
-                            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 mr-2" /> 剪辑意图
+                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 mr-2" /> 剪辑意图
                           </p>
                           <p className="text-sm text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-900/40 p-3 rounded-lg border border-slate-100 dark:border-slate-800/50 shadow-sm inner-shadow">{node.editIntent}</p>
                         </div>
@@ -514,7 +514,7 @@ function DistributionList({
                 <span className="font-mono text-slate-500 dark:text-slate-400">{count} · {ratio}%</span>
               </div>
               <div className="mt-1 h-1.5 rounded-full bg-slate-100 dark:bg-slate-800">
-                <div className="h-full rounded-full bg-blue-500" style={{ width: `${ratio}%` }} />
+                <div className="h-full rounded-full bg-indigo-500" style={{ width: `${ratio}%` }} />
               </div>
             </li>
           );

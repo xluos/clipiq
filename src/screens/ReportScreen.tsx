@@ -92,7 +92,7 @@ export function ReportScreen() {
 
   const segmentDefs = [
     { key: "hook", label: "开头引子", detail: report.structure?.hook, tone: "bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700" },
-    { key: "development", label: "发展", detail: report.structure?.development, tone: "bg-blue-50 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 border-blue-100 dark:border-blue-800/50" },
+    { key: "development", label: "发展", detail: report.structure?.development, tone: "bg-indigo-50 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 border-indigo-100 dark:border-indigo-800/50" },
     { key: "turn", label: "转折", detail: report.structure?.turn, tone: "bg-amber-50 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 border-amber-100 dark:border-amber-800/50" },
     { key: "climax", label: "高潮", detail: report.structure?.climax, tone: "bg-purple-50 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 border-purple-100 dark:border-purple-800/50" },
     { key: "ending", label: "结尾", detail: report.structure?.ending, tone: "bg-emerald-50 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 border-emerald-100 dark:border-emerald-800/50" },
@@ -152,7 +152,7 @@ export function ReportScreen() {
               onClick={() => scrollToSection(section.id)}
               className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
                 activeSection === section.id
-                  ? "bg-blue-50 dark:bg-blue-600/20 text-blue-600 dark:text-blue-400 font-medium"
+                  ? "bg-indigo-50 dark:bg-indigo-600/20 text-indigo-600 dark:text-indigo-400 font-medium"
                   : "text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800/50"
               }`}
             >
@@ -187,7 +187,7 @@ export function ReportScreen() {
             <div className="flex items-center gap-2 shrink-0">
               <Button variant="outline" size="sm" onClick={() => handleExport("json")} className="border-slate-200 dark:border-slate-800">JSON</Button>
               <Button variant="outline" size="sm" onClick={() => handleExport("csv")} className="border-slate-200 dark:border-slate-800">CSV</Button>
-              <Button className="bg-blue-600 hover:bg-blue-700 text-white border-0" onClick={() => handleExport("markdown")}>
+              <Button className="bg-indigo-600 hover:bg-indigo-700 text-white border-0" onClick={() => handleExport("markdown")}>
                 <Download className="w-4 h-4 mr-2" />
                 Markdown
               </Button>
@@ -196,14 +196,14 @@ export function ReportScreen() {
           {exportStatus && <p className="text-xs text-emerald-600 dark:text-emerald-400">{exportStatus}</p>}
 
           <section id="summary" className="space-y-4 scroll-mt-6">
-            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-blue-500 pl-3">整体摘要</h2>
+            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">整体摘要</h2>
             <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm text-slate-700 dark:text-slate-300 leading-relaxed text-sm whitespace-pre-line">
               {report.summary || "暂无整体摘要。"}
             </div>
           </section>
 
           <section id="structure" className="space-y-4 scroll-mt-6">
-            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-blue-500 pl-3">结构拆解</h2>
+            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">结构拆解</h2>
             <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm space-y-6">
               <div className="flex flex-col space-y-2">
                 <div className="flex h-12 rounded-lg overflow-hidden border border-slate-200 dark:border-slate-800 text-xs font-medium relative">
@@ -238,38 +238,38 @@ export function ReportScreen() {
           </section>
           
           <section id="emotion" className="space-y-4 scroll-mt-6">
-            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-blue-500 pl-3">情感曲线</h2>
+            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">情感曲线</h2>
             <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm">
               <EmotionCurve nodes={nodes} totalDuration={totalDuration} />
             </div>
           </section>
 
           <section id="pacing" className="space-y-4 scroll-mt-6">
-            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-blue-500 pl-3">节奏分析</h2>
+            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">节奏分析</h2>
             <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm text-slate-700 dark:text-slate-300 leading-relaxed text-sm whitespace-pre-line">
               {report.pacing || "暂无节奏分析。"}
             </div>
           </section>
 
           <section id="editing" className="space-y-4 scroll-mt-6">
-            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-blue-500 pl-3">剪辑风格</h2>
+            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">剪辑风格</h2>
             <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm text-slate-700 dark:text-slate-300 leading-relaxed text-sm whitespace-pre-line">
               {report.editingStyle || "暂无剪辑风格分析。"}
             </div>
           </section>
 
           <section id="composition" className="space-y-4 scroll-mt-6">
-            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-blue-500 pl-3">构图特点</h2>
+            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">构图特点</h2>
             <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm text-slate-700 dark:text-slate-300 leading-relaxed text-sm whitespace-pre-line">
               {report.composition || "暂无构图分析。"}
             </div>
           </section>
 
           <section id="takeaways" className="space-y-4 scroll-mt-6">
-             <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-blue-500 pl-3">核心洞察</h2>
+             <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">核心洞察</h2>
              <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm text-slate-700 dark:text-slate-300 leading-relaxed text-sm">
                 {report.takeaways?.length ? (
-                  <ul className="space-y-2 list-disc list-inside marker:text-blue-500">
+                  <ul className="space-y-2 list-disc list-inside marker:text-indigo-500">
                     {report.takeaways.map((t, i) => (
                       <li key={i}>{t}</li>
                     ))}
