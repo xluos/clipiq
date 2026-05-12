@@ -838,6 +838,30 @@ async function callOpenAICompatible(provider, project, frames, transcript, fallb
   return { ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, provider), usedModel: true };
 }
 
+async function streamSSE(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const payload = trimmed.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      try {
+        onEvent(JSON.parse(payload));
+      } catch {
+        // skip malformed chunk
+      }
+    }
+  }
+}
+
 async function callOpenAIChatCompletions(provider, systemText, userText, imageDataUrls, handle) {
   const endpoint = `${provider.baseUrl.replace(/\/+$/, "")}/chat/completions`;
   const response = await fetch(endpoint, {
@@ -846,9 +870,11 @@ async function callOpenAIChatCompletions(provider, systemText, userText, imageDa
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${provider.apiKeyRef}`,
+      accept: "text/event-stream",
     },
     body: JSON.stringify({
       model: provider.model,
+      stream: true,
       temperature: provider.temperature ?? 0.2,
       max_tokens: provider.maxOutputTokens ?? 2400,
       messages: [
@@ -867,9 +893,12 @@ async function callOpenAIChatCompletions(provider, systemText, userText, imageDa
     const detail = await response.text();
     throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
   }
-  const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content;
-  return tryParseJsonFromText(typeof content === "string" ? content : JSON.stringify(content));
+  let text = "";
+  await streamSSE(response, (event) => {
+    const delta = event?.choices?.[0]?.delta?.content;
+    if (typeof delta === "string") text += delta;
+  });
+  return tryParseJsonFromText(text);
 }
 
 async function callOpenAIResponses(provider, systemText, userText, imageDataUrls, handle) {
@@ -880,9 +909,11 @@ async function callOpenAIResponses(provider, systemText, userText, imageDataUrls
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${provider.apiKeyRef}`,
+      accept: "text/event-stream",
     },
     body: JSON.stringify({
       model: provider.model,
+      stream: true,
       temperature: provider.temperature ?? 0.2,
       max_output_tokens: provider.maxOutputTokens ?? 2400,
       input: [
@@ -904,19 +935,27 @@ async function callOpenAIResponses(provider, systemText, userText, imageDataUrls
     const detail = await response.text();
     throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
   }
-  const data = await response.json();
-  let text = typeof data?.output_text === "string" ? data.output_text : "";
-  if (!text && Array.isArray(data?.output)) {
-    for (const item of data.output) {
-      if (item?.type === "message" && Array.isArray(item.content)) {
-        for (const block of item.content) {
-          if ((block?.type === "output_text" || block?.type === "text") && typeof block.text === "string") {
-            text += block.text;
+  let text = "";
+  await streamSSE(response, (event) => {
+    // Responses stream events: response.output_text.delta carries { delta: "..." }
+    if (event?.type === "response.output_text.delta" && typeof event.delta === "string") {
+      text += event.delta;
+    }
+    // Some gateways emit completed response with final output array
+    if (event?.type === "response.completed" && Array.isArray(event?.response?.output)) {
+      if (!text) {
+        for (const item of event.response.output) {
+          if (item?.type === "message" && Array.isArray(item.content)) {
+            for (const block of item.content) {
+              if ((block?.type === "output_text" || block?.type === "text") && typeof block.text === "string") {
+                text += block.text;
+              }
+            }
           }
         }
       }
     }
-  }
+  });
   return tryParseJsonFromText(text);
 }
 
