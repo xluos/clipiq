@@ -440,6 +440,199 @@ async function writeJson(filePath, payload) {
   await fs.rename(tmp, filePath);
 }
 
+// 把单个 v1 provider 转新 schema (含 source/models/[]/builtin)。幂等。
+function migrateProviderV1(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  // 已经是 v2 形态 (有 models 数组) 直接补 source 兜底
+  if (Array.isArray(raw.models) && raw.models.length > 0) {
+    return {
+      ...raw,
+      source: raw.source || (raw.endpointType === "local_whisper_wasm" ? "local_whisper" : "remote"),
+    };
+  }
+  const endpointType = raw.endpointType || "openai_chat_completions";
+  const source =
+    endpointType === "local_whisper_wasm"
+      ? "local_whisper"
+      : endpointType === "local_llama_server"
+      ? "local_llama"
+      : "remote";
+  const isAudio =
+    endpointType === "openai_audio_transcriptions" || endpointType === "local_whisper_wasm";
+  const capabilities = isAudio ? ["audio_transcription", "fast"] : ["vision", "reasoning"];
+  const modelId = raw.model || raw.id;
+  const model = {
+    id: modelId,
+    label: modelId,
+    capabilities,
+    maxOutputTokens: raw.maxOutputTokens,
+    temperature: raw.temperature,
+    localWhisperModel: raw.localWhisperModel,
+    localWhisperMirror: raw.localWhisperMirror,
+    language: raw.language,
+  };
+  return {
+    id: raw.id,
+    name: raw.name,
+    source,
+    builtin: false,
+    baseUrl: raw.baseUrl || "",
+    apiKeyRef: raw.apiKeyRef || "",
+    endpointType,
+    inputMode: raw.inputMode || "auto",
+    models: [model],
+    // 保留 deprecated 字段供仍依赖它们的旧代码读取(本批次 PR-1 仍有读取点)
+    model: modelId,
+    kind: raw.kind || (isAudio ? "audio" : "video"),
+    localWhisperModel: raw.localWhisperModel,
+    localWhisperMirror: raw.localWhisperMirror,
+    language: raw.language,
+    maxOutputTokens: raw.maxOutputTokens,
+    temperature: raw.temperature,
+  };
+}
+
+// builtin local_llama: 内置本地推理 provider,3 个 Qwen3.5-VL 规格。
+// 每次 loadConfig 强制重写这个 entry,避免用户的旧配置把它覆盖。
+function buildBuiltinLocalLlamaProvider() {
+  const llamaRuntime = require("./llama-runtime.cjs");
+  const models = Object.values(llamaRuntime.MODELS).map((meta) => ({
+    id: meta.key,
+    label: meta.name,
+    capabilities: ["vision", "fast"],
+    localKey: meta.key,
+  }));
+  return {
+    id: "builtin-local-llama",
+    name: "本地推理 (Qwen3.5-VL)",
+    source: "local_llama",
+    builtin: true,
+    baseUrl: "",
+    apiKeyRef: "",
+    endpointType: "local_llama_server",
+    inputMode: "keyframe_sequence",
+    models,
+    // 保留 deprecated 字段
+    model: models[0]?.id,
+    kind: "video",
+  };
+}
+
+// builtin local_whisper: 内置本地 whisper.cpp WASM provider,几档常见 whisper size
+function buildBuiltinLocalWhisperProvider() {
+  const models = [
+    { id: "Xenova/whisper-tiny", label: "Whisper Tiny (~40MB)", capabilities: ["audio_transcription", "fast"], localWhisperModel: "Xenova/whisper-tiny", localWhisperMirror: "https://hf-mirror.com", language: "zh" },
+    { id: "Xenova/whisper-base", label: "Whisper Base (~75MB)", capabilities: ["audio_transcription", "fast"], localWhisperModel: "Xenova/whisper-base", localWhisperMirror: "https://hf-mirror.com", language: "zh" },
+    { id: "Xenova/whisper-small", label: "Whisper Small (~250MB)", capabilities: ["audio_transcription"], localWhisperModel: "Xenova/whisper-small", localWhisperMirror: "https://hf-mirror.com", language: "zh" },
+    { id: "Xenova/whisper-medium", label: "Whisper Medium (~500MB)", capabilities: ["audio_transcription"], localWhisperModel: "Xenova/whisper-medium", localWhisperMirror: "https://hf-mirror.com", language: "zh" },
+  ];
+  return {
+    id: "builtin-local-whisper",
+    name: "本地语音识别 (whisper.cpp WASM)",
+    source: "local_whisper",
+    builtin: true,
+    baseUrl: "",
+    apiKeyRef: "",
+    endpointType: "local_whisper_wasm",
+    inputMode: "keyframe_sequence",
+    models,
+    // 保留 deprecated 字段供旧 audio 路径读取
+    model: "Xenova/whisper-base",
+    kind: "audio",
+    localWhisperModel: "Xenova/whisper-base",
+    localWhisperMirror: "https://hf-mirror.com",
+    language: "zh",
+  };
+}
+
+const TASK_SLOT_KEYS = [
+  "simple_vision",
+  "simple_text",
+  "medium_vision",
+  "medium_text",
+  "complex_vision",
+  "complex_text",
+];
+
+function emptyTaskSlots() {
+  return TASK_SLOT_KEYS.reduce((acc, k) => ({ ...acc, [k]: null }), {});
+}
+
+// v1 → v2 迁移。幂等。
+function migrateConfigV1ToV2(raw) {
+  const cfg = raw && typeof raw === "object" ? raw : {};
+  const isV2 = cfg.schemaVersion === 2 && cfg.taskSlots && typeof cfg.taskSlots === "object";
+
+  // 用户自定义 providers (剔除旧的 builtin id,后面强制注入)
+  const rawProviders = Array.isArray(cfg.providers) ? cfg.providers : [];
+  const userProviders = rawProviders
+    .filter((p) => p && p.id !== "builtin-local-llama" && p.id !== "builtin-local-whisper" && p.id !== "local-whisper")
+    .map(migrateProviderV1)
+    .filter(Boolean);
+
+  const providers = [
+    buildBuiltinLocalLlamaProvider(),
+    buildBuiltinLocalWhisperProvider(),
+    ...userProviders,
+  ];
+
+  let taskSlots = emptyTaskSlots();
+  let audioSlot = null;
+
+  if (isV2) {
+    // 已经是 v2,只是 builtin 被覆盖。slot 直接读 raw。
+    for (const k of TASK_SLOT_KEYS) {
+      taskSlots[k] = cfg.taskSlots[k] || null;
+    }
+    audioSlot = cfg.audioSlot || null;
+  } else {
+    // v1: 用 activeVideoProviderId/activeAudioProviderId 推 default 槽位
+    const videoProviderId = cfg.activeVideoProviderId || null;
+    const audioProviderId = cfg.activeAudioProviderId || null;
+    const rawAudioProvider = rawProviders.find((p) => p && p.id === audioProviderId) || null;
+    const findProvider = (id) => providers.find((p) => p.id === id);
+    const videoProvider = videoProviderId ? findProvider(videoProviderId) : null;
+    let audioProvider = audioProviderId ? findProvider(audioProviderId) : null;
+    // local-whisper 旧 id 已被剔除,迁移到 builtin-local-whisper
+    if (!audioProvider && (audioProviderId === "local-whisper" || rawAudioProvider?.endpointType === "local_whisper_wasm")) {
+      audioProvider = findProvider("builtin-local-whisper");
+    }
+
+    const complexVisionSlot = videoProvider
+      ? { providerId: videoProvider.id, modelId: videoProvider.models[0]?.id }
+      : null;
+    const lastLlamaKey = cfg.lastLlamaModelKey || "qwen3_5_0_8b_q4km";
+    const simpleVisionSlot = { providerId: "builtin-local-llama", modelId: lastLlamaKey };
+
+    taskSlots.complex_vision = complexVisionSlot;
+    taskSlots.simple_vision = simpleVisionSlot;
+    taskSlots.simple_text = complexVisionSlot;
+    taskSlots.medium_vision = complexVisionSlot;
+    taskSlots.medium_text = complexVisionSlot;
+    taskSlots.complex_text = complexVisionSlot;
+
+    if (audioProvider) {
+      // 优先用旧 provider 的 model id 在新 provider.models 里匹配
+      const oldModelId = rawAudioProvider?.localWhisperModel || rawAudioProvider?.model || null;
+      const match = oldModelId && audioProvider.models.find((m) => m.id === oldModelId);
+      audioSlot = {
+        providerId: audioProvider.id,
+        modelId: match?.id || audioProvider.models[0]?.id,
+      };
+    } else {
+      audioSlot = { providerId: "builtin-local-whisper", modelId: "Xenova/whisper-base" };
+    }
+  }
+
+  return {
+    providers,
+    taskSlots,
+    audioSlot,
+    lastLlamaModelKey: cfg.lastLlamaModelKey || null,
+    schemaVersion: 2,
+  };
+}
+
 function resolveProjectVideoPath(project) {
   if (project?.localFilePath) return project.localFilePath;
   if (project?.source?.type === "local_file") return project.source.originalPath;
@@ -2156,11 +2349,20 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("config:load", async () => {
-    return readJson(getConfigPath(), null);
+    const raw = await readJson(getConfigPath(), null);
+    return migrateConfigV1ToV2(raw);
   });
 
   ipcMain.handle("config:save", async (_event, config) => {
-    await writeJson(getConfigPath(), { ...config, savedAt: new Date().toISOString() });
+    // 落盘前再过一次 migrate,保证 builtin 永远存在 + schema 永远是 v2
+    // 合并磁盘上的 lastLlamaModelKey 等 renderer 不持有的字段,避免被覆盖
+    const cur = await readJson(getConfigPath(), null);
+    const merged = {
+      ...config,
+      lastLlamaModelKey: config?.lastLlamaModelKey ?? cur?.lastLlamaModelKey ?? null,
+    };
+    const migrated = migrateConfigV1ToV2(merged);
+    await writeJson(getConfigPath(), { ...migrated, savedAt: new Date().toISOString() });
     return { ok: true };
   });
 

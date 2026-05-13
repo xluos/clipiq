@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig } from "./types";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment } from "./types";
 
 interface AppState {
   currentScreen: ScreenState;
@@ -10,9 +10,17 @@ interface AppState {
   setActiveProjectId: (id: string | null) => void;
   providers: ModelProvider[];
   setProviders: React.Dispatch<React.SetStateAction<ModelProvider[]>>;
+  taskSlots: TaskSlots;
+  setTaskSlot: (key: TaskSlotKey, assignment: SlotAssignment) => void;
+  audioSlot: SlotAssignment;
+  setAudioSlot: (assignment: SlotAssignment) => void;
+  /** @deprecated derived from taskSlots.complex_vision; will be removed in PR-3 */
   activeVideoProviderId: string | null;
+  /** @deprecated 写入会同步到 taskSlots.complex_vision.providerId,保留是为了在 PR-3 完成前旧 UI 不崩 */
   setActiveVideoProviderId: (id: string | null) => void;
+  /** @deprecated derived from audioSlot */
   activeAudioProviderId: string | null;
+  /** @deprecated 写入会同步到 audioSlot.providerId */
   setActiveAudioProviderId: (id: string | null) => void;
   nodesByProject: Record<string, AnalysisNode[]>;
   setNodesForProject: (projectId: string, nodes: AnalysisNode[]) => void;
@@ -23,43 +31,95 @@ interface AppState {
 
 const AppContext = createContext<AppState | undefined>(undefined);
 
+// v2 schema 的默认 providers/slots 由 main 进程的 migrateConfigV1ToV2 决定。
+// renderer 这里只保留一个空起点(electron 模式下会被 loadConfig 覆盖;
+// 浏览器预览模式下没有 main 进程,需要自己挂)。
 const DEFAULT_PROVIDERS: ModelProvider[] = [
   {
     id: "default-video",
-    name: "默认视觉模型",
+    name: "默认视觉模型 (示例)",
+    source: "remote",
     baseUrl: "https://api.openai.com/v1",
     apiKeyRef: "",
-    model: "gpt-4o-mini",
-    kind: "video",
     endpointType: "openai_chat_completions",
     inputMode: "auto",
-  },
-  {
-    id: "local-whisper",
-    name: "本地语音识别 (whisper.cpp WASM)",
-    baseUrl: "",
-    apiKeyRef: "",
-    model: "Xenova/whisper-base",
-    kind: "audio",
-    endpointType: "local_whisper_wasm",
-    inputMode: "keyframe_sequence",
-    language: "zh",
-    localWhisperModel: "Xenova/whisper-base",
-    localWhisperMirror: "https://hf-mirror.com",
+    models: [
+      {
+        id: "gpt-4o-mini",
+        label: "gpt-4o-mini",
+        capabilities: ["vision", "reasoning"],
+      },
+    ],
+    model: "gpt-4o-mini",
+    kind: "video",
   },
 ];
+
+const DEFAULT_TASK_SLOTS: TaskSlots = {
+  simple_vision: null,
+  simple_text: null,
+  medium_vision: null,
+  medium_text: null,
+  complex_vision: { providerId: "default-video", modelId: "gpt-4o-mini" },
+  complex_text: { providerId: "default-video", modelId: "gpt-4o-mini" },
+};
 
 const LOCAL_STORAGE_KEY = "video-analyzer-state";
 
 export function AppProvider({ children }: { children: ReactNode }) {
-  const hasHydrated = useRef(false);
+  const [hasHydrated, setHasHydrated] = useState(false);
   const previousProjectIds = useRef<Set<string>>(new Set());
   const [currentScreen, setCurrentScreen] = useState<ScreenState>("home");
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [providers, setProviders] = useState<ModelProvider[]>(DEFAULT_PROVIDERS);
-  const [activeVideoProviderId, setActiveVideoProviderId] = useState<string | null>("default-video");
-  const [activeAudioProviderId, setActiveAudioProviderId] = useState<string | null>("local-whisper");
+  const [taskSlots, setTaskSlots] = useState<TaskSlots>(DEFAULT_TASK_SLOTS);
+  const [audioSlot, setAudioSlotState] = useState<SlotAssignment>(null);
+
+  // ref 始终指向最新 providers,供下面的 setActiveXxxProviderId 在更换 provider 时挑首个 model
+  const providersRef = useRef<ModelProvider[]>(providers);
+  useEffect(() => {
+    providersRef.current = providers;
+  }, [providers]);
+
+  const setTaskSlot = useCallback((key: TaskSlotKey, assignment: SlotAssignment) => {
+    setTaskSlots((prev) => ({ ...prev, [key]: assignment }));
+  }, []);
+
+  const setAudioSlot = useCallback((assignment: SlotAssignment) => {
+    setAudioSlotState(assignment);
+  }, []);
+
+  // Deprecated 兼容层:旧 UI 仍读 activeVideoProviderId / activeAudioProviderId,
+  // 我们把它们映射到 taskSlots.complex_vision / audioSlot 上。PR-3 时一并删除。
+  const activeVideoProviderId = taskSlots.complex_vision?.providerId ?? null;
+  const activeAudioProviderId = audioSlot?.providerId ?? null;
+
+  const setActiveVideoProviderId = useCallback((id: string | null) => {
+    setTaskSlots((prev) => {
+      if (!id) return { ...prev, complex_vision: null };
+      const existing = prev.complex_vision;
+      const provider = providersRef.current.find((p) => p.id === id);
+      const modelId =
+        existing?.providerId === id && existing?.modelId
+          ? existing.modelId
+          : provider?.models[0]?.id || "";
+      return { ...prev, complex_vision: { providerId: id, modelId } };
+    });
+  }, []);
+
+  const setActiveAudioProviderId = useCallback((id: string | null) => {
+    if (!id) {
+      setAudioSlotState(null);
+      return;
+    }
+    const provider = providersRef.current.find((p) => p.id === id);
+    setAudioSlotState((prev) =>
+      prev?.providerId === id && prev?.modelId
+        ? prev
+        : { providerId: id, modelId: provider?.models[0]?.id || "" },
+    );
+  }, []);
   const [nodesByProject, setNodesByProject] = useState<Record<string, AnalysisNode[]>>({});
   const [reportByProject, setReportByProject] = useState<Record<string, AnalysisReport>>({});
 
@@ -111,11 +171,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
           if (config?.providers?.length) {
             setProviders(config.providers);
           }
-          if (config?.activeVideoProviderId !== undefined) {
-            setActiveVideoProviderId(config.activeVideoProviderId);
+          if (config?.taskSlots) {
+            setTaskSlots(config.taskSlots);
           }
-          if (config?.activeAudioProviderId !== undefined) {
-            setActiveAudioProviderId(config.activeAudioProviderId);
+          if (config?.audioSlot !== undefined) {
+            setAudioSlotState(config.audioSlot);
           }
           const projectList = await window.videoAnalyzer.listProjects();
           setProjects(projectList);
@@ -135,8 +195,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
           if (raw) {
             const state = JSON.parse(raw);
             if (state.providers?.length) setProviders(state.providers);
-            if (state.activeVideoProviderId !== undefined) setActiveVideoProviderId(state.activeVideoProviderId);
-            if (state.activeAudioProviderId !== undefined) setActiveAudioProviderId(state.activeAudioProviderId);
+            if (state.taskSlots) setTaskSlots(state.taskSlots);
+            if (state.audioSlot !== undefined) setAudioSlotState(state.audioSlot);
             setProjects(state.projects || []);
             setNodesByProject(state.nodesByProject || {});
             setReportByProject(state.reportByProject || {});
@@ -146,15 +206,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
       } catch (error) {
         console.warn("Failed to load app state", error);
       } finally {
-        hasHydrated.current = true;
+        setHasHydrated(true);
       }
     };
     load();
   }, []);
 
   useEffect(() => {
-    if (!hasHydrated.current) return;
-    const config: AppConfig = { providers, activeVideoProviderId, activeAudioProviderId };
+    if (!hasHydrated) return;
+    const config: AppConfig = {
+      providers,
+      taskSlots,
+      audioSlot,
+      schemaVersion: 2,
+    };
     const timer = window.setTimeout(() => {
       if (window.videoAnalyzer) {
         window.videoAnalyzer.saveConfig(config).catch((error) => {
@@ -169,10 +234,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [providers, activeVideoProviderId, activeAudioProviderId]);
+  }, [providers, taskSlots, audioSlot, hasHydrated]);
 
   useEffect(() => {
-    if (!hasHydrated.current) return;
+    if (!hasHydrated) return;
     const currentIds = new Set(projects.map((p) => p.id));
     previousProjectIds.current = currentIds;
     if (window.videoAnalyzer) {
@@ -188,7 +253,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         JSON.stringify({ ...existing, projects, nodesByProject, reportByProject })
       );
     }
-  }, [projects, nodesByProject, reportByProject]);
+  }, [projects, nodesByProject, reportByProject, hasHydrated]);
 
   return (
     <AppContext.Provider
@@ -201,6 +266,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setActiveProjectId,
         providers,
         setProviders,
+        taskSlots,
+        setTaskSlot,
+        audioSlot,
+        setAudioSlot,
         activeVideoProviderId,
         setActiveVideoProviderId,
         activeAudioProviderId,

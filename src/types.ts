@@ -1,26 +1,76 @@
 export type ModelInputMode = "auto" | "direct_video" | "keyframe_sequence";
 
+// Legacy: kept for v1 config compatibility. New code should read `source` + capabilities.
 export type ProviderKind = "video" | "audio";
+
+export type ModelCapability =
+  | "vision"
+  | "reasoning"
+  | "fast"
+  | "audio_transcription";
+
+export type ProviderSource = "remote" | "local_llama" | "local_whisper";
+
+export type ProviderEndpointType =
+  | "openai_chat_completions"
+  | "openai_responses"
+  | "openai_audio_transcriptions"
+  | "local_whisper_wasm"
+  | "local_llama_server";
+
+export type ProviderModel = {
+  id: string; // provider 内部唯一,如 "gpt-4o-mini" / "qwen3_5_2b_q4km"
+  label: string; // 人类可读 "Qwen3.5-2B (Q4_K_M)"
+  capabilities: ModelCapability[];
+  maxOutputTokens?: number;
+  temperature?: number;
+  // 本地推理 model 专属
+  localKey?: string;
+  // 本地 whisper 专属
+  localWhisperModel?: string;
+  localWhisperMirror?: string;
+  language?: string;
+};
 
 export type ModelProvider = {
   id: string;
   name: string;
+  source: ProviderSource;
+  builtin?: boolean; // builtin local_llama/local_whisper 不可删
   baseUrl: string;
   apiKeyRef: string;
-  model: string;
-  kind: ProviderKind;
-  endpointType:
-    | "openai_chat_completions"
-    | "openai_responses"
-    | "openai_audio_transcriptions"
-    | "local_whisper_wasm";
-  localWhisperModel?: string; // for local_whisper_wasm: HF model id, e.g. "Xenova/whisper-base"
-  localWhisperMirror?: string; // override HF mirror, default https://hf-mirror.com
+  endpointType: ProviderEndpointType;
   inputMode: ModelInputMode;
-  language?: string; // audio: BCP-47 hint, e.g. "zh", "en"
+  models: ProviderModel[];
+  // 以下字段是 v1 schema 残留,仅用于兼容性读取(配置迁移完成后从 models[0] 反推)
+  /** @deprecated use models[0].id */
+  model?: string;
+  /** @deprecated derived from source + endpointType */
+  kind?: ProviderKind;
+  /** @deprecated use models[0].localWhisperModel */
+  localWhisperModel?: string;
+  /** @deprecated use models[0].localWhisperMirror */
+  localWhisperMirror?: string;
+  /** @deprecated use models[0].language */
+  language?: string;
+  /** @deprecated use models[0].maxOutputTokens */
   maxOutputTokens?: number;
+  /** @deprecated use models[0].temperature */
   temperature?: number;
 };
+
+export type TaskDifficulty = "simple" | "medium" | "complex";
+export type TaskAxis = "vision" | "text";
+export type TaskSlotKey =
+  | "simple_vision"
+  | "simple_text"
+  | "medium_vision"
+  | "medium_text"
+  | "complex_vision"
+  | "complex_text";
+
+export type SlotAssignment = { providerId: string; modelId: string } | null;
+export type TaskSlots = Record<TaskSlotKey, SlotAssignment>;
 
 export type ProjectSource =
   | { type: "local_file"; originalPath: string }
@@ -214,10 +264,16 @@ export type AnalysisProgressEvent = {
 
 export type AppConfig = {
   providers: ModelProvider[];
-  activeVideoProviderId: string | null;
-  activeAudioProviderId: string | null;
+  taskSlots: TaskSlots;
+  audioSlot: SlotAssignment;
   // 上次启动过的本地推理模型(key)。下次应用启动时自动恢复。
   lastLlamaModelKey?: string | null;
+  schemaVersion: 2;
+  // v1 残留字段,仅在 migrateConfigV1ToV2 内读取,迁移后写回时不再产生
+  /** @deprecated migrated to taskSlots.complex_vision */
+  activeVideoProviderId?: string | null;
+  /** @deprecated migrated to audioSlot */
+  activeAudioProviderId?: string | null;
 };
 
 export type ScreenState = 

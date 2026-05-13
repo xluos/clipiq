@@ -147,23 +147,40 @@ function ModelSection() {
       ? {
           id,
           name: "新语音模型",
+          source: "remote",
           baseUrl: "https://api.openai.com/v1",
           apiKeyRef: "",
-          model: "whisper-1",
-          kind: "audio",
           endpointType: "openai_audio_transcriptions",
           inputMode: "keyframe_sequence",
+          models: [
+            {
+              id: "whisper-1",
+              label: "whisper-1",
+              capabilities: ["audio_transcription"],
+              language: "zh",
+            },
+          ],
+          model: "whisper-1",
+          kind: "audio",
           language: "zh",
         }
       : {
           id,
           name: "新视觉模型",
+          source: "remote",
           baseUrl: "https://api.openai.com/v1",
           apiKeyRef: "",
-          model: "gpt-4o-mini",
-          kind: "video",
           endpointType: "openai_chat_completions",
           inputMode: "auto",
+          models: [
+            {
+              id: "gpt-4o-mini",
+              label: "gpt-4o-mini",
+              capabilities: ["vision", "reasoning"],
+            },
+          ],
+          model: "gpt-4o-mini",
+          kind: "video",
         };
     setProviders((prev) => [...prev, draft]);
   };
