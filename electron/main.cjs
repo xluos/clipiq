@@ -26,8 +26,82 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 const VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "webm", "avi", "m4v"];
-const PIPELINE_VERSION = "mvp-local-2026-05-12";
-const SCHEMA_VERSION = "analysis-v1";
+const PIPELINE_VERSION = "mvp-local-2026-05-13";
+const SCHEMA_VERSION = "analysis-v2-methodology";
+
+const METHODOLOGY_DIR = path.join(__dirname, "..", "prompts", "methodology");
+const methodologyCache = new Map();
+const GENRE_CATALOG = {
+  vlog: "日常 / 生活 / 旅行 vlog，情绪线优先，BGM 主导节奏",
+  review: "测评 / 开箱 / 对比 / 好物推荐，结构强、可跳读、要证据",
+  travel: "风景 / 旅拍 / 城市漫游，意境优先，BGM 节拍剪辑",
+  tutorial: "教程 / DIY / 技能演示，deliberate pacing、步骤化",
+  knowledge: "知识科普 / 视频论文 / 行业分析，论证链 + 情绪曲线",
+  documentary: "纪录片 / 人物专题 / 深度叙事，三幕情绪 + 章节化",
+  "short-drama": "短剧 / 剧情段子 / 带货剧情，高密度反转、字幕主导",
+};
+const ALLOWED_GENRES = new Set([...Object.keys(GENRE_CATALOG), "other"]);
+
+function computeLengthBucket(durationSec) {
+  const d = Number(durationSec) || 0;
+  if (d < 60) return "short";
+  if (d < 180) return "mid";
+  if (d < 600) return "long";
+  return "deep";
+}
+
+async function loadMethodologyMd(relPath) {
+  if (methodologyCache.has(relPath)) return methodologyCache.get(relPath);
+  const full = path.join(METHODOLOGY_DIR, relPath);
+  try {
+    const content = await fs.readFile(full, "utf8");
+    methodologyCache.set(relPath, content);
+    return content;
+  } catch {
+    methodologyCache.set(relPath, "");
+    return "";
+  }
+}
+
+async function buildMethodologyContext(durationSec, manualGenre, preResolvedGenre) {
+  const lengthBucket = computeLengthBucket(durationSec);
+  const isAuto = !manualGenre || manualGenre === "auto";
+  // 优先级：用户手选 > pass1 预识别 > LLM 自行 catalog 选
+  const effectiveGenre = (!isAuto && manualGenre && manualGenre !== "auto")
+    ? manualGenre
+    : (preResolvedGenre && ALLOWED_GENRES.has(preResolvedGenre) ? preResolvedGenre : null);
+
+  const appliedRuleSets = ["_common", `length/${lengthBucket}`];
+  const blocks = [];
+  const commonText = await loadMethodologyMd("_common.md");
+  if (commonText) blocks.push(commonText);
+  const lengthText = await loadMethodologyMd(`length/${lengthBucket}.md`);
+  if (lengthText) blocks.push(lengthText);
+
+  if (effectiveGenre && effectiveGenre !== "other") {
+    const genreText = await loadMethodologyMd(`genre/${effectiveGenre}.md`);
+    if (genreText) {
+      blocks.push(genreText);
+      appliedRuleSets.push(`genre/${effectiveGenre}`);
+    }
+  } else {
+    // 没有预识别 + 用户也没指定 → 让 LLM 自己挑（fallback，理论上 two-pass 走通后不会进这里）
+    const catalogLines = Object.entries(GENRE_CATALOG)
+      .map(([k, v]) => `- ${k}: ${v}`)
+      .join("\n");
+    blocks.push(
+      `# 视频类型自动识别清单\n\n请从以下 7 类中选出一个最匹配的视频类型作为 detectedGenre。如果都不匹配填 "other"。\n\n${catalogLines}`
+    );
+  }
+
+  return {
+    text: blocks.join("\n\n---\n\n"),
+    lengthBucket,
+    appliedRuleSets,
+    isAuto,
+    forcedGenre: effectiveGenre,
+  };
+}
 const YT_DLP_LATEST_REDIRECT = "https://github.com/yt-dlp/yt-dlp/releases/latest";
 const YT_DLP_LATEST_DOWNLOAD = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
 
@@ -663,10 +737,17 @@ function localNodeForSegment(segment, project, frameUrl, transcriptSegments) {
   };
 }
 
-function buildLocalReport(project, nodes, provider, audioProvider, transcriptSummary) {
+function buildLocalReport(project, nodes, provider, audioProvider, transcriptSummary, options) {
   const transcriptHint = transcriptSummary
     ? `音轨已转录 ${transcriptSummary.segmentCount ?? 0} 段（${transcriptSummary.language || "auto"}），但视觉模型未配置或失败，没有生成完整语义分析。`
     : "未启用语音转录，且视觉模型未配置或失败，结果仅基于场景检测的关键帧骨架。";
+
+  const lengthBucket = computeLengthBucket(project.durationSec);
+  const manualGenre = options?.manualGenre && options.manualGenre !== "auto" ? options.manualGenre : null;
+  const appliedRuleSets = ["_common", `length/${lengthBucket}`];
+  if (manualGenre && ALLOWED_GENRES.has(manualGenre) && manualGenre !== "other") {
+    appliedRuleSets.push(`genre/${manualGenre}`);
+  }
 
   return {
     summary: `已对 ${project.videoName} 完成场景切分和关键帧抽取（共 ${nodes.length} 个候选片段）。${transcriptHint}请在设置里配置视觉模型或语音模型后重新分析以获得完整结果。`,
@@ -704,6 +785,14 @@ function buildLocalReport(project, nodes, provider, audioProvider, transcriptSum
     pipelineVersion: PIPELINE_VERSION,
     schemaVersion: SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
+    methodologyAudit: {
+      detectedGenre: manualGenre || "other",
+      lengthBucket,
+      appliedRuleSets,
+      hits: [],
+      violations: [],
+      misses: [],
+    },
   };
 }
 
@@ -722,25 +811,96 @@ function tryParseJsonFromText(text) {
   }
 }
 
-function normalizeModelResult(payload, fallbackNodes, fallbackReport, project, provider) {
+function sanitizeMethodologyTag(tag) {
+  if (!tag || typeof tag !== "object") return null;
+  const status = tag.status === "violation" ? "violation" : tag.status === "hit" ? "hit" : null;
+  if (!status) return null;
+  const ruleId = String(tag.ruleId || "").trim();
+  if (!ruleId) return null;
+  const confidence = Number.isFinite(Number(tag.confidence)) ? Math.max(0, Math.min(1, Number(tag.confidence))) : 0.6;
+  // 软抗议过滤：confidence < 0.2 的 violation 视为「不适用」，drop 掉。
+  // hit 不过滤，因为 hit 通常 confidence 都不低，而且 hit 多一些不伤。
+  if (status === "violation" && confidence < 0.2) return null;
+  return {
+    ruleId,
+    ruleName: String(tag.ruleName || ruleId),
+    category: String(tag.category || "structure"),
+    status,
+    evidence: String(tag.evidence || ""),
+    confidence,
+    ...(status === "violation" && tag.fixSuggestion ? { fixSuggestion: String(tag.fixSuggestion) } : {}),
+  };
+}
+
+function sanitizeMethodologyMiss(miss) {
+  if (!miss || typeof miss !== "object") return null;
+  const ruleId = String(miss.ruleId || "").trim();
+  if (!ruleId) return null;
+  return {
+    ruleId,
+    ruleName: String(miss.ruleName || ruleId),
+    category: String(miss.category || "structure"),
+    expectedAt: miss.expectedAt ? String(miss.expectedAt) : undefined,
+    reason: String(miss.reason || ""),
+    fixSuggestion: String(miss.fixSuggestion || ""),
+  };
+}
+
+function normalizeModelResult(payload, fallbackNodes, fallbackReport, project, provider, methodology) {
   const nodes = Array.isArray(payload?.nodes) ? payload.nodes : fallbackNodes;
-  const normalizedNodes = nodes.map((node, index) => ({
-    ...fallbackNodes[Math.min(index, fallbackNodes.length - 1)],
-    ...node,
-    id: String(node.id || `node-${index + 1}`),
-    startSec: Number.isFinite(Number(node.startSec)) ? Number(node.startSec) : fallbackNodes[index]?.startSec ?? 0,
-    endSec: Number.isFinite(Number(node.endSec)) ? Number(node.endSec) : fallbackNodes[index]?.endSec ?? project.durationSec,
-    visualElements: Array.isArray(node.visualElements) ? node.visualElements : fallbackNodes[index]?.visualElements ?? [],
-    audioElements: Array.isArray(node.audioElements) ? node.audioElements : fallbackNodes[index]?.audioElements ?? [],
-    nodeTypes: Array.isArray(node.nodeTypes) ? node.nodeTypes : fallbackNodes[index]?.nodeTypes ?? ["info_point"],
-    isHighlight: Boolean(node.isHighlight),
-  }));
+  const normalizedNodes = nodes.map((node, index) => {
+    const tags = Array.isArray(node.methodologyTags)
+      ? node.methodologyTags.map(sanitizeMethodologyTag).filter(Boolean)
+      : [];
+    return {
+      ...fallbackNodes[Math.min(index, fallbackNodes.length - 1)],
+      ...node,
+      id: String(node.id || `node-${index + 1}`),
+      startSec: Number.isFinite(Number(node.startSec)) ? Number(node.startSec) : fallbackNodes[index]?.startSec ?? 0,
+      endSec: Number.isFinite(Number(node.endSec)) ? Number(node.endSec) : fallbackNodes[index]?.endSec ?? project.durationSec,
+      visualElements: Array.isArray(node.visualElements) ? node.visualElements : fallbackNodes[index]?.visualElements ?? [],
+      audioElements: Array.isArray(node.audioElements) ? node.audioElements : fallbackNodes[index]?.audioElements ?? [],
+      nodeTypes: Array.isArray(node.nodeTypes) ? node.nodeTypes : fallbackNodes[index]?.nodeTypes ?? ["info_point"],
+      isHighlight: Boolean(node.isHighlight),
+      methodologyTags: tags,
+    };
+  });
+
+  // Aggregate hits/violations from node-level tags into report.methodologyAudit
+  const auditFromModel = payload?.report?.methodologyAudit || {};
+  const allTags = normalizedNodes.flatMap((n) => n.methodologyTags || []);
+  const hits = allTags.filter((t) => t.status === "hit");
+  const violations = allTags.filter((t) => t.status === "violation");
+  const misses = Array.isArray(auditFromModel.misses)
+    ? auditFromModel.misses.map(sanitizeMethodologyMiss).filter(Boolean)
+    : [];
+
+  const forcedGenre = methodology?.forcedGenre && ALLOWED_GENRES.has(methodology.forcedGenre) ? methodology.forcedGenre : null;
+  const rawDetected = String(auditFromModel.detectedGenre || "").trim();
+  const detectedGenre = forcedGenre
+    || (ALLOWED_GENRES.has(rawDetected) ? rawDetected : "other");
+
+  const methodologyAudit = methodology ? {
+    detectedGenre,
+    lengthBucket: methodology.lengthBucket,
+    appliedRuleSets: methodology.appliedRuleSets,
+    hits,
+    violations,
+    misses,
+    overallScore: Number.isFinite(Number(auditFromModel.overallScore))
+      ? Math.max(0, Math.min(100, Number(auditFromModel.overallScore)))
+      : undefined,
+    genreConfidence: Number.isFinite(Number(auditFromModel.genreConfidence))
+      ? Math.max(0, Math.min(1, Number(auditFromModel.genreConfidence)))
+      : undefined,
+  } : undefined;
 
   return {
     nodes: normalizedNodes.length ? normalizedNodes : fallbackNodes,
     report: {
       ...fallbackReport,
       ...(payload?.report || {}),
+      methodologyAudit,
       providerSnapshot: provider ? {
         name: provider.name,
         baseUrl: provider.baseUrl,
@@ -761,16 +921,125 @@ function estimateTokenCost(framesCount, transcriptText) {
 
 function trimTranscriptForBudget(transcriptText, segments, maxChars) {
   if (!transcriptText) return { text: "", segments: [] };
-  if (transcriptText.length <= maxChars) return { text: transcriptText, segments: segments || [] };
+  const safeSegments = Array.isArray(segments) ? segments : [];
+  if (transcriptText.length <= maxChars) return { text: transcriptText, segments: safeSegments };
   // 截前 60% + 后 40%，中间换 [...]
   const headLen = Math.floor(maxChars * 0.6);
   const tailLen = maxChars - headLen - 8;
   const head = transcriptText.slice(0, headLen);
   const tail = transcriptText.slice(-tailLen);
-  return { text: `${head}\n[...省略中段...]\n${tail}`, segments: segments || [] };
+  // segments 按比例截一段头 + 一段尾
+  let trimmedSegments = safeSegments;
+  if (safeSegments.length > 0) {
+    const ratio = maxChars / transcriptText.length;
+    const target = Math.max(2, Math.floor(safeSegments.length * ratio));
+    const headCount = Math.max(1, Math.floor(target * 0.6));
+    const tailCount = Math.max(1, target - headCount);
+    const headSeg = safeSegments.slice(0, headCount);
+    const tailSeg = safeSegments.slice(-tailCount);
+    const gapStart = headSeg[headSeg.length - 1]?.end ?? 0;
+    const gapEnd = tailSeg[0]?.start ?? gapStart;
+    trimmedSegments = [
+      ...headSeg,
+      { start: gapStart, end: gapEnd, text: "[...省略中段...]" },
+      ...tailSeg,
+    ];
+  }
+  return { text: `${head}\n[...省略中段...]\n${tail}`, segments: trimmedSegments };
 }
 
-function buildAnalysisPrompt(project, frames, transcript, options) {
+// 从 detectScenes 输出的时间戳数组 + frames 反推完整镜头切换表。
+// 标记哪些镜头被采样成了关键帧。
+function buildShotListFromScenes(scenes, durationSec, frames) {
+  const safeDuration = Math.max(Number(durationSec) || 0, 0);
+  if (!safeDuration) return [];
+  const sorted = [...new Set((Array.isArray(scenes) ? scenes : []).map(Number))]
+    .filter((t) => Number.isFinite(t) && t >= 0 && t < safeDuration)
+    .sort((a, b) => a - b);
+  if (sorted[0] !== 0) sorted.unshift(0);
+  const shots = sorted.map((start, i) => {
+    const end = sorted[i + 1] ?? safeDuration;
+    return { index: i, startSec: start, endSec: end, durationSec: end - start };
+  });
+  // 标记关键帧采样
+  shots.forEach((shot) => {
+    const fIndex = (frames || []).findIndex((f) => f.midSec >= shot.startSec && f.midSec < shot.endSec);
+    if (fIndex >= 0) shot.sampledFrameIndex = fIndex + 1;
+  });
+  return shots;
+}
+
+function computeShotStats(shots, durationSec) {
+  if (!shots.length) return null;
+  const durations = shots.map((s) => s.durationSec).slice().sort((a, b) => a - b);
+  const sum = durations.reduce((a, b) => a + b, 0);
+  const mean = sum / durations.length;
+  const median = durations[Math.floor(durations.length / 2)];
+  const variance = durations.reduce((acc, d) => acc + (d - mean) ** 2, 0) / durations.length;
+  const stddev = Math.sqrt(variance);
+  const minutes = Math.max(Number(durationSec) / 60, 1 / 60);
+  return {
+    count: shots.length,
+    mean,
+    median,
+    stddev,
+    minDur: durations[0],
+    maxDur: durations[durations.length - 1],
+    densityPerMin: shots.length / minutes,
+    bucketShort: shots.filter((s) => s.durationSec < 2).length,
+    bucketMid: shots.filter((s) => s.durationSec >= 2 && s.durationSec < 4).length,
+    bucketLong: shots.filter((s) => s.durationSec >= 4).length,
+  };
+}
+
+function formatShotListBlock(shots) {
+  if (!shots.length) return "";
+  // 限制最大行数避免 prompt 爆炸；对超长视频按段抽样
+  const MAX_ROWS = 80;
+  let displayShots = shots;
+  if (shots.length > MAX_ROWS) {
+    const step = shots.length / MAX_ROWS;
+    displayShots = [];
+    for (let i = 0; i < MAX_ROWS; i++) {
+      displayShots.push(shots[Math.min(shots.length - 1, Math.floor(i * step))]);
+    }
+  }
+  const head = "| # | start | end | dur | sampled |\n|---|---|---|---|---|";
+  const lines = displayShots.map((s) =>
+    `| ${s.index + 1} | ${s.startSec.toFixed(1)}s | ${s.endSec.toFixed(1)}s | ${s.durationSec.toFixed(1)}s | ${s.sampledFrameIndex ? `frame#${s.sampledFrameIndex}` : "—"} |`
+  );
+  const truncatedNote = shots.length > MAX_ROWS
+    ? `\n（共 ${shots.length} 个镜头，上表按等距抽样展示 ${MAX_ROWS} 条；完整时长分布见统计区。）`
+    : "";
+  return `# 镜头切换全量列表（共 ${shots.length} 个镜头）\n\n${head}\n${lines.join("\n")}${truncatedNote}`;
+}
+
+function formatShotStatsBlock(stats) {
+  if (!stats) return "";
+  return [
+    "# 镜头时长分布统计",
+    `- 总镜头数: ${stats.count} | 平均: ${stats.mean.toFixed(2)}s | 中位: ${stats.median.toFixed(2)}s | 标准差: ${stats.stddev.toFixed(2)}s`,
+    `- 最短: ${stats.minDur.toFixed(2)}s | 最长: ${stats.maxDur.toFixed(2)}s`,
+    `- 切换密度: ${stats.densityPerMin.toFixed(1)} 次/分钟`,
+    `- 时长分布桶: <2s: ${stats.bucketShort} 个 | 2-4s: ${stats.bucketMid} 个 | ≥4s: ${stats.bucketLong} 个`,
+  ].join("\n");
+}
+
+function formatTranscriptBlock(transcript) {
+  if (!transcript?.text) {
+    return "# 音轨转录\n（无 / 未配置语音模型）";
+  }
+  const segments = Array.isArray(transcript.segments) ? transcript.segments : [];
+  if (segments.length > 0) {
+    const lines = segments.map((s) =>
+      `[${Number(s.start || 0).toFixed(1)}-${Number(s.end || 0).toFixed(1)}] ${String(s.text || "").trim()}`
+    );
+    return `# 音轨转录（带时间戳，语言: ${transcript.language || "auto"}，共 ${segments.length} 段）\n${lines.join("\n")}`;
+  }
+  return `# 音轨转录（语言: ${transcript.language || "auto"}）\n${transcript.text}`;
+}
+
+async function buildAnalysisPrompt(project, frames, transcript, scenes, options) {
   const focusHint =
     options?.focus === "rhythm" ? "重点关注剪辑节奏、镜头切换密度、停顿停滞。" :
     options?.focus === "emotion" ? "重点关注情绪曲线、表达强度和观众共鸣点。" :
@@ -782,27 +1051,97 @@ function buildAnalysisPrompt(project, frames, transcript, options) {
     `#${i + 1}  t=${f.midSec.toFixed(1)}s  范围 ${f.startSec.toFixed(1)}-${f.endSec.toFixed(1)}s`
   ).join("\n");
 
-  const transcriptBlock = transcript?.text
-    ? `\n# 音轨转录（语言: ${transcript.language || "auto"}）\n${transcript.text}\n`
-    : "\n# 音轨转录\n（无 / 未配置语音模型）\n";
+  const shots = buildShotListFromScenes(scenes, project.durationSec, frames);
+  const shotStats = computeShotStats(shots, project.durationSec);
+  const shotListBlock = formatShotListBlock(shots);
+  const shotStatsBlock = formatShotStatsBlock(shotStats);
+  const transcriptBlock = formatTranscriptBlock(transcript);
+
+  const methodology = await buildMethodologyContext(project.durationSec, options?.manualGenre, options?.detectedGenre);
 
   const userText = [
-    `请分析短视频《${project.videoName}》。`,
-    `时长 ${Math.round(project.durationSec)}s, 画幅 ${project.width}x${project.height} (${project.orientation === "portrait" ? "竖屏" : project.orientation === "square" ? "方形" : "横屏"})。`,
+    `请分析视频《${project.videoName}》。`,
+    `时长 ${Math.round(project.durationSec)}s（lengthBucket=${methodology.lengthBucket}）, 画幅 ${project.width}x${project.height} (${project.orientation === "portrait" ? "竖屏" : project.orientation === "square" ? "方形" : "横屏"})。`,
     `${focusHint} ${modeHint}`,
     "",
     "# 关键帧时间表（与下面图片顺序一一对应）",
     frameDescriptions,
+    "",
+    shotListBlock,
+    "",
+    shotStatsBlock,
+    "",
     transcriptBlock,
-    "请只返回 JSON（不要 markdown），结构: {\"nodes\":[节点...],\"report\":{summary,structure:{hook,development,turn,climax,ending},pacing,editingStyle,composition,takeaways:[]}}.",
-    "每个 node 必须包含: id, startSec, endSec, title, nodeTypes(数组,可选 shot_change/emotion_turn/info_point/edit_intent/audio_change), shotDescription, shotType, cameraMovement, visualElements(数组), audioElements(数组), editIntent, emotionLabel, emotionIntensity(0-10整数), narrativeFunction, confidence(0-1), isHighlight(布尔)。",
-    "时间戳 startSec/endSec 必须严格落在视频时长内，且节点按时间升序。",
+    "",
+    "# 剪辑方法论规则集（必读，分析时严格对照）",
+    "下面是当前视频所属的时长档位 + 类型对应的剪辑方法论。每条规则有唯一 ruleId，例如 R-HOOK-001。",
+    "你必须在分析时对照这些规则给视频打标：命中（hit）挂在对应节点的 methodologyTags 上；违反（violation）也挂在节点的 methodologyTags 上并给出 fixSuggestion；缺失（miss，即规则要求出现但视频里完全没有的）写到 report.methodologyAudit.misses 数组里（注意 miss 没有具体节点）。",
+    "",
+    methodology.text,
+    "",
+    "# 输出格式（必须严格遵守）",
+    "请只返回 JSON（不要 markdown 围栏），结构如下：",
+    `{
+  "nodes":[
+    {
+      "id":"node-1",
+      "startSec":0,
+      "endSec":3,
+      "title":"...",
+      "nodeTypes":["shot_change"],
+      "shotDescription":"...",
+      "shotType":"近景",
+      "cameraMovement":"固定",
+      "visualElements":[],
+      "audioElements":[],
+      "editIntent":"...",
+      "emotionLabel":"...",
+      "emotionIntensity":7,
+      "narrativeFunction":"Hook",
+      "confidence":0.9,
+      "isHighlight":true,
+      "methodologyTags":[
+        {"ruleId":"R-HOOK-001","ruleName":"黄金 3 秒钩子","category":"hook","status":"hit","evidence":"开头特写 + 字幕 'XX' + 旁白 'YY'","confidence":0.9},
+        {"ruleId":"R-HOOK-002","ruleName":"钩子三层同步","category":"hook","status":"violation","evidence":"画面拍 A、字幕讲 B、旁白讲 C","confidence":0.8,"fixSuggestion":"统一首屏字幕和旁白都聚焦同一钩子"}
+      ]
+    }
+  ],
+  "report":{
+    "summary":"...",
+    "structure":{"hook":"...","development":"...","turn":"...","climax":"...","ending":"..."},
+    "pacing":"...",
+    "editingStyle":"...",
+    "composition":"...",
+    "takeaways":[],
+    "methodologyAudit":{
+      "detectedGenre":"vlog | review | travel | tutorial | knowledge | documentary | short-drama | other",
+      "genreConfidence":0.9,
+      "misses":[
+        {"ruleId":"R-STRUCT-001","ruleName":"起承转合完整","category":"structure","expectedAt":"视频中后段","reason":"全片节奏一条直线，无明显转折","fixSuggestion":"在中后段补一个反转或对比"}
+      ],
+      "overallScore":78
+    }
+  }
+}`,
+    "",
+    "硬性要求：",
+    "- 时间戳 startSec/endSec 必须严格落在视频时长内，且节点按时间升序。可对照上面的「镜头切换全量列表」来确定节点边界。",
+    "- methodologyTags 的 ruleId 必须来自上述方法论规则集，不要编造。",
+    "- 每条 violation 必须给 fixSuggestion；每条 miss 必须给 fixSuggestion + reason。",
+    "- evidence 必须引用具体画面/旁白/时间段（可引用镜头编号 #N 或字幕时间区间），不要写「看起来」「可能」这种含糊词。",
+    "- detectedGenre 必须从清单中选一个；如果用户已在 prompt 中指定类型，把它原样回填。",
+    "- overallScore 0-100，反映对应方法论的总体符合度。",
+    "",
+    "软约束（避免误报）：",
+    "- 如果一条规则的 when 触发条件在本视频里前提不成立（例如规则只适用 8 分钟以上但本视频只有 6 分钟、或规则要求 BGM 存在但本视频没有 BGM），请直接跳过这条规则，既不要打 violation 也不要打 miss。",
+    "- 如果一条规则的判断需要依赖你看不到的信号（例如 BGM beat sync 需要听到完整音轨节拍、但你只能看到关键帧 + 字幕），不要硬给 miss；可在 takeaways 里温和提示「无法基于现有素材判断」。",
+    "- 节奏类规则（R-PACE-*、R-LONG-002/003 等）请优先依据上方「镜头切换全量列表 + 时长分布统计」客观数据判断，而非靠 12 张关键帧脑补。",
   ].join("\n");
 
-  return userText;
+  return { userText, methodology };
 }
 
-async function callOpenAICompatible(provider, project, frames, transcript, fallbackNodes, fallbackReport, options, handle = null) {
+async function callOpenAICompatible(provider, project, frames, transcript, scenes, fallbackNodes, fallbackReport, options, handle = null) {
   if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
     return { nodes: fallbackNodes, report: fallbackReport, usedModel: false };
   }
@@ -812,7 +1151,7 @@ async function callOpenAICompatible(provider, project, frames, transcript, fallb
   let visibleTranscript = transcript;
   if (transcript?.text) {
     const trimmed = trimTranscriptForBudget(transcript.text, transcript.segments, 4000);
-    visibleTranscript = { ...transcript, text: trimmed.text };
+    visibleTranscript = { ...transcript, text: trimmed.text, segments: trimmed.segments };
   }
   const estimated = estimateTokenCost(Math.min(frames.length, 12), visibleTranscript?.text || "");
   if (estimated > maxBudget) {
@@ -828,16 +1167,66 @@ async function callOpenAICompatible(provider, project, frames, transcript, fallb
     imageDataUrls.push(`data:image/jpeg;base64,${base64}`);
   }
 
-  const userText = buildAnalysisPrompt(project, frames, visibleTranscript, options);
+  const { userText, methodology } = await buildAnalysisPrompt(project, frames, visibleTranscript, scenes, options);
   const systemText =
-    "你是一名严谨的短视频拉片分析师。所有回答必须是合法 JSON，不要使用 Markdown 围栏，不要解释。";
+    "你是一名严谨的视频拉片分析师。你既要描述视频内容，又要严格按照提供的剪辑方法论规则集对视频打标（命中 / 违反 / 缺失）。所有回答必须是合法 JSON，不要使用 Markdown 围栏，不要解释。";
 
   const useResponses = provider.endpointType === "openai_responses";
   const parsed = useResponses
     ? await callOpenAIResponses(provider, systemText, userText, imageDataUrls, handle)
     : await callOpenAIChatCompletions(provider, systemText, userText, imageDataUrls, handle);
 
-  return { ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, provider), usedModel: true };
+  return { ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, provider, methodology), usedModel: true };
+}
+
+// Pass 1（轻量、无图）：仅靠字幕分段 + 镜头列表识别 genre。失败时返回 null。
+async function detectGenreLightweight(provider, project, scenes, transcript, handle = null) {
+  if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) return null;
+  const shots = buildShotListFromScenes(scenes, project.durationSec, []);
+  const stats = computeShotStats(shots, project.durationSec);
+  const shotListBlock = formatShotListBlock(shots);
+  const shotStatsBlock = formatShotStatsBlock(stats);
+  const transcriptBlock = formatTranscriptBlock(transcript);
+  const catalogLines = Object.entries(GENRE_CATALOG)
+    .map(([k, v]) => `- ${k}: ${v}`)
+    .join("\n");
+
+  const systemText = "你是一名严谨的视频类型识别助手。基于提供的字幕分段（带时间戳）和镜头切换数据推断视频类型。只返回合法 JSON，不要 markdown 围栏，不要解释。";
+  const userText = [
+    `请基于以下信息推断视频《${project.videoName}》的类型。`,
+    `视频时长 ${Math.round(project.durationSec)}s，画幅 ${project.width}x${project.height}（${project.orientation}）。`,
+    "",
+    shotListBlock,
+    "",
+    shotStatsBlock,
+    "",
+    transcriptBlock,
+    "",
+    "# 候选类型清单",
+    catalogLines,
+    "- other: 都不匹配",
+    "",
+    "请只返回 JSON：",
+    `{"detectedGenre":"vlog|review|travel|tutorial|knowledge|documentary|short-drama|other","genreConfidence":0.0-1.0,"reasoning":"..."}`,
+  ].join("\n");
+
+  try {
+    const useResponses = provider.endpointType === "openai_responses";
+    const parsed = useResponses
+      ? await callOpenAIResponses(provider, systemText, userText, [], handle)
+      : await callOpenAIChatCompletions(provider, systemText, userText, [], handle);
+    const genre = String(parsed?.detectedGenre || "").trim();
+    if (!ALLOWED_GENRES.has(genre)) return null;
+    const conf = Number(parsed?.genreConfidence);
+    return {
+      detectedGenre: genre,
+      genreConfidence: Number.isFinite(conf) ? Math.max(0, Math.min(1, conf)) : 0.5,
+      reasoning: String(parsed?.reasoning || "").slice(0, 500),
+    };
+  } catch (error) {
+    if (handle?.cancelled) throw error;
+    return null;
+  }
 }
 
 async function streamSSE(response, onEvent) {
@@ -1246,7 +1635,7 @@ async function analyzeProject(event, { project, provider, audioProvider, options
           textPreview: transcript.text.slice(0, 240),
         }
       : null;
-    const fallbackReport = buildLocalReport(projectMeta, fallbackNodes, provider, audioProvider, transcriptSummary);
+    const fallbackReport = buildLocalReport(projectMeta, fallbackNodes, provider, audioProvider, transcriptSummary, options);
 
     let nodes = fallbackNodes;
     let report = fallbackReport;
@@ -1256,8 +1645,24 @@ async function analyzeProject(event, { project, provider, audioProvider, options
     if (provider?.apiKeyRef && provider.inputMode !== "direct_video") {
       try {
         ensureNotCancelled(handle);
+
+        // Pass 1：auto 模式且有字幕/镜头数据时，先用轻量调用识别 genre
+        let effectiveOptions = options;
+        const isAutoGenre = !options?.manualGenre || options.manualGenre === "auto";
+        if (isAutoGenre && (transcript || scenes?.length)) {
+          send(74, "识别视频类型", `根据字幕和镜头切换让 ${provider.name} 推断视频类型。`);
+          const detectStartedAt = Date.now();
+          const detected = await detectGenreLightweight(provider, projectMeta, scenes, transcript, handle);
+          if (detected?.detectedGenre) {
+            effectiveOptions = { ...options, detectedGenre: detected.detectedGenre };
+            send(76, "识别视频类型完成", `判定为 ${detected.detectedGenre}（置信度 ${(detected.genreConfidence * 100).toFixed(0)}%，耗时 ${Math.round((Date.now() - detectStartedAt) / 1000)}s）。`);
+          } else {
+            send(76, "类型识别跳过", "未能从字幕推断类型，将让主分析在 catalog 中识别。");
+          }
+        }
+
         send(78, "模型分析画面", `正在请 ${provider.name} 分析这段视频。`);
-        const modelResult = await callOpenAICompatible(provider, projectMeta, frames, transcript, fallbackNodes, fallbackReport, options, handle);
+        const modelResult = await callOpenAICompatible(provider, projectMeta, frames, transcript, scenes, fallbackNodes, fallbackReport, effectiveOptions, handle);
         nodes = modelResult.nodes;
         report = {
           ...modelResult.report,

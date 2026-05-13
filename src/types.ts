@@ -64,6 +64,60 @@ export type AnalysisNodeType =
   | "edit_intent"
   | "audio_change";
 
+export type VideoGenre =
+  | "vlog"
+  | "review"
+  | "travel"
+  | "tutorial"
+  | "knowledge"
+  | "documentary"
+  | "short-drama"
+  | "other";
+
+export type LengthBucket = "short" | "mid" | "long" | "deep";
+
+export type MethodologyRuleCategory =
+  | "hook"
+  | "structure"
+  | "pacing"
+  | "engagement"
+  | "sound"
+  | "density"
+  | "completion"
+  | "visual";
+
+export type MethodologyTagStatus = "hit" | "violation";
+
+export type MethodologyTag = {
+  ruleId: string; // e.g. "R-HOOK-001"
+  ruleName: string; // 人类可读名
+  category: MethodologyRuleCategory;
+  status: MethodologyTagStatus;
+  evidence: string; // 引用具体画面/旁白/时间段
+  confidence: number; // 0-1
+  fixSuggestion?: string; // 仅 violation 必填
+};
+
+export type MethodologyMiss = {
+  ruleId: string;
+  ruleName: string;
+  category: MethodologyRuleCategory;
+  expectedAt?: string; // 应该出现的位置/时间段描述
+  reason: string; // 为什么判定缺失
+  fixSuggestion: string;
+};
+
+export type MethodologyAudit = {
+  detectedGenre: VideoGenre; // LLM 推断的视频类型
+  lengthBucket: LengthBucket; // 根据 duration 推断
+  appliedRuleSets: string[]; // 加载了哪些规则集，如 ["_common", "length/long", "genre/review"]
+  hits: MethodologyTag[]; // 命中（节点级 hit 的聚合）
+  violations: MethodologyTag[]; // 违反（节点级 violation 的聚合）
+  misses: MethodologyMiss[]; // 缺失（报告级判定，没有对应节点）
+  overallScore?: number; // 0-100 综合评分（可选）
+  genreConfidence?: number; // 0-1 LLM 对类型推断的信心
+};
+
 export type AnalysisNode = {
   id: string;
   startSec: number;
@@ -84,6 +138,7 @@ export type AnalysisNode = {
   isHighlight: boolean;
   note?: string;
   thumbnailUrl?: string; // Captured from video for the node
+  methodologyTags?: MethodologyTag[]; // 该节点命中/违反的方法论规则
 };
 
 export type AnalysisReport = {
@@ -111,6 +166,7 @@ export type AnalysisReport = {
   generatedAt?: string;
   timings?: AnalysisTiming[];
   totalDurationMs?: number;
+  methodologyAudit?: MethodologyAudit;
 };
 
 export type AnalysisTiming = {
@@ -123,6 +179,9 @@ export type AnalysisOptions = {
   mode: "quick" | "standard" | "detailed";
   density: "sparse" | "standard" | "dense";
   focus: "all" | "narrative" | "rhythm" | "emotion";
+  // Hybrid: 用户可在 PrepareScreen 预指定类型；不指定（"auto"）则让 LLM 识别。
+  // 分析完成后用户也可在 ReportScreen 改类型并重新分析。
+  manualGenre?: VideoGenre | "auto";
 };
 
 export type AnalysisProgressEvent = {

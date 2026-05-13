@@ -382,6 +382,20 @@ export function WorkspaceScreen() {
                     <div className="flex flex-wrap gap-2 mb-3">
                       <Badge variant="secondary" className="bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700 dark:hover:bg-slate-700 text-[11px] px-2 py-0.5 font-medium shadow-none">{node.narrativeFunction}</Badge>
                       <Badge variant="secondary" className="bg-emerald-50 text-emerald-600 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 text-[11px] px-2 py-0.5 font-medium dark:border-emerald-500/20 shadow-none">{node.emotionLabel}</Badge>
+                      {(node.methodologyTags || []).map((tag, ti) => (
+                        <Badge
+                          key={`${tag.ruleId}-${ti}`}
+                          variant="secondary"
+                          title={`${tag.ruleName}${tag.evidence ? "：" + tag.evidence : ""}${tag.status === "violation" && tag.fixSuggestion ? "\n修复：" + tag.fixSuggestion : ""}`}
+                          className={`text-[11px] px-2 py-0.5 font-medium shadow-none ${
+                            tag.status === "hit"
+                              ? "bg-indigo-50 text-indigo-600 border-indigo-200 dark:bg-indigo-500/10 dark:text-indigo-400 dark:border-indigo-500/20"
+                              : "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20"
+                          }`}
+                        >
+                          {tag.status === "hit" ? "✓" : "⚠"} {tag.ruleName}
+                        </Badge>
+                      ))}
                     </div>
 
                     <p className={`text-sm line-clamp-2 leading-relaxed ${isActive ? 'text-slate-700 dark:text-slate-300' : 'text-slate-500 dark:text-slate-400'}`}>

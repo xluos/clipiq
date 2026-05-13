@@ -1,13 +1,16 @@
 import { useApp } from "../AppContext";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Download, FileText } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ArrowLeft, CheckCircle2, Download, FileText, AlertTriangle, Search, RefreshCw } from "lucide-react";
 import { formatTime } from "@/lib/utils";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FC } from "react";
 import type { ExportFormat } from "../electron-api";
+import type { VideoGenre, MethodologyTag, MethodologyMiss } from "../types";
 
 const REPORT_SECTIONS = [
   { id: "summary", label: "整体摘要" },
   { id: "structure", label: "结构拆解" },
+  { id: "methodology", label: "方法论诊断" },
   { id: "emotion", label: "情感曲线" },
   { id: "pacing", label: "节奏分析" },
   { id: "editing", label: "剪辑风格" },
@@ -15,6 +18,35 @@ const REPORT_SECTIONS = [
   { id: "takeaways", label: "核心洞察" },
   { id: "diagnostics", label: "性能诊断" },
 ] as const;
+
+const GENRE_LABELS: Record<VideoGenre, string> = {
+  vlog: "Vlog",
+  review: "测评 / 产品",
+  travel: "风景 / 旅拍",
+  tutorial: "教程 / 演示",
+  knowledge: "知识 / 科普",
+  documentary: "纪录片 / 专题",
+  "short-drama": "短剧 / 剧情",
+  other: "其他",
+};
+
+const LENGTH_LABELS: Record<string, string> = {
+  short: "短视频（<60s）",
+  mid: "中视频（1-3min）",
+  long: "中长视频（3-10min）",
+  deep: "深度长视频（10min+）",
+};
+
+const CATEGORY_LABELS: Record<string, string> = {
+  hook: "钩子",
+  structure: "结构",
+  pacing: "节奏",
+  engagement: "留存",
+  sound: "声画",
+  density: "信息密度",
+  completion: "完播",
+  visual: "视觉",
+};
 
 function formatDuration(ms: number) {
   if (ms < 1000) return `${ms} ms`;
@@ -25,7 +57,7 @@ function formatDuration(ms: number) {
 }
 
 export function ReportScreen() {
-  const { setCurrentScreen, reportByProject, activeProjectId, projects, nodesByProject, providers } = useApp();
+  const { setCurrentScreen, reportByProject, activeProjectId, projects, setProjects, nodesByProject, providers } = useApp();
   const [exportStatus, setExportStatus] = useState("");
   const [activeSection, setActiveSection] = useState<string>("summary");
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -139,6 +171,27 @@ export function ReportScreen() {
   });
   const totalWidth = rawSegments.reduce((sum, seg) => sum + seg.width, 0) || 1;
   const normalizedSegments = rawSegments.map((seg) => ({ ...seg, width: (seg.width / totalWidth) * 100 }));
+
+  const handleReanalyzeWithGenre = (genre: VideoGenre | "auto") => {
+    if (!project) return;
+    setProjects((prev) =>
+      prev.map((p) =>
+        p.id === project.id
+          ? {
+              ...p,
+              analysisOptions: {
+                ...(p.analysisOptions || { mode: "standard", density: "standard", focus: "all" }),
+                manualGenre: genre,
+              },
+              updatedAt: new Date().toISOString(),
+            }
+          : p
+      )
+    );
+    setCurrentScreen("prepare");
+  };
+
+  const audit = report.methodologyAudit;
 
   const handleExport = async (format: ExportFormat) => {
     if (!project || !report) return;
@@ -270,6 +323,23 @@ export function ReportScreen() {
             </div>
           </section>
           
+          <section id="methodology" className="space-y-4 scroll-mt-6">
+            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">方法论诊断</h2>
+            <MethodologyDiagnostics
+              audit={audit}
+              currentManualGenre={project.analysisOptions?.manualGenre || "auto"}
+              onReanalyze={handleReanalyzeWithGenre}
+              onSeekToNode={(time) => {
+                window.sessionStorage.setItem(
+                  "video-analyzer-pending-seek",
+                  JSON.stringify({ projectId: project.id, time })
+                );
+                setCurrentScreen("workspace");
+              }}
+              nodes={nodes}
+            />
+          </section>
+
           <section id="emotion" className="space-y-4 scroll-mt-6">
             <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">情感曲线</h2>
             <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm">
@@ -407,6 +477,258 @@ export function ReportScreen() {
     </div>
   );
 }
+
+type MethodologyDiagnosticsProps = {
+  audit?: import("../types").MethodologyAudit;
+  currentManualGenre: VideoGenre | "auto";
+  onReanalyze: (genre: VideoGenre | "auto") => void;
+  onSeekToNode: (time: number) => void;
+  nodes: import("../types").AnalysisNode[];
+};
+
+function MethodologyDiagnostics({ audit, currentManualGenre, onReanalyze, onSeekToNode, nodes }: MethodologyDiagnosticsProps) {
+  if (!audit) {
+    return (
+      <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm text-sm text-slate-500 dark:text-slate-400">
+        本次分析未生成方法论诊断结果（可能是旧版本结果或模型未启用）。重新分析后可获得按视频类型 + 时长匹配的剪辑方法论评估。
+      </div>
+    );
+  }
+
+  const violations = audit.violations || [];
+  const misses = audit.misses || [];
+  const hits = audit.hits || [];
+
+  const findNodeWithTag = (ruleId: string) => {
+    return nodes.find((n) => (n.methodologyTags || []).some((t) => t.ruleId === ruleId));
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* 顶部：识别类型 + 时长档位 + 评分 */}
+      <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm space-y-4">
+        <div className="grid gap-4 md:grid-cols-3">
+          <div>
+            <div className="text-xs uppercase tracking-widest text-slate-500 mb-1">识别类型</div>
+            <div className="text-base font-semibold text-slate-800 dark:text-slate-100">
+              {GENRE_LABELS[audit.detectedGenre] || audit.detectedGenre}
+              {typeof audit.genreConfidence === "number" && (
+                <span className="ml-2 text-xs font-normal text-slate-500">置信度 {(audit.genreConfidence * 100).toFixed(0)}%</span>
+              )}
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+              {currentManualGenre === "auto" ? "（自动识别）" : "（用户指定）"}
+            </p>
+          </div>
+          <div>
+            <div className="text-xs uppercase tracking-widest text-slate-500 mb-1">时长档位</div>
+            <div className="text-base font-semibold text-slate-800 dark:text-slate-100">
+              {LENGTH_LABELS[audit.lengthBucket] || audit.lengthBucket}
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 truncate">
+              规则集：{audit.appliedRuleSets.join(" + ")}
+            </p>
+          </div>
+          <div>
+            <div className="text-xs uppercase tracking-widest text-slate-500 mb-1">总评分</div>
+            {typeof audit.overallScore === "number" ? (
+              <>
+                <div className="text-2xl font-semibold text-slate-800 dark:text-slate-100">{audit.overallScore}<span className="text-sm text-slate-500 font-normal"> / 100</span></div>
+                <div className="mt-1 h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-indigo-500 to-violet-500"
+                    style={{ width: `${Math.max(2, audit.overallScore)}%` }}
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="text-sm text-slate-500">未评分</div>
+            )}
+          </div>
+        </div>
+
+        {/* 改类型 + 重新分析 */}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 pt-4 border-t border-slate-100 dark:border-slate-800">
+          <div className="text-xs text-slate-500 dark:text-slate-400 shrink-0">
+            觉得识别不准？改类型重新分析：
+          </div>
+          <Select value={currentManualGenre} onValueChange={(value) => onReanalyze(value as VideoGenre | "auto")}>
+            <SelectTrigger className="bg-slate-50 dark:bg-[#0A0A0B] border-slate-200 dark:border-slate-800 max-w-[260px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">自动识别</SelectItem>
+              <SelectItem value="vlog">Vlog</SelectItem>
+              <SelectItem value="review">测评 / 产品</SelectItem>
+              <SelectItem value="travel">风景 / 旅拍</SelectItem>
+              <SelectItem value="tutorial">教程 / 演示</SelectItem>
+              <SelectItem value="knowledge">知识 / 科普</SelectItem>
+              <SelectItem value="documentary">纪录片 / 专题</SelectItem>
+              <SelectItem value="short-drama">短剧 / 剧情</SelectItem>
+              <SelectItem value="other">其他</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button variant="ghost" size="sm" className="text-xs text-slate-500" onClick={() => onReanalyze(currentManualGenre)}>
+            <RefreshCw className="w-3.5 h-3.5 mr-1" />
+            前往分析页
+          </Button>
+        </div>
+      </div>
+
+      {/* 违反规则 */}
+      <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-500" />
+            违反规则 <span className="text-xs text-slate-500 font-normal">({violations.length})</span>
+          </h3>
+        </div>
+        {violations.length === 0 ? (
+          <p className="text-xs text-slate-500 dark:text-slate-400">没有发现违反规则的片段。</p>
+        ) : (
+          <ul className="space-y-3">
+            {violations.map((v, idx) => (
+              <MethodologyTagItem
+                key={`v-${idx}`}
+                tag={v}
+                tone="violation"
+                onClick={() => {
+                  const node = findNodeWithTag(v.ruleId);
+                  if (node) onSeekToNode(node.startSec);
+                }}
+                clickable={Boolean(findNodeWithTag(v.ruleId))}
+              />
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {/* 缺失规则 */}
+      <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+            <Search className="w-4 h-4 text-rose-500" />
+            缺失规则 <span className="text-xs text-slate-500 font-normal">({misses.length})</span>
+          </h3>
+        </div>
+        {misses.length === 0 ? (
+          <p className="text-xs text-slate-500 dark:text-slate-400">所有应有规则均已出现，无缺失。</p>
+        ) : (
+          <ul className="space-y-3">
+            {misses.map((m, idx) => (
+              <MethodologyMissItem key={`m-${idx}`} miss={m} />
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {/* 命中规则 */}
+      <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+            命中规则 <span className="text-xs text-slate-500 font-normal">({hits.length})</span>
+          </h3>
+        </div>
+        {hits.length === 0 ? (
+          <p className="text-xs text-slate-500 dark:text-slate-400">未识别出明确命中的规则。</p>
+        ) : (
+          <ul className="space-y-2">
+            {hits.map((h, idx) => (
+              <MethodologyTagItem
+                key={`h-${idx}`}
+                tag={h}
+                tone="hit"
+                compact
+                onClick={() => {
+                  const node = findNodeWithTag(h.ruleId);
+                  if (node) onSeekToNode(node.startSec);
+                }}
+                clickable={Boolean(findNodeWithTag(h.ruleId))}
+              />
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type MethodologyTagItemProps = {
+  tag: MethodologyTag;
+  tone: "hit" | "violation";
+  compact?: boolean;
+  onClick?: () => void;
+  clickable?: boolean;
+};
+
+const MethodologyTagItem: FC<MethodologyTagItemProps> = ({ tag, tone, compact = false, onClick, clickable }) => {
+  const toneClasses =
+    tone === "hit"
+      ? "border-emerald-200 dark:border-emerald-500/30 bg-emerald-50/40 dark:bg-emerald-500/5"
+      : "border-amber-200 dark:border-amber-500/30 bg-amber-50/40 dark:bg-amber-500/5";
+  return (
+    <li
+      onClick={clickable ? onClick : undefined}
+      className={`rounded-lg border ${toneClasses} px-3 py-2 ${clickable ? "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40" : ""}`}
+    >
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-200/60 dark:bg-slate-800 text-slate-600 dark:text-slate-300">{tag.ruleId}</span>
+        <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{tag.ruleName}</span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800/60 text-slate-500">
+          {CATEGORY_LABELS[tag.category] || tag.category}
+        </span>
+        <span className="text-[10px] text-slate-400 ml-auto">置信 {(tag.confidence * 100).toFixed(0)}%</span>
+      </div>
+      {!compact && tag.evidence && (
+        <p className="text-xs text-slate-600 dark:text-slate-400 mt-1.5">
+          <span className="font-medium text-slate-500 dark:text-slate-500">证据：</span>
+          {tag.evidence}
+        </p>
+      )}
+      {tone === "violation" && tag.fixSuggestion && (
+        <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
+          <span className="font-medium text-amber-700 dark:text-amber-400">修复建议：</span>
+          {tag.fixSuggestion}
+        </p>
+      )}
+    </li>
+  );
+};
+
+type MethodologyMissItemProps = { miss: MethodologyMiss };
+
+const MethodologyMissItem: FC<MethodologyMissItemProps> = ({ miss }) => {
+  return (
+    <li className="rounded-lg border border-rose-200 dark:border-rose-500/30 bg-rose-50/40 dark:bg-rose-500/5 px-3 py-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-200/60 dark:bg-slate-800 text-slate-600 dark:text-slate-300">{miss.ruleId}</span>
+        <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{miss.ruleName}</span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800/60 text-slate-500">
+          {CATEGORY_LABELS[miss.category] || miss.category}
+        </span>
+      </div>
+      {miss.expectedAt && (
+        <p className="text-xs text-slate-600 dark:text-slate-400 mt-1.5">
+          <span className="font-medium text-slate-500 dark:text-slate-500">应出现位置：</span>
+          {miss.expectedAt}
+        </p>
+      )}
+      {miss.reason && (
+        <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
+          <span className="font-medium text-slate-500 dark:text-slate-500">判定原因：</span>
+          {miss.reason}
+        </p>
+      )}
+      {miss.fixSuggestion && (
+        <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
+          <span className="font-medium text-rose-700 dark:text-rose-400">修复建议：</span>
+          {miss.fixSuggestion}
+        </p>
+      )}
+    </li>
+  );
+};
 
 function EmotionCurve({ nodes, totalDuration }: { nodes: { startSec: number; endSec: number; emotionIntensity: number; isHighlight: boolean; title: string }[]; totalDuration: number }) {
   if (!nodes.length) {

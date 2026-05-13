@@ -5,7 +5,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Label } from "@/components/ui/label";
 import { AlertTriangle, ArrowLeft, Play, LayoutGrid } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { AnalysisOptions } from "../types";
+import type { AnalysisOptions, VideoGenre } from "../types";
 import type { RuntimeStatus } from "../electron-api";
 
 export function PrepareScreen() {
@@ -18,6 +18,9 @@ export function PrepareScreen() {
   const [mode, setMode] = useState<AnalysisOptions["mode"]>(project?.analysisOptions?.mode || "standard");
   const [density, setDensity] = useState<AnalysisOptions["density"]>(project?.analysisOptions?.density || "standard");
   const [focus, setFocus] = useState<AnalysisOptions["focus"]>(project?.analysisOptions?.focus || "all");
+  const [manualGenre, setManualGenre] = useState<VideoGenre | "auto">(
+    project?.analysisOptions?.manualGenre || "auto"
+  );
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeChecked, setRuntimeChecked] = useState(false);
 
@@ -58,7 +61,7 @@ export function PrepareScreen() {
         status: "analyzing",
         providerId: activeVideoProviderId || undefined,
         model: provider?.model,
-        analysisOptions: { mode, density, focus },
+        analysisOptions: { mode, density, focus, manualGenre },
         updatedAt: new Date().toISOString()
       } : p));
     }
@@ -147,6 +150,31 @@ export function PrepareScreen() {
                   <SelectItem value="emotion">情绪曲线</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>视频类型（用于方法论匹配）</Label>
+              <Select value={manualGenre} onValueChange={(value) => setManualGenre(value as VideoGenre | "auto")}>
+                <SelectTrigger className="bg-slate-50 dark:bg-[#0A0A0B] border-slate-200 dark:border-slate-800">
+                  <SelectValue placeholder="自动识别" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">自动识别（推荐）</SelectItem>
+                  <SelectItem value="vlog">Vlog（生活 / 日常 / 旅行）</SelectItem>
+                  <SelectItem value="review">测评 / 产品 / 好物</SelectItem>
+                  <SelectItem value="travel">风景 / 旅拍 / 城市漫游</SelectItem>
+                  <SelectItem value="tutorial">教程 / DIY / 演示</SelectItem>
+                  <SelectItem value="knowledge">知识 / 科普 / 视频论文</SelectItem>
+                  <SelectItem value="documentary">纪录片 / 深度专题</SelectItem>
+                  <SelectItem value="short-drama">短剧 / 剧情演绎</SelectItem>
+                  <SelectItem value="other">其他（仅通用规则）</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-slate-400 dark:text-slate-500">
+                {manualGenre === "auto"
+                  ? "让模型先识别类型再加载对应规则集。分析后可在报告页修改并重新分析。"
+                  : "已锁定类型，将直接加载该类型的方法论规则集。"}
+              </p>
             </div>
 
             <div className="p-3 rounded-lg bg-slate-50 dark:bg-[#0A0A0B] border border-slate-200 dark:border-slate-800 text-sm space-y-1">
