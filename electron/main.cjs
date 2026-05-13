@@ -504,7 +504,7 @@ function buildBuiltinLocalLlamaProvider() {
   }));
   return {
     id: "builtin-local-llama",
-    name: "本地推理 (Qwen3.5-VL)",
+    name: "本地模型",
     source: "local_llama",
     builtin: true,
     baseUrl: "",
@@ -528,7 +528,7 @@ function buildBuiltinLocalWhisperProvider() {
   ];
   return {
     id: "builtin-local-whisper",
-    name: "本地语音识别 (whisper.cpp WASM)",
+    name: "本地音频识别",
     source: "local_whisper",
     builtin: true,
     baseUrl: "",
