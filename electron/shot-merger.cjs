@@ -11,6 +11,11 @@
 // - 失败的 shot 给 fallback shotDescription (字幕 + 第一帧 caption 拼一下), 不阻断。
 // - 不并发: 单序串行, 失败仅影响该 batch, 总耗时是 batches × 平均单次。
 //   未来如果用本地 medium 模型 (llama-server) 同样保单实例避免争资源。
+// - 走 openai-client 的 callJsonCompletion 统一入口, 按 provider.endpointType
+//   自动分流 chat/completions vs responses (GPT-5 等 reasoning 模型在 sub2api 这种
+//   代理下必须走 responses + SSE 才能拿到 content)。
+
+const { callJsonCompletion } = require("./openai-client.cjs");
 
 const ALLOWED_BATCH_SIZE = { min: 1, max: 12, default: 6 };
 
@@ -86,58 +91,26 @@ const MERGE_SCHEMA = {
   additionalProperties: false,
 };
 
-// 用 provider 的 baseUrl + apiKey + model 调一次 chat/completions, 返回 parsed JSON。
-// medium_text 槽位的 provider 已经被 shapeEffectiveProvider 处理过 baseUrl/apiKeyRef/model。
+// 走 openai-client 统一入口, 按 provider.endpointType 自动分流 chat/completions vs responses。
+// medium_text 槽位的 provider 已经被 shapeEffectiveProvider 处理过 baseUrl/apiKeyRef/model/endpointType。
 async function callMediumText(provider, systemText, userText, signal) {
   if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
     throw new Error("medium_text provider 配置不全 (baseUrl/apiKeyRef/model 缺失)");
   }
-  const endpoint = `${provider.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-  // json_object 比 json_schema strict 兼容性好得多 (用户自搭的代理 / 老版本 vLLM /
-  // DashScope 都未必支持 strict schema)。schema 通过 prompt 里的明确字段说明 + 后续
-  // sanitize 兜底。
-  const body = {
-    model: provider.model,
-    messages: [
-      { role: "system", content: systemText },
-      { role: "user", content: userText },
-    ],
+  const parsed = await callJsonCompletion(provider, {
+    systemText,
+    userText,
     temperature: 0.2,
-    // reasoning 模型 (GPT-5 / R1 / Qwen-Thinking) 会先烧 1k-2k token thinking,
-    // 剩下才轮到 content。这里给足 budget, 让简单任务也能挤出 content。
-    max_tokens: provider.maxOutputTokens ?? 8000,
-    response_format: { type: "json_object" },
-  };
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${provider.apiKeyRef}`,
-    },
-    body: JSON.stringify(body),
+    maxTokens: provider.maxOutputTokens ?? 8000,
+    maxOutputTokens: provider.maxOutputTokens ?? 8000,
     signal,
   });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`medium_text HTTP ${res.status}: ${detail.slice(0, 300)}`);
+  if (!parsed) {
+    throw new Error(
+      `medium_text 解析失败 (raw text 为空或不是合法 JSON; 走的 endpoint=${provider.endpointType})`,
+    );
   }
-  const data = await res.json();
-  const choice = data?.choices?.[0]?.message || {};
-  // 只在 message.content / reasoning_content 里找 JSON; 不要把整段 raw response 当 candidate
-  for (const candidate of [choice.content, choice.reasoning_content].filter(Boolean)) {
-    try {
-      return JSON.parse(candidate);
-    } catch {
-      const m = String(candidate).match(/\{[\s\S]*\}/);
-      if (m) {
-        try { return JSON.parse(m[0]); } catch { /* keep trying */ }
-      }
-    }
-  }
-  const finishReason = data?.choices?.[0]?.finish_reason;
-  throw new Error(
-    `medium_text content 为空 (finish_reason=${finishReason})。可能是 reasoning 模型把 budget 全花在 thinking 上。`,
-  );
+  return parsed;
 }
 
 // 生成兜底 shotDescription (LLM 失败 / 单批崩了时, 不让管线断)

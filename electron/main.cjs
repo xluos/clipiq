@@ -1,15 +1,16 @@
-const { app, BrowserWindow, dialog, ipcMain, nativeImage, net, protocol, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, nativeImage, protocol, shell } = require("electron");
 const { execFile } = require("node:child_process");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
-const { pathToFileURL } = require("node:url");
+const { Readable } = require("node:stream");
 const llamaRuntime = require("./llama-runtime.cjs");
 const whisperCppRuntime = require("./whisper-cpp-runtime.cjs");
 const prefilter = require("./prefilter.cjs");
 const shotMerger = require("./shot-merger.cjs");
 const summarizer = require("./summarizer.cjs");
+const openaiClient = require("./openai-client.cjs");
 const { getTranscriber } = require("./transcribe/index.cjs");
 
 const REMOTE_DEBUG_PORT = process.env.VIDEO_ANALYZER_DEBUG_PORT || "";
@@ -32,6 +33,24 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 const VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "webm", "avi", "m4v"];
+const MEDIA_MIME_TYPES = {
+  ".mp4": "video/mp4",
+  ".m4v": "video/mp4",
+  ".mov": "video/quicktime",
+  ".webm": "video/webm",
+  ".mkv": "video/x-matroska",
+  ".avi": "video/x-msvideo",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".m4a": "audio/mp4",
+  ".aac": "audio/aac",
+  ".ogg": "audio/ogg",
+};
 const PIPELINE_VERSION = "mvp-local-2026-05-13";
 const SCHEMA_VERSION = "analysis-v2-methodology";
 
@@ -1261,20 +1280,9 @@ function buildLocalReport(project, nodes, provider, audioProvider, transcriptSum
   };
 }
 
-function tryParseJsonFromText(text) {
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return null;
-    try {
-      return JSON.parse(match[0]);
-    } catch {
-      return null;
-    }
-  }
-}
+// JSON 解析 / SSE 拼流 / chat&responses 分流 全部抽到 openai-client.cjs,
+// 这里只保留薄的转发, 避免改动太多调用点。
+const { tryParseJsonFromText } = openaiClient;
 
 function sanitizeMethodologyTag(tag) {
   if (!tag || typeof tag !== "object") return null;
@@ -1731,126 +1739,9 @@ async function detectGenreLightweight(provider, project, scenes, transcript, han
   }
 }
 
-async function streamSSE(response, onEvent) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const payload = trimmed.slice(5).trim();
-      if (!payload || payload === "[DONE]") continue;
-      try {
-        onEvent(JSON.parse(payload));
-      } catch {
-        // skip malformed chunk
-      }
-    }
-  }
-}
-
-async function callOpenAIChatCompletions(provider, systemText, userText, imageDataUrls, handle) {
-  const endpoint = `${provider.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-  const response = await fetch(endpoint, {
-    method: "POST",
-    signal: handle?.abortController?.signal,
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${provider.apiKeyRef}`,
-      accept: "text/event-stream",
-    },
-    body: JSON.stringify({
-      model: provider.model,
-      stream: true,
-      temperature: provider.temperature ?? 0.2,
-      max_tokens: provider.maxOutputTokens ?? 12000,
-      messages: [
-        { role: "system", content: systemText },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: userText },
-            ...imageDataUrls.map((url) => ({ type: "image_url", image_url: { url } })),
-          ],
-        },
-      ],
-    }),
-  });
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
-  }
-  let text = "";
-  await streamSSE(response, (event) => {
-    const delta = event?.choices?.[0]?.delta?.content;
-    if (typeof delta === "string") text += delta;
-  });
-  return tryParseJsonFromText(text);
-}
-
-async function callOpenAIResponses(provider, systemText, userText, imageDataUrls, handle) {
-  const endpoint = `${provider.baseUrl.replace(/\/+$/, "")}/responses`;
-  const response = await fetch(endpoint, {
-    method: "POST",
-    signal: handle?.abortController?.signal,
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${provider.apiKeyRef}`,
-      accept: "text/event-stream",
-    },
-    body: JSON.stringify({
-      model: provider.model,
-      stream: true,
-      temperature: provider.temperature ?? 0.2,
-      max_output_tokens: provider.maxOutputTokens ?? 12000,
-      input: [
-        {
-          role: "system",
-          content: [{ type: "input_text", text: systemText }],
-        },
-        {
-          role: "user",
-          content: [
-            { type: "input_text", text: userText },
-            ...imageDataUrls.map((url) => ({ type: "input_image", image_url: url })),
-          ],
-        },
-      ],
-    }),
-  });
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
-  }
-  let text = "";
-  await streamSSE(response, (event) => {
-    // Responses stream events: response.output_text.delta carries { delta: "..." }
-    if (event?.type === "response.output_text.delta" && typeof event.delta === "string") {
-      text += event.delta;
-    }
-    // Some gateways emit completed response with final output array
-    if (event?.type === "response.completed" && Array.isArray(event?.response?.output)) {
-      if (!text) {
-        for (const item of event.response.output) {
-          if (item?.type === "message" && Array.isArray(item.content)) {
-            for (const block of item.content) {
-              if ((block?.type === "output_text" || block?.type === "text") && typeof block.text === "string") {
-                text += block.text;
-              }
-            }
-          }
-        }
-      }
-    }
-  });
-  return tryParseJsonFromText(text);
-}
+// 这两个函数现在转发到 openai-client.cjs, 保留兼容签名避免改动 callOpenAICompatible 等调用点
+const callOpenAIChatCompletions = openaiClient.callOpenAIChatCompletions;
+const callOpenAIResponses = openaiClient.callOpenAIResponses;
 
 async function extractAudioWav(ffmpeg, inputPath, outputPath, handle) {
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
@@ -2561,10 +2452,51 @@ app.whenReady().then(async () => {
   }
   app.setName("ClipIQ");
 
-  protocol.handle("media", (request) => {
+  protocol.handle("media", async (request) => {
     const url = new URL(request.url);
     const filePath = decodeURIComponent(url.pathname.slice(1));
-    return net.fetch(pathToFileURL(filePath).toString());
+    let stat;
+    try {
+      stat = await fs.stat(filePath);
+    } catch {
+      return new Response("Not Found", { status: 404 });
+    }
+    const size = stat.size;
+    const ext = path.extname(filePath).toLowerCase();
+    const contentType = MEDIA_MIME_TYPES[ext] || "application/octet-stream";
+    const range = request.headers.get("range");
+    if (range) {
+      const match = /^bytes=(\d+)-(\d*)$/.exec(range);
+      if (match) {
+        const start = Number(match[1]);
+        const end = match[2] ? Math.min(Number(match[2]), size - 1) : size - 1;
+        if (Number.isNaN(start) || start > end || start >= size) {
+          return new Response(null, {
+            status: 416,
+            headers: { "Content-Range": `bytes */${size}` },
+          });
+        }
+        const stream = fsSync.createReadStream(filePath, { start, end });
+        return new Response(Readable.toWeb(stream), {
+          status: 206,
+          headers: {
+            "Content-Range": `bytes ${start}-${end}/${size}`,
+            "Accept-Ranges": "bytes",
+            "Content-Length": String(end - start + 1),
+            "Content-Type": contentType,
+          },
+        });
+      }
+    }
+    const fullStream = fsSync.createReadStream(filePath);
+    return new Response(Readable.toWeb(fullStream), {
+      status: 200,
+      headers: {
+        "Accept-Ranges": "bytes",
+        "Content-Length": String(size),
+        "Content-Type": contentType,
+      },
+    });
   });
 
   ipcMain.handle("data:getInfo", async () => {

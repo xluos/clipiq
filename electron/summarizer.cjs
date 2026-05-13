@@ -10,54 +10,27 @@
 // 与 detectGenreLightweight 共存: 当 shotDescriptions 缺失 (e.g. medium_text 整体不可用),
 // main.cjs 会回退到旧的 detectGenreLightweight 路径。
 
+const { callJsonCompletion } = require("./openai-client.cjs");
+
 async function callMediumText(provider, systemText, userText, schema, signal) {
   if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
     throw new Error("medium_text provider 配置不全");
   }
-  const endpoint = `${provider.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-  const body = {
-    model: provider.model,
-    messages: [
-      { role: "system", content: systemText },
-      { role: "user", content: userText },
-    ],
+  // 走 openai-client 统一入口, 自动按 endpointType 分流 chat/completions vs responses
+  const parsed = await callJsonCompletion(provider, {
+    systemText,
+    userText,
     temperature: 0.3,
-    // reasoning 模型会先烧 1-2k token thinking, 放开 budget 让 content 有空间
-    max_tokens: provider.maxOutputTokens ?? 6000,
-    response_format: { type: "json_object" },
-  };
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${provider.apiKeyRef}`,
-    },
-    body: JSON.stringify(body),
+    maxTokens: provider.maxOutputTokens ?? 6000,
+    maxOutputTokens: provider.maxOutputTokens ?? 6000,
     signal,
   });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`medium_text HTTP ${res.status}: ${detail.slice(0, 300)}`);
+  if (!parsed) {
+    throw new Error(
+      `summarizer 解析失败 (raw text 为空或不是合法 JSON; endpoint=${provider.endpointType})`,
+    );
   }
-  const data = await res.json();
-  const choice = data?.choices?.[0]?.message || {};
-  // 只在真正的 content 字段里找 JSON; 不要把整段 raw response 当 candidate
-  // (reasoning 模型 content 为空时, raw response 里只有 choices/usage 没有可解析的 model output)。
-  for (const candidate of [choice.content, choice.reasoning_content].filter(Boolean)) {
-    try {
-      return JSON.parse(candidate);
-    } catch {
-      const m = String(candidate).match(/\{[\s\S]*\}/);
-      if (m) {
-        try { return JSON.parse(m[0]); } catch { /* keep trying */ }
-      }
-    }
-  }
-  const finishReason = data?.choices?.[0]?.finish_reason;
-  throw new Error(
-    `medium_text content 为空 (finish_reason=${finishReason})。可能是 reasoning 模型把 budget 全花在 thinking 上;
-请换一个非 reasoning 的 medium_text 模型或调高 max_tokens。`,
-  );
+  return parsed;
 }
 
 function buildSummarySchema(allowedGenres) {
