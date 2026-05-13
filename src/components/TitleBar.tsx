@@ -8,7 +8,7 @@ export function TitleBar() {
   const { currentScreen, setCurrentScreen } = useApp();
 
   return (
-    <div className="h-12 border-b border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#0F172A]/60 backdrop-blur flex items-center justify-between pr-4 pl-[88px] shrink-0 shadow-sm relative z-20" style={{ WebkitAppRegion: 'drag' } as any}>
+    <div className="h-12 border-b border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#0F172A]/60 backdrop-blur flex items-center justify-between pr-4 pl-[88px] shrink-0 relative z-20" style={{ WebkitAppRegion: 'drag' } as any}>
       <div className="flex items-center gap-2 select-none">
         <BrandLogo size={22} />
         <div className="flex items-baseline gap-2">
