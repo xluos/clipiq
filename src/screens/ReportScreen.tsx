@@ -3,9 +3,10 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ArrowLeft, CheckCircle2, Download, FileText, AlertTriangle, Search, RefreshCw } from "lucide-react";
 import { formatTime } from "@/lib/utils";
-import { useEffect, useRef, useState, type FC } from "react";
+import { useEffect, useMemo, useRef, useState, type FC, type PointerEvent as ReactPointerEvent } from "react";
 import type { ExportFormat } from "../electron-api";
-import type { VideoGenre, MethodologyTag, MethodologyMiss } from "../types";
+import type { AnalysisNode, AnalysisTiming, VideoGenre, MethodologyTag, MethodologyMiss } from "../types";
+import { useVideoFrames } from "@/lib/use-video-frames";
 
 const REPORT_SECTIONS = [
   { id: "summary", label: "整体摘要" },
@@ -16,8 +17,49 @@ const REPORT_SECTIONS = [
   { id: "editing", label: "剪辑风格" },
   { id: "composition", label: "构图特点" },
   { id: "takeaways", label: "核心洞察" },
-  { id: "diagnostics", label: "性能诊断" },
 ] as const;
+
+const STAGE_PALETTE = [
+  "from-indigo-500 to-indigo-400",
+  "from-violet-500 to-violet-400",
+  "from-sky-500 to-sky-400",
+  "from-emerald-500 to-emerald-400",
+  "from-amber-500 to-amber-400",
+  "from-rose-500 to-rose-400",
+  "from-fuchsia-500 to-fuchsia-400",
+  "from-teal-500 to-teal-400",
+];
+
+const STAGE_LABELS: Record<string, string> = {
+  inspect: "视频解析",
+  metadata: "视频解析",
+  probe: "视频解析",
+  download: "素材下载",
+  fetch: "素材下载",
+  transcribe: "语音转写",
+  audio: "语音转写",
+  asr: "语音转写",
+  keyframe: "关键帧抽取",
+  frames: "关键帧抽取",
+  extract: "关键帧抽取",
+  llm: "模型分析",
+  analyze: "模型分析",
+  analysis: "模型分析",
+  methodology: "方法论评估",
+  audit: "方法论评估",
+  postprocess: "后处理",
+  finalize: "后处理",
+  export: "导出整理",
+};
+
+function humanStage(name: string) {
+  const key = name.toLowerCase();
+  if (STAGE_LABELS[key]) return STAGE_LABELS[key];
+  for (const k of Object.keys(STAGE_LABELS)) {
+    if (key.includes(k)) return STAGE_LABELS[k];
+  }
+  return name;
+}
 
 const GENRE_LABELS: Record<VideoGenre, string> = {
   vlog: "Vlog",
@@ -136,6 +178,31 @@ export function ReportScreen() {
 
   const keyNodes = nodes.filter(n => n.isHighlight || n.nodeTypes.includes('emotion_turn'));
 
+  const reportTitle = (() => {
+    const rawName = (project.videoName || "").trim();
+    const cleaned = rawName.replace(/\.[a-z0-9]{2,5}$/i, "").replace(/[_-]+/g, " ").trim();
+    if (cleaned && !/^未命名/i.test(cleaned)) return cleaned;
+    const highlight = nodes.find(n => n.isHighlight) || nodes[0];
+    if (highlight?.title) return highlight.title;
+    const sentence = (report.summary || "").trim().split(/[。!?\n]/)[0];
+    if (sentence) return sentence.slice(0, 28);
+    return "视频分析报告";
+  })();
+
+  const reportSubtitle = (() => {
+    const bits: string[] = [];
+    bits.push(`${formatTime(project.durationSec)} · ${project.orientation === "portrait" ? "竖屏" : project.orientation === "square" ? "方形" : "横屏"}`);
+    if (project.source.type === "url") {
+      const u = project.source.url.replace(/^https?:\/\//, "");
+      bits.push(u.length > 40 ? u.slice(0, 40) + "…" : u);
+    }
+    if (report.methodologyAudit) {
+      const genreLabel = GENRE_LABELS[report.methodologyAudit.detectedGenre];
+      if (genreLabel) bits.push(genreLabel);
+    }
+    return bits.join(" · ");
+  })();
+
   const totalDuration = Math.max(project.durationSec || 0, 1);
   const sortedHighlights = nodes.filter(n => n.isHighlight).sort((a, b) => a.startSec - b.startSec);
   const firstHighlight = sortedHighlights[0];
@@ -252,8 +319,15 @@ export function ReportScreen() {
         <div className="flex-1 max-w-4xl space-y-10 pb-32">
           <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
             <div className="space-y-1 min-w-0">
-              <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">总结报告</h1>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+              <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100 truncate" title={reportTitle}>
+                {reportTitle}
+              </h1>
+              {reportSubtitle && (
+                <p className="text-sm text-slate-500 dark:text-slate-400 line-clamp-1" title={reportSubtitle}>
+                  {reportSubtitle}
+                </p>
+              )}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400 font-mono pt-1">
                 {report.providerSnapshot?.name && (
                   <span>来源 · {report.providerSnapshot.name}</span>
                 )}
@@ -281,6 +355,10 @@ export function ReportScreen() {
           </div>
           {exportStatus && <p className="text-xs text-emerald-600 dark:text-emerald-400">{exportStatus}</p>}
 
+          {report.timings?.length ? (
+            <TimingBar timings={report.timings} totalMs={report.totalDurationMs} />
+          ) : null}
+
           <section id="summary" className="space-y-4 scroll-mt-6">
             <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">整体摘要</h2>
             <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm text-slate-700 dark:text-slate-300 leading-relaxed text-sm whitespace-pre-line">
@@ -291,24 +369,15 @@ export function ReportScreen() {
           <section id="structure" className="space-y-4 scroll-mt-6">
             <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">结构拆解</h2>
             <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm space-y-6">
-              <div className="flex flex-col space-y-2">
-                <div className="flex h-12 rounded-lg overflow-hidden border border-slate-200 dark:border-slate-800 text-xs font-medium relative">
-                  {normalizedSegments.map((segment) => (
-                    <div
-                      key={segment.key}
-                      style={{ width: `${segment.width}%` }}
-                      title={`${segment.label} · ${segment.detail || ""}`}
-                      className={`flex items-center justify-center border-r last:border-r-0 truncate px-2 ${segment.tone}`}
-                    >
-                      {segment.label}
-                    </div>
-                  ))}
-                </div>
-                <div className="flex justify-between text-[10px] text-slate-500 font-mono px-1">
-                  <span>0:00</span>
-                  <span>{formatTime(project.durationSec)}</span>
-                </div>
-              </div>
+              <StructureTimeline
+                segments={normalizedSegments.map((s, idx) => ({
+                  ...s,
+                  startSec: boundaries[idx],
+                  endSec: boundaries[idx + 1],
+                }))}
+                videoSrc={project.localVideoPath}
+                totalDuration={totalDuration}
+              />
               <dl className="grid gap-3 text-sm md:grid-cols-2">
                 {normalizedSegments.map((segment) => (
                   <div
@@ -343,7 +412,17 @@ export function ReportScreen() {
           <section id="emotion" className="space-y-4 scroll-mt-6">
             <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">情感曲线</h2>
             <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm">
-              <EmotionCurve nodes={nodes} totalDuration={totalDuration} />
+              <EmotionCurve
+                nodes={nodes}
+                totalDuration={totalDuration}
+                onSeek={(time) => {
+                  window.sessionStorage.setItem(
+                    "video-analyzer-pending-seek",
+                    JSON.stringify({ projectId: project.id, time })
+                  );
+                  setCurrentScreen("workspace");
+                }}
+              />
             </div>
           </section>
 
@@ -381,54 +460,6 @@ export function ReportScreen() {
                   <p>暂无核心洞察。</p>
                 )}
              </div>
-          </section>
-
-          <section id="diagnostics" className="space-y-4 scroll-mt-6">
-            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">性能诊断</h2>
-            <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm space-y-4">
-              {report.timings?.length ? (
-                <>
-                  <div className="flex items-baseline justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
-                    <span className="text-sm text-slate-500 dark:text-slate-400">总耗时</span>
-                    <span className="font-mono text-base text-slate-800 dark:text-slate-100">
-                      {formatDuration(report.totalDurationMs || report.timings.reduce((a, t) => a + t.durationMs, 0))}
-                    </span>
-                  </div>
-                  {(() => {
-                    const total = report.timings.reduce((acc, t) => acc + t.durationMs, 0) || 1;
-                    const sorted = [...report.timings].sort((a, b) => b.durationMs - a.durationMs);
-                    return (
-                      <ul className="space-y-2 text-sm">
-                        {sorted.map((t, idx) => {
-                          const pct = (t.durationMs / total) * 100;
-                          return (
-                            <li key={`${t.stage}-${idx}`} className="space-y-1">
-                              <div className="flex items-center justify-between text-slate-700 dark:text-slate-200">
-                                <span>{t.stage}</span>
-                                <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
-                                  {formatDuration(t.durationMs)} · {pct.toFixed(1)}%
-                                </span>
-                              </div>
-                              <div className="h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-                                <div
-                                  className="h-full bg-gradient-to-r from-indigo-500 to-violet-500"
-                                  style={{ width: `${Math.max(2, pct)}%` }}
-                                />
-                              </div>
-                              {t.note && (
-                                <p className="text-xs text-slate-400 dark:text-slate-500">{t.note}</p>
-                              )}
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    );
-                  })()}
-                </>
-              ) : (
-                <p className="text-sm text-slate-500 dark:text-slate-400">这次分析没有记录耗时数据，可能是旧项目或分析过程异常。</p>
-              )}
-            </div>
           </section>
 
         </div>
@@ -575,16 +606,51 @@ function MethodologyDiagnostics({ audit, currentManualGenre, onReanalyze, onSeek
         </div>
       </div>
 
-      {/* 违反规则 */}
+      {/* 做得不错的点（命中） */}
       <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-amber-500" />
-            违反规则 <span className="text-xs text-slate-500 font-normal">({violations.length})</span>
-          </h3>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+              做得不错的点 <span className="text-xs text-slate-500 font-normal">({hits.length})</span>
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">这些动作很到位，下次继续保持。</p>
+          </div>
+        </div>
+        {hits.length === 0 ? (
+          <p className="text-xs text-slate-500 dark:text-slate-400">这次没找到特别值得夸的亮点。</p>
+        ) : (
+          <ul className="space-y-2">
+            {hits.map((h, idx) => (
+              <MethodologyTagItem
+                key={`h-${idx}`}
+                tag={h}
+                tone="hit"
+                compact
+                onClick={() => {
+                  const node = findNodeWithTag(h.ruleId);
+                  if (node) onSeekToNode(node.startSec);
+                }}
+                clickable={Boolean(findNodeWithTag(h.ruleId))}
+              />
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {/* 可以改进的地方（违反） */}
+      <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-500" />
+              可以再打磨一下的地方 <span className="text-xs text-slate-500 font-normal">({violations.length})</span>
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">这些点和常见做法有点出入，调整一下效果会更好。</p>
+          </div>
         </div>
         {violations.length === 0 ? (
-          <p className="text-xs text-slate-500 dark:text-slate-400">没有发现违反规则的片段。</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">没找到明显需要返工的地方，整体节奏稳。</p>
         ) : (
           <ul className="space-y-3">
             {violations.map((v, idx) => (
@@ -603,49 +669,23 @@ function MethodologyDiagnostics({ audit, currentManualGenre, onReanalyze, onSeek
         )}
       </div>
 
-      {/* 缺失规则 */}
+      {/* 建议补上的环节（缺失） */}
       <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-2">
-            <Search className="w-4 h-4 text-rose-500" />
-            缺失规则 <span className="text-xs text-slate-500 font-normal">({misses.length})</span>
-          </h3>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+              <Search className="w-4 h-4 text-rose-500" />
+              建议补上的环节 <span className="text-xs text-slate-500 font-normal">({misses.length})</span>
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">这些常规动作在视频里没看到，加上对观众体验会有明显帮助。</p>
+          </div>
         </div>
         {misses.length === 0 ? (
-          <p className="text-xs text-slate-500 dark:text-slate-400">所有应有规则均已出现，无缺失。</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">该有的环节都到位了，没什么明显缺口。</p>
         ) : (
           <ul className="space-y-3">
             {misses.map((m, idx) => (
               <MethodologyMissItem key={`m-${idx}`} miss={m} />
-            ))}
-          </ul>
-        )}
-      </div>
-
-      {/* 命中规则 */}
-      <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100 flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-            命中规则 <span className="text-xs text-slate-500 font-normal">({hits.length})</span>
-          </h3>
-        </div>
-        {hits.length === 0 ? (
-          <p className="text-xs text-slate-500 dark:text-slate-400">未识别出明确命中的规则。</p>
-        ) : (
-          <ul className="space-y-2">
-            {hits.map((h, idx) => (
-              <MethodologyTagItem
-                key={`h-${idx}`}
-                tag={h}
-                tone="hit"
-                compact
-                onClick={() => {
-                  const node = findNodeWithTag(h.ruleId);
-                  if (node) onSeekToNode(node.startSec);
-                }}
-                clickable={Boolean(findNodeWithTag(h.ruleId))}
-              />
             ))}
           </ul>
         )}
@@ -673,22 +713,20 @@ const MethodologyTagItem: FC<MethodologyTagItemProps> = ({ tag, tone, compact = 
       className={`rounded-lg border ${toneClasses} px-3 py-2 ${clickable ? "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40" : ""}`}
     >
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-200/60 dark:bg-slate-800 text-slate-600 dark:text-slate-300">{tag.ruleId}</span>
         <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{tag.ruleName}</span>
         <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800/60 text-slate-500">
           {CATEGORY_LABELS[tag.category] || tag.category}
         </span>
-        <span className="text-[10px] text-slate-400 ml-auto">置信 {(tag.confidence * 100).toFixed(0)}%</span>
       </div>
       {!compact && tag.evidence && (
         <p className="text-xs text-slate-600 dark:text-slate-400 mt-1.5">
-          <span className="font-medium text-slate-500 dark:text-slate-500">证据：</span>
+          <span className="font-medium text-slate-500 dark:text-slate-500">看到了：</span>
           {tag.evidence}
         </p>
       )}
       {tone === "violation" && tag.fixSuggestion && (
         <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
-          <span className="font-medium text-amber-700 dark:text-amber-400">修复建议：</span>
+          <span className="font-medium text-amber-700 dark:text-amber-400">可以试试：</span>
           {tag.fixSuggestion}
         </p>
       )}
@@ -702,7 +740,6 @@ const MethodologyMissItem: FC<MethodologyMissItemProps> = ({ miss }) => {
   return (
     <li className="rounded-lg border border-rose-200 dark:border-rose-500/30 bg-rose-50/40 dark:bg-rose-500/5 px-3 py-2">
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-200/60 dark:bg-slate-800 text-slate-600 dark:text-slate-300">{miss.ruleId}</span>
         <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{miss.ruleName}</span>
         <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800/60 text-slate-500">
           {CATEGORY_LABELS[miss.category] || miss.category}
@@ -710,19 +747,19 @@ const MethodologyMissItem: FC<MethodologyMissItemProps> = ({ miss }) => {
       </div>
       {miss.expectedAt && (
         <p className="text-xs text-slate-600 dark:text-slate-400 mt-1.5">
-          <span className="font-medium text-slate-500 dark:text-slate-500">应出现位置：</span>
+          <span className="font-medium text-slate-500 dark:text-slate-500">建议补在：</span>
           {miss.expectedAt}
         </p>
       )}
       {miss.reason && (
         <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
-          <span className="font-medium text-slate-500 dark:text-slate-500">判定原因：</span>
+          <span className="font-medium text-slate-500 dark:text-slate-500">为什么提它：</span>
           {miss.reason}
         </p>
       )}
       {miss.fixSuggestion && (
         <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">
-          <span className="font-medium text-rose-700 dark:text-rose-400">修复建议：</span>
+          <span className="font-medium text-rose-700 dark:text-rose-400">可以试试：</span>
           {miss.fixSuggestion}
         </p>
       )}
@@ -730,46 +767,289 @@ const MethodologyMissItem: FC<MethodologyMissItemProps> = ({ miss }) => {
   );
 };
 
-function EmotionCurve({ nodes, totalDuration }: { nodes: { startSec: number; endSec: number; emotionIntensity: number; isHighlight: boolean; title: string }[]; totalDuration: number }) {
+type EmotionCurveNode = Pick<AnalysisNode, "startSec" | "endSec" | "emotionIntensity" | "emotionLabel" | "isHighlight" | "title" | "shotDescription">;
+
+function catmullRomPath(points: { x: number; y: number }[]): string {
+  if (points.length === 0) return "";
+  if (points.length === 1) return `M${points[0].x},${points[0].y}`;
+  let d = `M${points[0].x.toFixed(1)},${points[0].y.toFixed(1)}`;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i - 1] || points[i];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[i + 2] || p2;
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`;
+  }
+  return d;
+}
+
+function EmotionCurve({ nodes, totalDuration, onSeek }: { nodes: EmotionCurveNode[]; totalDuration: number; onSeek?: (time: number) => void }) {
+  const [activeIdx, setActiveIdx] = useState<number | null>(null);
   if (!nodes.length) {
     return <p className="text-sm text-slate-500">尚未生成节点数据。</p>;
   }
   const width = 720;
-  const height = 160;
-  const padX = 24;
-  const padY = 18;
+  const height = 180;
+  const padX = 32;
+  const padY = 24;
   const safeDuration = Math.max(totalDuration, 1);
-  const points = nodes.map(node => {
+  const points = nodes.map((node, idx) => {
     const mid = (node.startSec + node.endSec) / 2;
     const x = padX + ((mid / safeDuration) * (width - padX * 2));
     const intensity = Math.max(0, Math.min(10, Number(node.emotionIntensity) || 0));
     const y = padY + (1 - intensity / 10) * (height - padY * 2);
-    return { x, y, node, intensity };
+    return { x, y, node, intensity, idx };
   });
-  const path = points.map((p, idx) => `${idx === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
-  const areaPath = `${path} L${points[points.length - 1].x.toFixed(1)},${(height - padY).toFixed(1)} L${points[0].x.toFixed(1)},${(height - padY).toFixed(1)} Z`;
+  const path = catmullRomPath(points);
+  const baseY = (height - padY).toFixed(1);
+  const areaPath = `${path} L${points[points.length - 1].x.toFixed(1)},${baseY} L${points[0].x.toFixed(1)},${baseY} Z`;
+  const gridLines = [0, 0.25, 0.5, 0.75, 1].map((p) => padY + p * (height - padY * 2));
+  const active = activeIdx !== null ? points[activeIdx] : null;
+
   return (
-    <div className="space-y-2">
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-44">
-        <defs>
-          <linearGradient id="emotionGradient" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stopColor="rgb(59 130 246 / 0.45)" />
-            <stop offset="100%" stopColor="rgb(59 130 246 / 0.05)" />
-          </linearGradient>
-        </defs>
-        <path d={areaPath} fill="url(#emotionGradient)" />
-        <path d={path} fill="none" stroke="rgb(37 99 235)" strokeWidth={2} />
-        {points.map(({ x, y, node, intensity }) => (
-          <g key={node.title + x}>
-            <circle cx={x} cy={y} r={node.isHighlight ? 5 : 3.5} fill={node.isHighlight ? "rgb(245 158 11)" : "rgb(37 99 235)"} stroke="white" strokeWidth={1.5} />
-            <title>{`${node.title} · 情绪 ${intensity}/10`}</title>
-          </g>
-        ))}
-      </svg>
+    <div className="grid grid-cols-1 md:grid-cols-[1fr_220px] gap-4 items-start">
+      <div className="space-y-2 min-w-0">
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-44">
+          <defs>
+            <linearGradient id="emotionGradient" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stopColor="rgb(99 102 241 / 0.4)" />
+              <stop offset="100%" stopColor="rgb(99 102 241 / 0.02)" />
+            </linearGradient>
+          </defs>
+          {gridLines.map((gy, i) => (
+            <line key={i} x1={padX} x2={width - padX} y1={gy} y2={gy} stroke="rgb(148 163 184 / 0.18)" strokeWidth={1} strokeDasharray={i % 2 ? "2 4" : ""} />
+          ))}
+          <path d={areaPath} fill="url(#emotionGradient)" />
+          <path d={path} fill="none" stroke="rgb(99 102 241)" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />
+          {points.map((p) => {
+            const isActive = activeIdx === p.idx;
+            return (
+              <g key={`${p.node.title}-${p.idx}`} className="cursor-pointer" onMouseEnter={() => setActiveIdx(p.idx)} onMouseLeave={() => setActiveIdx((cur) => (cur === p.idx ? null : cur))} onClick={() => { setActiveIdx(p.idx); onSeek?.(p.node.startSec); }}>
+                <circle cx={p.x} cy={p.y} r={12} fill="transparent" />
+                <circle
+                  cx={p.x}
+                  cy={p.y}
+                  r={isActive ? 6 : p.node.isHighlight ? 5 : 3.5}
+                  fill={p.node.isHighlight ? "rgb(245 158 11)" : "rgb(99 102 241)"}
+                  stroke="white"
+                  strokeWidth={1.5}
+                  className="transition-all"
+                />
+                {isActive && (
+                  <line x1={p.x} x2={p.x} y1={padY} y2={height - padY} stroke="rgb(99 102 241 / 0.5)" strokeWidth={1} strokeDasharray="3 3" />
+                )}
+              </g>
+            );
+          })}
+        </svg>
+        <div className="flex justify-between text-[10px] text-slate-500 font-mono px-1">
+          <span>0:00</span>
+          <span>情绪强度 0-10 · 点击点位跳转</span>
+          <span>{formatTime(safeDuration)}</span>
+        </div>
+      </div>
+      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/40 p-3 min-h-[160px]">
+        {active ? (
+          <div className="space-y-2">
+            <div className="flex items-center gap-1.5">
+              {active.node.isHighlight && <span className="text-amber-500 text-xs">★</span>}
+              <span className="text-xs font-mono text-slate-500">{formatTime(active.node.startSec)}</span>
+              <span className="text-xs text-slate-400">·</span>
+              <span className="text-xs text-slate-500">情绪 {active.intensity}/10</span>
+            </div>
+            <p className="text-sm font-medium text-slate-800 dark:text-slate-100 line-clamp-2">{active.node.title}</p>
+            <p className="text-[11px] text-emerald-600 dark:text-emerald-400">{active.node.emotionLabel}</p>
+            {active.node.shotDescription && (
+              <p className="text-xs text-slate-500 dark:text-slate-400 line-clamp-3 leading-relaxed">{active.node.shotDescription}</p>
+            )}
+            {onSeek && (
+              <button
+                className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+                onClick={() => onSeek(active.node.startSec)}
+              >
+                跳转到此处 →
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="text-xs text-slate-400 dark:text-slate-500 leading-relaxed">
+            鼠标移到曲线上的点能看到对应片段的情绪标签和镜头描述，点击可跳回视频对应时间。
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type StructureSegmentExt = {
+  key: string;
+  label: string;
+  detail?: string;
+  tone: string;
+  width: number;
+  startSec: number;
+  endSec: number;
+};
+
+function StructureTimeline({ segments, videoSrc, totalDuration }: { segments: StructureSegmentExt[]; videoSrc?: string; totalDuration: number }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [hover, setHover] = useState<{ x: number; time: number } | null>(null);
+  const frames = useVideoFrames(videoSrc, totalDuration, 16);
+
+  const handleMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const el = containerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const fraction = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 1);
+    setHover({ x: fraction * rect.width, time: fraction * totalDuration });
+  };
+
+  const hoverFrame = useMemo(() => {
+    if (!hover || frames.length === 0) return null;
+    let best = frames[0];
+    let bestDelta = Math.abs(frames[0].time - hover.time);
+    for (const f of frames) {
+      const d = Math.abs(f.time - hover.time);
+      if (d < bestDelta) { best = f; bestDelta = d; }
+    }
+    return best;
+  }, [hover, frames]);
+
+  return (
+    <div className="space-y-3">
+      <div
+        ref={containerRef}
+        onPointerMove={handleMove}
+        onPointerLeave={() => setHover(null)}
+        className="relative"
+      >
+        <div className="flex h-12 rounded-lg overflow-hidden border border-slate-200 dark:border-slate-800 text-xs font-medium relative">
+          {segments.map((segment) => (
+            <div
+              key={segment.key}
+              style={{ width: `${segment.width}%` }}
+              title={`${segment.label} · ${segment.detail || ""}`}
+              className={`flex items-center justify-center border-r last:border-r-0 truncate px-2 ${segment.tone}`}
+            >
+              {segment.label}
+            </div>
+          ))}
+        </div>
+        {hover && (
+          <div
+            className="pointer-events-none absolute top-0 bottom-0 w-px bg-indigo-500/70"
+            style={{ left: hover.x }}
+          />
+        )}
+        {hover && hoverFrame && (
+          <div
+            className="pointer-events-none absolute bottom-full mb-2 -translate-x-1/2 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-1 shadow-lg z-30"
+            style={{ left: Math.min(Math.max(hover.x, 80), (containerRef.current?.clientWidth || 0) - 80) }}
+          >
+            {hoverFrame.dataUrl ? (
+              <img src={hoverFrame.dataUrl} alt="" className="block w-40 h-auto rounded" />
+            ) : (
+              <div className="w-40 h-24 rounded bg-slate-100 dark:bg-slate-800 animate-pulse" />
+            )}
+            <div className="mt-1 text-center font-mono text-[10px] text-slate-500 dark:text-slate-400">
+              {formatTime(hover.time)}
+            </div>
+          </div>
+        )}
+      </div>
       <div className="flex justify-between text-[10px] text-slate-500 font-mono px-1">
         <span>0:00</span>
-        <span>情绪强度 0-10</span>
-        <span>{formatTime(safeDuration)}</span>
+        <span>{formatTime(totalDuration)}</span>
+      </div>
+      {/* 段落帧序列 */}
+      <div className="flex gap-1 h-12 rounded-md overflow-hidden bg-slate-50 dark:bg-slate-900/40 p-1">
+        {segments.map((segment) => {
+          const segFrames = frames.filter(f => f.time >= segment.startSec && f.time < segment.endSec);
+          return (
+            <div
+              key={`strip-${segment.key}`}
+              style={{ width: `${segment.width}%` }}
+              className="flex gap-0.5 overflow-hidden"
+              title={segment.label}
+            >
+              {segFrames.length > 0 ? segFrames.map((f) => (
+                f.dataUrl ? (
+                  <img key={f.time} src={f.dataUrl} alt="" className="h-full w-auto object-cover rounded-sm flex-shrink-0" />
+                ) : (
+                  <div key={f.time} className="h-full w-8 bg-slate-200 dark:bg-slate-800 rounded-sm flex-shrink-0 animate-pulse" />
+                )
+              )) : (
+                <div className="h-full w-full bg-slate-200/40 dark:bg-slate-800/40 rounded-sm" />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TimingBar({ timings, totalMs }: { timings: AnalysisTiming[]; totalMs?: number }) {
+  const total = totalMs || timings.reduce((acc, t) => acc + t.durationMs, 0);
+  if (total <= 0) return null;
+
+  type Aggregated = { label: string; durationMs: number; notes: string[]; stages: string[]; color: string };
+  const buckets = new Map<string, Aggregated>();
+  let colorIdx = 0;
+  for (const t of timings) {
+    const label = humanStage(t.stage);
+    const existing = buckets.get(label);
+    if (existing) {
+      existing.durationMs += t.durationMs;
+      existing.stages.push(t.stage);
+      if (t.note) existing.notes.push(t.note);
+    } else {
+      buckets.set(label, {
+        label,
+        durationMs: t.durationMs,
+        stages: [t.stage],
+        notes: t.note ? [t.note] : [],
+        color: STAGE_PALETTE[colorIdx % STAGE_PALETTE.length],
+      });
+      colorIdx++;
+    }
+  }
+  const aggregated = Array.from(buckets.values()).sort((a, b) => b.durationMs - a.durationMs);
+
+  return (
+    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] p-3">
+      <div className="flex items-baseline justify-between mb-2">
+        <span className="text-[11px] uppercase tracking-widest text-slate-500 dark:text-slate-400">分析耗时分布</span>
+        <span className="font-mono text-xs text-slate-700 dark:text-slate-200">总计 {formatDuration(total)}</span>
+      </div>
+      <div className="flex h-3 rounded-full overflow-hidden bg-slate-100 dark:bg-slate-800">
+        {aggregated.map((a) => {
+          const pct = (a.durationMs / total) * 100;
+          return (
+            <div
+              key={a.label}
+              style={{ width: `${pct}%` }}
+              title={`${a.label} · ${formatDuration(a.durationMs)} · ${pct.toFixed(1)}%`}
+              className={`bg-gradient-to-r ${a.color}`}
+            />
+          );
+        })}
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+        {aggregated.map((a) => {
+          const pct = (a.durationMs / total) * 100;
+          return (
+            <div key={a.label} className="flex items-center gap-1.5 text-[11px]">
+              <span className={`inline-block w-2 h-2 rounded-full bg-gradient-to-r ${a.color}`} />
+              <span className="text-slate-600 dark:text-slate-300">{a.label}</span>
+              <span className="font-mono text-slate-400 dark:text-slate-500">{formatDuration(a.durationMs)} · {pct.toFixed(0)}%</span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
