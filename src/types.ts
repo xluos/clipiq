@@ -109,6 +109,14 @@ export type AnalysisReport = {
   pipelineVersion?: string;
   schemaVersion?: string;
   generatedAt?: string;
+  timings?: AnalysisTiming[];
+  totalDurationMs?: number;
+};
+
+export type AnalysisTiming = {
+  stage: string;
+  durationMs: number;
+  note?: string;
 };
 
 export type AnalysisOptions = {

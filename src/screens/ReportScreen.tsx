@@ -13,7 +13,16 @@ const REPORT_SECTIONS = [
   { id: "editing", label: "剪辑风格" },
   { id: "composition", label: "构图特点" },
   { id: "takeaways", label: "核心洞察" },
+  { id: "diagnostics", label: "性能诊断" },
 ] as const;
+
+function formatDuration(ms: number) {
+  if (ms < 1000) return `${ms} ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(2)} s`;
+  const m = Math.floor(ms / 60000);
+  const s = ((ms % 60000) / 1000).toFixed(1);
+  return `${m}m ${s}s`;
+}
 
 export function ReportScreen() {
   const { setCurrentScreen, reportByProject, activeProjectId, projects, nodesByProject, providers } = useApp();
@@ -302,6 +311,54 @@ export function ReportScreen() {
                   <p>暂无核心洞察。</p>
                 )}
              </div>
+          </section>
+
+          <section id="diagnostics" className="space-y-4 scroll-mt-6">
+            <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">性能诊断</h2>
+            <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm space-y-4">
+              {report.timings?.length ? (
+                <>
+                  <div className="flex items-baseline justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+                    <span className="text-sm text-slate-500 dark:text-slate-400">总耗时</span>
+                    <span className="font-mono text-base text-slate-800 dark:text-slate-100">
+                      {formatDuration(report.totalDurationMs || report.timings.reduce((a, t) => a + t.durationMs, 0))}
+                    </span>
+                  </div>
+                  {(() => {
+                    const total = report.timings.reduce((acc, t) => acc + t.durationMs, 0) || 1;
+                    const sorted = [...report.timings].sort((a, b) => b.durationMs - a.durationMs);
+                    return (
+                      <ul className="space-y-2 text-sm">
+                        {sorted.map((t, idx) => {
+                          const pct = (t.durationMs / total) * 100;
+                          return (
+                            <li key={`${t.stage}-${idx}`} className="space-y-1">
+                              <div className="flex items-center justify-between text-slate-700 dark:text-slate-200">
+                                <span>{t.stage}</span>
+                                <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
+                                  {formatDuration(t.durationMs)} · {pct.toFixed(1)}%
+                                </span>
+                              </div>
+                              <div className="h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                                <div
+                                  className="h-full bg-gradient-to-r from-indigo-500 to-violet-500"
+                                  style={{ width: `${Math.max(2, pct)}%` }}
+                                />
+                              </div>
+                              {t.note && (
+                                <p className="text-xs text-slate-400 dark:text-slate-500">{t.note}</p>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    );
+                  })()}
+                </>
+              ) : (
+                <p className="text-sm text-slate-500 dark:text-slate-400">这次分析没有记录耗时数据，可能是旧项目或分析过程异常。</p>
+              )}
+            </div>
           </section>
 
         </div>

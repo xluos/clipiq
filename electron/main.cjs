@@ -1107,9 +1107,30 @@ async function analyzeProject(event, { project, provider, audioProvider, options
     throw new Error("该项目已有分析任务在运行。");
   }
   const handle = registerAnalysis(project.id);
+  const analysisStartedAt = Date.now();
+
+  // 阶段耗时记录:每次 send 检测 stage 字符串变化,把上一个 stage 的 duration 推入
+  const timings = [];
+  let currentStage = null;
+  let currentStageStartedAt = analysisStartedAt;
+  const closeCurrentStage = (note) => {
+    if (currentStage) {
+      timings.push({
+        stage: currentStage,
+        durationMs: Date.now() - currentStageStartedAt,
+        ...(note ? { note } : {}),
+      });
+    }
+  };
+  handle.timings = timings;
 
   const send = (progress, stage, message) => {
     if (handle.cancelled) return;
+    if (stage !== currentStage) {
+      closeCurrentStage();
+      currentStage = stage;
+      currentStageStartedAt = Date.now();
+    }
     const payload = { projectId: project.id, progress, stage, message };
     handle.lastProgress = payload;
     handle.lastProgressAt = Date.now();
@@ -1265,8 +1286,26 @@ async function analyzeProject(event, { project, provider, audioProvider, options
       thumbnailUrl: frames[0]?.framePath ? createMediaUrl(frames[0].framePath) : project.thumbnailUrl,
       updatedAt: new Date().toISOString(),
     };
-    await writeJson(path.join(projectDir, "analysis-result.json"), { project: updatedProject, nodes, report });
     send(100, "完成", "分析结果已生成。");
+    closeCurrentStage();
+    const totalDurationMs = Date.now() - analysisStartedAt;
+    const finalTimings = [...timings];
+    // 找出耗时 top 1 阶段(剔除 0ms 边界)
+    const top = finalTimings
+      .filter((t) => t.durationMs > 0 && t.stage !== "完成")
+      .sort((a, b) => b.durationMs - a.durationMs)[0];
+    const topLabel = top ? ` · 最耗时 ${top.stage} ${(top.durationMs / 1000).toFixed(1)}s` : "";
+    if (!handle.cancelled) {
+      event.sender.send("analysis:progress", {
+        projectId: project.id,
+        progress: 100,
+        stage: "完成",
+        message: `总耗时 ${(totalDurationMs / 1000).toFixed(1)}s${topLabel}`,
+      });
+    }
+    report = { ...report, timings: finalTimings, totalDurationMs };
+    await writeJson(path.join(projectDir, "analysis-result.json"), { project: updatedProject, nodes, report });
+    await writeJson(path.join(projectDir, "timings.json"), { totalDurationMs, timings: finalTimings });
     return { project: updatedProject, nodes, report };
   } finally {
     clearAnalysis(project.id);

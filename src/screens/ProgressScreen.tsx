@@ -131,7 +131,8 @@ export function ProgressScreen() {
         setProjects(prev => prev.map(p => p.id === project.id ? result.project : p));
         setProgress(100);
         setStageLabel("完成");
-        window.setTimeout(() => setCurrentScreen("workspace"), 500);
+        // 多停留一会儿让用户看到总耗时摘要
+        window.setTimeout(() => setCurrentScreen("workspace"), 1800);
       } catch (err) {
         if (cancelledRef.current) return;
         const message = err instanceof Error ? err.message : String(err);
