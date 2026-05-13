@@ -6,7 +6,18 @@ import type { InspectedVideo } from "../electron-api";
 import { BrandLogo } from "../components/BrandLogo";
 
 function formatDate(date: Date) {
-  return date.toISOString().replace('T', ' ').substring(0, 16);
+  const diffMs = Date.now() - date.getTime();
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return "刚刚";
+  if (diffMin < 60) return `${diffMin} 分钟前`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `${diffHour} 小时前`;
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  return sameYear ? `${m}-${d} ${hh}:${mm}` : `${date.getFullYear()}-${m}-${d} ${hh}:${mm}`;
 }
 
 export function HomeScreen() {

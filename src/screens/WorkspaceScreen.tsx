@@ -6,7 +6,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { FileText, Play, Pause, ArrowLeft, Folder, Search, Star, ExternalLink, Copy, Check } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { AnalysisNode, AnalysisNodeType, Project } from "../types";
 import { formatTime } from "@/lib/utils";
 
@@ -22,10 +22,14 @@ export function WorkspaceScreen() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [highlightsOnly, setHighlightsOnly] = useState(false);
   const [tab, setTab] = useState<"timeline" | "insights">("timeline");
   const [sourceCopied, setSourceCopied] = useState(false);
+  const [isDraggingProgress, setIsDraggingProgress] = useState(false);
+  const [hoverProgress, setHoverProgress] = useState<{ x: number; time: number } | null>(null);
+  const progressTrackRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -86,16 +90,60 @@ export function WorkspaceScreen() {
   }
 
   const handleNodeClick = (node: AnalysisNode) => {
+    setActiveNodeId(node.id);
     if (videoRef.current) {
       videoRef.current.currentTime = node.startSec;
+      setCurrentTime(node.startSec);
     }
   };
 
   const handleNodeDoubleClick = (node: AnalysisNode) => {
+    setActiveNodeId(node.id);
     if (videoRef.current) {
       videoRef.current.currentTime = node.startSec;
+      setCurrentTime(node.startSec);
       videoRef.current.play();
     }
+  };
+
+  const seekToFraction = (fraction: number) => {
+    if (!videoRef.current) return;
+    const clamped = Math.min(Math.max(fraction, 0), 1);
+    const target = clamped * project.durationSec;
+    videoRef.current.currentTime = target;
+    setCurrentTime(target);
+  };
+
+  const handleProgressPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const track = progressTrackRef.current;
+    if (!track) return;
+    track.setPointerCapture(event.pointerId);
+    setIsDraggingProgress(true);
+    const rect = track.getBoundingClientRect();
+    seekToFraction((event.clientX - rect.left) / rect.width);
+  };
+
+  const handleProgressPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const track = progressTrackRef.current;
+    if (!track) return;
+    const rect = track.getBoundingClientRect();
+    const fraction = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 1);
+    setHoverProgress({ x: fraction * rect.width, time: fraction * project.durationSec });
+    if (isDraggingProgress) {
+      seekToFraction(fraction);
+    }
+  };
+
+  const handleProgressPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const track = progressTrackRef.current;
+    if (track && track.hasPointerCapture(event.pointerId)) {
+      track.releasePointerCapture(event.pointerId);
+    }
+    setIsDraggingProgress(false);
+  };
+
+  const handleProgressPointerLeave = () => {
+    setHoverProgress(null);
   };
 
   const togglePlay = () => {
@@ -222,43 +270,88 @@ export function WorkspaceScreen() {
               <span>{formatTime(currentTime)}</span>
               <span>{formatTime(project.durationSec)}</span>
             </div>
-            <div className="relative h-10 bg-slate-100 dark:bg-[#0A0A0B] rounded-lg border border-slate-200 dark:border-slate-800 cursor-pointer overflow-hidden group" onClick={(e) => {
-              if (videoRef.current) {
-                const rect = e.currentTarget.getBoundingClientRect();
-                const pos = (e.clientX - rect.left) / rect.width;
-                videoRef.current.currentTime = pos * project.durationSec;
-              }
-            }}>
-              {/* Playhead Area */}
-              <div 
-                className="absolute top-0 bottom-0 bg-indigo-100 dark:bg-indigo-500/20 border-r border-indigo-400 dark:border-indigo-500/50 transition-all duration-75" 
-                style={{ width: `${(currentTime / project.durationSec) * 100}%` }}
-              />
-              <div 
-                className="absolute top-0 bottom-0 w-0.5 bg-indigo-600 dark:bg-white z-10 shadow-[0_0_10px_rgba(37,99,235,0.5)] dark:shadow-[0_0_10px_rgba(255,255,255,0.5)] transition-all duration-75" 
-                style={{ left: `${(currentTime / project.durationSec) * 100}%` }}
-              />
-              {/* Markers */}
-              {nodes.map(node => {
-                const isActive = node.id === activeNodeId;
-                const color = isActive
-                  ? "bg-indigo-600 dark:bg-white"
-                  : node.isHighlight
-                    ? "bg-amber-500 dark:bg-amber-400"
-                    : "bg-slate-400 dark:bg-slate-500";
+            <div
+              ref={progressTrackRef}
+              className={`relative h-10 bg-slate-100 dark:bg-[#0A0A0B] rounded-lg border border-slate-200 dark:border-slate-800 overflow-visible group ${isDraggingProgress ? "cursor-grabbing" : "cursor-pointer"}`}
+              onPointerDown={handleProgressPointerDown}
+              onPointerMove={handleProgressPointerMove}
+              onPointerUp={handleProgressPointerUp}
+              onPointerCancel={handleProgressPointerUp}
+              onPointerLeave={handleProgressPointerLeave}
+            >
+              <div className="absolute inset-0 rounded-lg overflow-hidden">
+                {/* Playhead Area */}
+                <div
+                  className="absolute top-0 bottom-0 bg-indigo-100 dark:bg-indigo-500/20 border-r border-indigo-400 dark:border-indigo-500/50 transition-all duration-75"
+                  style={{ width: `${(currentTime / project.durationSec) * 100}%` }}
+                />
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-indigo-600 dark:bg-white z-10 shadow-[0_0_10px_rgba(37,99,235,0.5)] dark:shadow-[0_0_10px_rgba(255,255,255,0.5)] transition-all duration-75"
+                  style={{ left: `${(currentTime / project.durationSec) * 100}%` }}
+                />
+                {/* Markers */}
+                {nodes.map(node => {
+                  const isActive = node.id === activeNodeId;
+                  const isHovered = node.id === hoveredNodeId;
+                  const base = isActive
+                    ? "bg-indigo-600 dark:bg-white w-[3px] z-30"
+                    : isHovered
+                      ? "bg-amber-600 dark:bg-amber-300 w-[4px] z-30 shadow-[0_0_8px_rgba(245,158,11,0.7)]"
+                      : node.isHighlight
+                        ? "bg-amber-500 dark:bg-amber-400 w-[3px] z-10"
+                        : "bg-slate-400 dark:bg-slate-500 w-[2px]";
+                  return (
+                    <div
+                      key={node.id}
+                      className={`absolute top-0 bottom-0 ${base} hover:bg-slate-900 dark:hover:bg-white transition-all cursor-pointer`}
+                      style={{ left: `${(node.startSec / project.durationSec) * 100}%` }}
+                      onPointerEnter={() => setHoveredNodeId(node.id)}
+                      onPointerLeave={() => setHoveredNodeId(prev => (prev === node.id ? null : prev))}
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                        setActiveNodeId(node.id);
+                        if (videoRef.current) {
+                          videoRef.current.currentTime = node.startSec;
+                          setCurrentTime(node.startSec);
+                        }
+                        const el = document.getElementById(`node-${node.id}`);
+                        if (el) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                      }}
+                    />
+                  );
+                })}
+              </div>
+              {/* Marker hover popover */}
+              {hoveredNodeId && (() => {
+                const node = nodes.find(n => n.id === hoveredNodeId);
+                if (!node) return null;
+                const leftPct = (node.startSec / project.durationSec) * 100;
                 return (
                   <div
-                    key={node.id}
-                    className={`absolute top-0 bottom-0 ${isActive ? "w-[3px] z-20" : node.isHighlight ? "w-[3px] z-10" : "w-[2px]"} ${color} hover:bg-slate-900 dark:hover:bg-white transition-colors cursor-pointer`}
-                    style={{ left: `${(node.startSec / project.durationSec) * 100}%` }}
-                    title={`${node.title}${node.isHighlight ? " (重点)" : ""}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      if (videoRef.current) videoRef.current.currentTime = node.startSec;
-                    }}
-                  />
+                    className="pointer-events-none absolute bottom-full mb-2 -translate-x-1/2 whitespace-nowrap rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] shadow-lg dark:border-slate-700 dark:bg-slate-900 z-40"
+                    style={{ left: `${leftPct}%` }}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      {node.isHighlight && <span className="text-amber-500">★</span>}
+                      <span className="font-medium text-slate-800 dark:text-slate-100">{node.title}</span>
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-2 font-mono text-[10px] text-slate-500 dark:text-slate-400">
+                      <span>{formatTime(node.startSec)}</span>
+                      <span>·</span>
+                      <span>{node.emotionLabel}</span>
+                    </div>
+                  </div>
                 );
-              })}
+              })()}
+              {/* Cursor preview time */}
+              {hoverProgress && !hoveredNodeId && (
+                <div
+                  className="pointer-events-none absolute bottom-full mb-2 -translate-x-1/2 rounded bg-slate-900/90 px-1.5 py-0.5 font-mono text-[10px] text-white shadow z-40 dark:bg-slate-200/90 dark:text-slate-900"
+                  style={{ left: hoverProgress.x }}
+                >
+                  {formatTime(hoverProgress.time)}
+                </div>
+              )}
             </div>
             <div className="flex items-center justify-center mt-1">
               <Button variant="ghost" size="icon" className="w-8 h-8 rounded-full text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors" onClick={togglePlay}>
@@ -347,16 +440,21 @@ export function WorkspaceScreen() {
             <div className="space-y-4 pb-20">
               {filteredNodes.map((node) => {
                 const isActive = activeNodeId === node.id;
+                const isHovered = hoveredNodeId === node.id;
                 return (
                   <div
                     key={node.id}
                     id={`node-${node.id}`}
                     onClick={() => handleNodeClick(node)}
                     onDoubleClick={() => handleNodeDoubleClick(node)}
+                    onMouseEnter={() => setHoveredNodeId(node.id)}
+                    onMouseLeave={() => setHoveredNodeId((prev) => (prev === node.id ? null : prev))}
                     className={`p-4 rounded-xl cursor-pointer border transition-all duration-200 shadow-sm
-                      ${isActive 
-                        ? 'bg-indigo-50/50 dark:bg-indigo-600/10 border-indigo-300 dark:border-indigo-500/40 ring-1 ring-indigo-400/30 dark:ring-indigo-500/20' 
-                        : 'bg-white dark:bg-slate-900/40 border-slate-200 dark:border-slate-800/60 hover:border-slate-300 dark:hover:bg-slate-900/60'
+                      ${isActive
+                        ? 'bg-indigo-50/50 dark:bg-indigo-600/10 border-indigo-300 dark:border-indigo-500/40 ring-1 ring-indigo-400/30 dark:ring-indigo-500/20'
+                        : isHovered
+                          ? 'bg-amber-50/40 dark:bg-amber-500/5 border-amber-300/60 dark:border-amber-500/30'
+                          : 'bg-white dark:bg-slate-900/40 border-slate-200 dark:border-slate-800/60 hover:border-slate-300 dark:hover:bg-slate-900/60'
                       }
                     `}
                   >
