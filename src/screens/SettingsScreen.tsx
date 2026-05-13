@@ -16,15 +16,16 @@ import {
 } from "lucide-react";
 import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { ModelInputMode, ModelProvider, ProviderKind } from "../types";
-import type { RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
+import type { LlamaModelInfo, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
 
-type Section = "model" | "deps" | "analysis" | "data";
+type Section = "model" | "deps" | "local" | "analysis" | "data";
 
 const NONE = "__none__";
 
 const SECTIONS: { key: Section; label: string }[] = [
   { key: "model", label: "模型配置" },
   { key: "deps", label: "本地依赖" },
+  { key: "local", label: "本地推理" },
   { key: "analysis", label: "默认分析" },
   { key: "data", label: "项目数据" },
 ];
@@ -106,6 +107,7 @@ export function SettingsScreen() {
           <div className="max-w-3xl space-y-8">
             {section === "model" && <ModelSection />}
             {section === "deps" && <DepsSection />}
+            {section === "local" && <LocalInferenceSection />}
             {section === "analysis" && <AnalysisDefaultsSection />}
             {section === "data" && <DataSection />}
           </div>
@@ -770,6 +772,337 @@ function DepsSection() {
         {ytDlpStatus && <p className="text-xs text-slate-500">{ytDlpStatus}</p>}
         {!window.videoAnalyzer && (
           <p className="text-xs text-slate-500">当前是浏览器预览环境，依赖检测只在 Electron 中可用。</p>
+        )}
+      </section>
+    </>
+  );
+}
+
+function LocalInferenceSection() {
+  const [status, setStatus] = useState<LlamaStatus | null>(null);
+  const [models, setModels] = useState<LlamaModelInfo[]>([]);
+  const [progress, setProgress] = useState<LlamaProgress | null>(null);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [busyAction, setBusyAction] = useState<"binary" | "download" | "start" | "stop" | "selftest" | null>(null);
+  const [error, setError] = useState<string>("");
+  const [selfTestImage, setSelfTestImage] = useState<{ name: string; dataUrl: string } | null>(null);
+  const [selfTestResult, setSelfTestResult] = useState<{
+    latencyMs: number;
+    text: string;
+    usage: { total_tokens?: number } | null;
+  } | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!window.videoAnalyzer?.llama) return;
+    const [s, m] = await Promise.all([
+      window.videoAnalyzer.llama.getStatus(),
+      window.videoAnalyzer.llama.listModels(),
+    ]);
+    setStatus(s);
+    setModels(m);
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    if (!window.videoAnalyzer?.llama) return;
+    const unsub = window.videoAnalyzer.llama.onProgress((event) => {
+      setProgress(event);
+    });
+    return unsub;
+  }, [refresh]);
+
+  const handleEnsureBinary = async () => {
+    if (!window.videoAnalyzer?.llama) return;
+    setBusyAction("binary");
+    setError("");
+    setProgress(null);
+    try {
+      await window.videoAnalyzer.llama.ensureBinary();
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleDownload = async (modelKey: string) => {
+    if (!window.videoAnalyzer?.llama) return;
+    setBusyKey(modelKey);
+    setBusyAction("download");
+    setError("");
+    setProgress(null);
+    try {
+      await window.videoAnalyzer.llama.ensureModel(modelKey);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyKey(null);
+      setBusyAction(null);
+    }
+  };
+
+  // 一键打通: 缺引擎补引擎,缺模型下模型,启动 server。
+  const handleStart = async (modelKey: string) => {
+    if (!window.videoAnalyzer?.llama) return;
+    setBusyKey(modelKey);
+    setError("");
+    setProgress(null);
+    try {
+      const currentStatus = await window.videoAnalyzer.llama.getStatus();
+      if (!currentStatus.binaryFound) {
+        setBusyAction("binary");
+        await window.videoAnalyzer.llama.ensureBinary();
+      }
+      const target = (await window.videoAnalyzer.llama.listModels()).find((m) => m.key === modelKey);
+      if (target && !target.downloaded) {
+        setBusyAction("download");
+        await window.videoAnalyzer.llama.ensureModel(modelKey);
+      }
+      setBusyAction("start");
+      await window.videoAnalyzer.llama.start(modelKey);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      await refresh();
+    } finally {
+      setBusyKey(null);
+      setBusyAction(null);
+    }
+  };
+
+  const handleStop = async () => {
+    if (!window.videoAnalyzer?.llama) return;
+    setBusyAction("stop");
+    try {
+      await window.videoAnalyzer.llama.stop();
+      await refresh();
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handlePickImage = async (file: File) => {
+    const reader = new FileReader();
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      reader.onerror = () => reject(reader.error);
+      reader.onload = () => resolve(reader.result as string);
+      reader.readAsDataURL(file);
+    });
+    setSelfTestImage({ name: file.name, dataUrl });
+    setSelfTestResult(null);
+  };
+
+  const handleSelfTest = async () => {
+    if (!window.videoAnalyzer?.llama) return;
+    if (!selfTestImage) {
+      setError("请先选择一张图片");
+      return;
+    }
+    setBusyAction("selftest");
+    setError("");
+    setSelfTestResult(null);
+    try {
+      const result = await window.videoAnalyzer.llama.selfTest({
+        imageDataUrl: selfTestImage.dataUrl,
+        prompt: "用 1-2 句中文描述这张图片的主体、场景和氛围。",
+      });
+      setSelfTestResult({
+        latencyMs: result.latencyMs,
+        text: result.text,
+        usage: result.usage,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  if (!window.videoAnalyzer?.llama) {
+    return (
+      <>
+        <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">本地推理</h2>
+        <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm text-sm text-slate-500">
+          当前是浏览器预览环境,本地推理只在 Electron 中可用。
+        </section>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">本地推理</h2>
+
+      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4">
+        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">推理引擎</h3>
+        <div className="grid grid-cols-[100px_1fr] gap-x-4 gap-y-2 text-sm">
+          <span className="text-slate-500">引擎位置</span>
+          <span className="font-mono text-xs break-all">
+            {status?.binaryFound ? (
+              <span className="text-emerald-600 dark:text-emerald-400">{status.binaryPath}</span>
+            ) : (
+              <span className="text-amber-600 dark:text-amber-400">未安装(首次使用约 8MB,会自动下载到应用数据目录)</span>
+            )}
+          </span>
+          <span className="text-slate-500">当前状态</span>
+          <span>
+            {status?.status === "ready" && status.modelKey ? (
+              <span className="text-emerald-600 dark:text-emerald-400">运行中 · {status.modelKey} · 端口 {status.port}</span>
+            ) : status?.status === "starting" ? (
+              <span className="text-indigo-500">启动中…</span>
+            ) : status?.status === "error" ? (
+              <span className="text-red-500">出错: {status.lastError}</span>
+            ) : (
+              <span className="text-slate-500">未运行</span>
+            )}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          {!status?.binaryFound && (
+            <Button
+              size="sm"
+              disabled={busyAction === "binary"}
+              onClick={handleEnsureBinary}
+              className="h-7"
+            >
+              {busyAction === "binary" ? (
+                <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+              ) : (
+                <DownloadCloud className="w-3 h-3 mr-1" />
+              )}
+              下载推理引擎
+            </Button>
+          )}
+          {status?.running && (
+            <Button size="sm" variant="outline" disabled={busyAction === "stop"} onClick={handleStop} className="h-7">
+              {busyAction === "stop" ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <XCircle className="w-3 h-3 mr-1" />}
+              停止
+            </Button>
+          )}
+        </div>
+        {busyAction === "binary" && progress && progress.scope === "binary" && (
+          <div className="text-xs text-indigo-500">{progress.message}</div>
+        )}
+      </section>
+
+      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4">
+        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">可选模型</h3>
+        <p className="text-xs text-slate-500">
+          首次使用需下载模型文件(约 {formatBytes(models[0]?.approxBytes || 0)}),会保存在应用数据目录,后续直接复用。
+        </p>
+        {models.map((m) => {
+          const isCurrent = status?.modelKey === m.key && status.status === "ready";
+          const isBusy = busyKey === m.key;
+          return (
+            <div key={m.key} className="border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-slate-800 dark:text-slate-200">{m.name}</div>
+                  <div className="text-xs text-slate-500">{m.description}</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {!m.downloaded && !isCurrent && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={isBusy}
+                      onClick={() => handleDownload(m.key)}
+                      className="h-7"
+                    >
+                      {isBusy && busyAction === "download" ? (
+                        <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                      ) : (
+                        <DownloadCloud className="w-3 h-3 mr-1" />
+                      )}
+                      预下载
+                    </Button>
+                  )}
+                  {!isCurrent && (
+                    <Button
+                      size="sm"
+                      disabled={isBusy}
+                      onClick={() => handleStart(m.key)}
+                      className="h-7"
+                    >
+                      {isBusy && (busyAction === "start" || busyAction === "binary" || busyAction === "download") ? (
+                        <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                      ) : (
+                        <CheckCircle2 className="w-3 h-3 mr-1" />
+                      )}
+                      启动
+                    </Button>
+                  )}
+                  {isCurrent && (
+                    <span className="text-xs text-emerald-600 dark:text-emerald-400 px-2 py-1 rounded bg-emerald-50 dark:bg-emerald-900/20">运行中</span>
+                  )}
+                </div>
+              </div>
+              <div className="text-xs text-slate-500 grid grid-cols-2 gap-2">
+                <span>权重: {m.llmDownloaded ? formatBytes(m.llmBytes) : "未下载"}</span>
+                <span>视觉编码器: {m.mmprojDownloaded ? formatBytes(m.mmprojBytes) : "未下载"}</span>
+              </div>
+              {isBusy && progress && (busyAction === "download" || busyAction === "binary") && (
+                <div className="text-xs text-indigo-500">{progress.message}</div>
+              )}
+              {isBusy && busyAction === "start" && (
+                <div className="text-xs text-indigo-500">启动中,首次加载模型可能需要几秒…</div>
+              )}
+            </div>
+          );
+        })}
+        {error && <p className="text-xs text-red-500">{error}</p>}
+      </section>
+
+      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4">
+        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">自检</h3>
+        <p className="text-xs text-slate-500">
+          选一张本地图片(可以是项目里抽的视频帧),让运行中的模型描述它的内容,验证视觉链路是否真的工作,顺便看看每帧推理延迟。
+        </p>
+        <div className="flex items-center gap-3">
+          <label className="inline-flex items-center gap-2 text-sm cursor-pointer">
+            <input
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handlePickImage(f);
+              }}
+            />
+            <span className="px-3 py-1.5 rounded-md border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
+              {selfTestImage ? "更换图片" : "选择图片"}
+            </span>
+          </label>
+          {selfTestImage && (
+            <span className="text-xs text-slate-500 truncate max-w-xs">{selfTestImage.name}</span>
+          )}
+          <Button
+            size="sm"
+            disabled={!selfTestImage || !status?.running || busyAction === "selftest"}
+            onClick={handleSelfTest}
+            className="h-8"
+          >
+            {busyAction === "selftest" && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
+            运行自检
+          </Button>
+        </div>
+        {selfTestImage && (
+          <img
+            src={selfTestImage.dataUrl}
+            alt="self-test"
+            className="max-h-48 rounded border border-slate-200 dark:border-slate-800"
+          />
+        )}
+        {selfTestResult && (
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 dark:bg-emerald-900/10 dark:border-emerald-800 p-3 text-sm space-y-2">
+            <div className="text-xs text-emerald-700 dark:text-emerald-300 font-mono">
+              延迟 {selfTestResult.latencyMs} ms
+              {selfTestResult.usage?.total_tokens != null && ` · ${selfTestResult.usage.total_tokens} tokens`}
+            </div>
+            <div className="text-slate-700 dark:text-slate-200 whitespace-pre-wrap">{selfTestResult.text}</div>
+          </div>
         )}
       </section>
     </>

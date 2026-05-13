@@ -494,6 +494,19 @@ export function WorkspaceScreen() {
                           {tag.status === "hit" ? "✓" : "⚠"} {tag.ruleName}
                         </Badge>
                       ))}
+                      {node.prefilterTag && (
+                        <Badge
+                          variant="secondary"
+                          title={`本地初筛\n场景: ${node.prefilterTag.sceneType}\n主体: ${node.prefilterTag.subject}\n信息量: ${node.prefilterTag.salience}/10\n签名: ${node.prefilterTag.signature}${node.prefilterTag.hasText !== "none" ? `\n含文字: ${node.prefilterTag.hasText}` : ""}`}
+                          className={`text-[11px] px-2 py-0.5 font-medium shadow-none ${
+                            node.prefilterTag.salience >= 7
+                              ? "bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-500/10 dark:text-sky-300 dark:border-sky-500/20"
+                              : "bg-slate-50 text-slate-500 border-slate-200 dark:bg-slate-800/60 dark:text-slate-400 dark:border-slate-700"
+                          }`}
+                        >
+                          ✨ {node.prefilterTag.subject} · {node.prefilterTag.salience}
+                        </Badge>
+                      )}
                     </div>
 
                     <p className={`text-sm line-clamp-2 leading-relaxed ${isActive ? 'text-slate-700 dark:text-slate-300' : 'text-slate-500 dark:text-slate-400'}`}>

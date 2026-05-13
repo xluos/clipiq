@@ -2,12 +2,13 @@ import { useApp } from "../AppContext";
 import { ModeToggle } from "./theme-toggle";
 import { Settings, Home } from "lucide-react";
 import { BrandLogo } from "./BrandLogo";
+import { RuntimeStatusIndicator } from "./RuntimeStatusIndicator";
 
 export function TitleBar() {
   const { currentScreen, setCurrentScreen } = useApp();
 
   return (
-    <div className="h-12 border-b border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#0F172A]/60 backdrop-blur flex items-center justify-between pr-4 pl-[88px] shrink-0 shadow-sm" style={{ WebkitAppRegion: 'drag' } as any}>
+    <div className="h-12 border-b border-slate-200 dark:border-slate-800 bg-white/50 dark:bg-[#0F172A]/60 backdrop-blur flex items-center justify-between pr-4 pl-[88px] shrink-0 shadow-sm relative z-20" style={{ WebkitAppRegion: 'drag' } as any}>
       <div className="flex items-center gap-2 select-none">
         <BrandLogo size={22} />
         <div className="flex items-baseline gap-2">
@@ -27,8 +28,9 @@ export function TitleBar() {
             <Home className="w-4 h-4" />
           </button>
         )}
-        <button 
-          onClick={() => setCurrentScreen('settings')} 
+        <RuntimeStatusIndicator />
+        <button
+          onClick={() => setCurrentScreen('settings')}
           className="p-1.5 text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100 rounded-md hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
           title="系统设置"
         >
