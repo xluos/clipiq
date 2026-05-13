@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, net, protocol, shell, utilityProcess } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, nativeImage, net, protocol, shell, utilityProcess } = require("electron");
 const { execFile } = require("node:child_process");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
@@ -1333,15 +1333,32 @@ function exportCsv(nodes) {
   return rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
 }
 
+function getAppIcon() {
+  const candidates = [
+    path.join(__dirname, "assets", "icon-1024.png"),
+    path.join(__dirname, "assets", "icon-512.png"),
+    path.join(__dirname, "assets", "icon-256.png"),
+  ];
+  for (const p of candidates) {
+    if (fsSync.existsSync(p)) {
+      const img = nativeImage.createFromPath(p);
+      if (!img.isEmpty()) return img;
+    }
+  }
+  return null;
+}
+
 async function createWindow() {
+  const icon = getAppIcon();
   const mainWindow = new BrowserWindow({
     width: 1320,
     height: 860,
     minWidth: 1080,
     minHeight: 720,
-    title: "自动拉片分析工具",
+    title: "ClipIQ · 自动拉片分析工具",
     titleBarStyle: "hiddenInset",
-    backgroundColor: "#0A0A0B",
+    backgroundColor: "#0F172A",
+    icon: icon || undefined,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -1359,6 +1376,13 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  // macOS Dock 图标
+  if (process.platform === "darwin" && app.dock) {
+    const icon = getAppIcon();
+    if (icon) app.dock.setIcon(icon);
+  }
+  app.setName("ClipIQ");
+
   protocol.handle("media", (request) => {
     const url = new URL(request.url);
     const filePath = decodeURIComponent(url.pathname.slice(1));
