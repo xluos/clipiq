@@ -14,12 +14,23 @@ function inferPlatform(url: string): Extract<ProjectSource, { type: "url" }>["pl
   return "unknown";
 }
 
+function platformLabel(p: Extract<ProjectSource, { type: "url" }>["platform"]): string {
+  switch (p) {
+    case "douyin": return "抖音";
+    case "xiaohongshu": return "小红书";
+    case "bilibili": return "哔哩哔哩";
+    case "tiktok": return "TikTok";
+    default: return "暂未识别";
+  }
+}
+
 export function UrlPullScreen() {
   const { setCurrentScreen, setProjects, setActiveProjectId } = useApp();
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<"idle" | "downloading" | "failed">("idle");
   const [logs, setLogs] = useState<string[]>([
-    "等待输入视频链接。支持 yt-dlp 能识别的公开视频链接，合集会按单条视频处理。"
+    "把视频链接粘贴到上方，我会自动下载并准备分析。",
+    "支持抖音、小红书、哔哩哔哩、TikTok 等公开短视频。"
   ]);
   const [error, setError] = useState("");
   const platform = useMemo(() => inferPlatform(url), [url]);
@@ -53,24 +64,28 @@ export function UrlPullScreen() {
 
     setStatus("downloading");
     setError("");
+    // 技术细节(source url / platform / yt-dlp 调用)走 console / main 日志,UI 只显示用户视角的状态
+    console.log("[clipiq] start url pull", { url, platform });
     setLogs([
-      `[source] ${url}`,
-      `[platform] ${platform}`,
-      "[yt-dlp] 准备拉取单条视频..."
+      `已识别为 ${platformLabel(platform)} 的链接`,
+      "正在下载视频,首次可能需要等几十秒..."
     ]);
 
     try {
       if (!window.videoAnalyzer) {
-        setLogs(prev => [...prev, "[demo] 当前是浏览器预览环境，使用示例视频模拟下载成功。"]);
+        setLogs(prev => [...prev, "浏览器预览环境会用示例视频代替真实下载。"]);
         window.setTimeout(createMockProject, 800);
         return;
       }
 
       const video = await window.videoAnalyzer.downloadVideo(url.trim());
+      console.log("[clipiq] download ok", video);
+      const orient = video.orientation === "portrait" ? "竖屏" : video.orientation === "square" ? "方形" : "横屏";
       setLogs(prev => [
         ...prev,
-        `[yt-dlp] 下载完成: ${video.filename}`,
-        `[ffprobe] ${Math.round(video.durationSec)}s · ${video.width}x${video.height} · ${video.orientation}`
+        `下载完成:${video.filename}`,
+        `视频信息:${Math.round(video.durationSec)} 秒 · ${video.width}×${video.height} · ${orient}`,
+        "正在进入分析准备页…"
       ]);
 
       setProjects(prev => [{
@@ -91,9 +106,10 @@ export function UrlPullScreen() {
       window.setTimeout(() => setCurrentScreen("prepare"), 500);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      console.error("[clipiq] url pull failed", err);
       setStatus("failed");
       setError(message);
-      setLogs(prev => [...prev, `[error] ${message}`]);
+      setLogs(prev => [...prev, `下载失败:${message}`]);
     }
   };
 
@@ -105,7 +121,7 @@ export function UrlPullScreen() {
         </div>
         <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">通过链接拉取视频</h2>
         <p className="text-slate-500 dark:text-slate-400 text-sm">
-          链接拉取由 Electron main process 调用 yt-dlp 完成；失败时可以改用本地文件继续拉片。
+          粘贴抖音、小红书、B 站、TikTok 等平台的视频分享链接,应用会自动下载到本地;下载失败时也可以改用本地视频文件继续。
         </p>
 
         <div className="space-y-3 text-left">
@@ -116,17 +132,30 @@ export function UrlPullScreen() {
             className="bg-white dark:bg-[#0E0E10] border-slate-200 dark:border-slate-800"
           />
           <div className="flex items-center justify-between text-xs text-slate-500">
-            <span>平台识别：<span className="font-mono text-slate-700 dark:text-slate-300">{platform}</span></span>
+            <span>来源平台：<span className="text-slate-700 dark:text-slate-300">{platformLabel(platform)}</span></span>
             {!window.videoAnalyzer && <span>浏览器预览模式会使用示例视频</span>}
           </div>
         </div>
 
-        <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg font-mono text-xs text-left text-slate-500 overflow-hidden h-40 flex flex-col justify-end shadow-sm">
-          {logs.map((line, index) => (
-            <p key={index} className={line.startsWith("[error]") ? "text-red-500" : index === logs.length - 1 && status === "downloading" ? "animate-pulse text-indigo-500" : ""}>
-              {line}
-            </p>
-          ))}
+        <div className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-xs text-left text-slate-500 dark:text-slate-400 overflow-hidden h-40 flex flex-col justify-end gap-1 shadow-sm">
+          {logs.map((line, index) => {
+            const isError = line.startsWith("下载失败");
+            const isLatestDownloading = index === logs.length - 1 && status === "downloading";
+            return (
+              <p
+                key={index}
+                className={
+                  isError
+                    ? "text-red-500"
+                    : isLatestDownloading
+                      ? "animate-pulse text-indigo-500"
+                      : ""
+                }
+              >
+                {line}
+              </p>
+            );
+          })}
         </div>
 
         {status === "failed" && (
