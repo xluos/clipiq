@@ -60,12 +60,12 @@ function whisperModelHint(modelId?: string) {
 function inputModeHint(mode?: string) {
   switch (mode) {
     case "direct_video":
-      return "把整段视频直接喂给模型，仅 Gemini Video / Qwen-VL 等少数模型支持。";
+      return "直接把视频传给模型,只有少数模型支持。";
     case "keyframe_sequence":
-      return "抽取关键帧序列调用模型，兼容性最好，目前默认走这条路径。";
+      return "从视频抽取关键画面再发给模型,兼容性最好。";
     case "auto":
     default:
-      return "暂时等同于抽帧序列，未来会根据模型能力自动切换到直接视频上传。";
+      return "目前等同于抽取关键画面;未来会根据模型能力自动切换。";
   }
 }
 
@@ -211,13 +211,13 @@ function ProvidersSection() {
     <>
       <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">供应商</h2>
       <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
-        统一列出本地推理与远端 OpenAI-compatible 服务。具体哪个任务用哪个,去「任务分配」页配置。
+        管理可用的模型供应商。在「任务分配」里挑选每个分析步骤实际使用哪个。
       </p>
 
       <ProviderGroup
         kind="video"
-        title="🎞️ 视觉/多模态供应商"
-        emptyHint="还没添加视觉模型,点右上新增按钮添加一个 OpenAI 兼容 chat/completions endpoint。"
+        title="🎞️ 视觉模型"
+        emptyHint="还没有添加视觉模型,点右上「新增」配置一个。"
         providers={videoProviders}
         activeId={activeVideoProviderId}
         onAdd={() => handleAdd("video")}
@@ -228,8 +228,8 @@ function ProvidersSection() {
 
       <ProviderGroup
         kind="audio"
-        title="🎙️ 音频字幕供应商"
-        emptyHint="还没添加语音模型。配置 OpenAI 兼容 /audio/transcriptions endpoint 即可启用转录。"
+        title="🎙️ 字幕识别"
+        emptyHint="还没有添加字幕识别服务,点右上「新增」配置一个。"
         providers={audioProviders}
         activeId={activeAudioProviderId}
         onAdd={() => handleAdd("audio")}
@@ -247,7 +247,7 @@ type SlotMeta = {
   difficulty: TaskDifficulty;
   axis: TaskAxis;
   hint: string;
-  used: boolean; // 当前主管线是否消费这个槽
+  used: boolean;
 };
 
 const SLOT_METAS: SlotMeta[] = [
@@ -266,7 +266,7 @@ function TaskAssignmentSection() {
     <>
       <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">任务分配</h2>
       <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
-        把每类任务绑到 (供应商, 模型)。主管线按任务难度 + 是否需要视觉自动选择。
+        给不同复杂度的分析任务挑选合适的模型。轻量任务用小模型省成本,复杂任务用强模型保证质量。
       </p>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -283,18 +283,18 @@ function TaskAssignmentSection() {
       </div>
 
       <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 pt-2 border-t border-slate-200 dark:border-slate-800">
-        音频字幕识别
+        字幕识别
       </h3>
       <p className="text-xs text-slate-500 dark:text-slate-400 -mt-3">
-        独立配置,不参与上面的 6 档矩阵。本地 Whisper 或远端 ASR 均可。
+        从视频音轨里识别字幕。
       </p>
       <SlotCard
         meta={{
           key: "__audio__" as unknown as TaskSlotKey,
-          label: "音频转录",
+          label: "字幕识别",
           difficulty: "simple",
           axis: "text",
-          hint: "用于从视频音轨提取字幕",
+          hint: "本地 Whisper 速度快、隐私好;远端服务准确度更高",
           used: true,
         }}
         providers={providers}
@@ -377,7 +377,7 @@ function SlotCard({
         <div className="text-sm font-semibold text-slate-800 dark:text-slate-100">{meta.label}</div>
         {!meta.used && (
           <Badge variant="outline" className="text-[10px] text-slate-400 border-slate-200 dark:border-slate-700">
-            暂未消费
+            暂未启用
           </Badge>
         )}
       </div>
@@ -663,8 +663,8 @@ function ProviderCard({
             label="模式"
             hint={
               provider.endpointType === "local_whisper_wasm"
-                ? "首次使用会从镜像下载 ONNX 模型，体积 40 – 500 MB；推理在本机 CPU，离线可用。"
-                : "走 OpenAI 兼容 /audio/transcriptions，需要配 Base URL 和 API Key。"
+                ? "首次使用会下载模型文件(40 – 500 MB),之后在本机离线运行。"
+                : "通过远端 API 转录,需要配 Base URL 和 API Key。"
             }
           >
             <Select
