@@ -7,7 +7,7 @@ export function RuntimeStatusIndicator() {
   const [open, setOpen] = useState(false);
   const [llamaStatus, setLlamaStatus] = useState<LlamaStatus | null>(null);
   const [llamaModels, setLlamaModels] = useState<LlamaModelInfo[]>([]);
-  const { providers, activeVideoProviderId, activeAudioProviderId, setCurrentScreen } = useApp();
+  const { providers, taskSlots, audioSlot, setCurrentScreen } = useApp();
   const wrapRef = useRef<HTMLDivElement>(null);
 
   // 轮询 + 事件刷新: 启动期间事件密集,空闲时 3s 一次拉一下兜底
@@ -47,8 +47,28 @@ export function RuntimeStatusIndicator() {
     return () => document.removeEventListener("mousedown", onDocMouseDown);
   }, [open]);
 
-  const videoProvider = providers.find((p) => p.id === activeVideoProviderId) || null;
-  const audioProvider = providers.find((p) => p.id === activeAudioProviderId) || null;
+  // 主分析: complex_vision 槽 → provider + model label
+  const visionSlot = taskSlots.complex_vision;
+  const visionProvider = visionSlot ? providers.find((p) => p.id === visionSlot.providerId) : null;
+  const visionModelLabel = (() => {
+    if (!visionSlot || !visionProvider) return null;
+    return visionProvider.models.find((m) => m.id === visionSlot.modelId)?.label || visionSlot.modelId;
+  })();
+
+  // 音频: audioSlot → provider + model label
+  const audioProvider = audioSlot ? providers.find((p) => p.id === audioSlot.providerId) : null;
+  const audioModelLabel = (() => {
+    if (!audioSlot || !audioProvider) return null;
+    return audioProvider.models.find((m) => m.id === audioSlot.modelId)?.label || audioSlot.modelId;
+  })();
+
+  // 本地推理: llamaStatus.modelKey 映射到 model.label
+  const llamaModelLabel = (() => {
+    if (!llamaStatus?.modelKey) return null;
+    return (
+      llamaModels.find((m) => m.key === llamaStatus.modelKey)?.name || llamaStatus.modelKey
+    );
+  })();
 
   const dotClass = (() => {
     switch (llamaStatus?.status) {
@@ -67,7 +87,7 @@ export function RuntimeStatusIndicator() {
 
   const summary = (() => {
     if (!llamaStatus) return "加载中";
-    if (llamaStatus.status === "ready") return `本地推理 · ${llamaStatus.modelKey || ""}`;
+    if (llamaStatus.status === "ready") return `本地推理 · ${llamaModelLabel || llamaStatus.modelKey || ""}`;
     if (llamaStatus.status === "starting") return "本地推理启动中";
     if (llamaStatus.status === "error") return "本地推理出错";
     if (llamaStatus.status === "stopping") return "停止中";
@@ -86,68 +106,57 @@ export function RuntimeStatusIndicator() {
       </button>
       {open && (
         <div
-          className="absolute right-0 top-full mt-1.5 w-80 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#0F172A] shadow-lg p-4 space-y-3 z-50 text-sm"
+          className="absolute right-0 top-full mt-1.5 w-80 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#0F172A] shadow-lg p-4 z-50 text-sm divide-y divide-slate-200 dark:divide-slate-700"
           style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
         >
-          <Section title="本地推理(视觉初筛)">
+          <Section title="本地推理 · 视觉初筛">
             {!window.videoAnalyzer?.llama ? (
-              <div className="text-slate-500 text-xs">浏览器预览环境</div>
+              <Hint>浏览器预览环境</Hint>
             ) : llamaStatus?.running ? (
               <>
-                <div className="text-emerald-600 dark:text-emerald-400">运行中 · 端口 {llamaStatus.port}</div>
-                <Sub>模型: {llamaStatus.modelKey}</Sub>
+                <Row label="状态" value={<StatusPill tone="ok">运行中</StatusPill>} />
+                <Row label="模型" value={llamaModelLabel || "-"} />
+                <Row label="端口" value={String(llamaStatus.port || "-")} mono />
               </>
             ) : llamaStatus?.status === "starting" ? (
-              <div className="text-amber-600 dark:text-amber-400">启动中…</div>
+              <Row label="状态" value={<StatusPill tone="busy">启动中…</StatusPill>} />
             ) : llamaStatus?.status === "error" ? (
               <>
-                <div className="text-red-600">出错</div>
-                <Sub className="break-words">{llamaStatus.lastError || ""}</Sub>
+                <Row label="状态" value={<StatusPill tone="error">出错</StatusPill>} />
+                {llamaStatus.lastError && (
+                  <Hint className="break-words">{llamaStatus.lastError}</Hint>
+                )}
               </>
             ) : llamaStatus?.binaryFound ? (
-              <div className="text-slate-500">未启动(可去设置启动,或下次会自动恢复)</div>
+              <Hint>未启动（去设置启动，或下次会自动恢复）</Hint>
             ) : (
-              <div className="text-slate-500">推理引擎未安装</div>
-            )}
-            {llamaModels.length > 0 && (
-              <Sub>
-                可用模型:{" "}
-                {llamaModels
-                  .map((m) => `${m.downloaded ? "✓" : "·"} ${m.name}`)
-                  .join("  ")}
-              </Sub>
+              <Hint>推理引擎未安装</Hint>
             )}
           </Section>
 
-          <Divider />
-
-          <Section title="视觉模型(主分析)">
-            {videoProvider ? (
+          <Section title="主分析 · 视觉理解">
+            {visionProvider ? (
               <>
-                <div className="text-slate-800 dark:text-slate-200">{videoProvider.name}</div>
-                <Sub className="break-all">
-                  {videoProvider.model} · {videoProvider.baseUrl}
-                </Sub>
+                <Row label="供应商" value={visionProvider.name} />
+                <Row label="模型" value={visionModelLabel || "-"} />
+                <Row label="端点" value={visionProvider.baseUrl || "-"} mono small />
               </>
             ) : (
-              <div className="text-slate-500">未配置</div>
+              <Hint>未配置</Hint>
             )}
           </Section>
 
-          <Divider />
-
-          <Section title="音频模型">
+          <Section title="音频字幕识别">
             {audioProvider ? (
               <>
-                <div className="text-slate-800 dark:text-slate-200">{audioProvider.name}</div>
-                <Sub>
-                  {audioProvider.endpointType === "local_whisper_wasm"
-                    ? `本地 · ${audioProvider.localWhisperModel || audioProvider.model}`
-                    : `${audioProvider.model} · ${audioProvider.baseUrl}`}
-                </Sub>
+                <Row label="供应商" value={audioProvider.name} />
+                <Row label="模型" value={audioModelLabel || "-"} />
+                {audioProvider.source !== "local_whisper" && audioProvider.baseUrl && (
+                  <Row label="端点" value={audioProvider.baseUrl} mono small />
+                )}
               </>
             ) : (
-              <div className="text-slate-500">未启用</div>
+              <Hint>未启用</Hint>
             )}
           </Section>
 
@@ -156,7 +165,7 @@ export function RuntimeStatusIndicator() {
               setOpen(false);
               setCurrentScreen("settings");
             }}
-            className="w-full text-center text-xs text-indigo-600 dark:text-indigo-400 hover:underline pt-1 cursor-pointer"
+            className="w-full text-center text-xs text-indigo-600 dark:text-indigo-400 hover:underline pt-3 cursor-pointer"
           >
             打开设置 →
           </button>
@@ -168,17 +177,51 @@ export function RuntimeStatusIndicator() {
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div>
-      <div className="text-[11px] text-slate-500 mb-1 font-semibold uppercase tracking-wider">{title}</div>
-      {children}
+    <div className="py-3 first:pt-0 last:pb-0 space-y-1">
+      <div className="text-[10px] text-slate-400 dark:text-slate-500 font-semibold uppercase tracking-wider mb-1.5">
+        {title}
+      </div>
+      <div className="space-y-1">{children}</div>
     </div>
   );
 }
 
-function Sub({ children, className = "" }: { children: ReactNode; className?: string }) {
-  return <div className={`text-xs text-slate-500 mt-0.5 ${className}`}>{children}</div>;
+function Row({
+  label,
+  value,
+  mono,
+  small,
+}: {
+  label: string;
+  value: ReactNode;
+  mono?: boolean;
+  small?: boolean;
+}) {
+  return (
+    <div className="flex items-baseline gap-3">
+      <span className="text-[11px] text-slate-400 dark:text-slate-500 w-12 shrink-0">{label}</span>
+      <span
+        className={`flex-1 min-w-0 truncate ${
+          small ? "text-[11px]" : "text-sm"
+        } text-slate-800 dark:text-slate-100 ${mono ? "font-mono" : ""}`}
+        title={typeof value === "string" ? value : undefined}
+      >
+        {value}
+      </span>
+    </div>
+  );
 }
 
-function Divider() {
-  return <div className="border-t border-slate-200 dark:border-slate-700" />;
+function Hint({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return <div className={`text-xs text-slate-500 dark:text-slate-400 ${className}`}>{children}</div>;
+}
+
+function StatusPill({ children, tone }: { children: ReactNode; tone: "ok" | "busy" | "error" }) {
+  const cls =
+    tone === "ok"
+      ? "text-emerald-600 dark:text-emerald-400"
+      : tone === "busy"
+      ? "text-amber-500"
+      : "text-red-500";
+  return <span className={`text-sm font-medium ${cls}`}>{children}</span>;
 }
