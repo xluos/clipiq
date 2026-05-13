@@ -1,7 +1,9 @@
 import { useApp } from "../AppContext";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   ArrowLeft,
@@ -11,6 +13,8 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  Sparkles,
+  Square,
   Trash2,
   XCircle,
 } from "lucide-react";
@@ -778,11 +782,17 @@ function DepsSection() {
   );
 }
 
+// 从 "Qwen3.5-0.8B (Q4_K_M)" 抽 "0.8B"。key 容易把版本号 "3_5" 误识别为 size。
+function llamaSizeFromName(name: string) {
+  const m = name.match(/-(\d+(?:\.\d+)?B)/i);
+  return m ? m[1] : name;
+}
+
 function LocalInferenceSection() {
   const [status, setStatus] = useState<LlamaStatus | null>(null);
   const [models, setModels] = useState<LlamaModelInfo[]>([]);
   const [progress, setProgress] = useState<LlamaProgress | null>(null);
-  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<"binary" | "download" | "start" | "stop" | "selftest" | null>(null);
   const [error, setError] = useState<string>("");
   const [selfTestImage, setSelfTestImage] = useState<{ name: string; dataUrl: string } | null>(null);
@@ -811,42 +821,19 @@ function LocalInferenceSection() {
     return unsub;
   }, [refresh]);
 
-  const handleEnsureBinary = async () => {
-    if (!window.videoAnalyzer?.llama) return;
-    setBusyAction("binary");
-    setError("");
-    setProgress(null);
-    try {
-      await window.videoAnalyzer.llama.ensureBinary();
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusyAction(null);
-    }
-  };
+  // 自动选中:running 的优先,其次第一个已下载的,再退到第一个
+  useEffect(() => {
+    if (selectedKey && models.some((m) => m.key === selectedKey)) return;
+    const next =
+      (status?.modelKey && models.find((m) => m.key === status.modelKey)?.key) ||
+      models.find((m) => m.downloaded)?.key ||
+      models[0]?.key ||
+      null;
+    setSelectedKey(next);
+  }, [models, status?.modelKey, selectedKey]);
 
-  const handleDownload = async (modelKey: string) => {
-    if (!window.videoAnalyzer?.llama) return;
-    setBusyKey(modelKey);
-    setBusyAction("download");
-    setError("");
-    setProgress(null);
-    try {
-      await window.videoAnalyzer.llama.ensureModel(modelKey);
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusyKey(null);
-      setBusyAction(null);
-    }
-  };
-
-  // 一键打通: 缺引擎补引擎,缺模型下模型,启动 server。
   const handleStart = async (modelKey: string) => {
     if (!window.videoAnalyzer?.llama) return;
-    setBusyKey(modelKey);
     setError("");
     setProgress(null);
     try {
@@ -867,7 +854,6 @@ function LocalInferenceSection() {
       setError(e instanceof Error ? e.message : String(e));
       await refresh();
     } finally {
-      setBusyKey(null);
       setBusyAction(null);
     }
   };
@@ -931,136 +917,183 @@ function LocalInferenceSection() {
     );
   }
 
+  const selectedModel = models.find((m) => m.key === selectedKey) || null;
+  const runningKey = status?.running ? status.modelKey : null;
+  const isSelectedRunning = !!runningKey && runningKey === selectedKey;
+  const isBusy = busyAction !== null && busyAction !== "selftest";
+
+  type MainAction = {
+    label: string;
+    loading: boolean;
+    disabled: boolean;
+    danger: boolean;
+    onClick?: () => void;
+  };
+  const mainAction: MainAction = (() => {
+    if (busyAction === "binary") return { label: "下载引擎中…", loading: true, disabled: true, danger: false };
+    if (busyAction === "download") return { label: "下载模型中…", loading: true, disabled: true, danger: false };
+    if (busyAction === "start") return { label: "启动中…", loading: true, disabled: true, danger: false };
+    if (busyAction === "stop") return { label: "停止中…", loading: true, disabled: true, danger: false };
+    if (!selectedModel) return { label: "启动", loading: false, disabled: true, danger: false };
+    if (isSelectedRunning) {
+      return { label: "停止", loading: false, disabled: false, danger: true, onClick: handleStop };
+    }
+    if (!!runningKey && !isSelectedRunning) {
+      return {
+        label: `切换到 ${llamaSizeFromName(selectedModel.name)}`,
+        loading: false,
+        disabled: false,
+        danger: false,
+        onClick: () => handleStart(selectedModel.key),
+      };
+    }
+    if (!selectedModel.downloaded) {
+      return {
+        label: "下载并启动",
+        loading: false,
+        disabled: false,
+        danger: false,
+        onClick: () => handleStart(selectedModel.key),
+      };
+    }
+    return {
+      label: "启动",
+      loading: false,
+      disabled: false,
+      danger: false,
+      onClick: () => handleStart(selectedModel.key),
+    };
+  })();
+
+  const statusLine = (() => {
+    if (status?.status === "ready" && status.modelKey) {
+      return (
+        <span className="text-emerald-600 dark:text-emerald-400">
+          运行中 · {llamaSizeFromName(models.find((m) => m.key === status.modelKey)?.name || status.modelKey)} · 端口 {status.port}
+        </span>
+      );
+    }
+    if (status?.status === "starting") return <span className="text-amber-500">启动中…</span>;
+    if (status?.status === "error") return <span className="text-red-500">出错: {status.lastError}</span>;
+    if (selectedModel?.downloaded) return <span className="text-slate-500">未运行 · 已下载,随时可启动</span>;
+    if (selectedModel) return <span className="text-slate-500">未下载 · 首次启动会先下载约 {formatBytes(selectedModel.approxBytes)}</span>;
+    return <span className="text-slate-500">未运行</span>;
+  })();
+
+  const showProgress =
+    progress && (busyAction === "binary" || busyAction === "download") && progress.percent != null;
+
   return (
     <>
       <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">本地推理</h2>
 
-      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4">
-        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">推理引擎</h3>
-        <div className="grid grid-cols-[100px_1fr] gap-x-4 gap-y-2 text-sm">
-          <span className="text-slate-500">引擎位置</span>
-          <span className="font-mono text-xs break-all">
-            {status?.binaryFound ? (
-              <span className="text-emerald-600 dark:text-emerald-400">{status.binaryPath}</span>
-            ) : (
-              <span className="text-amber-600 dark:text-amber-400">未安装(首次使用约 8MB,会自动下载到应用数据目录)</span>
-            )}
-          </span>
-          <span className="text-slate-500">当前状态</span>
-          <span>
-            {status?.status === "ready" && status.modelKey ? (
-              <span className="text-emerald-600 dark:text-emerald-400">运行中 · {status.modelKey} · 端口 {status.port}</span>
-            ) : status?.status === "starting" ? (
-              <span className="text-indigo-500">启动中…</span>
-            ) : status?.status === "error" ? (
-              <span className="text-red-500">出错: {status.lastError}</span>
-            ) : (
-              <span className="text-slate-500">未运行</span>
-            )}
-          </span>
+      <section className="rounded-xl border-2 border-orange-300/80 dark:border-orange-500/40 bg-orange-50/40 dark:bg-orange-500/[0.04] shadow-sm overflow-hidden">
+        <div className="p-5 flex items-start gap-4">
+          <div className="w-12 h-12 shrink-0 rounded-xl bg-gradient-to-br from-violet-500 via-fuchsia-500 to-rose-500 grid place-items-center text-white shadow-sm">
+            <Sparkles className="w-5 h-5" />
+          </div>
+          <div className="flex-1 min-w-0 space-y-1.5">
+            <div className="flex items-center flex-wrap gap-1.5">
+              <span className="text-base font-semibold text-slate-900 dark:text-slate-100">Qwen3.5-VL</span>
+              <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100 border-orange-200 dark:bg-orange-500/15 dark:text-orange-300 dark:border-orange-500/30">视觉初筛</Badge>
+              <Badge variant="outline" className="text-slate-600 dark:text-slate-300">本地</Badge>
+              <Badge variant="outline" className="text-slate-600 dark:text-slate-300">Apple GPU</Badge>
+            </div>
+            <p className="text-xs text-slate-500 leading-relaxed">
+              抽帧后让本地模型给每张候选画面快速打标,按信息量和签名相似度精筛,降低送给视觉主模型的画面数。
+            </p>
+          </div>
+          <div className="shrink-0 space-y-1.5">
+            <div className="text-[11px] text-slate-500 text-right">选择规格</div>
+            <div className="flex flex-col gap-1.5">
+              {models.map((m) => {
+                const checked = selectedKey === m.key;
+                const running = runningKey === m.key;
+                return (
+                  <button
+                    key={m.key}
+                    onClick={() => setSelectedKey(m.key)}
+                    disabled={isBusy}
+                    className={`group inline-flex items-center gap-3 pl-2.5 pr-3 py-1.5 rounded-md border text-xs transition-colors min-w-[170px] ${
+                      checked
+                        ? "border-orange-400 bg-white dark:bg-orange-500/10 shadow-sm"
+                        : "border-slate-200 dark:border-slate-800 hover:border-slate-300 bg-white/60 dark:bg-slate-900/40"
+                    } disabled:cursor-not-allowed disabled:opacity-60`}
+                  >
+                    <span
+                      className={`w-2 h-2 rounded-full shrink-0 ${
+                        checked ? "bg-orange-500 ring-2 ring-orange-200 dark:ring-orange-500/30" : "bg-slate-300 dark:bg-slate-600"
+                      }`}
+                    />
+                    <span className="font-semibold text-slate-700 dark:text-slate-200 text-left">{llamaSizeFromName(m.name)}</span>
+                    <span className="ml-auto text-slate-500 dark:text-slate-400">{formatBytes(m.approxBytes)}</span>
+                    {running ? (
+                      <span className="text-emerald-500" title="运行中">●</span>
+                    ) : m.downloaded ? (
+                      <span className="text-emerald-500" title="已下载">✓</span>
+                    ) : (
+                      <span className="text-slate-300 dark:text-slate-700">·</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          {!status?.binaryFound && (
-            <Button
-              size="sm"
-              disabled={busyAction === "binary"}
-              onClick={handleEnsureBinary}
-              className="h-7"
-            >
-              {busyAction === "binary" ? (
-                <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-              ) : (
-                <DownloadCloud className="w-3 h-3 mr-1" />
-              )}
-              下载推理引擎
-            </Button>
-          )}
-          {status?.running && (
-            <Button size="sm" variant="outline" disabled={busyAction === "stop"} onClick={handleStop} className="h-7">
-              {busyAction === "stop" ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <XCircle className="w-3 h-3 mr-1" />}
-              停止
-            </Button>
-          )}
+
+        <div className="border-t border-orange-200/60 dark:border-orange-500/20 bg-white/70 dark:bg-black/20 px-5 py-3.5 flex items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold mb-0.5">模型状态</div>
+            <div className="text-sm">{statusLine}</div>
+            <div className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">
+              引擎: {status?.binaryFound ? <span className="text-emerald-500">✓ 已安装</span> : <span className="text-amber-500">未安装 · 启动时会自动下载约 8MB</span>}
+            </div>
+          </div>
+          <Button
+            size="sm"
+            onClick={mainAction.onClick}
+            disabled={mainAction.disabled}
+            variant={mainAction.danger ? "outline" : "default"}
+            className={
+              mainAction.danger
+                ? "h-9 px-4 border-red-300 text-red-600 hover:bg-red-50 dark:border-red-500/40 dark:text-red-400 dark:hover:bg-red-500/10"
+                : "h-9 px-4 bg-orange-500 hover:bg-orange-600 text-white border-orange-500"
+            }
+          >
+            {mainAction.loading ? (
+              <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+            ) : mainAction.danger ? (
+              <Square className="w-3.5 h-3.5 mr-1.5 fill-current" />
+            ) : (
+              <DownloadCloud className="w-3.5 h-3.5 mr-1.5" />
+            )}
+            {mainAction.label}
+          </Button>
         </div>
-        {busyAction === "binary" && progress && progress.scope === "binary" && (
-          <div className="text-xs text-indigo-500">{progress.message}</div>
+
+        {showProgress && (
+          <div className="border-t border-orange-200/60 dark:border-orange-500/20 px-5 py-2.5 bg-white/50 dark:bg-black/10">
+            <Progress value={progress!.percent || 0} className="h-1.5" />
+            <div className="text-[11px] text-slate-500 mt-1.5">{progress!.message}</div>
+          </div>
+        )}
+
+        {error && (
+          <div className="border-t border-red-200 dark:border-red-500/20 bg-red-50 dark:bg-red-500/10 px-5 py-2 text-xs text-red-600 dark:text-red-400">
+            {error}
+          </div>
         )}
       </section>
 
       <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4">
-        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">可选模型</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">自检</h3>
+          <span className="text-[11px] text-slate-400">需先启动模型</span>
+        </div>
         <p className="text-xs text-slate-500">
-          首次使用需下载模型文件(约 {formatBytes(models[0]?.approxBytes || 0)}),会保存在应用数据目录,后续直接复用。
+          选一张本地图片(可以是项目里抽的视频帧),让运行中的模型描述它,验证视觉链路是否真的工作,顺便看每帧推理延迟。
         </p>
-        {models.map((m) => {
-          const isCurrent = status?.modelKey === m.key && status.status === "ready";
-          const isBusy = busyKey === m.key;
-          return (
-            <div key={m.key} className="border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-2">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-medium text-slate-800 dark:text-slate-200">{m.name}</div>
-                  <div className="text-xs text-slate-500">{m.description}</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  {!m.downloaded && !isCurrent && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={isBusy}
-                      onClick={() => handleDownload(m.key)}
-                      className="h-7"
-                    >
-                      {isBusy && busyAction === "download" ? (
-                        <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                      ) : (
-                        <DownloadCloud className="w-3 h-3 mr-1" />
-                      )}
-                      预下载
-                    </Button>
-                  )}
-                  {!isCurrent && (
-                    <Button
-                      size="sm"
-                      disabled={isBusy}
-                      onClick={() => handleStart(m.key)}
-                      className="h-7"
-                    >
-                      {isBusy && (busyAction === "start" || busyAction === "binary" || busyAction === "download") ? (
-                        <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                      ) : (
-                        <CheckCircle2 className="w-3 h-3 mr-1" />
-                      )}
-                      启动
-                    </Button>
-                  )}
-                  {isCurrent && (
-                    <span className="text-xs text-emerald-600 dark:text-emerald-400 px-2 py-1 rounded bg-emerald-50 dark:bg-emerald-900/20">运行中</span>
-                  )}
-                </div>
-              </div>
-              <div className="text-xs text-slate-500 grid grid-cols-2 gap-2">
-                <span>权重: {m.llmDownloaded ? formatBytes(m.llmBytes) : "未下载"}</span>
-                <span>视觉编码器: {m.mmprojDownloaded ? formatBytes(m.mmprojBytes) : "未下载"}</span>
-              </div>
-              {isBusy && progress && (busyAction === "download" || busyAction === "binary") && (
-                <div className="text-xs text-indigo-500">{progress.message}</div>
-              )}
-              {isBusy && busyAction === "start" && (
-                <div className="text-xs text-indigo-500">启动中,首次加载模型可能需要几秒…</div>
-              )}
-            </div>
-          );
-        })}
-        {error && <p className="text-xs text-red-500">{error}</p>}
-      </section>
-
-      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4">
-        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">自检</h3>
-        <p className="text-xs text-slate-500">
-          选一张本地图片(可以是项目里抽的视频帧),让运行中的模型描述它的内容,验证视觉链路是否真的工作,顺便看看每帧推理延迟。
-        </p>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <label className="inline-flex items-center gap-2 text-sm cursor-pointer">
             <input
               type="file"
@@ -1071,7 +1104,7 @@ function LocalInferenceSection() {
                 if (f) handlePickImage(f);
               }}
             />
-            <span className="px-3 py-1.5 rounded-md border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
+            <span className="px-3 py-1.5 rounded-md border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-xs">
               {selfTestImage ? "更换图片" : "选择图片"}
             </span>
           </label>
