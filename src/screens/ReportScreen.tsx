@@ -29,22 +29,46 @@ export function ReportScreen() {
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const visible = entries
-          .filter(entry => entry.isIntersecting)
-          .sort((a, b) => b.intersectionRatio - a.intersectionRatio);
-        if (visible[0]?.target?.id) {
-          setActiveSection(visible[0].target.id);
-        }
-      },
-      { root: container, rootMargin: "-20% 0px -55% 0px", threshold: [0, 0.25, 0.5, 0.75, 1] }
-    );
-    REPORT_SECTIONS.forEach(({ id }) => {
-      const el = container.querySelector(`#${id}`);
-      if (el) observer.observe(el);
-    });
-    return () => observer.disconnect();
+
+    // Scroll-spy: pick the last section whose top has crossed the activation
+    // line; if scrolled to bottom, force-select the last section so short
+    // trailing sections never get out-shadowed by taller earlier ones.
+    const ACTIVATION_OFFSET = 96;
+    const BOTTOM_EPSILON = 4;
+
+    type SectionEntry = { id: string; el: HTMLElement };
+    const sectionEls: SectionEntry[] = [];
+    for (const { id } of REPORT_SECTIONS) {
+      const el = container.querySelector(`#${id}`) as HTMLElement | null;
+      if (el) sectionEls.push({ id, el });
+    }
+
+    if (sectionEls.length === 0) return;
+
+    const update = () => {
+      if (container.scrollTop + container.clientHeight >= container.scrollHeight - BOTTOM_EPSILON) {
+        setActiveSection(sectionEls[sectionEls.length - 1].id);
+        return;
+      }
+      const activationLine = container.scrollTop + ACTIVATION_OFFSET;
+      let active = sectionEls[0].id;
+      for (const { id, el } of sectionEls) {
+        if (el.offsetTop <= activationLine) active = id;
+        else break;
+      }
+      setActiveSection(active);
+    };
+
+    update();
+    container.addEventListener("scroll", update, { passive: true });
+    const resizeObserver = new ResizeObserver(update);
+    resizeObserver.observe(container);
+    sectionEls.forEach(({ el }) => resizeObserver.observe(el));
+
+    return () => {
+      container.removeEventListener("scroll", update);
+      resizeObserver.disconnect();
+    };
   }, [report]);
 
   const scrollToSection = (id: string) => {
@@ -162,8 +186,8 @@ export function ReportScreen() {
         </div>
       </div>
 
-      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-8 py-8 md:px-12 flex relative">
-        <div className="flex-1 max-w-4xl space-y-10 pb-20">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-8 pt-8 pb-16 md:px-12 flex relative">
+        <div className="flex-1 max-w-4xl space-y-10 pb-32">
           <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
             <div className="space-y-1 min-w-0">
               <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">总结报告</h1>

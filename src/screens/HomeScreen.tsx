@@ -1,6 +1,6 @@
 import { useApp } from "../AppContext";
 import { Button } from "@/components/ui/button";
-import { FolderOpen, CloudDownload, UploadCloud, ChevronRight, CheckCircle2, Clock, XCircle, Film, Trash2 } from "lucide-react";
+import { FolderOpen, CloudDownload, UploadCloud, CheckCircle2, Clock, XCircle, Film, Trash2 } from "lucide-react";
 import { type ChangeEvent, type DragEvent, type MouseEvent, useRef, useState } from "react";
 import type { InspectedVideo } from "../electron-api";
 import { BrandLogo } from "../components/BrandLogo";
@@ -225,9 +225,7 @@ export function HomeScreen() {
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-slate-800 dark:text-slate-200">最近项目</h3>
               {projects.length > 0 && (
-                <button className="text-sm text-indigo-600 dark:text-indigo-400 font-medium hover:underline flex items-center">
-                  查看全部 <ChevronRight className="w-4 h-4 ml-0.5" />
-                </button>
+                <span className="text-xs text-slate-500 dark:text-slate-400 font-mono">共 {projects.length} 项</span>
               )}
             </div>
             

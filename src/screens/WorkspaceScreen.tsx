@@ -301,7 +301,7 @@ export function WorkspaceScreen() {
           </div>
 
           {tab === "insights" ? (
-            <ScrollArea className="flex-1 px-4 py-4">
+            <ScrollArea className="flex-1 min-h-0 px-4 py-4">
               <div className="space-y-5 pb-20">
                 <div className="grid grid-cols-2 gap-3">
                   <StatCard label="节点总数" value={String(totalNodes)} />
@@ -343,7 +343,7 @@ export function WorkspaceScreen() {
               </div>
             </ScrollArea>
           ) : (
-          <ScrollArea className="flex-1 px-4 py-4" ref={scrollRef}>
+          <ScrollArea className="flex-1 min-h-0 px-4 py-4" ref={scrollRef}>
             <div className="space-y-4 pb-20">
               {filteredNodes.map((node) => {
                 const isActive = activeNodeId === node.id;
