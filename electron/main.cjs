@@ -554,6 +554,51 @@ const TASK_SLOT_KEYS = [
   "complex_text",
 ];
 
+// 把 (config, slotKey) 解析成"看起来像 v1 ModelProvider"的 effective provider 对象,
+// 供下游 callOpenAICompatible/callOpenAIResponses/transcribeAudio 等无感复用。
+// local_llama 的 baseUrl 从 llama-runtime.getStatus().port 拼。
+function resolveSlotProvider(config, slotKey) {
+  const slot = config?.taskSlots?.[slotKey];
+  if (!slot) return null;
+  const provider = config.providers?.find((p) => p.id === slot.providerId);
+  const model = provider?.models?.find((m) => m.id === slot.modelId);
+  if (!provider || !model) return null;
+  return shapeEffectiveProvider(provider, model);
+}
+
+function resolveAudioProvider(config) {
+  const slot = config?.audioSlot;
+  if (!slot) return null;
+  const provider = config.providers?.find((p) => p.id === slot.providerId);
+  const model = provider?.models?.find((m) => m.id === slot.modelId);
+  if (!provider || !model) return null;
+  return shapeEffectiveProvider(provider, model);
+}
+
+function shapeEffectiveProvider(provider, model) {
+  let baseUrl = provider.baseUrl;
+  let apiKeyRef = provider.apiKeyRef;
+  if (provider.source === "local_llama") {
+    const llamaRuntime = require("./llama-runtime.cjs");
+    const status = llamaRuntime.getStatus();
+    if (status?.running && status?.port) {
+      baseUrl = `http://127.0.0.1:${status.port}/v1`;
+      apiKeyRef = "local"; // llama-server 不验证 key
+    }
+  }
+  return {
+    ...provider,
+    baseUrl,
+    apiKeyRef,
+    model: model.id,
+    maxOutputTokens: model.maxOutputTokens ?? provider.maxOutputTokens,
+    temperature: model.temperature ?? provider.temperature,
+    localWhisperModel: model.localWhisperModel || provider.localWhisperModel,
+    localWhisperMirror: model.localWhisperMirror || provider.localWhisperMirror,
+    language: model.language || provider.language,
+  };
+}
+
 function emptyTaskSlots() {
   return TASK_SLOT_KEYS.reduce((acc, k) => ({ ...acc, [k]: null }), {});
 }
@@ -1762,10 +1807,18 @@ async function warmupLocalWhisper(audioProvider) {
   return result.warmup;
 }
 
-async function analyzeProject(event, { project, provider, audioProvider, options }) {
+async function analyzeProject(event, { project, provider: _legacyProvider, audioProvider: _legacyAudio, options }) {
   if (activeAnalyses.has(project.id)) {
     throw new Error("该项目已有分析任务在运行。");
   }
+  // 在管线开始时一次性快照 config + 从 taskSlots/audioSlot 解析各任务的 effective provider,
+  // 避免运行中用户改设置导致竞争。renderer 传入的 provider/audioProvider 入参作废。
+  const cfgSnapshot = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+  const complexVisionProvider = resolveSlotProvider(cfgSnapshot, "complex_vision");
+  const mediumTextProvider = resolveSlotProvider(cfgSnapshot, "medium_text");
+  const audioProvider = resolveAudioProvider(cfgSnapshot);
+  // 兼容旧主流程变量名
+  const provider = complexVisionProvider;
   const handle = registerAnalysis(project.id);
   const analysisStartedAt = Date.now();
 
@@ -2029,13 +2082,14 @@ async function analyzeProject(event, { project, provider, audioProvider, options
       try {
         ensureNotCancelled(handle);
 
-        // Pass 1：auto 模式且有字幕/镜头数据时，先用轻量调用识别 genre
+        // Pass 1: auto 模式且有字幕/镜头数据时,用 medium_text 槽位的模型轻量识别 genre
         let effectiveOptions = options;
         const isAutoGenre = !options?.manualGenre || options.manualGenre === "auto";
         if (isAutoGenre && (transcript || scenes?.length)) {
-          send(74, "识别视频类型", `根据字幕和镜头切换让 ${provider.name} 推断视频类型。`);
+          const genreProvider = mediumTextProvider || provider;
+          send(74, "识别视频类型", `根据字幕和镜头切换让 ${genreProvider.name} 推断视频类型。`);
           const detectStartedAt = Date.now();
-          const detected = await detectGenreLightweight(provider, projectMeta, scenes, transcript, handle);
+          const detected = await detectGenreLightweight(genreProvider, projectMeta, scenes, transcript, handle);
           if (detected?.detectedGenre) {
             effectiveOptions = { ...options, detectedGenre: detected.detectedGenre };
             send(76, "识别视频类型完成", `判定为 ${detected.detectedGenre}（置信度 ${(detected.genreConfidence * 100).toFixed(0)}%，耗时 ${Math.round((Date.now() - detectStartedAt) / 1000)}s）。`);
