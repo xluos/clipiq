@@ -32,7 +32,6 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   },
   exportProject: (payload) => ipcRenderer.invoke("project:export", payload),
   testProvider: (provider) => ipcRenderer.invoke("provider:testConnection", provider),
-  isWhisperModelCached: (modelId) => ipcRenderer.invoke("whisper:isModelCached", modelId),
   checkYtDlpUpdate: () => ipcRenderer.invoke("ytdlp:checkUpdate"),
   installYtDlp: () => ipcRenderer.invoke("ytdlp:install"),
   onYtDlpUpdateStatus: (callback) => {
@@ -65,6 +64,23 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
       const listener = (_event, payload) => callback(payload);
       ipcRenderer.on("llama:log", listener);
       return () => ipcRenderer.removeListener("llama:log", listener);
+    },
+  },
+  whisperCpp: {
+    listModels: () => ipcRenderer.invoke("whisperCpp:listModels"),
+    getStatus: () => ipcRenderer.invoke("whisperCpp:getStatus"),
+    ensureModel: (modelKey) => ipcRenderer.invoke("whisperCpp:ensureModel", modelKey),
+    start: (modelKey) => ipcRenderer.invoke("whisperCpp:start", modelKey),
+    stop: () => ipcRenderer.invoke("whisperCpp:stop"),
+    onProgress: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("whisperCpp:progress", listener);
+      return () => ipcRenderer.removeListener("whisperCpp:progress", listener);
+    },
+    onLog: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("whisperCpp:log", listener);
+      return () => ipcRenderer.removeListener("whisperCpp:log", listener);
     },
   },
 });

@@ -128,6 +128,42 @@ export type LlamaSelfTestResult = {
   usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
 };
 
+export type WhisperCppModelInfo = {
+  key: string;
+  name: string;
+  description: string;
+  approxBytes: number;
+  downloaded: boolean;
+  downloadedBytes: number;
+  modelPath: string | null;
+};
+
+export type WhisperCppStatus = {
+  binaryPath: string | null;
+  binaryFound: boolean;
+  running: boolean;
+  status: "idle" | "starting" | "ready" | "stopping" | "error";
+  modelKey: string | null;
+  port: number | null;
+  startedAt: number;
+  lastError: string | null;
+  recentLogs: Array<{ ts: number; channel: "stdout" | "stderr"; line: string }>;
+};
+
+export type WhisperCppProgress = {
+  scope: "model";
+  modelKey?: string;
+  stage: "skip" | "start" | "progress" | "done";
+  file?: string;
+  label: string;
+  message: string;
+  receivedBytes?: number;
+  totalBytes?: number;
+  percent?: number;
+};
+
+export type WhisperCppLogEntry = { channel: "stdout" | "stderr"; line: string };
+
 declare global {
   interface Window {
     videoAnalyzer?: {
@@ -163,7 +199,6 @@ declare global {
         format: ExportFormat;
       }) => Promise<{ canceled: boolean; filePath?: string }>;
       testProvider: (provider: ModelProvider) => Promise<ProviderTestResult>;
-      isWhisperModelCached: (modelId: string) => Promise<{ cached: boolean; sizeBytes?: number }>;
       checkYtDlpUpdate: () => Promise<YtDlpUpdateInfo>;
       installYtDlp: () => Promise<YtDlpInstallResult>;
       onYtDlpUpdateStatus: (callback: (info: YtDlpUpdateInfo) => void) => () => void;
@@ -190,6 +225,15 @@ declare global {
         selfTest: (payload: { imageDataUrl?: string; prompt?: string }) => Promise<LlamaSelfTestResult>;
         onProgress: (callback: (event: LlamaProgress) => void) => () => void;
         onLog: (callback: (event: LlamaLogEntry) => void) => () => void;
+      };
+      whisperCpp: {
+        listModels: () => Promise<WhisperCppModelInfo[]>;
+        getStatus: () => Promise<WhisperCppStatus>;
+        ensureModel: (modelKey: string) => Promise<{ ok: true; modelKey: string }>;
+        start: (modelKey: string) => Promise<{ ok: true; port: number; reused: boolean }>;
+        stop: () => Promise<{ ok: true }>;
+        onProgress: (callback: (event: WhisperCppProgress) => void) => () => void;
+        onLog: (callback: (event: WhisperCppLogEntry) => void) => () => void;
       };
     };
   }

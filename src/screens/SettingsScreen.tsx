@@ -46,15 +46,15 @@ const SECTIONS: { key: Section; label: string }[] = [
 
 function whisperModelHint(modelId?: string) {
   switch (modelId) {
-    case "Xenova/whisper-tiny":
-      return "~40 MB · 最快，但中文准确率一般，适合英文 / 噪声小的素材。";
-    case "Xenova/whisper-small":
-      return "~250 MB · 中文较准，速度适中，常规拉片推荐。";
-    case "Xenova/whisper-medium":
-      return "~500 MB · 准确率高，速度慢，长视频耗时较多。";
-    case "Xenova/whisper-base":
+    case "ggml-tiny":
+      return "~75 MB · 最快,但中文准确率一般,适合英文 / 噪声小的素材。";
+    case "ggml-small":
+      return "~466 MB · 中文较准,速度适中,常规拉片推荐。";
+    case "ggml-medium":
+      return "~1.5 GB · 准确率高,速度慢,长视频耗时较多。";
+    case "ggml-base":
     default:
-      return "~75 MB · 默认选项，速度和准确率折中。";
+      return "~142 MB · 默认选项,速度和准确率折中。";
   }
 }
 
@@ -332,7 +332,7 @@ function SlotCard({
     ? providers.filter((p) =>
         p.models.some((m) => m.capabilities.includes("audio_transcription")) ||
         p.endpointType === "openai_audio_transcriptions" ||
-        p.endpointType === "local_whisper_wasm",
+        p.endpointType === "local_whisper_cpp",
       )
     : providers.filter((p) =>
         // 任意 model 满足 axis 要求即可:vision 槽需要至少一个 vision 能力 model;text 不限
@@ -349,7 +349,7 @@ function SlotCard({
         (m) =>
           m.capabilities.includes("audio_transcription") ||
           selectedProvider.endpointType === "openai_audio_transcriptions" ||
-          selectedProvider.endpointType === "local_whisper_wasm",
+          selectedProvider.endpointType === "local_whisper_cpp",
       );
     }
     if (meta.axis === "vision") {
@@ -551,18 +551,25 @@ function ProviderCard({
     setDraft(persisted);
   };
 
-  const isLocalWhisper = draft.endpointType === "local_whisper_wasm";
+  const isLocalWhisper = draft.endpointType === "local_whisper_cpp";
   const modelKey = isLocalWhisper ? draft.localWhisperModel || draft.model : null;
 
+  // 通过 whisperCpp.listModels 拿"已下载 + size"信息, 给按钮文案提供"已就绪 (XX MB)" / "下载并预热"
   useEffect(() => {
-    if (!isLocalWhisper || !modelKey || !window.videoAnalyzer) {
+    if (!isLocalWhisper || !modelKey || !window.videoAnalyzer?.whisperCpp) {
       setWhisperCache(null);
       return;
     }
     let cancelled = false;
     setWhisperCache(null);
-    window.videoAnalyzer.isWhisperModelCached(modelKey).then((res) => {
-      if (!cancelled) setWhisperCache(res);
+    window.videoAnalyzer.whisperCpp.listModels().then((models) => {
+      if (cancelled) return;
+      const target = models.find((m) => m.key === modelKey);
+      if (target) {
+        setWhisperCache({ cached: target.downloaded, sizeBytes: target.downloadedBytes });
+      } else {
+        setWhisperCache({ cached: false });
+      }
     }).catch(() => {
       if (!cancelled) setWhisperCache({ cached: false });
     });
@@ -578,9 +585,10 @@ function ProviderCard({
       if (window.videoAnalyzer) {
         const result = await window.videoAnalyzer.testProvider(draft);
         setTestResult(result);
-        if (isLocalWhisper && modelKey) {
-          const refreshed = await window.videoAnalyzer.isWhisperModelCached(modelKey).catch(() => null);
-          if (refreshed) setWhisperCache(refreshed);
+        if (isLocalWhisper && modelKey && window.videoAnalyzer.whisperCpp) {
+          const models = await window.videoAnalyzer.whisperCpp.listModels().catch(() => null);
+          const target = models?.find((m) => m.key === modelKey);
+          if (target) setWhisperCache({ cached: target.downloaded, sizeBytes: target.downloadedBytes });
         }
         return;
       }
@@ -626,12 +634,12 @@ function ProviderCard({
               内置
             </span>
           )}
-          {!persisted.builtin && persisted.endpointType === "local_whisper_wasm" && (
+          {!persisted.builtin && persisted.endpointType === "local_whisper_cpp" && (
             <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
               本地
             </span>
           )}
-          {!persisted.builtin && persisted.endpointType !== "local_whisper_wasm" && !persisted.apiKeyRef && (
+          {!persisted.builtin && persisted.endpointType !== "local_whisper_cpp" && !persisted.apiKeyRef && (
             <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
               缺 Key
             </span>
@@ -670,21 +678,21 @@ function ProviderCard({
           <Field
             label="模式"
             hint={
-              provider.endpointType === "local_whisper_wasm"
+              provider.endpointType === "local_whisper_cpp"
                 ? "首次使用会下载模型文件(40 – 500 MB),之后在本机离线运行。"
                 : "通过远端 API 转录,需要配 Base URL 和 API Key。"
             }
           >
             <Select
-              value={provider.endpointType === "local_whisper_wasm" ? "local_whisper_wasm" : "openai_audio_transcriptions"}
+              value={provider.endpointType === "local_whisper_cpp" ? "local_whisper_cpp" : "openai_audio_transcriptions"}
               onValueChange={(v) => {
                 const next = v as ModelProvider["endpointType"];
-                if (next === "local_whisper_wasm") {
+                if (next === "local_whisper_cpp") {
                   onUpdate({
                     endpointType: next,
-                    localWhisperModel: provider.localWhisperModel || "Xenova/whisper-base",
+                    localWhisperModel: provider.localWhisperModel || "ggml-base",
                     localWhisperMirror: provider.localWhisperMirror || "https://hf-mirror.com",
-                    model: provider.localWhisperModel || "Xenova/whisper-base",
+                    model: provider.localWhisperModel || "ggml-base",
                   });
                 } else {
                   onUpdate({ endpointType: next });
@@ -693,17 +701,17 @@ function ProviderCard({
             >
               <SelectTrigger className="w-[260px]">
                 <SelectValue>
-                  {provider.endpointType === "local_whisper_wasm" ? "本地" : "云端"}
+                  {provider.endpointType === "local_whisper_cpp" ? "本地" : "云端"}
                 </SelectValue>
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="local_whisper_wasm">本地</SelectItem>
+                <SelectItem value="local_whisper_cpp">本地</SelectItem>
                 <SelectItem value="openai_audio_transcriptions">云端</SelectItem>
               </SelectContent>
             </Select>
           </Field>
         )}
-        {provider.endpointType !== "local_whisper_wasm" && (
+        {provider.endpointType !== "local_whisper_cpp" && (
           <>
             <Field label="API Base URL">
               <Input
@@ -724,7 +732,7 @@ function ProviderCard({
             </Field>
           </>
         )}
-        {kind === "video" || provider.endpointType !== "local_whisper_wasm" ? (
+        {kind === "video" || provider.endpointType !== "local_whisper_cpp" ? (
           <Field label="模型名">
             <Input
               value={provider.model}
@@ -736,17 +744,17 @@ function ProviderCard({
         ) : (
           <Field label="本地模型" hint={whisperModelHint(provider.localWhisperModel)}>
             <Select
-              value={provider.localWhisperModel || "Xenova/whisper-base"}
+              value={provider.localWhisperModel || "ggml-base"}
               onValueChange={(v) => onUpdate({ localWhisperModel: v, model: v })}
             >
               <SelectTrigger className="w-[300px]">
-                <SelectValue>{provider.localWhisperModel || "Xenova/whisper-base"}</SelectValue>
+                <SelectValue>{provider.localWhisperModel || "ggml-base"}</SelectValue>
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="Xenova/whisper-tiny">whisper-tiny</SelectItem>
-                <SelectItem value="Xenova/whisper-base">whisper-base</SelectItem>
-                <SelectItem value="Xenova/whisper-small">whisper-small</SelectItem>
-                <SelectItem value="Xenova/whisper-medium">whisper-medium</SelectItem>
+                <SelectItem value="ggml-tiny">whisper-tiny</SelectItem>
+                <SelectItem value="ggml-base">whisper-base</SelectItem>
+                <SelectItem value="ggml-small">whisper-small</SelectItem>
+                <SelectItem value="ggml-medium">whisper-medium</SelectItem>
               </SelectContent>
             </Select>
           </Field>
@@ -804,7 +812,7 @@ function ProviderCard({
                 className="font-mono max-w-[160px]"
               />
             </Field>
-            {provider.endpointType === "local_whisper_wasm" && (
+            {provider.endpointType === "local_whisper_cpp" && (
               <Field label="HF 镜像">
                 <Input
                   value={provider.localWhisperMirror ?? "https://hf-mirror.com"}

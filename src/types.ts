@@ -15,7 +15,8 @@ export type ProviderEndpointType =
   | "openai_chat_completions"
   | "openai_responses"
   | "openai_audio_transcriptions"
-  | "local_whisper_wasm"
+  | "local_whisper_cpp"
+  | "local_whisper_wasm" // 老 config 残留,migrate 后会被改写为 local_whisper_cpp
   | "local_llama_server";
 
 export type ProviderModel = {

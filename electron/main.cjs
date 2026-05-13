@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, nativeImage, net, protocol, shell, utilityProcess } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, nativeImage, net, protocol, shell } = require("electron");
 const { execFile } = require("node:child_process");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
@@ -6,7 +6,9 @@ const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const { pathToFileURL } = require("node:url");
 const llamaRuntime = require("./llama-runtime.cjs");
+const whisperCppRuntime = require("./whisper-cpp-runtime.cjs");
 const prefilter = require("./prefilter.cjs");
+const { getTranscriber } = require("./transcribe/index.cjs");
 
 const REMOTE_DEBUG_PORT = process.env.VIDEO_ANALYZER_DEBUG_PORT || "";
 if (REMOTE_DEBUG_PORT) {
@@ -445,20 +447,22 @@ function migrateProviderV1(raw) {
   if (!raw || typeof raw !== "object") return null;
   // 已经是 v2 形态 (有 models 数组) 直接补 source 兜底
   if (Array.isArray(raw.models) && raw.models.length > 0) {
+    const localWhisperEndpoint =
+      raw.endpointType === "local_whisper_wasm" || raw.endpointType === "local_whisper_cpp";
     return {
       ...raw,
-      source: raw.source || (raw.endpointType === "local_whisper_wasm" ? "local_whisper" : "remote"),
+      source: raw.source || (localWhisperEndpoint ? "local_whisper" : "remote"),
     };
   }
   const endpointType = raw.endpointType || "openai_chat_completions";
-  const source =
-    endpointType === "local_whisper_wasm"
-      ? "local_whisper"
-      : endpointType === "local_llama_server"
-      ? "local_llama"
-      : "remote";
-  const isAudio =
-    endpointType === "openai_audio_transcriptions" || endpointType === "local_whisper_wasm";
+  const isLocalWhisper =
+    endpointType === "local_whisper_wasm" || endpointType === "local_whisper_cpp";
+  const source = isLocalWhisper
+    ? "local_whisper"
+    : endpointType === "local_llama_server"
+    ? "local_llama"
+    : "remote";
+  const isAudio = endpointType === "openai_audio_transcriptions" || isLocalWhisper;
   const capabilities = isAudio ? ["audio_transcription", "fast"] : ["vision", "reasoning"];
   const modelId = raw.model || raw.id;
   const model = {
@@ -518,14 +522,18 @@ function buildBuiltinLocalLlamaProvider() {
   };
 }
 
-// builtin local_whisper: 内置本地 whisper.cpp WASM provider,几档常见 whisper size
+// builtin local_whisper: 内置 whisper.cpp + ggml 模型 provider。
+// 每次 loadConfig 都强制重写,把旧 transformers.js (Xenova/whisper-*) 配置自然替换掉。
 function buildBuiltinLocalWhisperProvider() {
-  const models = [
-    { id: "Xenova/whisper-tiny", label: "Whisper Tiny (~40MB)", capabilities: ["audio_transcription", "fast"], localWhisperModel: "Xenova/whisper-tiny", localWhisperMirror: "https://hf-mirror.com", language: "zh" },
-    { id: "Xenova/whisper-base", label: "Whisper Base (~75MB)", capabilities: ["audio_transcription", "fast"], localWhisperModel: "Xenova/whisper-base", localWhisperMirror: "https://hf-mirror.com", language: "zh" },
-    { id: "Xenova/whisper-small", label: "Whisper Small (~250MB)", capabilities: ["audio_transcription"], localWhisperModel: "Xenova/whisper-small", localWhisperMirror: "https://hf-mirror.com", language: "zh" },
-    { id: "Xenova/whisper-medium", label: "Whisper Medium (~500MB)", capabilities: ["audio_transcription"], localWhisperModel: "Xenova/whisper-medium", localWhisperMirror: "https://hf-mirror.com", language: "zh" },
-  ];
+  const FAST_KEYS = new Set(["ggml-tiny", "ggml-base"]);
+  const models = Object.values(whisperCppRuntime.MODELS).map((meta) => ({
+    id: meta.key,
+    label: meta.name,
+    capabilities: FAST_KEYS.has(meta.key)
+      ? ["audio_transcription", "fast"]
+      : ["audio_transcription"],
+    language: "zh",
+  }));
   return {
     id: "builtin-local-whisper",
     name: "本地音频识别",
@@ -533,14 +541,12 @@ function buildBuiltinLocalWhisperProvider() {
     builtin: true,
     baseUrl: "",
     apiKeyRef: "",
-    endpointType: "local_whisper_wasm",
+    endpointType: "local_whisper_cpp",
     inputMode: "keyframe_sequence",
     models,
     // 保留 deprecated 字段供旧 audio 路径读取
-    model: "Xenova/whisper-base",
+    model: "ggml-base",
     kind: "audio",
-    localWhisperModel: "Xenova/whisper-base",
-    localWhisperMirror: "https://hf-mirror.com",
     language: "zh",
   };
 }
@@ -630,6 +636,30 @@ function migrateConfigV1ToV2(raw) {
       taskSlots[k] = cfg.taskSlots[k] || null;
     }
     audioSlot = cfg.audioSlot || null;
+
+    // builtin provider 重新注入后, audioSlot.modelId 可能指向已下线的 model id
+    // (典型: 从 transformers.js 时代的 Xenova/whisper-* 升到 whisper.cpp 的 ggml-*)。
+    // 兜底: 优先做 Xenova → ggml 映射, 否则落到 provider.models[0]。
+    if (audioSlot?.providerId && audioSlot?.modelId) {
+      const audioProv = providers.find((p) => p.id === audioSlot.providerId);
+      if (audioProv) {
+        const modelOk = audioProv.models.some((m) => m.id === audioSlot.modelId);
+        if (!modelOk) {
+          const xenovaToGgml = {
+            "Xenova/whisper-tiny": "ggml-tiny",
+            "Xenova/whisper-base": "ggml-base",
+            "Xenova/whisper-small": "ggml-small",
+            "Xenova/whisper-medium": "ggml-medium",
+          };
+          const mapped = xenovaToGgml[audioSlot.modelId];
+          const fallback =
+            (mapped && audioProv.models.find((m) => m.id === mapped)?.id) ||
+            audioProv.models[0]?.id ||
+            null;
+          if (fallback) audioSlot = { providerId: audioSlot.providerId, modelId: fallback };
+        }
+      }
+    }
   } else {
     // v1: 用 activeVideoProviderId/activeAudioProviderId 推 default 槽位
     const videoProviderId = cfg.activeVideoProviderId || null;
@@ -639,7 +669,10 @@ function migrateConfigV1ToV2(raw) {
     const videoProvider = videoProviderId ? findProvider(videoProviderId) : null;
     let audioProvider = audioProviderId ? findProvider(audioProviderId) : null;
     // local-whisper 旧 id 已被剔除,迁移到 builtin-local-whisper
-    if (!audioProvider && (audioProviderId === "local-whisper" || rawAudioProvider?.endpointType === "local_whisper_wasm")) {
+    const wasLocalWhisper =
+      rawAudioProvider?.endpointType === "local_whisper_wasm" ||
+      rawAudioProvider?.endpointType === "local_whisper_cpp";
+    if (!audioProvider && (audioProviderId === "local-whisper" || wasLocalWhisper)) {
       audioProvider = findProvider("builtin-local-whisper");
     }
 
@@ -657,15 +690,23 @@ function migrateConfigV1ToV2(raw) {
     taskSlots.complex_text = complexVisionSlot;
 
     if (audioProvider) {
-      // 优先用旧 provider 的 model id 在新 provider.models 里匹配
+      // 优先用旧 provider 的 model id 在新 provider.models 里匹配。
+      // transformers.js 时代的 Xenova/whisper-* → whisper.cpp 时代的 ggml-* 映射。
       const oldModelId = rawAudioProvider?.localWhisperModel || rawAudioProvider?.model || null;
-      const match = oldModelId && audioProvider.models.find((m) => m.id === oldModelId);
+      const xenovaToGgml = {
+        "Xenova/whisper-tiny": "ggml-tiny",
+        "Xenova/whisper-base": "ggml-base",
+        "Xenova/whisper-small": "ggml-small",
+        "Xenova/whisper-medium": "ggml-medium",
+      };
+      const mapped = oldModelId ? xenovaToGgml[oldModelId] || oldModelId : null;
+      const match = mapped && audioProvider.models.find((m) => m.id === mapped);
       audioSlot = {
         providerId: audioProvider.id,
         modelId: match?.id || audioProvider.models[0]?.id,
       };
     } else {
-      audioSlot = { providerId: "builtin-local-whisper", modelId: "Xenova/whisper-base" };
+      audioSlot = { providerId: "builtin-local-whisper", modelId: "ggml-base" };
     }
   }
 
@@ -1678,8 +1719,13 @@ async function extractAudioWav(ffmpeg, inputPath, outputPath, handle) {
 
 async function transcribeAudio(audioProvider, wavPath, handle, onProgress) {
   if (!audioProvider) return null;
-  if (audioProvider.endpointType === "local_whisper_wasm") {
-    return transcribeLocalWhisper(audioProvider, wavPath, handle, onProgress);
+  // local_whisper_wasm 是老 schema 残留, 与新 local_whisper_cpp 都走 whisper.cpp 后端
+  if (
+    audioProvider.endpointType === "local_whisper_cpp" ||
+    audioProvider.endpointType === "local_whisper_wasm" ||
+    audioProvider.source === "local_whisper"
+  ) {
+    return transcribeLocalWhisperCpp(audioProvider, wavPath, handle, onProgress);
   }
   if (!audioProvider.baseUrl || !audioProvider.apiKeyRef || !audioProvider.model) {
     return null;
@@ -1715,96 +1761,64 @@ async function transcribeAudio(audioProvider, wavPath, handle, onProgress) {
   };
 }
 
-// whisper 推理跑在独立 utilityProcess 里，崩溃不会拖垮主进程。
-// 每次任务 spawn 一个 worker，收到 result/error 后 kill。
-function runWhisperWorker({ type, payload, onProgress, handle }) {
-  return new Promise((resolve, reject) => {
-    const workerPath = path.join(__dirname, "whisper-worker.cjs");
-    if (!fsSync.existsSync(workerPath)) {
-      reject(new Error(`worker 脚本不存在: ${workerPath}`));
-      return;
-    }
-    const child = utilityProcess.fork(workerPath, [], {
-      serviceName: "whisper-asr",
-      stdio: "pipe",
-      env: {
-        ...process.env,
-        HTTPS_PROXY: process.env.HTTPS_PROXY || process.env.https_proxy || "",
-        HTTP_PROXY: process.env.HTTP_PROXY || process.env.http_proxy || "",
-      },
-    });
-
-    if (child.stdout) child.stdout.on("data", (chunk) => console.log("[whisper]", chunk.toString().trimEnd()));
-    if (child.stderr) child.stderr.on("data", (chunk) => console.error("[whisper]", chunk.toString().trimEnd()));
-
-    let settled = false;
-    let cancelWatcher = null;
-    const requestId = `req-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-
-    const finish = (fn) => {
-      if (settled) return;
-      settled = true;
-      if (cancelWatcher) clearInterval(cancelWatcher);
-      try { child.kill(); } catch { /* ignore */ }
-      fn();
-    };
-
-    child.on("message", (msg) => {
-      if (!msg || typeof msg !== "object") return;
-      if (msg.type === "ready") {
-        child.postMessage({ type, requestId, payload });
-      } else if (msg.type === "progress") {
-        if (onProgress) onProgress({ stage: msg.stage, message: msg.message });
-      } else if (msg.type === "result") {
-        finish(() => resolve(msg));
-      } else if (msg.type === "error" || msg.type === "fatal") {
-        finish(() => reject(new Error(msg.message || "whisper worker error")));
-      }
-    });
-
-    child.on("exit", (code) => {
-      if (settled) return;
-      settled = true;
-      if (cancelWatcher) clearInterval(cancelWatcher);
-      reject(new Error(`whisper worker 退出 (code=${code})`));
-    });
-
-    if (handle) {
-      cancelWatcher = setInterval(() => {
-        if (handle.cancelled) finish(() => reject(new Error("cancelled")));
-      }, 200);
-    }
-  });
+// 把任意旧/新 modelId 规范化成 whisper.cpp 的 ggml-* key。
+// 老 Xenova/whisper-* 配置在 migrate 时已经被改写, 这里是双保险。
+function normalizeWhisperCppModelId(rawId) {
+  if (!rawId) return "ggml-base";
+  const xenovaMap = {
+    "Xenova/whisper-tiny": "ggml-tiny",
+    "Xenova/whisper-base": "ggml-base",
+    "Xenova/whisper-small": "ggml-small",
+    "Xenova/whisper-medium": "ggml-medium",
+  };
+  return xenovaMap[rawId] || rawId;
 }
 
-async function transcribeLocalWhisper(audioProvider, wavPath, handle, onProgress) {
-  const modelId = audioProvider.localWhisperModel || audioProvider.model || "Xenova/whisper-base";
-  const mirror = audioProvider.localWhisperMirror || "https://hf-mirror.com";
-  const cacheDir = path.join(app.getPath("userData"), "whisper-cache");
-  const result = await runWhisperWorker({
-    type: "transcribe",
-    payload: {
-      wavPath,
-      modelId,
-      mirror,
-      cacheDir,
-      language: audioProvider.language || null,
-    },
+async function transcribeLocalWhisperCpp(audioProvider, wavPath, handle, onProgress) {
+  const modelId = normalizeWhisperCppModelId(
+    audioProvider.localWhisperModel || audioProvider.model,
+  );
+  // 没下过模型就先下
+  const status = await whisperCppRuntime.listModels();
+  const target = status.find((m) => m.key === modelId);
+  if (!target) throw new Error(`未知 whisper.cpp 模型: ${modelId}`);
+  if (!target.downloaded) {
+    if (onProgress) onProgress({ stage: "download", message: `${target.name} 首次使用,下载模型中` });
+    await whisperCppRuntime.ensureModel(modelId, (p) => {
+      if (p.percent != null && onProgress) {
+        onProgress({ stage: "download", message: p.message });
+      }
+    });
+  }
+  const transcriber = getTranscriber("whisper_cpp");
+  return transcriber.transcribe({
+    wavPath,
+    modelId,
+    language: audioProvider.language || null,
     onProgress,
     handle,
   });
-  return result.transcript;
 }
 
-async function warmupLocalWhisper(audioProvider) {
-  const modelId = audioProvider.localWhisperModel || audioProvider.model || "Xenova/whisper-base";
-  const mirror = audioProvider.localWhisperMirror || "https://hf-mirror.com";
-  const cacheDir = path.join(app.getPath("userData"), "whisper-cache");
-  const result = await runWhisperWorker({
-    type: "warmup",
-    payload: { modelId, mirror, cacheDir },
-  });
-  return result.warmup;
+async function warmupLocalWhisperCpp(audioProvider) {
+  const modelId = normalizeWhisperCppModelId(
+    audioProvider.localWhisperModel || audioProvider.model,
+  );
+  const t0 = Date.now();
+  // ensureBinary 不存在 → 提示开发者跑 build script
+  if (!whisperCppRuntime.resolveBinaryPath()) {
+    throw new Error(
+      "找不到 whisper-server 可执行文件,请先运行 scripts/build-whisper-cpp.sh 编译。",
+    );
+  }
+  const models = await whisperCppRuntime.listModels();
+  const target = models.find((m) => m.key === modelId);
+  if (!target) throw new Error(`未知 whisper.cpp 模型: ${modelId}`);
+  if (!target.downloaded) {
+    await whisperCppRuntime.ensureModel(modelId);
+  }
+  await whisperCppRuntime.start(modelId);
+  return { modelId, elapsedMs: Date.now() - t0 };
 }
 
 async function analyzeProject(event, { project, provider: _legacyProvider, audioProvider: _legacyAudio, options }) {
@@ -2033,7 +2047,10 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     let transcript = null;
     let transcriptError = null;
     const audioReady = audioProvider && inspected.hasAudio && (
-      audioProvider.endpointType === "local_whisper_wasm" || audioProvider.apiKeyRef
+      audioProvider.source === "local_whisper" ||
+      audioProvider.endpointType === "local_whisper_cpp" ||
+      audioProvider.endpointType === "local_whisper_wasm" ||
+      audioProvider.apiKeyRef
     );
     if (audioReady) {
       try {
@@ -2521,50 +2538,21 @@ app.whenReady().then(async () => {
     return { canceled: false, filePath: result.filePath };
   });
 
-  ipcMain.handle("whisper:isModelCached", async (_event, modelId) => {
-    if (!modelId || typeof modelId !== "string") return { cached: false };
-    const cacheDir = path.join(app.getPath("userData"), "whisper-cache");
-    const modelDir = path.join(cacheDir, modelId);
-    try {
-      const entries = await fs.readdir(modelDir, { withFileTypes: true });
-      // 至少要有 onnx 子目录或 model.onnx 文件，且有 config.json
-      let hasConfig = false;
-      let hasOnnx = false;
-      for (const entry of entries) {
-        if (entry.name === "config.json") hasConfig = true;
-        if (entry.name === "onnx") {
-          const onnxFiles = await fs.readdir(path.join(modelDir, entry.name)).catch(() => []);
-          if (onnxFiles.some((f) => f.endsWith(".onnx") || f.endsWith(".onnx_data"))) hasOnnx = true;
-        }
-        if (entry.name.endsWith(".onnx")) hasOnnx = true;
-      }
-      if (!hasConfig || !hasOnnx) return { cached: false };
-      let totalBytes = 0;
-      async function walk(p) {
-        const items = await fs.readdir(p, { withFileTypes: true }).catch(() => []);
-        for (const i of items) {
-          const full = path.join(p, i.name);
-          if (i.isDirectory()) await walk(full);
-          else if (i.isFile()) {
-            const stat = await fs.stat(full).catch(() => null);
-            if (stat) totalBytes += stat.size;
-          }
-        }
-      }
-      await walk(modelDir);
-      return { cached: true, sizeBytes: totalBytes };
-    } catch {
-      return { cached: false };
-    }
-  });
-
   ipcMain.handle("provider:testConnection", async (_event, provider) => {
-    if (provider?.endpointType === "local_whisper_wasm") {
-      const modelId = provider.localWhisperModel || provider.model || "Xenova/whisper-base";
+    if (
+      provider?.endpointType === "local_whisper_cpp" ||
+      provider?.endpointType === "local_whisper_wasm" ||
+      provider?.source === "local_whisper"
+    ) {
+      const modelId = normalizeWhisperCppModelId(
+        provider.localWhisperModel || provider.model,
+      );
       try {
-        const t0 = Date.now();
-        await warmupLocalWhisper(provider);
-        return { ok: true, message: `本地模型 ${modelId} 已就绪 (${((Date.now() - t0) / 1000).toFixed(1)}s)。` };
+        const result = await warmupLocalWhisperCpp(provider);
+        return {
+          ok: true,
+          message: `本地模型 ${modelId} 已就绪 (${(result.elapsedMs / 1000).toFixed(1)}s)。`,
+        };
       } catch (error) {
         return { ok: false, message: `本地模型加载失败: ${error?.message || error}` };
       }
@@ -2714,6 +2702,7 @@ app.whenReady().then(async () => {
   });
 
   await llamaRuntime.init();
+  await whisperCppRuntime.init();
 
   ipcMain.handle("llama:listModels", async () => llamaRuntime.listModels());
 
@@ -2752,6 +2741,29 @@ app.whenReady().then(async () => {
   ipcMain.handle("llama:selfTest", async (_event, payload) => {
     return llamaRuntime.selfTest(payload || {});
   });
+
+  // whisper.cpp runtime IPC ----------------------------------------------------
+  ipcMain.handle("whisperCpp:listModels", async () => whisperCppRuntime.listModels());
+
+  ipcMain.handle("whisperCpp:getStatus", async () => whisperCppRuntime.getStatus());
+
+  ipcMain.handle("whisperCpp:ensureModel", async (event, modelKey) => {
+    return whisperCppRuntime.ensureModel(modelKey, (progress) => {
+      event.sender.send("whisperCpp:progress", { scope: "model", modelKey, ...progress });
+    });
+  });
+
+  ipcMain.handle("whisperCpp:start", async (event, modelKey) => {
+    return whisperCppRuntime.start(modelKey, {
+      onLog: (entry) => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send("whisperCpp:log", entry);
+        }
+      },
+    });
+  });
+
+  ipcMain.handle("whisperCpp:stop", async () => whisperCppRuntime.stop());
 
   await createWindow();
 
@@ -2836,6 +2848,7 @@ function scheduleYtDlpAutoCheck() {
 
 app.on("before-quit", () => {
   llamaRuntime.shutdownSync();
+  whisperCppRuntime.shutdownSync();
 });
 
 app.on("window-all-closed", () => {
