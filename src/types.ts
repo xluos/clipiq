@@ -187,6 +187,7 @@ export type PrefilterTag = {
   salience: number;      // 0-10,信息量
   isEmpty: boolean;
   signature: string;     // 3-5 汉字概括,用于 dedup
+  caption?: string;      // 一句话画面描述(≤30 汉字),给下游 shot 合并 / 节点详情用
 };
 
 export type AnalysisNode = {

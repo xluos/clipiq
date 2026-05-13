@@ -818,23 +818,43 @@ async function inspectVideo(filePath, handle = null) {
   };
 }
 
-// 精筛后(送远端)的目标帧数。受 token 预算约束,跟之前一致。
+// 用户接受的本地初筛 (prefilter) 时间预算 (秒), 按 density 档分级。
+// candidateCount 由此推回, 而不是写死的帧数 —— 长视频自然扩张, 短视频不变,
+// prefilter 时间被 budget 而非帧数硬顶。
+const PREFILTER_BUDGET_SEC = {
+  sparse: 30,
+  standard: 60,
+  dense: 120,
+};
+// 本地初筛单帧推理时间 (Qwen3.5-0.8B @ Apple Silicon Metal 实测 ~1.1s)。
+// 后续可以改成基于 prefilterStats 滚动 EMA, 自适应不同模型 / 机器。
+const PREFILTER_PER_FRAME_MS = 1100;
+
+// 精筛后(送时间轴 + 主分析)的目标帧/节点数。
+// 旧版死 cap 32, 长视频节点密度 ≤ 1/min 体感跳; 改成跟时长线性,
+// 让 30min 视频也能产 100+ 节点骨架 (主分析帧数另由 token budget 限制, 见 callOpenAICompatible)。
 function targetFrameCount(durationSec, options) {
   const density = options?.density || "standard";
   const mode = options?.mode || "standard";
-  // base "frames per minute" 启发，参考 OpenSceneSense 的 fps_per_minute=4
   const base = density === "dense" ? 6 : density === "sparse" ? 2 : 4;
   const detailBoost = mode === "detailed" ? 1 : mode === "quick" ? -1 : 0;
-  const target = Math.round((durationSec / 60) * (base + detailBoost));
-  return Math.max(6, Math.min(32, target));
+  const durationMin = Math.max(0.5, durationSec / 60);
+  const target = Math.round(durationMin * (base + detailBoost));
+  // 上限不死 cap 32, 跟时长走但有合理上限 (4 节点/分钟做基础密度)。
+  const upper = Math.max(32, Math.round(durationMin * 4));
+  return Math.max(6, Math.min(upper, target));
 }
 
-// 候选抽帧数。本地初筛 ready 时多抽,给初筛更多选材。
+// 候选抽帧数。本地初筛 ready 时多抽, 给初筛更多选材。
+// 旧版死 cap 30 长视频被压扁; 改成 budget driven, 仍保 ≥ finalCount + 8 留去重空间。
 function candidateFrameCount(durationSec, options, hasLocalPrefilter) {
   const finalCount = targetFrameCount(durationSec, options);
   if (!hasLocalPrefilter) return finalCount;
-  const expanded = Math.round(finalCount * 2.5);
-  return Math.max(finalCount, Math.min(30, expanded));
+  const density = options?.density || "standard";
+  const budgetSec = PREFILTER_BUDGET_SEC[density] ?? PREFILTER_BUDGET_SEC.standard;
+  const capByBudget = Math.floor((budgetSec * 1000) / PREFILTER_PER_FRAME_MS);
+  const desired = Math.max(Math.round(finalCount * 2.5), finalCount + 8);
+  return Math.max(finalCount, Math.min(desired, capByBudget));
 }
 
 function sceneThresholdFor(options) {

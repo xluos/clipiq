@@ -24,8 +24,9 @@ const PREFILTER_SCHEMA = {
     salience: { type: "integer", minimum: 0, maximum: 10 },
     isEmpty: { type: "boolean" },
     signature: { type: "string", maxLength: 24 },
+    caption: { type: "string", maxLength: 90 },
   },
-  required: ["sceneType", "subject", "hasText", "salience", "isEmpty", "signature"],
+  required: ["sceneType", "subject", "hasText", "salience", "isEmpty", "signature", "caption"],
   additionalProperties: false,
 };
 
@@ -37,6 +38,7 @@ const SYSTEM_PROMPT =
   "- salience: 信息量打分 0-10。**画面里只要有人/物/场景主体,至少给 5 分**;9-10 留给主体非常突出、动作或表情明确、构图有讲究的关键画面。\n" +
   "- isEmpty: **仅当画面是纯黑屏/纯白屏/无明显主体的过场色块时填 true**;只要看得见人或物就一律 false。\n" +
   "- signature: 3-5 个汉字精炼概括(用主体+地点),例:海边背包 / 山顶日出 / 早餐桌。避免太宽的词如'户外''室内'。\n" +
+  "- caption: 一句话描述这张画面(≤30 汉字),重点说\"主体在做什么\" + \"画面氛围或镜头角度\"。不要复述 sceneType/subject 已有的字段,要写出运动 / 动作 / 神态 / 构图等增量信息(例:女生背包面带笑意走过石板路 / 俯拍 桌上摆满甜品和咖啡)。\n" +
   "不要思考过程,直接输出 JSON。";
 
 const USER_PROMPT_TEXT =
@@ -50,6 +52,7 @@ function neutralTag(reason) {
     salience: 5,
     isEmpty: false,
     signature: "未识别",
+    caption: "",
     _error: reason,
   };
 }
@@ -89,7 +92,10 @@ function sanitizeTag(raw) {
   const signature = typeof raw.signature === "string" && raw.signature.trim()
     ? raw.signature.trim().slice(0, 24)
     : subject;
-  return { sceneType, subject, hasText, salience, isEmpty, signature };
+  const caption = typeof raw.caption === "string" && raw.caption.trim()
+    ? raw.caption.trim().slice(0, 90)
+    : "";
+  return { sceneType, subject, hasText, salience, isEmpty, signature, caption };
 }
 
 async function tagOneFrame(port, imagePath, modelKey, signal) {
@@ -110,7 +116,10 @@ async function tagOneFrame(port, imagePath, modelKey, signal) {
         ],
       },
     ],
-    max_tokens: 120,
+    // 输出预算: 6 字段 tag (~70 token) + caption ≤30 汉字 (~60 token) + JSON 结构 (~20 token) ≈ 150 token, 2x buffer。
+    // 必须配合 enable_thinking: false; 不关 thinking 会把 budget 烧在 <think>...</think> 段上 content 为空,
+    // 兜底走 neutralTag。json_schema strict:true 在 llama-server 端会翻译成 GBNF grammar 提前 stop, 不会浪费 budget。
+    max_tokens: 280,
     temperature: 0.1,
     response_format: {
       type: "json_schema",
