@@ -4,6 +4,7 @@ import { FolderOpen, CloudDownload, UploadCloud, CheckCircle2, Clock, XCircle, F
 import { type ChangeEvent, type DragEvent, type MouseEvent, useRef, useState } from "react";
 import type { InspectedVideo } from "../electron-api";
 import { BrandLogo } from "../components/BrandLogo";
+import { useConfirm } from "../components/ConfirmDialog";
 
 function formatDate(date: Date) {
   const diffMs = Date.now() - date.getTime();
@@ -22,13 +23,20 @@ function formatDate(date: Date) {
 
 export function HomeScreen() {
   const { setCurrentScreen, projects, setActiveProjectId, setProjects, removeProject } = useApp();
+  const confirm = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [dropError, setDropError] = useState<string>("");
 
-  const handleDelete = (event: MouseEvent<HTMLButtonElement>, projectId: string) => {
+  const handleDelete = async (event: MouseEvent<HTMLButtonElement>, projectId: string) => {
     event.stopPropagation();
-    if (!window.confirm("确定要删除这个项目吗？该项目的分析结果也会从应用记录中移除。")) return;
+    const ok = await confirm({
+      title: "删除项目",
+      description: "确定要删除这个项目吗?项目的分析结果会从应用记录中一并移除。",
+      confirmLabel: "删除",
+      destructive: true,
+    });
+    if (!ok) return;
     removeProject(projectId);
   };
 

@@ -1,4 +1,5 @@
 import { useApp } from "../AppContext";
+import { useConfirm } from "../components/ConfirmDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -140,6 +141,7 @@ function ProvidersSection() {
     activeAudioProviderId,
     setActiveAudioProviderId,
   } = useApp();
+  const confirm = useConfirm();
 
   const videoProviders = useMemo(() => providers.filter((p) => p.kind === "video"), [providers]);
   const audioProviders = useMemo(() => providers.filter((p) => p.kind === "audio"), [providers]);
@@ -195,10 +197,16 @@ function ProvidersSection() {
     setProviders((prev) => [...prev, draft]);
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     const p = providers.find((x) => x.id === id);
     if (!p) return;
-    if (!window.confirm(`确定删除「${p.name}」？`)) return;
+    const ok = await confirm({
+      title: "删除供应商",
+      description: `确定删除「${p.name}」?这个供应商配置将从应用中移除。`,
+      confirmLabel: "删除",
+      destructive: true,
+    });
+    if (!ok) return;
     setProviders((prev) => prev.filter((x) => x.id !== id));
     if (activeVideoProviderId === id) {
       const next = providers.find((x) => x.kind === "video" && x.id !== id);
@@ -1337,6 +1345,7 @@ function AnalysisDefaultsSection() {
 
 function DataSection() {
   const { projects } = useApp();
+  const confirm = useConfirm();
   const [info, setInfo] = useState<{
     userDataPath: string;
     projectsPath: string;
@@ -1369,7 +1378,13 @@ function DataSection() {
   };
   const handlePurge = async () => {
     if (!window.videoAnalyzer) return;
-    if (!window.confirm(`确定清空 ${info?.projectCount ?? 0} 个项目的本地文件？此操作不可恢复，但应用内的项目列表需要手动删除。`)) return;
+    const ok = await confirm({
+      title: "清空本地项目数据",
+      description: `确定清空 ${info?.projectCount ?? 0} 个项目的本地文件?此操作不可恢复;应用内的项目列表需要单独从首页删除。`,
+      confirmLabel: "清空",
+      destructive: true,
+    });
+    if (!ok) return;
     setPurging(true);
     setStatusMessage("");
     try {
