@@ -8,6 +8,8 @@ const { pathToFileURL } = require("node:url");
 const llamaRuntime = require("./llama-runtime.cjs");
 const whisperCppRuntime = require("./whisper-cpp-runtime.cjs");
 const prefilter = require("./prefilter.cjs");
+const shotMerger = require("./shot-merger.cjs");
+const summarizer = require("./summarizer.cjs");
 const { getTranscriber } = require("./transcribe/index.cjs");
 
 const REMOTE_DEBUG_PORT = process.env.VIDEO_ANALYZER_DEBUG_PORT || "";
@@ -1075,6 +1077,94 @@ async function extractFrame(ffmpeg, inputPath, outputPath, second, width = 420, 
   ], {}, handle);
 }
 
+// PR2 金字塔管线: 把 shots 里的 representativeFrameIndex / frames / subtitleSegments
+// 按时间区间 overlap 匹配, 挂到大模型出的 nodes 上, 让 UI 能渲染镜头级 evidence。
+function attachShotEvidenceToNodes(nodes, shots) {
+  if (!Array.isArray(nodes) || !Array.isArray(shots)) return;
+  for (const node of nodes) {
+    const ns = Number(node.startSec);
+    const ne = Number(node.endSec);
+    if (!Number.isFinite(ns) || !Number.isFinite(ne)) continue;
+    // 找时间区间 overlap 最大的 shot
+    let best = null;
+    let bestOverlap = 0;
+    for (const s of shots) {
+      const overlap = Math.max(0, Math.min(s.endSec, ne) - Math.max(s.startSec, ns));
+      if (overlap > bestOverlap) {
+        best = s;
+        bestOverlap = overlap;
+      }
+    }
+    if (!best) continue;
+
+    const toFrameCtx = (f) => ({
+      thumbnailUrl: createMediaUrl(f.framePath),
+      framePath: f.framePath,
+      midSec: f.midSec,
+      caption: f.prefilterTag?.caption,
+      salience: f.prefilterTag?.salience,
+      signature: f.prefilterTag?.signature,
+    });
+    const repIdxs = Array.isArray(best.representativeFrameIndex) ? best.representativeFrameIndex : [];
+    const repFrames = repIdxs
+      .map((i) => best.frames[i])
+      .filter(Boolean)
+      .map(toFrameCtx);
+    if (repFrames.length > 0) node.representativeFrames = repFrames;
+    if (Array.isArray(best.frames) && best.frames.length > 0) {
+      node.framesInShot = best.frames.map(toFrameCtx);
+    }
+    if (Array.isArray(best.subtitleSegments) && best.subtitleSegments.length > 0) {
+      node.subtitleSegments = best.subtitleSegments.map((s) => ({
+        start: Number(s.start) || 0,
+        end: Number(s.end) || 0,
+        text: String(s.text || ""),
+      }));
+    }
+    // 用 shot 内代表帧 / 第一帧的 prefilterTag 覆盖按 fallbackNodes[index] 兜底挂错位的 tag
+    // (主分析切的节点数跟 frames 不是 1:1, 旧逻辑 fallbackNodes[index] 会把 frame[0] 的 caption
+    // 错挂到 node[0] 上, 即使该 frame 时间上不在 node[0] 区间内)
+    const sourceFrame = best.frames[repIdxs[0]] || best.frames[0];
+    if (sourceFrame?.prefilterTag) {
+      node.prefilterTag = sourceFrame.prefilterTag;
+    }
+  }
+}
+
+// PR2 金字塔管线: 把精筛后的 frames + scenes + transcript 切成"镜头" 单元,
+// 喂给 shot-merger 做合并。scenes 已经是相邻切换时间戳。
+// 边界处理: 短于 0.4s 的极短 shot 跳过 (跟 planFramePlan 一致); 落到 shot 区间外的
+// frame (理论上不该发生, dHash 跳过或边界四舍五入误差) 不参与, 由 fallback 兜底。
+function buildShotsFromFrames(frames, scenes, durationSec, transcriptSegments) {
+  const safeDuration = Math.max(durationSec || 0, 1);
+  const sorted = [...new Set(scenes || [])].filter((t) => Number.isFinite(t) && t < safeDuration).sort((a, b) => a - b);
+  if (sorted.length === 0 || sorted[0] > 0.5) sorted.unshift(0);
+
+  const shots = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const start = sorted[i];
+    const end = sorted[i + 1] ?? safeDuration;
+    if (end - start < 0.4) continue;
+    const shotFrames = (frames || []).filter((f) => {
+      const m = Number(f.midSec);
+      return Number.isFinite(m) && m >= start && m < end;
+    });
+    const subSegs = Array.isArray(transcriptSegments)
+      ? transcriptSegments.filter((s) => Number(s.end) > start && Number(s.start) < end)
+      : [];
+    const subtitleText = subSegs.map((s) => String(s.text || "").trim()).filter(Boolean).join(" ");
+    shots.push({
+      shotIndex: shots.length,
+      startSec: start,
+      endSec: end,
+      frames: shotFrames,
+      subtitleText,
+      subtitleSegments: subSegs,
+    });
+  }
+  return shots;
+}
+
 // 仅当模型未返回结果时用作骨架节点；不再用位置百分比硬编码语义。
 function localNodeForSegment(segment, project, frameUrl, transcriptSegments) {
   const id = segment.index + 1;
@@ -1424,9 +1514,12 @@ async function buildAnalysisPrompt(project, frames, transcript, scenes, options)
     "综合关注叙事结构、剪辑节奏、情绪曲线和画面信息。";
   const modeHint = options?.mode === "detailed" ? "拆解到尽可能细的镜头级。" : options?.mode === "quick" ? "只覆盖关键节点，不要面面俱到。" : "覆盖主要剪辑节点。";
 
-  const frameDescriptions = frames.map((f, i) =>
-    `#${i + 1}  t=${f.midSec.toFixed(1)}s  范围 ${f.startSec.toFixed(1)}-${f.endSec.toFixed(1)}s`
-  ).join("\n");
+  const frameDescriptions = frames.map((f, i) => {
+    const cap = f.prefilterTag?.caption?.trim();
+    const tag = f.prefilterTag?.signature?.trim();
+    const meta = cap ? `  画面: ${cap}` : tag ? `  签名: ${tag}` : "";
+    return `#${i + 1}  t=${f.midSec.toFixed(1)}s  范围 ${f.startSec.toFixed(1)}-${f.endSec.toFixed(1)}s${meta ? "\n" + meta : ""}`;
+  }).join("\n");
 
   const shots = buildShotListFromScenes(scenes, project.durationSec, frames);
   const shotStats = computeShotStats(shots, project.durationSec);
@@ -1436,12 +1529,43 @@ async function buildAnalysisPrompt(project, frames, transcript, scenes, options)
 
   const methodology = await buildMethodologyContext(project.durationSec, options?.manualGenre, options?.detectedGenre);
 
+  // 金字塔管线上下文 (PR2): 如果中间层 (shot-merger + summarizer) 已经把镜头/全局都合并好,
+  // 把这些"已知 evidence"喂给大模型, 让它做评审而不是从零看视频。
+  const pyramidBlock = (() => {
+    const lines = [];
+    if (options?.globalSummary) {
+      lines.push("# 中间层产出 - 全局摘要");
+      lines.push(options.globalSummary);
+      if (options?.structureHint) {
+        lines.push("");
+        lines.push("中间层提供的结构线索 (供参考, 不一定准, 你要自己判断):");
+        if (options.structureHint.hook) lines.push(`  开场 hook: ${options.structureHint.hook}`);
+        if (options.structureHint.climax) lines.push(`  高潮: ${options.structureHint.climax}`);
+        if (options.structureHint.ending) lines.push(`  结尾: ${options.structureHint.ending}`);
+      }
+    }
+    if (Array.isArray(options?.shotContexts) && options.shotContexts.length > 0) {
+      lines.push("");
+      lines.push("# 中间层产出 - 镜头级描述 (medium 模型合并 帧 caption + 字幕)");
+      lines.push("以下镜头描述已经综合了画面 + 字幕信息, 是你做剪辑审计的主要 evidence base。");
+      options.shotContexts.forEach((sc, i) => {
+        lines.push(`S${i + 1} [${sc.startSec.toFixed(1)}-${sc.endSec.toFixed(1)}s] 帧数=${sc.framesInShot}`);
+        lines.push(`  画面: ${sc.shotDescription || "(空)"}`);
+        if (sc.subtitleText) lines.push(`  字幕: ${sc.subtitleText}`);
+      });
+    }
+    return lines.length > 0 ? lines.join("\n") : "";
+  })();
+
   const userText = [
     `请分析视频《${project.videoName}》。`,
     `时长 ${Math.round(project.durationSec)}s（lengthBucket=${methodology.lengthBucket}）, 画幅 ${project.width}x${project.height} (${project.orientation === "portrait" ? "竖屏" : project.orientation === "square" ? "方形" : "横屏"})。`,
     `${focusHint} ${modeHint}`,
     "",
+    pyramidBlock,
+    pyramidBlock ? "" : null,
     "# 关键帧时间表（与下面图片顺序一一对应）",
+    "(图片是 镜头描述/字幕 之外的视觉补充, 重点用来确认主体细节和画面构图; 数量受 token 预算限制, 不代表全部画面信息)",
     frameDescriptions,
     "",
     shotListBlock,
@@ -1513,7 +1637,8 @@ async function buildAnalysisPrompt(project, frames, transcript, scenes, options)
     "- 如果一条规则的 when 触发条件在本视频里前提不成立（例如规则只适用 8 分钟以上但本视频只有 6 分钟、或规则要求 BGM 存在但本视频没有 BGM），请直接跳过这条规则，既不要打 violation 也不要打 miss。",
     "- 如果一条规则的判断需要依赖你看不到的信号（例如 BGM beat sync 需要听到完整音轨节拍、但你只能看到关键帧 + 字幕），不要硬给 miss；可在 takeaways 里温和提示「无法基于现有素材判断」。",
     "- 节奏类规则（R-PACE-*、R-LONG-002/003 等）请优先依据上方「镜头切换全量列表 + 时长分布统计」客观数据判断，而非靠 12 张关键帧脑补。",
-  ].join("\n");
+    "- 如果上方提供了「中间层产出」(全局摘要 + 镜头级描述), 它已经覆盖了画面+字幕的语义信息, 请把它作为主要 evidence base; 12 张关键帧只用来核对主体识别和构图细节, 不要把它当唯一信息源。",
+  ].filter((line) => line !== null).join("\n");
 
   return { userText, methodology };
 }
@@ -1644,7 +1769,7 @@ async function callOpenAIChatCompletions(provider, systemText, userText, imageDa
       model: provider.model,
       stream: true,
       temperature: provider.temperature ?? 0.2,
-      max_tokens: provider.maxOutputTokens ?? 2400,
+      max_tokens: provider.maxOutputTokens ?? 12000,
       messages: [
         { role: "system", content: systemText },
         {
@@ -1683,7 +1808,7 @@ async function callOpenAIResponses(provider, systemText, userText, imageDataUrls
       model: provider.model,
       stream: true,
       temperature: provider.temperature ?? 0.2,
-      max_output_tokens: provider.maxOutputTokens ?? 2400,
+      max_output_tokens: provider.maxOutputTokens ?? 12000,
       input: [
         {
           role: "system",
@@ -2110,43 +2235,157 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       : null;
     const fallbackReport = buildLocalReport(projectMeta, fallbackNodes, provider, audioProvider, transcriptSummary, options);
 
+    // 金字塔管线 (PR2): 镜头合并 + 全局聚合, 输出 shotContexts/globalSummary 给主分析。
+    // medium_text 不可用时整段跳过, 走 detectGenreLightweight 兜底; 失败一律降级不阻断。
+    let shots = buildShotsFromFrames(frames, scenes, projectMeta.durationSec || project.durationSec || 1, transcript?.segments);
+    let shotContexts = null;
+    let globalContext = null;
+    const canUseMedium =
+      mediumTextProvider?.apiKeyRef &&
+      mediumTextProvider?.baseUrl &&
+      mediumTextProvider?.model &&
+      shots.length > 0;
+    if (canUseMedium) {
+      try {
+        ensureNotCancelled(handle);
+        send(67, "镜头合并", `让 ${mediumTextProvider.name} 把 ${shots.length} 个镜头合成可读描述。`);
+        const mergeStart = Date.now();
+        const mergeInputs = shots.map((s) => ({
+          startSec: s.startSec,
+          endSec: s.endSec,
+          subtitleText: s.subtitleText || "",
+          frames: s.frames.map((f) => ({
+            caption: f.prefilterTag?.caption,
+            subject: f.prefilterTag?.subject,
+            signature: f.prefilterTag?.signature,
+            salience: f.prefilterTag?.salience,
+            midSec: f.midSec,
+          })),
+        }));
+        const mergeResults = await shotMerger.mergeShots({
+          shots: mergeInputs,
+          provider: mediumTextProvider,
+          batchSize: 6,
+          handle,
+          onProgress: ({ done, total, batchIndex }) => {
+            ensureNotCancelled(handle);
+            const pct = 67 + Math.round((done / total) * 4);
+            send(pct, "镜头合并", `已合并 ${done}/${total} (batch ${batchIndex}, 平均 ${Math.round((Date.now()-mergeStart)/done)}ms/镜头)`);
+          },
+        });
+        // 写回 shots: shotDescription + representativeFrameIndex
+        for (let i = 0; i < shots.length; i++) {
+          shots[i].shotDescription = mergeResults[i]?.shotDescription || "";
+          shots[i].representativeFrameIndex = mergeResults[i]?.representativeFrameIndex || [];
+        }
+        shotContexts = shots.map((s) => ({
+          shotIndex: s.shotIndex,
+          startSec: s.startSec,
+          endSec: s.endSec,
+          shotDescription: s.shotDescription,
+          framesInShot: s.frames.length,
+          subtitleText: s.subtitleText || undefined,
+        }));
+        send(71, "镜头合并完成", `${shots.length} 个镜头描述就绪 · ${((Date.now()-mergeStart)/1000).toFixed(1)}s`);
+      } catch (error) {
+        if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
+        send(71, "镜头合并失败", `${error.message || error}。降级到旧的逐帧路径。`);
+        shotContexts = null;
+      }
+
+      // 全局聚合 (genre + summary): shotContexts 在手时做, 否则跳过让 detectGenreLightweight 兜底
+      if (shotContexts && shotContexts.length > 0) {
+        try {
+          ensureNotCancelled(handle);
+          send(72, "全局聚合", `综合 ${shotContexts.length} 个镜头描述 + 字幕推断视频类型和摘要。`);
+          const sumStart = Date.now();
+          const stats = computeShotStats(
+            buildShotListFromScenes(scenes, projectMeta.durationSec, []),
+            projectMeta.durationSec,
+          );
+          globalContext = await summarizer.summarizeVideo({
+            shotContexts,
+            transcript,
+            shotStats: stats,
+            project: projectMeta,
+            provider: mediumTextProvider,
+            genreCatalog: GENRE_CATALOG,
+            allowedGenres: [...ALLOWED_GENRES],
+            handle,
+          });
+          if (globalContext?.detectedGenre) {
+            send(74, "全局聚合完成", `判定 ${globalContext.detectedGenre} (${Math.round((globalContext.genreConfidence||0)*100)}%) · 摘要 ${globalContext.globalSummary?.length || 0} 字 · ${((Date.now()-sumStart)/1000).toFixed(1)}s`);
+          } else {
+            send(74, "全局聚合跳过", "未能从镜头描述推断, 让主分析自行识别。");
+          }
+        } catch (error) {
+          if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
+          send(74, "全局聚合失败", `${error.message || error}。降级到 detectGenreLightweight。`);
+          globalContext = null;
+        }
+      }
+    }
+
     let nodes = fallbackNodes;
     let report = fallbackReport;
     ensureNotCancelled(handle);
-    send(72, "准备分析素材", provider?.apiKeyRef ? `已整理好 ${frames.length} 张关键画面${transcript ? " + 字幕" : ""},准备送给模型。` : "未配置视觉模型,本次只生成时间线骨架。");
+    send(76, "准备分析素材", provider?.apiKeyRef ? `已整理好 ${frames.length} 张关键画面${transcript ? " + 字幕" : ""}${shotContexts ? ` + ${shotContexts.length} 个镜头描述` : ""},准备送给模型。` : "未配置视觉模型,本次只生成时间线骨架。");
 
     if (provider?.apiKeyRef && provider.inputMode !== "direct_video") {
       try {
         ensureNotCancelled(handle);
 
-        // Pass 1: auto 模式且有字幕/镜头数据时,用 medium_text 槽位的模型轻量识别 genre
         let effectiveOptions = options;
         const isAutoGenre = !options?.manualGenre || options.manualGenre === "auto";
-        if (isAutoGenre && (transcript || scenes?.length)) {
+
+        // Genre 优先级: globalContext > detectGenreLightweight fallback > 让主分析在 catalog 里判
+        if (globalContext?.detectedGenre) {
+          effectiveOptions = { ...options, detectedGenre: globalContext.detectedGenre };
+        } else if (isAutoGenre && (transcript || scenes?.length)) {
           const genreProvider = mediumTextProvider || provider;
-          send(74, "识别视频类型", `根据字幕和镜头切换让 ${genreProvider.name} 推断视频类型。`);
+          send(77, "识别视频类型", `根据字幕和镜头切换让 ${genreProvider.name} 推断视频类型。`);
           const detectStartedAt = Date.now();
           const detected = await detectGenreLightweight(genreProvider, projectMeta, scenes, transcript, handle);
           if (detected?.detectedGenre) {
             effectiveOptions = { ...options, detectedGenre: detected.detectedGenre };
-            send(76, "识别视频类型完成", `判定为 ${detected.detectedGenre}（置信度 ${(detected.genreConfidence * 100).toFixed(0)}%，耗时 ${Math.round((Date.now() - detectStartedAt) / 1000)}s）。`);
+            send(77, "识别视频类型完成", `判定为 ${detected.detectedGenre}（置信度 ${(detected.genreConfidence * 100).toFixed(0)}%，耗时 ${Math.round((Date.now() - detectStartedAt) / 1000)}s）。`);
           } else {
-            send(76, "类型识别跳过", "未能从字幕推断类型，将让主分析在 catalog 中识别。");
+            send(77, "类型识别跳过", "未能从字幕推断类型，将让主分析在 catalog 中识别。");
           }
+        }
+
+        // 把 shotContexts + globalSummary 传给主分析 prompt (callOpenAICompatible 内部会消费)
+        if (shotContexts && shotContexts.length > 0) {
+          effectiveOptions = {
+            ...effectiveOptions,
+            shotContexts,
+            globalSummary: globalContext?.globalSummary,
+            structureHint: globalContext?.structureHint,
+          };
         }
 
         send(78, "模型分析画面", `正在请 ${provider.name} 分析这段视频。`);
         const modelResult = await callOpenAICompatible(provider, projectMeta, frames, transcript, scenes, fallbackNodes, fallbackReport, effectiveOptions, handle);
         nodes = modelResult.nodes;
+        // 把金字塔中间产物 (代表帧 / 帧 captions / 字幕段) 挂到节点上, 让 UI 能渲染镜头级 evidence
+        if (Array.isArray(shots) && shots.length > 0) {
+          attachShotEvidenceToNodes(nodes, shots);
+        }
         report = {
           ...modelResult.report,
           audioProviderSnapshot: fallbackReport.audioProviderSnapshot,
           transcript: fallbackReport.transcript,
         };
+        if (globalContext?.globalSummary) report.globalSummary = globalContext.globalSummary;
+        if (shotContexts) report.shotContexts = shotContexts;
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
         send(85, "分析失败", `${error.message || error}。已回退到本地基础结果。`);
       }
+    } else if (globalContext || shotContexts) {
+      // 视觉主分析未配置, 但中间层有产物, 让 fallback report 至少能带上 globalSummary
+      if (globalContext?.globalSummary) report.globalSummary = globalContext.globalSummary;
+      if (shotContexts) report.shotContexts = shotContexts;
     }
 
     ensureNotCancelled(handle);

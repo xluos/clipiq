@@ -362,8 +362,14 @@ export function ReportScreen() {
           <section id="summary" className="space-y-4 scroll-mt-6">
             <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">整体摘要</h2>
             <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm text-slate-700 dark:text-slate-300 leading-relaxed text-sm whitespace-pre-line">
-              {report.summary || "暂无整体摘要。"}
+              {report.globalSummary || report.summary || "暂无整体摘要。"}
             </div>
+            {report.globalSummary && report.summary && report.globalSummary !== report.summary && (
+              <details className="bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 rounded-lg px-4 py-3 text-xs text-slate-500">
+                <summary className="cursor-pointer select-none">主分析模型的摘要 (供对照)</summary>
+                <div className="mt-2 whitespace-pre-line leading-relaxed text-slate-600 dark:text-slate-400">{report.summary}</div>
+              </details>
+            )}
           </section>
 
           <section id="structure" className="space-y-4 scroll-mt-6">

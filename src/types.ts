@@ -190,6 +190,16 @@ export type PrefilterTag = {
   caption?: string;      // 一句话画面描述(≤30 汉字),给下游 shot 合并 / 节点详情用
 };
 
+// 单帧的轻量上下文 (本地初筛产物), 用作 shot 合并 / 节点详情展示
+export type FrameContext = {
+  thumbnailUrl: string;     // media:// URL
+  framePath: string;        // 磁盘路径
+  midSec: number;           // 抽帧时刻
+  caption?: string;         // 来自 prefilterTag.caption
+  salience?: number;        // 来自 prefilterTag.salience
+  signature?: string;       // 来自 prefilterTag.signature
+};
+
 export type AnalysisNode = {
   id: string;
   startSec: number;
@@ -212,6 +222,20 @@ export type AnalysisNode = {
   thumbnailUrl?: string; // Captured from video for the node
   methodologyTags?: MethodologyTag[]; // 该节点命中/违反的方法论规则
   prefilterTag?: PrefilterTag; // 本地初筛打标(若启用)
+  // 金字塔管线新增字段 (PR2)
+  representativeFrames?: FrameContext[];   // 由 medium_text 选出的该镜头代表帧 (1-3 张)
+  framesInShot?: FrameContext[];           // 该镜头内所有抽帧候选, 调试/详情面板用
+  subtitleSegments?: Array<{ start: number; end: number; text: string }>; // 落在该镜头区间内的字幕段
+};
+
+// PR2 金字塔管线: medium_text 合并出来的镜头级上下文, 喂给主分析做评审
+export type ShotContext = {
+  shotIndex: number;
+  startSec: number;
+  endSec: number;
+  shotDescription: string;          // medium_text 输出: 综合画面+字幕的一段话 (30-80 汉字)
+  framesInShot: number;             // 该镜头内抽到的帧数
+  subtitleText?: string;            // 该镜头时间段内的拼接字幕
 };
 
 export type AnalysisReport = {
@@ -240,6 +264,9 @@ export type AnalysisReport = {
   timings?: AnalysisTiming[];
   totalDurationMs?: number;
   methodologyAudit?: MethodologyAudit;
+  // PR2 金字塔管线新增字段
+  globalSummary?: string;           // medium_text 在主分析前生成的全局摘要 (优先于 summary 展示)
+  shotContexts?: ShotContext[];     // 所有镜头的中间产物, 时间轴渲染 + 调试用
 };
 
 export type AnalysisTiming = {

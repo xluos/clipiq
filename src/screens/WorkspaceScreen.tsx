@@ -515,6 +515,36 @@ export function WorkspaceScreen() {
 
                     {isActive && (
                       <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800/50 space-y-4 animate-in fade-in slide-in-from-top-2">
+                        {Array.isArray(node.representativeFrames) && node.representativeFrames.length > 0 && (
+                          <div>
+                            <p className="text-[11px] text-slate-500 uppercase tracking-widest mb-1.5 font-bold flex items-center">
+                              <span className="w-1.5 h-1.5 rounded-full bg-sky-500 mr-2" /> 镜头代表帧
+                            </p>
+                            <div className="flex gap-2 flex-wrap">
+                              {node.representativeFrames.map((rf, i) => (
+                                <div
+                                  key={i}
+                                  className="rounded-md border border-slate-200 dark:border-slate-800 overflow-hidden bg-white dark:bg-slate-900/40 shadow-sm"
+                                  style={{ width: 140 }}
+                                >
+                                  <img src={rf.thumbnailUrl} alt="代表帧" className="w-full h-20 object-cover" />
+                                  <div className="px-2 py-1.5 text-[11px] text-slate-600 dark:text-slate-400 leading-snug">
+                                    <div className="text-[10px] text-slate-400 mb-0.5">t={rf.midSec.toFixed(1)}s · sal={rf.salience ?? "?"}</div>
+                                    <div className="line-clamp-2">{rf.caption || rf.signature || "—"}</div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {node.prefilterTag?.caption && (
+                          <div>
+                            <p className="text-[11px] text-slate-500 uppercase tracking-widest mb-1.5 font-bold flex items-center">
+                              <span className="w-1.5 h-1.5 rounded-full bg-orange-500 mr-2" /> 初筛画面描述
+                            </p>
+                            <p className="text-sm text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-900/40 p-3 rounded-lg border border-slate-100 dark:border-slate-800/50 shadow-sm">{node.prefilterTag.caption}</p>
+                          </div>
+                        )}
                         <div>
                           <p className="text-[11px] text-slate-500 uppercase tracking-widest mb-1.5 font-bold flex items-center">
                             <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 mr-2" /> 剪辑意图
