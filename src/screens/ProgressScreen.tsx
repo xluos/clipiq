@@ -102,12 +102,25 @@ export function ProgressScreen() {
       setStageIndex(Math.min(STAGES.length - 1, Math.floor((event.progress / 100) * STAGES.length)));
     });
 
+    const applyProgressSnapshot = (snap: { progress: number; stage: string; message?: string } | null | undefined) => {
+      if (!snap) return;
+      setProgress(snap.progress);
+      setStageLabel(snap.stage);
+      setDetail(snap.message || "");
+      setStageIndex(Math.min(STAGES.length - 1, Math.floor((snap.progress / 100) * STAGES.length)));
+    };
+
     const launchOrAttach = async () => {
       const alreadyRunning = await window.videoAnalyzer!.isAnalysisActive(project.id);
       if (alreadyRunning) {
-        // Another mount/window already kicked off; just listen to progress events until project state
-        // updates to completed via the main-process .then handler that ProgressScreen owns.
-        setStageLabel("继续监听后台分析任务");
+        // 已有后台分析任务,先拉一次最近 progress 作为初始显示,再继续订阅事件流
+        try {
+          const last = await window.videoAnalyzer!.getLastAnalysisProgress(project.id);
+          if (last) applyProgressSnapshot(last);
+          else setStageLabel("后台分析任务运行中");
+        } catch {
+          setStageLabel("后台分析任务运行中");
+        }
         return;
       }
       try {

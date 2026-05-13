@@ -97,6 +97,7 @@ declare global {
       }) => Promise<AnalysisResult>;
       cancelAnalysis: (projectId: string) => Promise<{ cancelled: boolean }>;
       isAnalysisActive: (projectId: string) => Promise<boolean>;
+      getLastAnalysisProgress: (projectId: string) => Promise<AnalysisProgressEvent | null>;
       onAnalysisProgress: (callback: (event: AnalysisProgressEvent) => void) => () => void;
       exportProject: (payload: {
         project: Project;

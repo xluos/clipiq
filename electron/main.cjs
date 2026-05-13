@@ -92,6 +92,8 @@ function registerAnalysis(projectId) {
 }
 
 function clearAnalysis(projectId) {
+  const handle = activeAnalyses.get(projectId);
+  if (handle?.heartbeat) clearInterval(handle.heartbeat);
   activeAnalyses.delete(projectId);
 }
 
@@ -1104,8 +1106,27 @@ async function analyzeProject(event, { project, provider, audioProvider, options
 
   const send = (progress, stage, message) => {
     if (handle.cancelled) return;
-    event.sender.send("analysis:progress", { projectId: project.id, progress, stage, message });
+    const payload = { projectId: project.id, progress, stage, message };
+    handle.lastProgress = payload;
+    handle.lastProgressAt = Date.now();
+    event.sender.send("analysis:progress", payload);
   };
+
+  // 心跳:某些阶段(本地 whisper 加载/推理)单次任务 30s+,
+  // 中间没有事件 UI 看起来卡死。每 2s 重发最近一次 progress 并附累计等待时长。
+  const heartbeat = setInterval(() => {
+    if (handle.cancelled || !handle.lastProgress) return;
+    const idle = Date.now() - (handle.lastProgressAt || 0);
+    if (idle < 1500) return;
+    const elapsed = Math.floor(idle / 1000);
+    const base = handle.lastProgress;
+    const baseMsg = base.message || "";
+    // 已经带过 "已等待 Ns" 后缀,只更新数字
+    const stripped = baseMsg.replace(/\s*·?\s*已等待 \d+s$/, "");
+    const msg = stripped ? `${stripped} · 已等待 ${elapsed}s` : `已等待 ${elapsed}s`;
+    event.sender.send("analysis:progress", { ...base, message: msg });
+  }, 2000);
+  handle.heartbeat = heartbeat;
 
   try {
     const inputPath = resolveProjectVideoPath(project);
@@ -1533,6 +1554,11 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("analysis:isActive", async (_event, projectId) => {
     return activeAnalyses.has(projectId);
+  });
+
+  ipcMain.handle("analysis:getLastProgress", async (_event, projectId) => {
+    const handle = activeAnalyses.get(projectId);
+    return handle?.lastProgress || null;
   });
 
   ipcMain.handle("project:export", async (_event, { project, nodes, report, provider, format }) => {
