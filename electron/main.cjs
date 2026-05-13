@@ -457,6 +457,28 @@ function inferPlatform(source) {
   return "unknown";
 }
 
+function getUrlCachePath() {
+  return path.join(app.getPath("userData"), "url-cache.json");
+}
+
+async function readUrlCache() {
+  try {
+    const raw = await fs.readFile(getUrlCachePath(), "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeUrlCache(cache) {
+  try {
+    await fs.writeFile(getUrlCachePath(), JSON.stringify(cache, null, 2), "utf8");
+  } catch (err) {
+    console.warn("[url-cache] write failed", err);
+  }
+}
+
 function getRotation(videoStream) {
   const tagRotation = Number(videoStream?.tags?.rotate);
   if (Number.isFinite(tagRotation)) return tagRotation;
@@ -2200,6 +2222,23 @@ app.whenReady().then(async () => {
       throw new Error("未从输入中识别到视频链接,请确认粘贴的内容里包含 http(s):// 开头的链接。");
     }
 
+    const cache = await readUrlCache();
+    const cached = cache[url];
+    if (cached?.filePath) {
+      try {
+        await fs.access(cached.filePath);
+        const inspected = await inspectVideo(cached.filePath);
+        return {
+          projectId: `proj-url-${Date.now()}`,
+          platform: inferPlatform(url),
+          ...inspected,
+        };
+      } catch {
+        delete cache[url];
+        await writeUrlCache(cache);
+      }
+    }
+
     const projectId = `proj-url-${Date.now()}`;
     const mediaDir = path.join(app.getPath("userData"), "projects", projectId, "media");
     await fs.mkdir(mediaDir, { recursive: true });
@@ -2224,6 +2263,8 @@ app.whenReady().then(async () => {
     if (!latest) throw new Error("yt-dlp 执行完成，但没有生成视频文件。");
 
     const inspected = await inspectVideo(latest.filePath);
+    cache[url] = { filePath: latest.filePath, savedAt: Date.now() };
+    await writeUrlCache(cache);
     return {
       projectId,
       platform: inferPlatform(url),
