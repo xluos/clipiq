@@ -68,7 +68,7 @@ const LOCAL_STORAGE_KEY = "video-analyzer-state";
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [hasHydrated, setHasHydrated] = useState(false);
-  const previousProjectIds = useRef<Set<string>>(new Set());
+  const previousProjectsRef = useRef<Map<string, Project>>(new Map());
   const [currentScreen, setCurrentScreen] = useState<ScreenState>("home");
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
@@ -179,7 +179,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           }
           const projectList = await window.videoAnalyzer.listProjects();
           setProjects(projectList);
-          previousProjectIds.current = new Set(projectList.map((p) => p.id));
+          previousProjectsRef.current = new Map(projectList.map((p) => [p.id, p]));
           const nodesEntries = await Promise.all(
             projectList.map(async (p) => [p.id, await window.videoAnalyzer!.getNodes(p.id)] as const)
           );
@@ -200,7 +200,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
             setProjects(state.projects || []);
             setNodesByProject(state.nodesByProject || {});
             setReportByProject(state.reportByProject || {});
-            previousProjectIds.current = new Set((state.projects || []).map((p: Project) => p.id));
+            previousProjectsRef.current = new Map(
+              (state.projects || []).map((p: Project) => [p.id, p] as const),
+            );
           }
         }
       } catch (error) {
@@ -238,10 +240,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!hasHydrated) return;
-    const currentIds = new Set(projects.map((p) => p.id));
-    previousProjectIds.current = currentIds;
+    const prev = previousProjectsRef.current;
+    const nextMap = new Map(projects.map((p) => [p.id, p] as const));
+    previousProjectsRef.current = nextMap;
     if (window.videoAnalyzer) {
       for (const project of projects) {
+        if (prev.get(project.id) === project) continue;
         window.videoAnalyzer.upsertProject(project).catch((error) => {
           console.warn("upsertProject failed", error);
         });

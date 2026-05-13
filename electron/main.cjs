@@ -2705,9 +2705,11 @@ app.whenReady().then(async () => {
   ipcMain.handle("projects:upsert", async (_event, project) => {
     if (!project?.id) throw new Error("projects:upsert 需要 project.id");
     const db = getDb();
+    const parsed = project.updatedAt ? Date.parse(project.updatedAt) : NaN;
+    const updatedAt = Number.isFinite(parsed) ? parsed : Date.now();
     db.prepare(
       "INSERT INTO projects (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
-    ).run(project.id, JSON.stringify(project), Date.now());
+    ).run(project.id, JSON.stringify(project), updatedAt);
     return { ok: true };
   });
 

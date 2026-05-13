@@ -23,6 +23,11 @@ function formatDate(date: Date) {
 
 export function HomeScreen() {
   const { setCurrentScreen, projects, setActiveProjectId, setProjects, removeProject } = useApp();
+  const sortedProjects = [...projects].sort(
+    (a, b) =>
+      new Date(b.updatedAt || b.createdAt || 0).getTime() -
+      new Date(a.updatedAt || a.createdAt || 0).getTime(),
+  );
   const confirm = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -254,7 +259,7 @@ export function HomeScreen() {
                </div>
             ) : (
               <div className="space-y-3">
-                {projects.map(proj => (
+                {sortedProjects.map(proj => (
                   <div
                     key={proj.id}
                     onClick={() => {
