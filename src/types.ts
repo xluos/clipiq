@@ -118,6 +118,26 @@ export type MethodologyAudit = {
   genreConfidence?: number; // 0-1 LLM 对类型推断的信心
 };
 
+export type PrefilterSceneType =
+  | "outdoor"
+  | "indoor"
+  | "transition"
+  | "text_card"
+  | "person"
+  | "product"
+  | "ui"
+  | "landscape"
+  | "other";
+
+export type PrefilterTag = {
+  sceneType: PrefilterSceneType;
+  subject: string;       // 主体一句话(≤8 汉字)
+  hasText: "none" | "chinese" | "english" | "mixed";
+  salience: number;      // 0-10,信息量
+  isEmpty: boolean;
+  signature: string;     // 3-5 汉字概括,用于 dedup
+};
+
 export type AnalysisNode = {
   id: string;
   startSec: number;
@@ -139,6 +159,7 @@ export type AnalysisNode = {
   note?: string;
   thumbnailUrl?: string; // Captured from video for the node
   methodologyTags?: MethodologyTag[]; // 该节点命中/违反的方法论规则
+  prefilterTag?: PrefilterTag; // 本地初筛打标(若启用)
 };
 
 export type AnalysisReport = {
@@ -195,6 +216,8 @@ export type AppConfig = {
   providers: ModelProvider[];
   activeVideoProviderId: string | null;
   activeAudioProviderId: string | null;
+  // 上次启动过的本地推理模型(key)。下次应用启动时自动恢复。
+  lastLlamaModelKey?: string | null;
 };
 
 export type ScreenState = 

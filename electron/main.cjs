@@ -5,6 +5,8 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const { pathToFileURL } = require("node:url");
+const llamaRuntime = require("./llama-runtime.cjs");
+const prefilter = require("./prefilter.cjs");
 
 const REMOTE_DEBUG_PORT = process.env.VIDEO_ANALYZER_DEBUG_PORT || "";
 if (REMOTE_DEBUG_PORT) {
@@ -537,6 +539,7 @@ async function inspectVideo(filePath, handle = null) {
   };
 }
 
+// 精筛后(送远端)的目标帧数。受 token 预算约束,跟之前一致。
 function targetFrameCount(durationSec, options) {
   const density = options?.density || "standard";
   const mode = options?.mode || "standard";
@@ -545,6 +548,14 @@ function targetFrameCount(durationSec, options) {
   const detailBoost = mode === "detailed" ? 1 : mode === "quick" ? -1 : 0;
   const target = Math.round((durationSec / 60) * (base + detailBoost));
   return Math.max(6, Math.min(32, target));
+}
+
+// 候选抽帧数。本地初筛 ready 时多抽,给初筛更多选材。
+function candidateFrameCount(durationSec, options, hasLocalPrefilter) {
+  const finalCount = targetFrameCount(durationSec, options);
+  if (!hasLocalPrefilter) return finalCount;
+  const expanded = Math.round(finalCount * 2.5);
+  return Math.max(finalCount, Math.min(30, expanded));
 }
 
 function sceneThresholdFor(options) {
@@ -581,40 +592,77 @@ async function detectScenes(ffmpeg, inputPath, threshold, handle) {
 }
 
 // 根据 scene 时间戳 + 目标帧数，分配最终抽帧时刻。
-// 若场景数 >= 目标：取最显著的目标个（用相邻时长权重）
-// 若场景数 <  目标：在每个场景中点的基础上补均匀样
+// 策略:
+//   1. 每个 shot 先分 1 张(锚帧,中点)
+//   2. 剩余配额按 "duration/(count+1)" 最大的 shot 不断加点(长镜头多分)
+//   3. shot 内多张时按等距均分
+//   4. shot 数本身 > target 时,挑 duration 最长的 target 个
 function planFramePlan(scenes, durationSec, targetCount) {
   const safeDuration = Math.max(durationSec, 1);
   const sorted = [...new Set(scenes)].filter((t) => t < safeDuration).sort((a, b) => a - b);
+  if (sorted.length === 0 || sorted[0] > 0.5) sorted.unshift(0);
 
-  // 每个 scene 取中点（更稳定，避开切换瞬间的运动模糊）
-  const midpoints = sorted.map((start, i) => {
-    const end = sorted[i + 1] ?? safeDuration;
-    return { sceneStart: start, sceneEnd: end, sampleSec: Math.min(safeDuration - 0.1, start + (end - start) / 2) };
-  });
+  const shots = sorted
+    .map((start, i) => {
+      const end = sorted[i + 1] ?? safeDuration;
+      return { start, end, duration: Math.max(0, end - start) };
+    })
+    .filter((s) => s.duration >= 0.4);
 
-  let picks;
-  if (midpoints.length >= targetCount) {
-    // 按 scene 长度从大到小排，取前 target 个；保留时间顺序
-    picks = [...midpoints]
-      .sort((a, b) => (b.sceneEnd - b.sceneStart) - (a.sceneEnd - a.sceneStart))
-      .slice(0, targetCount)
-      .sort((a, b) => a.sampleSec - b.sampleSec);
-  } else {
-    picks = [...midpoints];
-    const need = targetCount - picks.length;
-    if (need > 0) {
-      const step = safeDuration / (need + 1);
-      for (let i = 1; i <= need; i++) picks.push({ sceneStart: i * step, sceneEnd: i * step, sampleSec: i * step });
-      picks.sort((a, b) => a.sampleSec - b.sampleSec);
-    }
+  // 兜底:没有合理 shot,均匀分布
+  if (shots.length === 0) {
+    return Array.from({ length: targetCount }, (_, i) => {
+      const sec = (safeDuration * (i + 1)) / (targetCount + 1);
+      return { index: i, startSec: sec, endSec: sec, midSec: Math.min(safeDuration - 0.1, sec) };
+    });
   }
 
+  // shot 数已 >= target,挑 duration 最长的
+  if (shots.length >= targetCount) {
+    const chosen = [...shots]
+      .sort((a, b) => b.duration - a.duration)
+      .slice(0, targetCount)
+      .map((shot) => ({ shot, sec: shot.start + shot.duration / 2 }));
+    chosen.sort((a, b) => a.sec - b.sec);
+    return chosen.map((p, index) => ({
+      index,
+      startSec: p.shot.start,
+      endSec: p.shot.end,
+      midSec: Math.min(safeDuration - 0.1, Math.max(0, p.sec)),
+    }));
+  }
+
+  // 每 shot 分配采样数: 先各 1,剩余按 "duration / (count+1)" 贪心
+  const counts = shots.map(() => 1);
+  let remaining = targetCount - shots.length;
+  while (remaining > 0) {
+    let bestIdx = 0;
+    let bestScore = shots[0].duration / (counts[0] + 1);
+    for (let i = 1; i < shots.length; i++) {
+      const score = shots[i].duration / (counts[i] + 1);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+    counts[bestIdx] += 1;
+    remaining -= 1;
+  }
+
+  const picks = [];
+  shots.forEach((shot, i) => {
+    const n = counts[i];
+    for (let k = 1; k <= n; k++) {
+      const sec = shot.start + (shot.duration * k) / (n + 1);
+      picks.push({ shot, sec });
+    }
+  });
+  picks.sort((a, b) => a.sec - b.sec);
   return picks.map((p, index) => ({
     index,
-    startSec: p.sceneStart,
-    endSec: p.sceneEnd,
-    midSec: p.sampleSec,
+    startSec: p.shot.start,
+    endSec: p.shot.end,
+    midSec: Math.min(safeDuration - 0.1, Math.max(0, p.sec)),
   }));
 }
 
@@ -683,7 +731,7 @@ function hammingDistance(a, b) {
   return d;
 }
 
-async function buildFrames(ffmpeg, inputPath, plan, artifactDir, handle, onProgress) {
+async function buildFrames(ffmpeg, inputPath, plan, artifactDir, handle, onProgress, { withPrefilterFrame = false } = {}) {
   const HAMMING_MIN_DISTINCT = 5;
   const out = [];
   let lastHash = null;
@@ -699,13 +747,18 @@ async function buildFrames(ffmpeg, inputPath, plan, artifactDir, handle, onProgr
       continue;
     }
     await extractFrame(ffmpeg, inputPath, framePath, segment.midSec, 520, handle);
-    out.push({ ...segment, framePath, hash });
+    let prefilterFramePath = null;
+    if (withPrefilterFrame) {
+      prefilterFramePath = path.join(artifactDir, `prefilter-${String(i + 1).padStart(2, "0")}.jpg`);
+      await extractFrame(ffmpeg, inputPath, prefilterFramePath, segment.midSec, 320, handle, 5);
+    }
+    out.push({ ...segment, framePath, prefilterFramePath, hash });
     lastHash = hash || lastHash;
   }
   return { frames: out, skipped };
 }
 
-async function extractFrame(ffmpeg, inputPath, outputPath, second, width = 420, handle = null) {
+async function extractFrame(ffmpeg, inputPath, outputPath, second, width = 420, handle = null, qvalue = 3) {
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await run(ffmpeg, [
     "-y",
@@ -718,7 +771,7 @@ async function extractFrame(ffmpeg, inputPath, outputPath, second, width = 420, 
     "-vf",
     `scale=${width}:-2`,
     "-q:v",
-    "3",
+    String(qvalue),
     outputPath,
   ], {}, handle);
 }
@@ -756,6 +809,7 @@ function localNodeForSegment(segment, project, frameUrl, transcriptSegments) {
     confidence: 0.3,
     isHighlight: false,
     thumbnailUrl: frameUrl,
+    prefilterTag: segment.prefilterTag || undefined,
   };
 }
 
@@ -874,8 +928,9 @@ function normalizeModelResult(payload, fallbackNodes, fallbackReport, project, p
     const tags = Array.isArray(node.methodologyTags)
       ? node.methodologyTags.map(sanitizeMethodologyTag).filter(Boolean)
       : [];
+    const fallbackNode = fallbackNodes[Math.min(index, fallbackNodes.length - 1)] || {};
     return {
-      ...fallbackNodes[Math.min(index, fallbackNodes.length - 1)],
+      ...fallbackNode,
       ...node,
       id: String(node.id || `node-${index + 1}`),
       startSec: Number.isFinite(Number(node.startSec)) ? Number(node.startSec) : fallbackNodes[index]?.startSec ?? 0,
@@ -885,6 +940,7 @@ function normalizeModelResult(payload, fallbackNodes, fallbackReport, project, p
       nodeTypes: Array.isArray(node.nodeTypes) ? node.nodeTypes : fallbackNodes[index]?.nodeTypes ?? ["info_point"],
       isHighlight: Boolean(node.isHighlight),
       methodologyTags: tags,
+      prefilterTag: fallbackNode.prefilterTag, // 始终用本地初筛结果,不允许 model 覆盖
     };
   });
 
@@ -1588,9 +1644,61 @@ async function analyzeProject(event, { project, provider, audioProvider, options
     ensureNotCancelled(handle);
     const sceneThreshold = sceneThresholdFor(options);
     const scenes = await detectScenes(ffmpeg, inputPath, sceneThreshold, handle);
-    const targetCount = targetFrameCount(inspected.durationSec || project.durationSec || 1, options);
-    const plan = planFramePlan(scenes, inspected.durationSec || project.durationSec || 1, targetCount);
-    send(20, "挑选关键画面", `从 ${scenes.length} 个镜头里挑出 ${plan.length} 张关键画面。`);
+    // 本地初筛预检: 用户希望用(lastLlamaModelKey 存在) → 主动确认/启动 server,
+    // 失败一律降级为"跳过初筛但继续分析",绝不阻断主流程。
+    let localStatus = llamaRuntime.getStatus();
+    let localPrefilterReady = !!(localStatus.running && localStatus.port);
+    if (!localPrefilterReady) {
+      const cfg = await readJson(getConfigPath(), null).catch(() => null);
+      const preferredModel = cfg?.lastLlamaModelKey;
+      if (preferredModel) {
+        if (!localStatus.binaryFound) {
+          send(10, "本地推理预检", "推理引擎未安装,本次跳过初筛(去设置 → 本地推理可安装)。");
+        } else {
+          const models = await llamaRuntime.listModels();
+          const target = models.find((m) => m.key === preferredModel);
+          if (!target || !target.downloaded) {
+            send(10, "本地推理预检", `模型 ${preferredModel} 未下载完成,本次跳过初筛。`);
+          } else if (localStatus.status === "starting") {
+            send(10, "本地推理预检", "本地模型启动中,等待就绪(最多 15 秒)。");
+            const deadline = Date.now() + 15_000;
+            while (Date.now() < deadline) {
+              await new Promise((r) => setTimeout(r, 500));
+              localStatus = llamaRuntime.getStatus();
+              if (localStatus.running) break;
+              ensureNotCancelled(handle);
+            }
+            localPrefilterReady = !!(localStatus.running && localStatus.port);
+            if (!localPrefilterReady) {
+              send(10, "本地推理预检", "本地模型 15 秒内未就绪,本次跳过初筛。");
+            }
+          } else {
+            send(10, "本地推理预检", `本地模型未启动,正在自动拉起 ${preferredModel}…`);
+            try {
+              await llamaRuntime.start(preferredModel);
+              localStatus = llamaRuntime.getStatus();
+              localPrefilterReady = !!(localStatus.running && localStatus.port);
+            } catch (error) {
+              send(10, "本地推理预检", `本地模型启动失败: ${error?.message || error}。本次跳过初筛。`);
+            }
+          }
+        }
+      }
+    }
+    const finalCount = targetFrameCount(inspected.durationSec || project.durationSec || 1, options);
+    const candidateCount = candidateFrameCount(
+      inspected.durationSec || project.durationSec || 1,
+      options,
+      localPrefilterReady,
+    );
+    const plan = planFramePlan(scenes, inspected.durationSec || project.durationSec || 1, candidateCount);
+    send(
+      20,
+      "挑选关键画面",
+      localPrefilterReady
+        ? `本地初筛已就绪,从 ${scenes.length} 个镜头里先抽 ${plan.length} 张候选。`
+        : `从 ${scenes.length} 个镜头里挑出 ${plan.length} 张关键画面。`,
+    );
 
     await writeJson(path.join(projectDir, "media-manifest.json"), {
       source: project.source,
@@ -1603,17 +1711,77 @@ async function analyzeProject(event, { project, provider, audioProvider, options
       scenes,
       plan,
       sceneThreshold,
-      targetFrameCount: targetCount,
+      finalFrameCount: finalCount,
+      candidateFrameCount: candidateCount,
+      localPrefilterReady,
       pipelineVersion: PIPELINE_VERSION,
       schemaVersion: SCHEMA_VERSION,
       generatedAt: new Date().toISOString(),
     });
 
     send(24, "抽取关键画面", `准备抽取 ${plan.length} 张关键画面,会自动去掉相似画面。`);
-    const { frames, skipped } = await buildFrames(ffmpeg, inputPath, plan, artifactDir, handle, (i, total, sec) => {
-      send(24 + Math.round((i / total) * 26), "抽取关键画面", `已抽 ${i + 1} / ${total} 张 · 第 ${sec.toFixed(1)} 秒`);
-    });
-    if (skipped > 0) send(50, "画面去重", `去掉 ${skipped} 张相似画面,保留 ${frames.length} 张。`);
+    const { frames: candidateFrames, skipped } = await buildFrames(
+      ffmpeg,
+      inputPath,
+      plan,
+      artifactDir,
+      handle,
+      (i, total, sec) => {
+        send(24 + Math.round((i / total) * 22), "抽取关键画面", `已抽 ${i + 1} / ${total} 张 · 第 ${sec.toFixed(1)} 秒`);
+      },
+      { withPrefilterFrame: localPrefilterReady },
+    );
+    if (skipped > 0) {
+      send(46, "画面去重", `去掉 ${skipped} 张相似画面,保留 ${candidateFrames.length} 张。`);
+    }
+
+    // 本地初筛 + 精筛:让 Qwen3.5-0.8B 给每帧打标,据此 dedup / 删空镜 / cap 总数。
+    // 本地模型未启动时直接走老路径,行为与之前一致。
+    let frames = candidateFrames;
+    let prefilterStats = null;
+    if (localPrefilterReady && candidateFrames.length > 0) {
+      try {
+        send(48, "本地初筛", `让本地模型给 ${candidateFrames.length} 张候选画面快速打标。`);
+        const prefilterStartedAt = Date.now();
+        const tagResult = await prefilter.tagFrames(candidateFrames, {
+          port: localStatus.port,
+          modelKey: localStatus.modelKey,
+          perFrameTimeoutMs: 30_000,
+          onProgress: (i, total) => {
+            ensureNotCancelled(handle);
+            const avgMs = Math.round((Date.now() - prefilterStartedAt) / (i + 1));
+            send(
+              48 + Math.round(((i + 1) / total) * 6),
+              "本地初筛",
+              `已打标 ${i + 1} / ${total} 张 · 平均 ${avgMs} ms/帧`,
+            );
+          },
+        });
+        const refined = prefilter.refineByTags(tagResult.frames, {
+          maxKeep: finalCount,
+          minKeep: Math.min(4, candidateFrames.length),
+          similarityThreshold: 0.7,
+        });
+        frames = refined.kept;
+        prefilterStats = {
+          totalElapsedMs: tagResult.totalElapsedMs,
+          totalTokens: tagResult.totalTokens,
+          candidate: candidateFrames.length,
+          kept: refined.kept.length,
+          dropped: refined.dropped.length,
+        };
+        send(
+          54,
+          "精挑画面",
+          `从 ${candidateFrames.length} 张候选里精选 ${refined.kept.length} 张送给视觉模型 · 本地初筛用时 ${(tagResult.totalElapsedMs / 1000).toFixed(1)}s`,
+        );
+      } catch (error) {
+        if (error instanceof AnalysisCancelledError) throw error;
+        const msg = error instanceof Error ? error.message : String(error);
+        send(54, "本地初筛失败", `${msg}（已回退到全部候选画面）`);
+        frames = candidateFrames;
+      }
+    }
 
     // 音频转录（可选）
     let transcript = null;
@@ -1733,6 +1901,23 @@ async function analyzeProject(event, { project, provider, audioProvider, options
     report = { ...report, timings: finalTimings, totalDurationMs };
     await writeJson(path.join(projectDir, "analysis-result.json"), { project: updatedProject, nodes, report });
     await writeJson(path.join(projectDir, "timings.json"), { totalDurationMs, timings: finalTimings });
+    // main 端直接落盘 SQLite,避免依赖 renderer 走 ProgressScreen 才能同步。
+    // 与 renderer 端 setNodesForProject/setReportForProject 的 IPC 写是幂等的(INSERT OR UPDATE)。
+    try {
+      const db = getDb();
+      db.prepare(
+        "INSERT INTO projects (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+      ).run(updatedProject.id, JSON.stringify(updatedProject), Date.now());
+      db.prepare(
+        "INSERT INTO analysis_nodes (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data",
+      ).run(project.id, JSON.stringify(nodes));
+      db.prepare(
+        "INSERT INTO analysis_reports (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data",
+      ).run(project.id, JSON.stringify(report));
+    } catch (persistError) {
+      // 不阻断返回:JSON 文件已经写了,renderer 路径仍可兜底
+      console.warn("[clipiq] main 端 SQLite 持久化失败,renderer 路径会兜底:", persistError);
+    }
     return { project: updatedProject, nodes, report };
   } finally {
     clearAnalysis(project.id);
@@ -2272,14 +2457,112 @@ app.whenReady().then(async () => {
     };
   });
 
+  await llamaRuntime.init();
+
+  ipcMain.handle("llama:listModels", async () => llamaRuntime.listModels());
+
+  ipcMain.handle("llama:getStatus", async () => llamaRuntime.getStatus());
+
+  ipcMain.handle("llama:ensureBinary", async (event) => {
+    const path = await llamaRuntime.ensureLlamaServer((progress) => {
+      event.sender.send("llama:progress", { scope: "binary", ...progress });
+    });
+    return { ok: true, binaryPath: path };
+  });
+
+  ipcMain.handle("llama:ensureModel", async (event, modelKey) => {
+    return llamaRuntime.ensureModel(modelKey, (progress) => {
+      event.sender.send("llama:progress", { scope: "model", modelKey, ...progress });
+    });
+  });
+
+  ipcMain.handle("llama:start", async (event, modelKey) => {
+    const result = await llamaRuntime.start(modelKey, {
+      onLog: (entry) => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send("llama:log", entry);
+        }
+      },
+    });
+    // 持久化最近一次启动的模型,下次开应用时自动恢复
+    persistLastLlamaModelKey(modelKey).catch((e) =>
+      console.warn("[clipiq] 持久化 lastLlamaModelKey 失败:", e),
+    );
+    return result;
+  });
+
+  ipcMain.handle("llama:stop", async () => llamaRuntime.stop());
+
+  ipcMain.handle("llama:selfTest", async (_event, payload) => {
+    return llamaRuntime.selfTest(payload || {});
+  });
+
   await createWindow();
 
   scheduleYtDlpAutoCheck();
+  scheduleLlamaAutoResume();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+async function persistLastLlamaModelKey(modelKey) {
+  const cur = (await readJson(getConfigPath(), null)) || {};
+  await writeJson(getConfigPath(), {
+    ...cur,
+    lastLlamaModelKey: modelKey || null,
+    savedAt: new Date().toISOString(),
+  });
+}
+
+function scheduleLlamaAutoResume() {
+  // 不阻塞主流程,稍微延迟一点让窗口先呈现给用户
+  setTimeout(async () => {
+    try {
+      const cfg = await readJson(getConfigPath(), null);
+      const lastKey = cfg?.lastLlamaModelKey;
+      if (!lastKey) return;
+      const status = llamaRuntime.getStatus();
+      if (!status.binaryFound) {
+        console.log("[clipiq] llama auto-resume 跳过:推理引擎未安装");
+        return;
+      }
+      const models = await llamaRuntime.listModels();
+      const target = models.find((m) => m.key === lastKey);
+      if (!target) {
+        console.log(`[clipiq] llama auto-resume 跳过:未知模型 ${lastKey}`);
+        return;
+      }
+      if (!target.downloaded) {
+        console.log(`[clipiq] llama auto-resume 跳过:模型 ${lastKey} 未下载完成`);
+        return;
+      }
+      console.log(`[clipiq] llama auto-resume: 启动 ${lastKey}`);
+      await llamaRuntime.start(lastKey, {
+        onLog: (entry) => {
+          // 自启动期间日志只走主进程 stdout,不打扰 renderer
+          if (entry.channel === "stderr" && /error|fatal/i.test(entry.line)) {
+            console.warn("[llama auto-resume]", entry.line);
+          }
+        },
+      });
+      // 通知 renderer 更新状态卡片(如果已打开 Settings 本地推理 section)
+      const win = BrowserWindow.getAllWindows()[0];
+      if (win && !win.isDestroyed()) {
+        win.webContents.send("llama:progress", {
+          scope: "auto-resume",
+          stage: "ready",
+          label: "本地推理",
+          message: `自动恢复模型 ${lastKey}`,
+        });
+      }
+      console.log(`[clipiq] llama auto-resume 完成`);
+    } catch (error) {
+      console.warn(`[clipiq] llama auto-resume 失败: ${error?.message || error}`);
+    }
+  }, 1500);
+}
 
 function scheduleYtDlpAutoCheck() {
   setTimeout(async () => {
@@ -2294,6 +2577,10 @@ function scheduleYtDlpAutoCheck() {
     }
   }, 2000);
 }
+
+app.on("before-quit", () => {
+  llamaRuntime.shutdownSync();
+});
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();

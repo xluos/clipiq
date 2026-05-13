@@ -48,4 +48,23 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   getDataInfo: () => ipcRenderer.invoke("data:getInfo"),
   openDataFolder: (which) => ipcRenderer.invoke("data:openFolder", which),
   purgeProjects: () => ipcRenderer.invoke("data:purgeProjects"),
+  llama: {
+    listModels: () => ipcRenderer.invoke("llama:listModels"),
+    getStatus: () => ipcRenderer.invoke("llama:getStatus"),
+    ensureBinary: () => ipcRenderer.invoke("llama:ensureBinary"),
+    ensureModel: (modelKey) => ipcRenderer.invoke("llama:ensureModel", modelKey),
+    start: (modelKey) => ipcRenderer.invoke("llama:start", modelKey),
+    stop: () => ipcRenderer.invoke("llama:stop"),
+    selfTest: (payload) => ipcRenderer.invoke("llama:selfTest", payload),
+    onProgress: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("llama:progress", listener);
+      return () => ipcRenderer.removeListener("llama:progress", listener);
+    },
+    onLog: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("llama:log", listener);
+      return () => ipcRenderer.removeListener("llama:log", listener);
+    },
+  },
 });

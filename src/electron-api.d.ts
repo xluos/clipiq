@@ -72,6 +72,62 @@ export type ProviderTestResult = {
   message: string;
 };
 
+export type LlamaModelInfo = {
+  key: string;
+  name: string;
+  description: string;
+  approxBytes: number;
+  llmDownloaded: boolean;
+  llmBytes: number;
+  mmprojDownloaded: boolean;
+  mmprojBytes: number;
+  downloaded: boolean;
+  llmPath: string;
+  mmprojPath: string;
+};
+
+export type LlamaStatus = {
+  binaryPath: string | null;
+  binaryFound: boolean;
+  running: boolean;
+  status: "idle" | "starting" | "ready" | "stopping" | "error";
+  modelKey: string | null;
+  port: number | null;
+  startedAt: number;
+  lastError: string | null;
+  recentLogs: Array<{ ts: number; channel: "stdout" | "stderr"; line: string }>;
+};
+
+export type LlamaProgress = {
+  scope: "binary" | "model";
+  modelKey?: string;
+  stage:
+    | "skip"
+    | "start"
+    | "progress"
+    | "done"
+    | "binary-start"
+    | "binary-progress"
+    | "binary-extract"
+    | "binary-done";
+  file?: string;
+  label: string;
+  message: string;
+  receivedBytes?: number;
+  totalBytes?: number;
+  percent?: number;
+};
+
+export type LlamaLogEntry = { channel: "stdout" | "stderr"; line: string };
+
+export type LlamaSelfTestResult = {
+  ok: true;
+  latencyMs: number;
+  text: string;
+  modelKey: string | null;
+  usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
+};
+
 declare global {
   interface Window {
     videoAnalyzer?: {
@@ -124,6 +180,17 @@ declare global {
       }>;
       openDataFolder: (which?: "projects" | "userData") => Promise<{ ok: boolean; path: string }>;
       purgeProjects: () => Promise<{ ok: boolean; message?: string }>;
+      llama: {
+        listModels: () => Promise<LlamaModelInfo[]>;
+        getStatus: () => Promise<LlamaStatus>;
+        ensureBinary: () => Promise<{ ok: true; binaryPath: string }>;
+        ensureModel: (modelKey: string) => Promise<{ ok: true; modelKey: string }>;
+        start: (modelKey: string) => Promise<{ ok: true; port: number; reused: boolean }>;
+        stop: () => Promise<{ ok: true }>;
+        selfTest: (payload: { imageDataUrl?: string; prompt?: string }) => Promise<LlamaSelfTestResult>;
+        onProgress: (callback: (event: LlamaProgress) => void) => () => void;
+        onLog: (callback: (event: LlamaLogEntry) => void) => () => void;
+      };
     };
   }
 }
