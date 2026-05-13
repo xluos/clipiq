@@ -7,13 +7,13 @@ import { CheckCircle2, ChevronRight, Loader2 } from "lucide-react";
 import type { AnalysisOptions } from "../types";
 
 const STAGES = [
-  "读取视频元数据…",
-  "检测镜头切换点…",
-  "抽取关键帧…",
-  "准备模型上下文…",
-  "分析画面语义…",
-  "分析音频与叙事…",
-  "构建时间线节点…",
+  "读取视频信息…",
+  "检测镜头切换…",
+  "挑选关键画面…",
+  "识别字幕…",
+  "整理分析素材…",
+  "模型分析画面…",
+  "整理结果…",
   "生成最终报告…"
 ];
 

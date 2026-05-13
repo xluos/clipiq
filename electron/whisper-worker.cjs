@@ -71,9 +71,10 @@ async function loadPipeline(modelId, mirror, cacheDir, onProgress) {
     progress_callback: (p) => {
       if (!onProgress) return;
       if (p?.status === "progress" && typeof p.progress === "number") {
-        onProgress({ stage: "download", message: `${p.file || modelId} · ${Math.floor(p.progress)}%` });
+        // 模型文件首次下载,把内部文件名隐藏,只显示百分比
+        onProgress({ stage: "download", message: `首次下载语音模型 · ${Math.floor(p.progress)}%` });
       } else if (p?.status === "ready") {
-        onProgress({ stage: "ready", message: "模型就绪" });
+        onProgress({ stage: "ready", message: "语音模型已加载" });
       }
     },
   }).then((p) => { dlog("pipeline ready"); return p; }).catch((e) => { dlog(`pipeline rejected: ${e.message}`); throw e; });
@@ -108,13 +109,13 @@ async function handleTranscribe(requestId, payload) {
   const { wavPath, modelId, mirror, cacheDir, language } = payload;
   const onProgress = (p) => send({ type: "progress", requestId, ...p });
   try {
-    onProgress({ stage: "load", message: `加载模型 ${modelId}` });
+    onProgress({ stage: "load", message: "正在加载本地语音模型" });
     const asr = await loadPipeline(modelId, mirror, cacheDir, onProgress);
-    onProgress({ stage: "decode", message: "解析 WAV → Float32" });
+    onProgress({ stage: "decode", message: "正在读取音频内容" });
     const buffer = await fs.readFile(wavPath);
     const samples = decodeWavToFloat32(buffer);
     const duration = samples.length / 16000;
-    onProgress({ stage: "infer", message: `推理 ${duration.toFixed(1)}s 音频` });
+    onProgress({ stage: "infer", message: `正在识别 ${duration.toFixed(1)} 秒音频` });
     const result = await asr(samples, {
       language: language || undefined,
       return_timestamps: true,

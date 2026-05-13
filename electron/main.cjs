@@ -1165,7 +1165,7 @@ async function analyzeProject(event, { project, provider, audioProvider, options
       throw new Error("未检测到 ffmpeg/ffprobe，无法生成关键帧和媒体清单。");
     }
 
-    send(5, "读取视频元数据", "使用 ffprobe 校验时长、尺寸、音轨。");
+    send(5, "读取视频信息", "正在校验视频时长、分辨率、音轨。");
     ensureNotCancelled(handle);
     const inspected = await inspectVideo(inputPath, handle);
     const projectDir = getProjectDir(project.id);
@@ -1173,13 +1173,13 @@ async function analyzeProject(event, { project, provider, audioProvider, options
     await fs.mkdir(artifactDir, { recursive: true });
     const projectMeta = { ...project, ...inspected, hasAudio: inspected.hasAudio };
 
-    send(12, "检测镜头切换", "ffmpeg scene filter 扫描所有 cut 点。");
+    send(12, "检测镜头切换", "扫描视频中的镜头切换点。");
     ensureNotCancelled(handle);
     const sceneThreshold = sceneThresholdFor(options);
     const scenes = await detectScenes(ffmpeg, inputPath, sceneThreshold, handle);
     const targetCount = targetFrameCount(inspected.durationSec || project.durationSec || 1, options);
     const plan = planFramePlan(scenes, inspected.durationSec || project.durationSec || 1, targetCount);
-    send(20, "规划候选帧", `场景 ${scenes.length} 个 → 目标 ${plan.length} 个候选帧`);
+    send(20, "挑选关键画面", `从 ${scenes.length} 个镜头里挑出 ${plan.length} 张关键画面。`);
 
     await writeJson(path.join(projectDir, "media-manifest.json"), {
       source: project.source,
@@ -1198,11 +1198,11 @@ async function analyzeProject(event, { project, provider, audioProvider, options
       generatedAt: new Date().toISOString(),
     });
 
-    send(24, "抽取关键帧", `${plan.length} 张候选帧 + dHash 去重`);
+    send(24, "抽取关键画面", `准备抽取 ${plan.length} 张关键画面,会自动去掉相似画面。`);
     const { frames, skipped } = await buildFrames(ffmpeg, inputPath, plan, artifactDir, handle, (i, total, sec) => {
-      send(24 + Math.round((i / total) * 26), "抽取关键帧", `${i + 1}/${total} · ${sec.toFixed(1)}s`);
+      send(24 + Math.round((i / total) * 26), "抽取关键画面", `已抽 ${i + 1} / ${total} 张 · 第 ${sec.toFixed(1)} 秒`);
     });
-    if (skipped > 0) send(50, "去重", `dHash 去掉 ${skipped} 张冗余帧，剩 ${frames.length} 张`);
+    if (skipped > 0) send(50, "画面去重", `去掉 ${skipped} 张相似画面,保留 ${frames.length} 张。`);
 
     // 音频转录（可选）
     let transcript = null;
@@ -1212,22 +1212,22 @@ async function analyzeProject(event, { project, provider, audioProvider, options
     );
     if (audioReady) {
       try {
-        send(55, "提取音轨", "ffmpeg 提取 16kHz 单声道 WAV。");
+        send(55, "提取音轨", "从视频里分离出音频,准备识别字幕。");
         const wavPath = path.join(artifactDir, "audio.wav");
         await extractAudioWav(ffmpeg, inputPath, wavPath, handle);
-        send(60, "语音转录", `${audioProvider.name} / ${audioProvider.model}`);
+        send(60, "字幕识别", `${audioProvider.name} 准备就绪`);
         ensureNotCancelled(handle);
         transcript = await transcribeAudio(audioProvider, wavPath, handle, (p) => {
-          send(62, "语音转录", p.message);
+          send(62, "字幕识别", p.message);
         });
         if (transcript) {
           await writeJson(path.join(artifactDir, "transcript.json"), transcript);
-          send(66, "转录完成", `${transcript.segments.length} 段, ${transcript.text.length} 字`);
+          send(66, "字幕识别完成", `共 ${transcript.segments.length} 段字幕、${transcript.text.length} 个字。`);
         }
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
         transcriptError = error?.message || String(error);
-        send(66, "转录失败", `${transcriptError}（继续走纯视觉分析）`);
+        send(66, "字幕识别失败", `${transcriptError}（不影响后续画面分析）`);
       }
     }
 
@@ -1251,12 +1251,12 @@ async function analyzeProject(event, { project, provider, audioProvider, options
     let nodes = fallbackNodes;
     let report = fallbackReport;
     ensureNotCancelled(handle);
-    send(72, "准备模型输入", provider?.apiKeyRef ? `构建 keyframe_sequence 请求（${frames.length} 帧${transcript ? " + 转录" : ""}）。` : "未配置视觉模型，将仅返回骨架结果。");
+    send(72, "准备分析素材", provider?.apiKeyRef ? `已整理好 ${frames.length} 张关键画面${transcript ? " + 字幕" : ""},准备送给模型。` : "未配置视觉模型,本次只生成时间线骨架。");
 
     if (provider?.apiKeyRef && provider.inputMode !== "direct_video") {
       try {
         ensureNotCancelled(handle);
-        send(78, "调用模型分析", `${provider.name} / ${provider.model}`);
+        send(78, "模型分析画面", `正在请 ${provider.name} 分析这段视频。`);
         const modelResult = await callOpenAICompatible(provider, projectMeta, frames, transcript, fallbackNodes, fallbackReport, options, handle);
         nodes = modelResult.nodes;
         report = {
@@ -1266,12 +1266,12 @@ async function analyzeProject(event, { project, provider, audioProvider, options
         };
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
-        send(85, "模型回退", `${error.message || error}。已回退到骨架结果。`);
+        send(85, "分析失败", `${error.message || error}。已回退到本地基础结果。`);
       }
     }
 
     ensureNotCancelled(handle);
-    send(90, "合并节点与报告", "写入项目产物。");
+    send(90, "整理结果", "正在保存分析结果。");
     const updatedProject = {
       ...project,
       localFilePath: inputPath,
@@ -1781,10 +1781,18 @@ app.whenReady().then(async () => {
     }
   });
 
-  ipcMain.handle("video:downloadUrl", async (_event, url) => {
+  ipcMain.handle("video:downloadUrl", async (_event, rawInput) => {
     const ytDlp = await commandPath("yt-dlp");
     if (!ytDlp) {
       throw new Error("未找到 yt-dlp，无法通过链接拉取视频。请先安装 yt-dlp，或改用本地视频。");
+    }
+
+    // 抖音/小红书等平台的分享文案是「中文 + URL + 时间戳 + 口令」混排,
+    // 用户经常整段粘贴。这里提取首个 http(s) URL,允许整段输入。
+    const urlMatch = String(rawInput || "").match(/https?:\/\/[^\s'"<>，。、）]+/);
+    const url = urlMatch ? urlMatch[0].replace(/[.,;)]+$/, "") : "";
+    if (!url) {
+      throw new Error("未从输入中识别到视频链接,请确认粘贴的内容里包含 http(s):// 开头的链接。");
     }
 
     const projectId = `proj-url-${Date.now()}`;
