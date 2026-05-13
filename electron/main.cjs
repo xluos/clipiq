@@ -1015,6 +1015,10 @@ async function transcribeAudio(audioProvider, wavPath, handle, onProgress) {
 function runWhisperWorker({ type, payload, onProgress, handle }) {
   return new Promise((resolve, reject) => {
     const workerPath = path.join(__dirname, "whisper-worker.cjs");
+    if (!fsSync.existsSync(workerPath)) {
+      reject(new Error(`worker 脚本不存在: ${workerPath}`));
+      return;
+    }
     const child = utilityProcess.fork(workerPath, [], {
       serviceName: "whisper-asr",
       stdio: "pipe",

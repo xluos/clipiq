@@ -6,13 +6,28 @@
 //   { type: 'progress' | 'result' | 'error' }
 
 const fs = require("node:fs/promises");
+const fsSync = require("node:fs");
 const path = require("node:path");
 
 const port = process.parentPort;
 if (!port) {
-  // 不是通过 utilityProcess.fork 启动的,正常退出
+  // 不是通过 utilityProcess.fork 启动的,直接退出
   process.exit(0);
 }
+
+// 诊断日志,主进程 stdout 监听在 utility 模式下不稳定,直接写文件方便排查
+const LOG_PATH = "/tmp/clipiq-whisper-worker.log";
+function dlog(msg) {
+  try {
+    fsSync.appendFileSync(LOG_PATH, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch {
+    // ignore
+  }
+}
+dlog(`worker boot pid=${process.pid} node=${process.versions.node}`);
+
+process.on("uncaughtException", (e) => dlog(`uncaughtException: ${e.message}\n${e.stack}`));
+process.on("unhandledRejection", (e) => dlog(`unhandledRejection: ${e?.message || e}`));
 
 const pipelines = new Map();
 let dispatcherApplied = false;
@@ -42,6 +57,7 @@ function applyProxyOnce() {
 async function loadPipeline(modelId, mirror, cacheDir, onProgress) {
   const cacheKey = `${modelId}|${mirror || ""}|${cacheDir}`;
   if (pipelines.has(cacheKey)) return pipelines.get(cacheKey);
+  dlog(`loadPipeline start modelId=${modelId} mirror=${mirror}`);
   applyProxyOnce();
   const transformers = await import("@huggingface/transformers");
   const env = transformers.env;
@@ -54,13 +70,13 @@ async function loadPipeline(modelId, mirror, cacheDir, onProgress) {
     dtype: "q8",
     progress_callback: (p) => {
       if (!onProgress) return;
-      if (p?.status === "downloading" && typeof p.progress === "number") {
+      if (p?.status === "progress" && typeof p.progress === "number") {
         onProgress({ stage: "download", message: `${p.file || modelId} · ${Math.floor(p.progress)}%` });
       } else if (p?.status === "ready") {
         onProgress({ stage: "ready", message: "模型就绪" });
       }
     },
-  });
+  }).then((p) => { dlog("pipeline ready"); return p; }).catch((e) => { dlog(`pipeline rejected: ${e.message}`); throw e; });
   pipelines.set(cacheKey, promise);
   promise.catch(() => pipelines.delete(cacheKey));
   return promise;
@@ -151,7 +167,10 @@ async function handleWarmup(requestId, payload) {
   }
 }
 
-port.on("message", (msg) => {
+port.on("message", (event) => {
+  // ⚠️ utilityProcess 的 parentPort 派发 MessageEvent,真实数据在 event.data;
+  // 直接 msg.type 会拿到 undefined,worker 收不到任何任务。
+  const msg = event && typeof event === "object" && "data" in event ? event.data : event;
   if (!msg || typeof msg !== "object") return;
   if (msg.type === "transcribe") return handleTranscribe(msg.requestId, msg.payload);
   if (msg.type === "warmup") return handleWarmup(msg.requestId, msg.payload);
