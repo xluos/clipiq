@@ -19,17 +19,26 @@ import {
   XCircle,
 } from "lucide-react";
 import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
-import { ModelInputMode, ModelProvider, ProviderKind } from "../types";
+import {
+  ModelInputMode,
+  ModelProvider,
+  ProviderKind,
+  SlotAssignment,
+  TaskAxis,
+  TaskDifficulty,
+  TaskSlotKey,
+} from "../types";
 import type { LlamaModelInfo, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
 
-type Section = "model" | "deps" | "local" | "analysis" | "data";
+type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "data";
 
 const NONE = "__none__";
 
 const SECTIONS: { key: Section; label: string }[] = [
-  { key: "model", label: "模型配置" },
-  { key: "deps", label: "本地依赖" },
+  { key: "providers", label: "供应商" },
+  { key: "tasks", label: "任务分配" },
   { key: "local", label: "本地推理" },
+  { key: "deps", label: "本地依赖" },
   { key: "analysis", label: "默认分析" },
   { key: "data", label: "项目数据" },
 ];
@@ -74,7 +83,7 @@ function formatBytes(bytes: number) {
 
 export function SettingsScreen() {
   const { setCurrentScreen } = useApp();
-  const [section, setSection] = useState<Section>("model");
+  const [section, setSection] = useState<Section>("providers");
 
   return (
     <div className="flex-1 flex h-full">
@@ -109,7 +118,8 @@ export function SettingsScreen() {
 
         <div className="flex-1 overflow-y-auto p-8 md:p-12">
           <div className="max-w-3xl space-y-8">
-            {section === "model" && <ModelSection />}
+            {section === "providers" && <ProvidersSection />}
+            {section === "tasks" && <TaskAssignmentSection />}
             {section === "deps" && <DepsSection />}
             {section === "local" && <LocalInferenceSection />}
             {section === "analysis" && <AnalysisDefaultsSection />}
@@ -121,7 +131,7 @@ export function SettingsScreen() {
   );
 }
 
-function ModelSection() {
+function ProvidersSection() {
   const {
     providers,
     setProviders,
@@ -199,68 +209,15 @@ function ModelSection() {
 
   return (
     <>
-      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">模型配置</h2>
-
-      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-5">
-        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">默认调用模型</h3>
-        <div className="grid grid-cols-[140px_1fr] items-center gap-4">
-          <Label className="text-right text-slate-500 dark:text-slate-400">视觉理解</Label>
-          <Select
-            value={activeVideoProviderId ?? NONE}
-            onValueChange={(value) => setActiveVideoProviderId(value === NONE ? null : value)}
-          >
-            <SelectTrigger className="w-full max-w-md bg-slate-50 dark:bg-[#0A0A0B] border-slate-200 dark:border-slate-800">
-              <SelectValue placeholder="选择视觉模型">
-                {(() => {
-                  const p = providers.find((x) => x.id === activeVideoProviderId);
-                  return p ? `${p.name} · ${p.model || "未配置模型"}` : "选择视觉模型";
-                })()}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {videoProviders.length === 0 && (
-                <SelectItem value={NONE} disabled>
-                  暂无视觉 Provider
-                </SelectItem>
-              )}
-              {videoProviders.map((provider) => (
-                <SelectItem key={provider.id} value={provider.id}>
-                  {provider.name} · {provider.model || "未配置模型"}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="grid grid-cols-[140px_1fr] items-center gap-4">
-          <Label className="text-right text-slate-500 dark:text-slate-400">语音转录</Label>
-          <Select
-            value={activeAudioProviderId ?? NONE}
-            onValueChange={(value) => setActiveAudioProviderId(value === NONE ? null : value)}
-          >
-            <SelectTrigger className="w-full max-w-md bg-slate-50 dark:bg-[#0A0A0B] border-slate-200 dark:border-slate-800">
-              <SelectValue placeholder="不启用语音转录">
-                {(() => {
-                  const p = providers.find((x) => x.id === activeAudioProviderId);
-                  return p ? `${p.name} · ${p.model || "未配置模型"}` : "不启用语音转录";
-                })()}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={NONE}>不启用语音转录</SelectItem>
-              {audioProviders.map((provider) => (
-                <SelectItem key={provider.id} value={provider.id}>
-                  {provider.name} · {provider.model || "未配置模型"}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </section>
+      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">供应商</h2>
+      <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
+        统一列出本地推理与远端 OpenAI-compatible 服务。具体哪个任务用哪个,去「任务分配」页配置。
+      </p>
 
       <ProviderGroup
         kind="video"
-        title="🎞️ 视觉模型"
-        emptyHint="还没添加视觉模型，点右上新增按钮添加一个 OpenAI 兼容 chat/completions endpoint。"
+        title="🎞️ 视觉/多模态供应商"
+        emptyHint="还没添加视觉模型,点右上新增按钮添加一个 OpenAI 兼容 chat/completions endpoint。"
         providers={videoProviders}
         activeId={activeVideoProviderId}
         onAdd={() => handleAdd("video")}
@@ -271,7 +228,7 @@ function ModelSection() {
 
       <ProviderGroup
         kind="audio"
-        title="🎙️ 语音模型"
+        title="🎙️ 音频字幕供应商"
         emptyHint="还没添加语音模型。配置 OpenAI 兼容 /audio/transcriptions endpoint 即可启用转录。"
         providers={audioProviders}
         activeId={activeAudioProviderId}
@@ -281,6 +238,201 @@ function ModelSection() {
         onUpdate={updateProvider}
       />
     </>
+  );
+}
+
+type SlotMeta = {
+  key: TaskSlotKey;
+  label: string;
+  difficulty: TaskDifficulty;
+  axis: TaskAxis;
+  hint: string;
+  used: boolean; // 当前主管线是否消费这个槽
+};
+
+const SLOT_METAS: SlotMeta[] = [
+  { key: "simple_vision", label: "简单 · 视觉", difficulty: "simple", axis: "vision", hint: "用于本地视觉初筛打标", used: true },
+  { key: "simple_text", label: "简单 · 文本", difficulty: "simple", axis: "text", hint: "暂未消费,留作快速文本任务", used: false },
+  { key: "medium_vision", label: "中等 · 视觉", difficulty: "medium", axis: "vision", hint: "暂未消费,留作中等视觉任务", used: false },
+  { key: "medium_text", label: "中等 · 文本", difficulty: "medium", axis: "text", hint: "用于字幕推断视频类型", used: true },
+  { key: "complex_vision", label: "复杂 · 视觉", difficulty: "complex", axis: "vision", hint: "用于主分析:拉片打标 + 方法论审计", used: true },
+  { key: "complex_text", label: "复杂 · 文本", difficulty: "complex", axis: "text", hint: "暂未消费,留作复杂文本任务", used: false },
+];
+
+function TaskAssignmentSection() {
+  const { providers, taskSlots, setTaskSlot, audioSlot, setAudioSlot } = useApp();
+
+  return (
+    <>
+      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">任务分配</h2>
+      <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
+        把每类任务绑到 (供应商, 模型)。主管线按任务难度 + 是否需要视觉自动选择。
+      </p>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {SLOT_METAS.map((meta) => (
+          <Fragment key={meta.key}>
+            <SlotCard
+              meta={meta}
+              providers={providers}
+              assignment={taskSlots[meta.key]}
+              onChange={(a) => setTaskSlot(meta.key, a)}
+            />
+          </Fragment>
+        ))}
+      </div>
+
+      <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 pt-2 border-t border-slate-200 dark:border-slate-800">
+        音频字幕识别
+      </h3>
+      <p className="text-xs text-slate-500 dark:text-slate-400 -mt-3">
+        独立配置,不参与上面的 6 档矩阵。本地 Whisper 或远端 ASR 均可。
+      </p>
+      <SlotCard
+        meta={{
+          key: "__audio__" as unknown as TaskSlotKey,
+          label: "音频转录",
+          difficulty: "simple",
+          axis: "text",
+          hint: "用于从视频音轨提取字幕",
+          used: true,
+        }}
+        providers={providers}
+        assignment={audioSlot}
+        onChange={(a) => setAudioSlot(a)}
+        audioMode
+      />
+    </>
+  );
+}
+
+function SlotCard({
+  meta,
+  providers,
+  assignment,
+  onChange,
+  audioMode,
+}: {
+  meta: SlotMeta;
+  providers: ModelProvider[];
+  assignment: SlotAssignment;
+  onChange: (a: SlotAssignment) => void;
+  audioMode?: boolean;
+}) {
+  // 按 axis/audio 模式过滤候选 provider 和 model
+  const candidateProviders = audioMode
+    ? providers.filter((p) =>
+        p.models.some((m) => m.capabilities.includes("audio_transcription")) ||
+        p.endpointType === "openai_audio_transcriptions" ||
+        p.endpointType === "local_whisper_wasm",
+      )
+    : providers.filter((p) =>
+        // 任意 model 满足 axis 要求即可:vision 槽需要至少一个 vision 能力 model;text 不限
+        meta.axis === "vision"
+          ? p.models.some((m) => m.capabilities.includes("vision"))
+          : true,
+      );
+
+  const selectedProvider = assignment ? providers.find((p) => p.id === assignment.providerId) : null;
+  const candidateModels = (() => {
+    if (!selectedProvider) return [];
+    if (audioMode) {
+      return selectedProvider.models.filter(
+        (m) =>
+          m.capabilities.includes("audio_transcription") ||
+          selectedProvider.endpointType === "openai_audio_transcriptions" ||
+          selectedProvider.endpointType === "local_whisper_wasm",
+      );
+    }
+    if (meta.axis === "vision") {
+      return selectedProvider.models.filter((m) => m.capabilities.includes("vision"));
+    }
+    return selectedProvider.models;
+  })();
+
+  const handleProviderChange = (id: string) => {
+    if (id === NONE) {
+      onChange(null);
+      return;
+    }
+    const p = providers.find((x) => x.id === id);
+    const firstModel = audioMode
+      ? p?.models.find((m) => m.capabilities.includes("audio_transcription")) || p?.models[0]
+      : meta.axis === "vision"
+      ? p?.models.find((m) => m.capabilities.includes("vision")) || p?.models[0]
+      : p?.models[0];
+    onChange(firstModel ? { providerId: id, modelId: firstModel.id } : null);
+  };
+
+  const handleModelChange = (id: string) => {
+    if (!assignment) return;
+    onChange({ ...assignment, modelId: id });
+  };
+
+  return (
+    <div
+      className={`rounded-xl border ${meta.used ? "border-slate-200 dark:border-slate-800" : "border-dashed border-slate-200 dark:border-slate-800"} bg-white dark:bg-[#0E0E10] p-4 space-y-2.5 shadow-sm`}
+    >
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-semibold text-slate-800 dark:text-slate-100">{meta.label}</div>
+        {!meta.used && (
+          <Badge variant="outline" className="text-[10px] text-slate-400 border-slate-200 dark:border-slate-700">
+            暂未消费
+          </Badge>
+        )}
+      </div>
+      <div className="text-[11px] text-slate-500 dark:text-slate-400">{meta.hint}</div>
+
+      <Select value={assignment?.providerId ?? NONE} onValueChange={handleProviderChange}>
+        <SelectTrigger className="h-8 text-xs bg-slate-50 dark:bg-[#0A0A0B] border-slate-200 dark:border-slate-800">
+          <SelectValue placeholder="选供应商">
+            {selectedProvider ? selectedProvider.name : "选供应商"}
+          </SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={NONE}>不启用</SelectItem>
+          {candidateProviders.length === 0 && (
+            <SelectItem value={NONE} disabled>
+              没有符合能力的供应商
+            </SelectItem>
+          )}
+          {candidateProviders.map((p) => (
+            <SelectItem key={p.id} value={p.id}>
+              {p.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+
+      <Select value={assignment?.modelId ?? NONE} onValueChange={handleModelChange} disabled={!selectedProvider}>
+        <SelectTrigger className="h-8 text-xs bg-slate-50 dark:bg-[#0A0A0B] border-slate-200 dark:border-slate-800">
+          <SelectValue placeholder="选模型">
+            {(() => {
+              if (!assignment || !selectedProvider) return "选模型";
+              const m = selectedProvider.models.find((x) => x.id === assignment.modelId);
+              return m?.label || assignment.modelId;
+            })()}
+          </SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          {candidateModels.length === 0 && (
+            <SelectItem value={NONE} disabled>
+              {meta.axis === "vision" ? "该供应商无视觉能力的 model" : "该供应商没有 model"}
+            </SelectItem>
+          )}
+          {candidateModels.map((m) => (
+            <SelectItem key={m.id} value={m.id}>
+              <span className="flex items-center gap-2">
+                <span>{m.label}</span>
+                <span className="text-[10px] text-slate-400">
+                  {m.capabilities.join(" · ")}
+                </span>
+              </span>
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
   );
 }
 
@@ -461,16 +613,20 @@ function ProviderCard({
               默认
             </span>
           )}
-          {persisted.endpointType === "local_whisper_wasm" ? (
+          {persisted.builtin && (
+            <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
+              内置
+            </span>
+          )}
+          {!persisted.builtin && persisted.endpointType === "local_whisper_wasm" && (
             <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
               本地
             </span>
-          ) : (
-            !persisted.apiKeyRef && (
-              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
-                缺 Key
-              </span>
-            )
+          )}
+          {!persisted.builtin && persisted.endpointType !== "local_whisper_wasm" && !persisted.apiKeyRef && (
+            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
+              缺 Key
+            </span>
           )}
           {isDirty && (
             <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300">
@@ -484,15 +640,17 @@ function ProviderCard({
               设为默认
             </Button>
           )}
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onDelete}
-            className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
-          >
-            <Trash2 className="w-4 h-4 mr-1" />
-            删除
-          </Button>
+          {!provider.builtin && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onDelete}
+              className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+            >
+              <Trash2 className="w-4 h-4 mr-1" />
+              删除
+            </Button>
+          )}
         </div>
       </header>
 
