@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, nativeImage, protocol, shell } = require("electron");
+const { app, BrowserWindow, Notification, dialog, ipcMain, nativeImage, protocol, shell } = require("electron");
 const { execFile } = require("node:child_process");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
@@ -2580,6 +2580,40 @@ function getAppIcon() {
   return null;
 }
 
+// "后台" 判定: 没有任何窗口处于聚焦+可见+未最小化状态。
+// 覆盖: macOS Cmd+H 隐藏 / minimize / 切到别的 app / 单显示器另一桌面。
+function isAppInBackground() {
+  const wins = BrowserWindow.getAllWindows();
+  if (wins.length === 0) return true;
+  return !wins.some((w) => w.isFocused() && w.isVisible() && !w.isMinimized());
+}
+
+// 仅当应用不在前台时弹系统通知。点击通知把主窗口拉到前台。
+// macOS 首次需要在系统设置中允许通知;Notification.isSupported 返回 false 时静默。
+function notifyIfBackground({ title, body, urgency } = {}) {
+  if (!isAppInBackground()) return;
+  if (!Notification.isSupported()) return;
+  try {
+    const n = new Notification({
+      title: title || "ClipIQ",
+      body: body || "",
+      silent: false,
+      urgency: urgency || "normal",
+    });
+    n.on("click", () => {
+      const win = BrowserWindow.getAllWindows()[0];
+      if (!win) return;
+      if (win.isMinimized()) win.restore();
+      if (!win.isVisible()) win.show();
+      win.focus();
+      if (process.platform === "darwin" && app.dock?.show) app.dock.show();
+    });
+    n.show();
+  } catch (err) {
+    console.warn("[notify] 通知失败:", err?.message || err);
+  }
+}
+
 async function createWindow() {
   const icon = getAppIcon();
   const mainWindow = new BrowserWindow({
@@ -2854,7 +2888,28 @@ app.whenReady().then(async () => {
     return { ok: true };
   });
 
-  ipcMain.handle("analysis:start", analyzeProject);
+  ipcMain.handle("analysis:start", async (event, args) => {
+    const projectName = args?.project?.videoName || args?.project?.title || "视频";
+    try {
+      const result = await analyzeProject(event, args);
+      notifyIfBackground({
+        title: "ClipIQ · 分析完成",
+        body: `「${projectName}」分析已完成,可以查看报告了`,
+      });
+      return result;
+    } catch (err) {
+      // 用户主动取消不弹通知,失败才弹
+      if (!(err instanceof AnalysisCancelledError)) {
+        const msg = String(err?.message || err).slice(0, 140);
+        notifyIfBackground({
+          title: "ClipIQ · 分析失败",
+          body: `「${projectName}」: ${msg}`,
+          urgency: "critical",
+        });
+      }
+      throw err;
+    }
+  });
 
   ipcMain.handle("analysis:cancel", async (_event, projectId) => {
     return { cancelled: cancelAnalysis(projectId) };
