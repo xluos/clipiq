@@ -19,7 +19,7 @@ import {
   Trash2,
   XCircle,
 } from "lucide-react";
-import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, type FunctionComponent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ModelInputMode,
   ModelProvider,
@@ -267,50 +267,231 @@ const SLOT_METAS: SlotMeta[] = [
   { key: "complex_text", label: "复杂 · 文本", difficulty: "complex", axis: "text", hint: "暂未消费,留作复杂文本任务", used: false },
 ];
 
+const PIPELINE_STAGES: Array<{
+  num: string;
+  title: string;
+  badges: string[];
+  desc: string;
+  slot: TaskSlotKey | "__audio__";
+  isKey?: boolean;
+}> = [
+  { num: "01", title: "抽帧初筛", badges: ["simple · vision"], desc: "对每秒 1-2 帧的抽帧打标(场景类型、主体、是否空帧),过滤重复与低信息量帧。", slot: "simple_vision" },
+  { num: "02", title: "字幕识别", badges: ["audio"], desc: "从音轨提取台词,作为节点字幕来源。", slot: "__audio__" },
+  { num: "03", title: "镜头合并 + 全局摘要", badges: ["medium · text"], desc: "把同一镜头的若干帧合并成镜头描述,聚合成全局摘要并推断视频类型。", slot: "medium_text" },
+  { num: "04", title: "主分析", badges: ["complex · vision"], desc: "基于镜头描述 + 字幕 + 关键帧,产出节点评审、方法论审计、情绪曲线。", slot: "complex_vision", isKey: true },
+];
+
+const EXTRA_SLOTS: TaskSlotKey[] = ["simple_text", "medium_vision", "complex_text"];
+
 function TaskAssignmentSection() {
   const { providers, taskSlots, setTaskSlot, audioSlot, setAudioSlot } = useApp();
+  const [extrasOpen, setExtrasOpen] = useState(false);
+
+  const slotMetaByKey: Record<string, SlotMeta> = SLOT_METAS.reduce((acc, m) => {
+    acc[m.key] = m;
+    return acc;
+  }, {} as Record<string, SlotMeta>);
+  const audioMeta: SlotMeta = {
+    key: "__audio__" as unknown as TaskSlotKey,
+    label: "字幕识别",
+    difficulty: "simple",
+    axis: "text",
+    hint: "本地 Whisper 速度快、隐私好;远端服务准确度更高",
+    used: true,
+  };
 
   return (
     <>
-      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">任务分配</h2>
+      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">分析管线</h2>
       <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
-        给不同复杂度的分析任务挑选合适的模型。轻量任务用小模型省成本,复杂任务用强模型保证质量。
+        每一步绑定独立模型,改完立即生效。
       </p>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {SLOT_METAS.map((meta) => (
-          <Fragment key={meta.key}>
-            <SlotCard
-              meta={meta}
+      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] overflow-hidden">
+        {PIPELINE_STAGES.map((stage, idx) => {
+          const isAudio = stage.slot === "__audio__";
+          const meta = isAudio ? audioMeta : slotMetaByKey[stage.slot];
+          const assignment = isAudio ? audioSlot : taskSlots[stage.slot as TaskSlotKey];
+          const onChange = isAudio
+            ? (a: SlotAssignment) => setAudioSlot(a)
+            : (a: SlotAssignment) => setTaskSlot(stage.slot as TaskSlotKey, a);
+          return (
+            <PipelineRow
+              key={stage.slot}
+              stage={stage}
+              isFirst={idx === 0}
               providers={providers}
-              assignment={taskSlots[meta.key]}
-              onChange={(a) => setTaskSlot(meta.key, a)}
+              meta={meta}
+              assignment={assignment}
+              onChange={onChange}
+              audioMode={isAudio}
             />
-          </Fragment>
-        ))}
+          );
+        })}
       </div>
 
-      <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 pt-2 border-t border-slate-200 dark:border-slate-800">
-        字幕识别
-      </h3>
-      <p className="text-xs text-slate-500 dark:text-slate-400 -mt-3">
-        从视频音轨里识别字幕。
-      </p>
-      <SlotCard
-        meta={{
-          key: "__audio__" as unknown as TaskSlotKey,
-          label: "字幕识别",
-          difficulty: "simple",
-          axis: "text",
-          hint: "本地 Whisper 速度快、隐私好;远端服务准确度更高",
-          used: true,
-        }}
-        providers={providers}
-        assignment={audioSlot}
-        onChange={(a) => setAudioSlot(a)}
-        audioMode
-      />
+      <button
+        type="button"
+        onClick={() => setExtrasOpen(v => !v)}
+        className="self-start font-mono text-[10.5px] uppercase tracking-wider text-slate-500 hover:text-slate-900 dark:hover:text-slate-100 transition-colors"
+      >
+        {extrasOpen ? "▴ 隐藏未启用槽位" : "▾ 显示 3 个未启用槽位"}
+      </button>
+
+      {extrasOpen && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {EXTRA_SLOTS.map((key) => {
+            const meta = slotMetaByKey[key];
+            if (!meta) return null;
+            return (
+              <Fragment key={key}>
+                <SlotCard
+                  meta={meta}
+                  providers={providers}
+                  assignment={taskSlots[key]}
+                  onChange={(a) => setTaskSlot(key, a)}
+                />
+              </Fragment>
+            );
+          })}
+        </div>
+      )}
     </>
+  );
+}
+
+type PipelineRowProps = {
+  stage: { num: string; title: string; badges: string[]; desc: string; isKey?: boolean };
+  isFirst: boolean;
+  providers: ModelProvider[];
+  meta: SlotMeta;
+  assignment: SlotAssignment;
+  onChange: (a: SlotAssignment) => void;
+  audioMode?: boolean;
+};
+
+const PipelineRow: FunctionComponent<PipelineRowProps> = ({
+  stage, isFirst, providers, meta, assignment, onChange, audioMode,
+}) => {
+  const candidateProviders = audioMode
+    ? providers.filter((p) =>
+        p.models.some((m) => m.capabilities.includes("audio_transcription")) ||
+        p.endpointType === "openai_audio_transcriptions" ||
+        p.endpointType === "local_whisper_cpp",
+      )
+    : providers.filter((p) =>
+        meta.axis === "vision"
+          ? p.models.some((m) => m.capabilities.includes("vision"))
+          : true,
+      );
+  const selectedProvider = assignment ? providers.find((p) => p.id === assignment.providerId) : null;
+  const candidateModels = (() => {
+    if (!selectedProvider) return [];
+    if (audioMode) {
+      return selectedProvider.models.filter(
+        (m) =>
+          m.capabilities.includes("audio_transcription") ||
+          selectedProvider.endpointType === "openai_audio_transcriptions" ||
+          selectedProvider.endpointType === "local_whisper_cpp",
+      );
+    }
+    if (meta.axis === "vision") {
+      return selectedProvider.models.filter((m) => m.capabilities.includes("vision"));
+    }
+    return selectedProvider.models;
+  })();
+
+  const handleProviderChange = (id: string) => {
+    if (id === NONE) {
+      onChange(null);
+      return;
+    }
+    const p = providers.find((x) => x.id === id);
+    const firstModel = audioMode
+      ? p?.models.find((m) => m.capabilities.includes("audio_transcription")) || p?.models[0]
+      : meta.axis === "vision"
+      ? p?.models.find((m) => m.capabilities.includes("vision")) || p?.models[0]
+      : p?.models[0];
+    onChange(firstModel ? { providerId: id, modelId: firstModel.id } : null);
+  };
+
+  const handleModelChange = (id: string) => {
+    if (!assignment) return;
+    onChange({ ...assignment, modelId: id });
+  };
+
+  return (
+    <div className={`grid grid-cols-[36px_minmax(0,1fr)_280px] gap-4 items-start px-5 py-4 ${isFirst ? "" : "border-t border-slate-200 dark:border-slate-800"}`}>
+      <div className={`w-7 h-7 grid place-items-center rounded-md font-mono text-[11px] font-medium ${
+        stage.isKey
+          ? "bg-indigo-600 text-white border border-indigo-600"
+          : "bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700"
+      }`}>
+        {stage.num}
+      </div>
+      <div className="min-w-0">
+        <h4 className="text-[13.5px] font-semibold text-slate-900 dark:text-slate-100 mb-1 flex items-center gap-2">
+          {stage.title}
+          {stage.badges.map(b => (
+            <span key={b} className={`inline-flex h-5 px-1.5 rounded font-mono text-[10.5px] uppercase tracking-wider items-center ${
+              stage.isKey
+                ? "bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900"
+                : "bg-transparent text-slate-500 border border-slate-200 dark:border-slate-700"
+            }`}>
+              {b}
+            </span>
+          ))}
+        </h4>
+        <p className="text-[12.5px] text-slate-600 dark:text-slate-400 leading-snug">
+          {stage.desc}
+        </p>
+      </div>
+      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0e0e10] p-2.5 space-y-2">
+        <div className="font-mono text-[10px] uppercase tracking-wider text-slate-500">当前使用</div>
+        <Select value={assignment?.providerId ?? NONE} onValueChange={handleProviderChange}>
+          <SelectTrigger className="h-7 text-[12px] bg-white dark:bg-[#14151a] border-slate-200 dark:border-slate-800">
+            <SelectValue placeholder="选供应商">
+              {selectedProvider ? selectedProvider.name : "选供应商"}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={NONE}>不启用</SelectItem>
+            {candidateProviders.length === 0 && (
+              <SelectItem value={NONE} disabled>没有符合能力的供应商</SelectItem>
+            )}
+            {candidateProviders.map((p) => (
+              <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={assignment?.modelId ?? NONE} onValueChange={handleModelChange} disabled={!selectedProvider}>
+          <SelectTrigger className="h-7 text-[12px] bg-white dark:bg-[#14151a] border-slate-200 dark:border-slate-800 font-mono">
+            <SelectValue placeholder="选模型">
+              {(() => {
+                if (!assignment || !selectedProvider) return "选模型";
+                const m = selectedProvider.models.find((x) => x.id === assignment.modelId);
+                return m?.label || assignment.modelId;
+              })()}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            {candidateModels.length === 0 && (
+              <SelectItem value={NONE} disabled>
+                {meta.axis === "vision" ? "该供应商无视觉能力的 model" : "该供应商没有 model"}
+              </SelectItem>
+            )}
+            {candidateModels.map((m) => (
+              <SelectItem key={m.id} value={m.id}>
+                <span className="flex items-center gap-2">
+                  <span>{m.label}</span>
+                  <span className="text-[10px] text-slate-400">{m.capabilities.join(" · ")}</span>
+                </span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
   );
 }
 
