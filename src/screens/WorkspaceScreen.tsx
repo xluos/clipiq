@@ -366,6 +366,16 @@ export function WorkspaceScreen() {
         {/* Right: Nodes List Sidebar */}
         <div className={`${isPortrait ? 'flex-1' : 'w-full md:w-[450px]'} border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] flex flex-col min-h-0 shadow-sm z-10`}>
           <div className="p-3 border-b border-slate-200 dark:border-slate-800 flex-none bg-slate-50/80 dark:bg-[#0E0E10] space-y-3">
+            {report?.globalSummary && (
+              <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-3">
+                <div className="flex items-center justify-between mb-1.5">
+                  <div className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 font-medium">全局概览</div>
+                </div>
+                <p className="text-[12.5px] text-slate-700 dark:text-slate-300 leading-relaxed line-clamp-3" title={report.globalSummary}>
+                  {report.globalSummary}
+                </p>
+              </div>
+            )}
             <Tabs value={tab} onValueChange={(value) => setTab(value as "timeline" | "shots" | "insights")}>
               <TabsList className="grid w-full grid-cols-3 bg-slate-100 dark:bg-slate-900 p-1 rounded-lg">
                 <TabsTrigger value="timeline" className="data-[state=active]:bg-white dark:data-[state=active]:bg-[#0E0E10] rounded-md shadow-sm dark:shadow-none font-medium">逻辑节点</TabsTrigger>
@@ -576,41 +586,86 @@ export function WorkspaceScreen() {
                       </button>
                     </div>
                     
-                    <div className="flex flex-wrap gap-2 mb-3">
-                      <Badge variant="secondary" className="bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700 dark:hover:bg-slate-700 text-[11px] px-2 py-0.5 font-medium shadow-none">{node.narrativeFunction}</Badge>
-                      <Badge variant="secondary" className="bg-emerald-50 text-emerald-600 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 text-[11px] px-2 py-0.5 font-medium dark:border-emerald-500/20 shadow-none">{node.emotionLabel}</Badge>
-                      {(node.methodologyTags || []).map((tag, ti) => (
-                        <Badge
-                          key={`${tag.ruleId}-${ti}`}
-                          variant="secondary"
-                          title={`${tag.ruleName}${tag.evidence ? "：" + tag.evidence : ""}${tag.status === "violation" && tag.fixSuggestion ? "\n修复：" + tag.fixSuggestion : ""}`}
-                          className={`text-[11px] px-2 py-0.5 font-medium shadow-none ${
-                            tag.status === "hit"
-                              ? "bg-indigo-50 text-indigo-600 border-indigo-200 dark:bg-indigo-500/10 dark:text-indigo-400 dark:border-indigo-500/20"
-                              : "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20"
-                          }`}
-                        >
-                          {tag.status === "hit" ? "✓" : "⚠"} {tag.ruleName}
-                        </Badge>
-                      ))}
-                      {node.prefilterTag && (
-                        <Badge
-                          variant="secondary"
-                          title={`本地初筛\n场景: ${node.prefilterTag.sceneType}\n主体: ${node.prefilterTag.subject}\n信息量: ${node.prefilterTag.salience}/10\n签名: ${node.prefilterTag.signature}${node.prefilterTag.hasText !== "none" ? `\n含文字: ${node.prefilterTag.hasText}` : ""}`}
-                          className={`text-[11px] px-2 py-0.5 font-medium shadow-none ${
-                            node.prefilterTag.salience >= 7
-                              ? "bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-500/10 dark:text-sky-300 dark:border-sky-500/20"
-                              : "bg-slate-50 text-slate-500 border-slate-200 dark:bg-slate-800/60 dark:text-slate-400 dark:border-slate-700"
-                          }`}
-                        >
-                          ✨ {node.prefilterTag.subject} · {node.prefilterTag.salience}
-                        </Badge>
-                      )}
-                    </div>
+                    {/* Default state: single primary chip + monospace meta line.
+                        Full badge stack (methodology / prefilter / emotion) only on expand. */}
+                    {!isActive && (
+                      <>
+                        <div className="flex items-center gap-2 mb-2">
+                          {node.isHighlight ? (
+                            <span className="inline-flex items-center gap-1 h-5 px-1.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20">
+                              <Star className="w-2.5 h-2.5 fill-current" /> 高光
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center h-5 px-1.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-slate-100 text-slate-600 border border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700">
+                              {node.narrativeFunction || "节点"}
+                            </span>
+                          )}
+                        </div>
+                        <div className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 dark:text-slate-500 flex items-center gap-2 flex-wrap">
+                          {node.emotionLabel && (
+                            <>
+                              <span className="normal-case font-sans">{node.emotionLabel} {node.emotionIntensity}/10</span>
+                              <span className="text-slate-300 dark:text-slate-700">·</span>
+                            </>
+                          )}
+                          {(() => {
+                            const hits = (node.methodologyTags || []).filter(t => t.status === "hit").length;
+                            const vios = (node.methodologyTags || []).filter(t => t.status === "violation").length;
+                            if (hits === 0 && vios === 0) return null;
+                            return (
+                              <>
+                                <span>
+                                  {hits > 0 && <span className="text-indigo-600 dark:text-indigo-400">命中 {hits}</span>}
+                                  {hits > 0 && vios > 0 && <span className="mx-1 text-slate-300 dark:text-slate-700">/</span>}
+                                  {vios > 0 && <span className="text-amber-600 dark:text-amber-400">违反 {vios}</span>}
+                                </span>
+                              </>
+                            );
+                          })()}
+                        </div>
+                      </>
+                    )}
 
-                    <p className={`text-sm line-clamp-2 leading-relaxed ${isActive ? 'text-slate-700 dark:text-slate-300' : 'text-slate-500 dark:text-slate-400'}`}>
-                      {node.shotDescription}
-                    </p>
+                    {/* Expanded state: keep the rich badge stack and description here for context. */}
+                    {isActive && (
+                      <>
+                        <div className="flex flex-wrap gap-2 mb-3">
+                          <Badge variant="secondary" className="bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700 dark:hover:bg-slate-700 text-[11px] px-2 py-0.5 font-medium shadow-none">{node.narrativeFunction}</Badge>
+                          <Badge variant="secondary" className="bg-emerald-50 text-emerald-600 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 text-[11px] px-2 py-0.5 font-medium dark:border-emerald-500/20 shadow-none">{node.emotionLabel}</Badge>
+                          {(node.methodologyTags || []).map((tag, ti) => (
+                            <Badge
+                              key={`${tag.ruleId}-${ti}`}
+                              variant="secondary"
+                              title={`${tag.ruleName}${tag.evidence ? "：" + tag.evidence : ""}${tag.status === "violation" && tag.fixSuggestion ? "\n修复：" + tag.fixSuggestion : ""}`}
+                              className={`text-[11px] px-2 py-0.5 font-medium shadow-none ${
+                                tag.status === "hit"
+                                  ? "bg-indigo-50 text-indigo-600 border-indigo-200 dark:bg-indigo-500/10 dark:text-indigo-400 dark:border-indigo-500/20"
+                                  : "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20"
+                              }`}
+                            >
+                              {tag.status === "hit" ? "✓" : "⚠"} {tag.ruleName}
+                            </Badge>
+                          ))}
+                          {node.prefilterTag && (
+                            <Badge
+                              variant="secondary"
+                              title={`本地初筛\n场景: ${node.prefilterTag.sceneType}\n主体: ${node.prefilterTag.subject}\n信息量: ${node.prefilterTag.salience}/10\n签名: ${node.prefilterTag.signature}${node.prefilterTag.hasText !== "none" ? `\n含文字: ${node.prefilterTag.hasText}` : ""}`}
+                              className={`text-[11px] px-2 py-0.5 font-medium shadow-none ${
+                                node.prefilterTag.salience >= 7
+                                  ? "bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-500/10 dark:text-sky-300 dark:border-sky-500/20"
+                                  : "bg-slate-50 text-slate-500 border-slate-200 dark:bg-slate-800/60 dark:text-slate-400 dark:border-slate-700"
+                              }`}
+                            >
+                              ✨ {node.prefilterTag.subject} · {node.prefilterTag.salience}
+                            </Badge>
+                          )}
+                        </div>
+
+                        <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                          {node.shotDescription}
+                        </p>
+                      </>
+                    )}
 
                     {isActive && (
                       <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800/50 space-y-4 animate-in fade-in slide-in-from-top-2">
