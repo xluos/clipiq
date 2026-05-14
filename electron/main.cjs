@@ -3125,10 +3125,29 @@ function scheduleYtDlpAutoCheck() {
   }, 2000);
 }
 
-app.on("before-quit", () => {
-  llamaRuntime.shutdownSync();
-  whisperCppRuntime.shutdownSync();
-});
+// 所有可能的退出路径都收敛到这个清理函数:
+// 1) Electron 自己 app.quit() / Cmd+Q → before-quit
+// 2) 终端 Ctrl+C / kill 主进程 → SIGINT / SIGTERM / SIGHUP (concurrently -k 用 SIGTERM)
+// 3) Node 主循环退出 → exit
+// 同一个 cleanup 可以被多次调用, shutdownSync 内部已经判 state.process 是否存在, 幂等。
+let _cleanedUp = false;
+function cleanupSidecars(reason) {
+  if (_cleanedUp) return;
+  _cleanedUp = true;
+  try { console.log(`[clipiq] cleanupSidecars: ${reason}`); } catch {}
+  try { llamaRuntime.shutdownSync(); } catch {}
+  try { whisperCppRuntime.shutdownSync(); } catch {}
+}
+app.on("before-quit", () => cleanupSidecars("before-quit"));
+process.on("exit", () => cleanupSidecars("process.exit"));
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(sig, () => {
+    cleanupSidecars(sig);
+    // 重新发信号给自己, 让 Node 默认行为接管退出 (避免吞掉信号导致 hang)
+    // app.quit() 不可靠: 在 dev 模式下被 concurrently -k 时 electron 已经处于半死状态
+    setTimeout(() => process.exit(0), 100);
+  });
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();

@@ -11,6 +11,11 @@ const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
 const path = require("node:path");
 const { createServer } = require("node:net");
+const sidecarUtils = require("./sidecar-utils.cjs");
+
+function pidFilePath() {
+  return path.join(app.getPath("userData"), "sidecars", "llama.json");
+}
 
 const HF_MIRROR_DEFAULT = "https://hf-mirror.com";
 
@@ -243,6 +248,9 @@ async function ensureLlamaServer(onProgress = () => {}) {
 const state = {
   binaryPath: null,
   process: null,
+  // borrowedPid: 跨会话接管时设置 —— 表示这个 sidecar 不是本会话 spawn 的,
+  // 没有 ChildProcess 句柄, 只能通过 pid 操作。stop/shutdownSync 要分支处理。
+  borrowedPid: null,
   port: null,
   modelKey: null,
   startedAt: 0,
@@ -360,6 +368,17 @@ async function ensureModel(modelKey, onProgress = () => {}) {
 }
 
 async function stop() {
+  // 接管的 sidecar (没有 ChildProcess 句柄, 只有 PID) —— 用 pid 操作
+  if (!state.process && state.borrowedPid) {
+    state.status = "stopping";
+    await sidecarUtils.killPidAsyncWait(state.borrowedPid, 2000);
+    sidecarUtils.clearPidFile(pidFilePath());
+    state.borrowedPid = null;
+    state.port = null;
+    state.modelKey = null;
+    state.status = "idle";
+    return { ok: true };
+  }
   if (!state.process) {
     state.status = "idle";
     state.modelKey = null;
@@ -377,6 +396,7 @@ async function stop() {
       state.port = null;
       state.modelKey = null;
       state.status = "idle";
+      sidecarUtils.clearPidFile(pidFilePath());
       resolve({ ok: true });
     };
     proc.once("exit", finish);
@@ -418,9 +438,10 @@ async function waitForReady(port, timeoutMs = 60_000) {
 }
 
 async function start(modelKey, { onLog } = {}) {
-  if (state.process) {
+  // 复用: 当前会话或上一会话残留 (borrowedPid) 都算; 模型对得上就直接返回
+  if (state.process || state.borrowedPid) {
     if (state.modelKey === modelKey && state.status === "ready") {
-      return { ok: true, port: state.port, reused: true };
+      return { ok: true, port: state.port, reused: true, adopted: !!state.borrowedPid };
     }
     await stop();
   }
@@ -465,6 +486,15 @@ async function start(modelKey, { onLog } = {}) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   state.process = child;
+  // 落盘 PID 文件: 下次 electron 启动能识别这个 sidecar (即便我们这次被强杀)
+  sidecarUtils.writePidFile(pidFilePath(), {
+    pid: child.pid,
+    port,
+    modelKey,
+    parentPid: process.pid,
+    startedAt: state.startedAt,
+    binaryPath: binary,
+  });
 
   const handleLine = (channel) => (chunk) => {
     const text = chunk.toString();
@@ -487,6 +517,7 @@ async function start(modelKey, { onLog } = {}) {
     state.process = null;
     state.port = null;
     state.modelKey = null;
+    sidecarUtils.clearPidFile(pidFilePath());
     if (wasStopping) {
       state.status = "idle";
     } else {
@@ -550,14 +581,59 @@ async function selfTest({ imageDataUrl, prompt } = {}) {
 async function init() {
   state.binaryPath = await resolveLlamaServerPath();
   await fs.mkdir(modelsRootDir(), { recursive: true });
+  await reapOrAdopt();
 }
 
-async function shutdownSync() {
-  if (!state.process) return;
-  try {
-    state.process.kill("SIGTERM");
-  } catch {
-    // ignore
+// init() 时检查 PID 文件: 上次的 sidecar 是否还能接管? 不能就杀掉残留。
+async function reapOrAdopt() {
+  const filePath = pidFilePath();
+  const result = await sidecarUtils.inspectPidFile(filePath, { pathSuffix: "/v1/models", timeoutMs: 600 });
+  if (result.mode === "none") return;
+  const { info } = result;
+  if (result.mode === "stale") {
+    // pid 已死 (上次进程 clean exit 但没清文件, 或机器重启过)
+    // eslint-disable-next-line no-console
+    console.log("[llama-runtime] PID file stale, clearing");
+    sidecarUtils.clearPidFile(filePath);
+    return;
+  }
+  if (result.mode === "kill") {
+    // pid 活但 HTTP 不响应 —— 僵尸状态, 杀掉
+    // eslint-disable-next-line no-console
+    console.log(`[llama-runtime] orphan pid ${info.pid} unresponsive on :${info.port}, killing`);
+    await sidecarUtils.killPidAsyncWait(info.pid, 1500);
+    sidecarUtils.clearPidFile(filePath);
+    return;
+  }
+  // adopt: pid + port 都活, 接管
+  if (!MODELS[info.modelKey]) {
+    // 配置变了 / 不认识的 modelKey → 杀掉, 不接管
+    // eslint-disable-next-line no-console
+    console.log(`[llama-runtime] orphan modelKey ${info.modelKey} not in current MODELS map, killing`);
+    await sidecarUtils.killPidAsyncWait(info.pid, 1500);
+    sidecarUtils.clearPidFile(filePath);
+    return;
+  }
+  state.borrowedPid = info.pid;
+  state.port = info.port;
+  state.modelKey = info.modelKey;
+  state.startedAt = info.startedAt || Date.now();
+  state.status = "ready";
+  // eslint-disable-next-line no-console
+  console.log(`[llama-runtime] adopted orphan pid=${info.pid} port=${info.port} model=${info.modelKey}`);
+}
+
+// 同步退出路径 (process.exit / SIGTERM hook) 调用。要尽快释放 sidecar, 不能用 async。
+function shutdownSync() {
+  if (state.process) {
+    try { state.process.kill("SIGTERM"); } catch { /* ignore */ }
+    sidecarUtils.clearPidFile(pidFilePath());
+    return;
+  }
+  if (state.borrowedPid) {
+    sidecarUtils.killPidSyncWait(state.borrowedPid, 600);
+    sidecarUtils.clearPidFile(pidFilePath());
+    state.borrowedPid = null;
   }
 }
 

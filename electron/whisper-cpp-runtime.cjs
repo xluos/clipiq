@@ -21,6 +21,11 @@ const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
 const path = require("node:path");
 const { createServer } = require("node:net");
+const sidecarUtils = require("./sidecar-utils.cjs");
+
+function pidFilePath() {
+  return path.join(app.getPath("userData"), "sidecars", "whisper.json");
+}
 
 const HF_MIRROR_DEFAULT = "https://hf-mirror.com";
 const GGERGANOV_WHISPER_REPO = "ggerganov/whisper.cpp";
@@ -126,6 +131,8 @@ async function findFreePort() {
 const state = {
   binaryPath: null,
   process: null,
+  // borrowedPid: 跨会话接管的 sidecar (上次 electron 强退留下的孤儿), 没有 ChildProcess 句柄。
+  borrowedPid: null,
   port: null,
   modelKey: null,
   startedAt: 0,
@@ -231,6 +238,17 @@ async function ensureModel(modelKey, onProgress = () => {}) {
 }
 
 async function stop() {
+  // 接管的 sidecar: 只有 pid 没有句柄, 用 pid 操作
+  if (!state.process && state.borrowedPid) {
+    state.status = "stopping";
+    await sidecarUtils.killPidAsyncWait(state.borrowedPid, 2000);
+    sidecarUtils.clearPidFile(pidFilePath());
+    state.borrowedPid = null;
+    state.port = null;
+    state.modelKey = null;
+    state.status = "idle";
+    return { ok: true };
+  }
   if (!state.process) {
     state.status = "idle";
     state.modelKey = null;
@@ -248,6 +266,7 @@ async function stop() {
       state.port = null;
       state.modelKey = null;
       state.status = "idle";
+      sidecarUtils.clearPidFile(pidFilePath());
       resolve({ ok: true });
     };
     proc.once("exit", finish);
@@ -290,9 +309,10 @@ async function waitForReady(port, timeoutMs = 60_000) {
 }
 
 async function start(modelKey, { onLog } = {}) {
-  if (state.process) {
+  // 复用: 本会话句柄 或 跨会话接管 (borrowedPid) 都算
+  if (state.process || state.borrowedPid) {
     if (state.modelKey === modelKey && state.status === "ready") {
-      return { ok: true, port: state.port, reused: true };
+      return { ok: true, port: state.port, reused: true, adopted: !!state.borrowedPid };
     }
     await stop();
   }
@@ -333,6 +353,14 @@ async function start(modelKey, { onLog } = {}) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   state.process = child;
+  sidecarUtils.writePidFile(pidFilePath(), {
+    pid: child.pid,
+    port,
+    modelKey,
+    parentPid: process.pid,
+    startedAt: state.startedAt,
+    binaryPath: binary,
+  });
 
   const handleLine = (channel) => (chunk) => {
     const text = chunk.toString();
@@ -355,6 +383,7 @@ async function start(modelKey, { onLog } = {}) {
     state.process = null;
     state.port = null;
     state.modelKey = null;
+    sidecarUtils.clearPidFile(pidFilePath());
     if (wasStopping) {
       state.status = "idle";
     } else {
@@ -378,14 +407,53 @@ async function start(modelKey, { onLog } = {}) {
 async function init() {
   state.binaryPath = resolveBinaryPath();
   await fs.mkdir(modelsRootDir(), { recursive: true });
+  await reapOrAdopt();
+}
+
+async function reapOrAdopt() {
+  const filePath = pidFilePath();
+  const result = await sidecarUtils.inspectPidFile(filePath, { pathSuffix: "/", timeoutMs: 600 });
+  if (result.mode === "none") return;
+  const { info } = result;
+  if (result.mode === "stale") {
+    // eslint-disable-next-line no-console
+    console.log("[whisper-runtime] PID file stale, clearing");
+    sidecarUtils.clearPidFile(filePath);
+    return;
+  }
+  if (result.mode === "kill") {
+    // eslint-disable-next-line no-console
+    console.log(`[whisper-runtime] orphan pid ${info.pid} unresponsive on :${info.port}, killing`);
+    await sidecarUtils.killPidAsyncWait(info.pid, 1500);
+    sidecarUtils.clearPidFile(filePath);
+    return;
+  }
+  if (!MODELS[info.modelKey]) {
+    // eslint-disable-next-line no-console
+    console.log(`[whisper-runtime] orphan modelKey ${info.modelKey} not in MODELS map, killing`);
+    await sidecarUtils.killPidAsyncWait(info.pid, 1500);
+    sidecarUtils.clearPidFile(filePath);
+    return;
+  }
+  state.borrowedPid = info.pid;
+  state.port = info.port;
+  state.modelKey = info.modelKey;
+  state.startedAt = info.startedAt || Date.now();
+  state.status = "ready";
+  // eslint-disable-next-line no-console
+  console.log(`[whisper-runtime] adopted orphan pid=${info.pid} port=${info.port} model=${info.modelKey}`);
 }
 
 function shutdownSync() {
-  if (!state.process) return;
-  try {
-    state.process.kill("SIGTERM");
-  } catch {
-    // ignore
+  if (state.process) {
+    try { state.process.kill("SIGTERM"); } catch { /* ignore */ }
+    sidecarUtils.clearPidFile(pidFilePath());
+    return;
+  }
+  if (state.borrowedPid) {
+    sidecarUtils.killPidSyncWait(state.borrowedPid, 600);
+    sidecarUtils.clearPidFile(pidFilePath());
+    state.borrowedPid = null;
   }
 }
 
