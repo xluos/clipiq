@@ -12,7 +12,7 @@ async function main() {
   }
   const res = await fetch(`http://127.0.0.1:${port}/json`);
   const targets = await res.json();
-  const page = targets.find((t) => t.type === "page");
+  const page = targets.find((t) => t.type === "page" && !t.url.startsWith("devtools://")) || targets.find((t) => t.type === "page");
   if (!page) throw new Error("no page target");
   const ws = new WebSocket(page.webSocketDebuggerUrl);
   let id = 0;

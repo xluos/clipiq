@@ -7,7 +7,8 @@ async function main() {
   const outPath = process.argv[3] || "/tmp/electron.png";
   const res = await fetch(`http://127.0.0.1:${port}/json`);
   const targets = await res.json();
-  const page = targets.find((t) => t.type === "page");
+  // Pick the real renderer (not DevTools): prefer page targets whose URL is not a devtools:// scheme.
+  const page = targets.find((t) => t.type === "page" && !t.url.startsWith("devtools://")) || targets.find((t) => t.type === "page");
   if (!page) throw new Error("no page target");
   const ws = new WebSocket(page.webSocketDebuggerUrl);
   let id = 0;
