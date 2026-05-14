@@ -57,6 +57,8 @@ export type InspectedVideo = {
 export type DownloadedVideo = InspectedVideo & {
   projectId: string;
   platform: Extract<ProjectSource, { type: "url" }>["platform"];
+  title?: string | null;    // medium_text 从分享文案提的项目标题 (空 → 用 filename)
+  fromCache?: boolean;      // true: 复用了 url-cache 里的本地文件, 没走 yt-dlp
 };
 
 export type AnalysisResult = {
