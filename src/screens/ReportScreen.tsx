@@ -259,6 +259,17 @@ export function ReportScreen() {
   };
 
   const audit = report.methodologyAudit;
+  const highlightCount = nodes.filter(n => n.isHighlight).length;
+  const violationCount = audit?.violations?.length ?? 0;
+  const hitCount = audit?.hits?.length ?? 0;
+  const overallScore = audit?.overallScore;
+  const heroSentence = (report.globalSummary || report.summary || "").trim().split(/[。!?\n]/)[0];
+  const heroChips = [
+    audit?.detectedGenre ? GENRE_LABELS[audit.detectedGenre] : null,
+    nodes.length > 0 ? `${nodes.length} 个节点` : null,
+    highlightCount > 0 ? `${highlightCount} 个高光` : null,
+    violationCount > 0 ? `${violationCount} 处违反` : null,
+  ].filter((x): x is string => Boolean(x));
 
   const handleExport = async (format: ExportFormat) => {
     if (!project || !report) return;
@@ -358,6 +369,57 @@ export function ReportScreen() {
           {report.timings?.length ? (
             <TimingBar timings={report.timings} totalMs={report.totalDurationMs} />
           ) : null}
+
+          {heroSentence && (
+            <section className="space-y-3">
+              <div className={`rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-6 md:p-7 grid grid-cols-1 ${typeof overallScore === "number" ? "md:grid-cols-[1fr_200px]" : ""} gap-8 items-center`}>
+                <div className="min-w-0">
+                  <div className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 mb-2">一句话定调</div>
+                  <h2 className="text-[20px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 leading-relaxed">
+                    {heroSentence}
+                  </h2>
+                  {heroChips.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-4">
+                      {heroChips.map((c, i) => (
+                        <span key={i} className="inline-flex items-center h-6 px-2.5 rounded-full text-[11.5px] border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#14151a] text-slate-700 dark:text-slate-300 font-sans">
+                          {c}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {typeof overallScore === "number" && (
+                  <div className="border-l border-slate-200 dark:border-slate-800 pl-6 text-center md:pl-7">
+                    <div className="font-mono text-[48px] leading-none font-medium text-slate-900 dark:text-slate-100 tabular-nums tracking-tight">
+                      {(overallScore / 10).toFixed(1)}
+                    </div>
+                    <div className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 mt-2">综合评分</div>
+                  </div>
+                )}
+              </div>
+
+              {(highlightCount > 0 || violationCount > 0 || hitCount > 0) && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <FindingCard
+                    label="高光节点"
+                    value={String(highlightCount)}
+                    hint={highlightCount > 0 ? "建议保留,是视频的辨识度来源。" : "本视频尚未识别出高光节点。"}
+                  />
+                  <FindingCard
+                    label="方法论违反"
+                    value={String(violationCount)}
+                    hint={violationCount > 0 ? "见下方方法论诊断,按建议修复。" : "未触发任何方法论违反。"}
+                    tone={violationCount > 0 ? "warn" : "default"}
+                  />
+                  <FindingCard
+                    label="方法论命中"
+                    value={String(hitCount)}
+                    hint={hitCount > 0 ? "命中的规则代表已掌握的剪辑章法。" : "暂未命中规则,可对照参考。"}
+                  />
+                </div>
+              )}
+            </section>
+          )}
 
           <section id="summary" className="space-y-4 scroll-mt-6">
             <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">整体摘要</h2>
@@ -1057,6 +1119,30 @@ function TimingBar({ timings, totalMs }: { timings: AnalysisTiming[]; totalMs?: 
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function FindingCard({ label, value, hint, tone = "default" }: {
+  label: string;
+  value: string;
+  hint: string;
+  tone?: "default" | "warn";
+}) {
+  const isWarn = tone === "warn";
+  return (
+    <div className={`rounded-lg border p-3.5 ${
+      isWarn
+        ? "border-amber-200 dark:border-amber-900/40 bg-amber-50 dark:bg-amber-950/30"
+        : "border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a]"
+    }`}>
+      <div className="flex items-center justify-between mb-1">
+        <span className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500">{label}</span>
+        <span className={`font-mono text-[18px] font-medium tabular-nums leading-none ${
+          isWarn ? "text-amber-700 dark:text-amber-300" : "text-slate-900 dark:text-slate-100"
+        }`}>{value}</span>
+      </div>
+      <p className="text-[12.5px] text-slate-600 dark:text-slate-400 leading-snug mt-1">{hint}</p>
     </div>
   );
 }
