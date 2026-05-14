@@ -11,10 +11,12 @@ import { AnalysisNode, AnalysisNodeType, Project } from "../types";
 import { formatTime } from "@/lib/utils";
 
 export function WorkspaceScreen() {
-  const { setCurrentScreen, projects, activeProjectId, nodesByProject, setNodesForProject } = useApp();
-  
+  const { setCurrentScreen, projects, activeProjectId, nodesByProject, setNodesForProject, reportByProject } = useApp();
+
   const project = projects.find(p => p.id === activeProjectId);
   const nodes = nodesByProject[activeProjectId || ""] || [];
+  const report = activeProjectId ? reportByProject[activeProjectId] : undefined;
+  const shotContexts = report?.shotContexts || [];
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -25,7 +27,7 @@ export function WorkspaceScreen() {
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [highlightsOnly, setHighlightsOnly] = useState(false);
-  const [tab, setTab] = useState<"timeline" | "insights">("timeline");
+  const [tab, setTab] = useState<"timeline" | "shots" | "insights">("timeline");
   const [sourceCopied, setSourceCopied] = useState(false);
   const [isDraggingProgress, setIsDraggingProgress] = useState(false);
   const [hoverProgress, setHoverProgress] = useState<{ x: number; time: number } | null>(null);
@@ -364,9 +366,12 @@ export function WorkspaceScreen() {
         {/* Right: Nodes List Sidebar */}
         <div className={`${isPortrait ? 'flex-1' : 'w-full md:w-[450px]'} border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] flex flex-col min-h-0 shadow-sm z-10`}>
           <div className="p-3 border-b border-slate-200 dark:border-slate-800 flex-none bg-slate-50/80 dark:bg-[#0E0E10] space-y-3">
-            <Tabs value={tab} onValueChange={(value) => setTab(value as "timeline" | "insights")}>
-              <TabsList className="grid w-full grid-cols-2 bg-slate-100 dark:bg-slate-900 p-1 rounded-lg">
-                <TabsTrigger value="timeline" className="data-[state=active]:bg-white dark:data-[state=active]:bg-[#0E0E10] rounded-md shadow-sm dark:shadow-none font-medium">时间线</TabsTrigger>
+            <Tabs value={tab} onValueChange={(value) => setTab(value as "timeline" | "shots" | "insights")}>
+              <TabsList className="grid w-full grid-cols-3 bg-slate-100 dark:bg-slate-900 p-1 rounded-lg">
+                <TabsTrigger value="timeline" className="data-[state=active]:bg-white dark:data-[state=active]:bg-[#0E0E10] rounded-md shadow-sm dark:shadow-none font-medium">逻辑节点</TabsTrigger>
+                <TabsTrigger value="shots" className="data-[state=active]:bg-white dark:data-[state=active]:bg-[#0E0E10] rounded-md shadow-sm dark:shadow-none font-medium">
+                  镜头{shotContexts.length > 0 ? ` · ${shotContexts.length}` : ""}
+                </TabsTrigger>
                 <TabsTrigger value="insights" className="data-[state=active]:bg-white dark:data-[state=active]:bg-[#0E0E10] rounded-md shadow-sm dark:shadow-none font-medium">概览</TabsTrigger>
               </TabsList>
             </Tabs>
@@ -393,7 +398,101 @@ export function WorkspaceScreen() {
             )}
           </div>
 
-          {tab === "insights" ? (
+          {tab === "shots" ? (
+            <ScrollArea className="flex-1 min-h-0 px-4 py-4">
+              <div className="space-y-3 pb-20">
+                {shotContexts.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-slate-200 p-8 text-center text-sm text-slate-500 dark:border-slate-800">
+                    本项目还没有镜头级数据。请重新分析以生成镜头时间线。
+                  </div>
+                ) : (
+                  shotContexts.map((sc) => {
+                    const isCurrent = currentTime >= sc.startSec && currentTime < sc.endSec;
+                    const frames = sc.frames || sc.representativeFrames || [];
+                    const dur = Math.max(0, sc.endSec - sc.startSec);
+                    return (
+                      <div
+                        key={sc.shotIndex}
+                        onClick={() => {
+                          if (videoRef.current) {
+                            videoRef.current.currentTime = sc.startSec;
+                            setCurrentTime(sc.startSec);
+                          }
+                        }}
+                        className={`p-3 rounded-xl cursor-pointer border transition-all duration-200 ${
+                          isCurrent
+                            ? "bg-indigo-50/50 dark:bg-indigo-600/10 border-indigo-300 dark:border-indigo-500/40 ring-1 ring-indigo-400/30"
+                            : "bg-white dark:bg-slate-900/40 border-slate-200 dark:border-slate-800/60 hover:border-slate-300 dark:hover:bg-slate-900/60"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700">
+                            S{sc.shotIndex + 1}
+                          </span>
+                          <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                            {formatTime(sc.startSec)} → {formatTime(sc.endSec)}
+                          </span>
+                          <span className="text-[10px] font-mono text-slate-400">{dur.toFixed(1)}s</span>
+                        </div>
+                        {frames.length > 0 && (
+                          <div className="flex gap-1.5 overflow-x-auto pb-1 mb-2">
+                            {frames.map((f, fi) => {
+                              const isRep = (sc.representativeFrames || []).some((r) => r.framePath === f.framePath);
+                              return (
+                                <div
+                                  key={fi}
+                                  className={`flex-none rounded border overflow-hidden bg-white dark:bg-slate-900/40 ${
+                                    isRep
+                                      ? "border-sky-400 dark:border-sky-500 ring-1 ring-sky-300/40"
+                                      : "border-slate-200 dark:border-slate-800"
+                                  }`}
+                                  style={{ width: 96 }}
+                                  title={f.caption || f.signature || `t=${f.midSec.toFixed(1)}s`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (videoRef.current) {
+                                      videoRef.current.currentTime = f.midSec;
+                                      setCurrentTime(f.midSec);
+                                    }
+                                  }}
+                                >
+                                  <img src={f.thumbnailUrl} alt={`t=${f.midSec}s`} className="w-full h-14 object-cover" />
+                                  <div className="px-1 py-0.5 text-[9px] font-mono text-slate-500 text-center bg-slate-50 dark:bg-slate-900/60">
+                                    {f.midSec.toFixed(1)}s{typeof f.salience === "number" ? ` · ${f.salience}` : ""}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {sc.shotDescription && (
+                          <p className="text-[13px] text-slate-700 dark:text-slate-300 leading-relaxed mb-2">
+                            {sc.shotDescription}
+                          </p>
+                        )}
+                        {Array.isArray(sc.subtitleSegments) && sc.subtitleSegments.length > 0 ? (
+                          <div className="space-y-0.5 mt-1.5 pl-2 border-l-2 border-slate-200 dark:border-slate-700">
+                            {sc.subtitleSegments.map((seg, si) => (
+                              <div key={si} className="text-[11px] text-slate-600 dark:text-slate-400 leading-snug">
+                                <span className="font-mono text-slate-400 mr-2">
+                                  {formatTime(seg.start)}
+                                </span>
+                                {seg.text}
+                              </div>
+                            ))}
+                          </div>
+                        ) : sc.subtitleText ? (
+                          <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-snug mt-1.5 pl-2 border-l-2 border-slate-200 dark:border-slate-700">
+                            {sc.subtitleText}
+                          </p>
+                        ) : null}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </ScrollArea>
+          ) : tab === "insights" ? (
             <ScrollArea className="flex-1 min-h-0 px-4 py-4">
               <div className="space-y-5 pb-20">
                 <div className="grid grid-cols-2 gap-3">

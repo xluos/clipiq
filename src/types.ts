@@ -228,14 +228,17 @@ export type AnalysisNode = {
   subtitleSegments?: Array<{ start: number; end: number; text: string }>; // 落在该镜头区间内的字幕段
 };
 
-// PR2 金字塔管线: medium_text 合并出来的镜头级上下文, 喂给主分析做评审
+// PR2 金字塔管线: medium_text 合并出来的镜头级上下文, 喂给主分析做评审 + UI 镜头时间线渲染
 export type ShotContext = {
   shotIndex: number;
   startSec: number;
   endSec: number;
   shotDescription: string;          // medium_text 输出: 综合画面+字幕的一段话 (30-80 汉字)
-  framesInShot: number;             // 该镜头内抽到的帧数
-  subtitleText?: string;            // 该镜头时间段内的拼接字幕
+  frames?: FrameContext[];          // 该镜头内全部抽帧 (带 thumbnailUrl + caption + midSec), 严格拉片时间线渲染用
+  representativeFrames?: FrameContext[]; // 由 medium_text 挑出的 1-3 张代表帧 (frames 的子集)
+  subtitleSegments?: Array<{ start: number; end: number; text: string }>; // 落在该镜头区间的字幕段, 保留分段
+  subtitleText?: string;            // 该镜头时间段内的拼接字幕 (向后兼容老 report)
+  framesInShot?: number;            // 兼容字段: 旧 report 只存了帧数; 新 report 用 frames.length
 };
 
 export type AnalysisReport = {

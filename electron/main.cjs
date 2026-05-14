@@ -2187,14 +2187,82 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           shots[i].shotDescription = mergeResults[i]?.shotDescription || "";
           shots[i].representativeFrameIndex = mergeResults[i]?.representativeFrameIndex || [];
         }
-        shotContexts = shots.map((s) => ({
-          shotIndex: s.shotIndex,
-          startSec: s.startSec,
-          endSec: s.endSec,
-          shotDescription: s.shotDescription,
-          framesInShot: s.frames.length,
-          subtitleText: s.subtitleText || undefined,
-        }));
+        // 兜底: scene detector 切出的镜头数 >> prefilter 保留的关键帧数时,
+        // 大多数镜头会 frames=[]; 在镜头中点抽一张轻量缩略图, 让 UI 镜头时间线每个 card
+        // 都有图, 也让 attachShotEvidenceToNodes 在帧稀疏时不至于完全失配。
+        const shotsNeedingThumb = shots.filter(
+          (s) => !Array.isArray(s.frames) || s.frames.length === 0
+        );
+        if (shotsNeedingThumb.length > 0) {
+          const thumbStart = Date.now();
+          let thumbDone = 0;
+          const concurrency = 6;
+          for (let i = 0; i < shotsNeedingThumb.length; i += concurrency) {
+            ensureNotCancelled(handle);
+            const batch = shotsNeedingThumb.slice(i, i + concurrency);
+            await Promise.all(
+              batch.map(async (s) => {
+                const midSec = Math.max(0, (Number(s.startSec) + Number(s.endSec)) / 2);
+                const framePath = path.join(
+                  artifactDir,
+                  `shot-${String(s.shotIndex + 1).padStart(3, "0")}.jpg`
+                );
+                try {
+                  await extractFrame(ffmpeg, inputPath, framePath, midSec, 360, handle, 4);
+                  s.frames = [{ framePath, midSec, isShotThumbBackfill: true }];
+                } catch (err) {
+                  if (err instanceof AnalysisCancelledError || err?.name === "AbortError") throw err;
+                  // 单帧失败不阻断, 该镜头仍然 frames=[]
+                }
+              })
+            );
+            thumbDone += batch.length;
+            send(
+              71,
+              "镜头缩略图",
+              `已为 ${thumbDone}/${shotsNeedingThumb.length} 个无关键帧镜头抽兜底缩略图`
+            );
+          }
+          send(
+            71,
+            "镜头缩略图就绪",
+            `${shotsNeedingThumb.length} 张兜底缩略图 · ${((Date.now() - thumbStart) / 1000).toFixed(1)}s`
+          );
+        }
+        // shotContexts 完整形态: 带帧 URL + 字幕分段, 供 UI 镜头时间线渲染
+        // (旧 report 里只存了 framesInShot 数量和 subtitleText 字符串, 现在保留向后兼容字段)
+        const toFrameCtx = (f) => ({
+          thumbnailUrl: createMediaUrl(f.framePath),
+          framePath: f.framePath,
+          midSec: Number(f.midSec) || 0,
+          caption: f.prefilterTag?.caption,
+          salience: f.prefilterTag?.salience,
+          signature: f.prefilterTag?.signature,
+        });
+        shotContexts = shots.map((s) => {
+          const framesCtx = Array.isArray(s.frames) ? s.frames.map(toFrameCtx) : [];
+          const repIdxs = Array.isArray(s.representativeFrameIndex) ? s.representativeFrameIndex : [];
+          const repFrames = repIdxs
+            .map((i) => framesCtx[i])
+            .filter(Boolean);
+          return {
+            shotIndex: s.shotIndex,
+            startSec: s.startSec,
+            endSec: s.endSec,
+            shotDescription: s.shotDescription,
+            frames: framesCtx,
+            representativeFrames: repFrames.length > 0 ? repFrames : framesCtx.slice(0, 1),
+            subtitleSegments: Array.isArray(s.subtitleSegments)
+              ? s.subtitleSegments.map((seg) => ({
+                  start: Number(seg.start) || 0,
+                  end: Number(seg.end) || 0,
+                  text: String(seg.text || "").trim(),
+                }))
+              : [],
+            subtitleText: s.subtitleText || undefined,
+            framesInShot: framesCtx.length,
+          };
+        });
         send(71, "镜头合并完成", `${shots.length} 个镜头描述就绪 · ${((Date.now()-mergeStart)/1000).toFixed(1)}s`);
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
