@@ -12,6 +12,17 @@ const shotMerger = require("./shot-merger.cjs");
 const summarizer = require("./summarizer.cjs");
 const openaiClient = require("./openai-client.cjs");
 const { getTranscriber } = require("./transcribe/index.cjs");
+const OpenCC = require("opencc-js");
+
+// 云端 whisper 同样会有简繁混排,做一层 t2s 兜底。
+const SIMPLIFIED_PROMPT_ZH = "以下是普通话的句子，请使用简体中文输出。";
+const t2sConverterMain = OpenCC.Converter({ from: "t", to: "cn" });
+
+function isChineseLangMain(lang) {
+  if (!lang) return false;
+  const v = String(lang).toLowerCase();
+  return v === "zh" || v === "chinese" || v.startsWith("zh-") || v.startsWith("zh_");
+}
 
 const REMOTE_DEBUG_PORT = process.env.VIDEO_ANALYZER_DEBUG_PORT || "";
 if (REMOTE_DEBUG_PORT) {
@@ -1772,6 +1783,7 @@ async function transcribeAudio(audioProvider, wavPath, handle, onProgress) {
   form.append("model", audioProvider.model);
   form.append("response_format", "verbose_json");
   if (audioProvider.language) form.append("language", audioProvider.language);
+  if (isChineseLangMain(audioProvider.language)) form.append("prompt", SIMPLIFIED_PROMPT_ZH);
 
   const endpoint = `${audioProvider.baseUrl.replace(/\/+$/, "")}/audio/transcriptions`;
   const response = await fetch(endpoint, {
@@ -1785,12 +1797,18 @@ async function transcribeAudio(audioProvider, wavPath, handle, onProgress) {
     throw new Error(`${response.status}: ${detail.slice(0, 200)}`);
   }
   const data = await response.json();
+  const detectedLang = data?.language || audioProvider.language || null;
+  const shouldSimplify = isChineseLangMain(detectedLang) || isChineseLangMain(audioProvider.language);
+  const normalize = (s) => {
+    const t = String(s || "").trim();
+    return shouldSimplify && t ? t2sConverterMain(t) : t;
+  };
   const segments = Array.isArray(data?.segments)
-    ? data.segments.map((s) => ({ start: Number(s.start) || 0, end: Number(s.end) || 0, text: String(s.text || "").trim() }))
+    ? data.segments.map((s) => ({ start: Number(s.start) || 0, end: Number(s.end) || 0, text: normalize(s.text) }))
     : [];
-  const fullText = typeof data?.text === "string" ? data.text.trim() : segments.map((s) => s.text).join(" ").trim();
+  const fullText = typeof data?.text === "string" ? normalize(data.text) : segments.map((s) => s.text).join(" ").trim();
   return {
-    language: data?.language || audioProvider.language || null,
+    language: detectedLang,
     text: fullText,
     segments,
     duration: Number(data?.duration) || 0,

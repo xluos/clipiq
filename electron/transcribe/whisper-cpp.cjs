@@ -23,7 +23,19 @@
 //   start/end 直接是秒 (跟 OpenAI verbose_json 格式一致), 无需缩放。
 
 const fs = require("node:fs/promises");
+const OpenCC = require("opencc-js");
 const whisperCppRuntime = require("../whisper-cpp-runtime.cjs");
+
+// Whisper 训练语料里中文部分混了大量繁中字幕,language=zh 时常出现简繁混排。
+// 双保险:1) initial_prompt 引导模型偏简体 2) 对输出统一跑 t2s 转换。
+const SIMPLIFIED_PROMPT = "以下是普通话的句子，请使用简体中文输出。";
+const t2sConverter = OpenCC.Converter({ from: "t", to: "cn" });
+
+function isChineseLang(lang) {
+  if (!lang) return false;
+  const v = String(lang).toLowerCase();
+  return v === "zh" || v === "chinese" || v.startsWith("zh-") || v.startsWith("zh_");
+}
 
 async function isAvailable() {
   // 静态检查 binary; 模型可懒加载, ensureModel 阶段会兜底
@@ -61,6 +73,7 @@ async function transcribe({ wavPath, modelId, language, onProgress, handle }) {
   form.append("response_format", "verbose_json");
   form.append("temperature", "0");
   if (language) form.append("language", language);
+  if (isChineseLang(language)) form.append("prompt", SIMPLIFIED_PROMPT);
 
   if (onProgress) onProgress({ stage: "infer", message: "本地语音引擎推理中" });
   const response = await fetch(`http://127.0.0.1:${status.port}/inference`, {
@@ -75,19 +88,26 @@ async function transcribe({ wavPath, modelId, language, onProgress, handle }) {
   }
 
   const data = await response.json();
+  const detectedLang = data?.language || language || null;
+  const shouldSimplify = isChineseLang(detectedLang) || isChineseLang(language);
+  const normalize = (s) => {
+    const t = String(s || "").trim();
+    return shouldSimplify && t ? t2sConverter(t) : t;
+  };
+
   const rawSegments = Array.isArray(data?.segments) ? data.segments : [];
   const segments = rawSegments.map((s) => ({
     start: Number(s.start) || 0,
     end: Number(s.end) || 0,
-    text: String(s.text || "").trim(),
+    text: normalize(s.text),
   }));
   const fullText =
     typeof data?.text === "string" && data.text.trim()
-      ? data.text.trim()
+      ? normalize(data.text)
       : segments.map((s) => s.text).join(" ").trim();
 
   return {
-    language: data?.language || language || null,
+    language: detectedLang,
     text: fullText,
     segments,
     duration: Number(data?.duration) || (segments.length ? segments[segments.length - 1].end : 0),
