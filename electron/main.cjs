@@ -265,17 +265,22 @@ async function commandPath(command) {
   }
 }
 
-function createMediaUrl(filePath) {
-  // Absolute filesystem path. Use for user-owned files outside the app's userData
-  // (e.g. ~/Downloads/foo.mp4) where there is no natural "project root" to express
-  // them against. Survives across app renames as long as the user keeps the file.
-  return `media://local/${encodeURIComponent(filePath)}`;
+// Two URL shapes carried by the `media://` protocol:
+//
+//   media://external/<encoded-abs-path>            user-owned file at an arbitrary location
+//                                                  (e.g. ~/Downloads/foo.mp4) — must stay
+//                                                  absolute because there is no project root
+//                                                  to express it against.
+//
+//   media://project/<projectId>/<encoded-rel>      artifact inside the project's directory
+//                                                  under userData. Stored relative so the URL
+//                                                  survives userData renames / backups /
+//                                                  exported project bundles.
+function createExternalMediaUrl(absPath) {
+  return `media://external/${encodeURIComponent(absPath)}`;
 }
 
 function createProjectMediaUrl(projectId, framePath) {
-  // Resource that lives inside a project's directory under userData.
-  // Stored as a relative path so the URL survives userData renames / cross-device
-  // restores / shared project bundles.
   const projectDir = getProjectDir(projectId);
   const rel = path.isAbsolute(framePath) ? path.relative(projectDir, framePath) : framePath;
   const encoded = rel.split(path.sep).map(encodeURIComponent).join("/");
@@ -881,7 +886,7 @@ async function inspectVideo(filePath, handle = null) {
   const ffprobe = await commandPath("ffprobe");
   const fallback = {
     filePath,
-    mediaUrl: createMediaUrl(filePath),
+    mediaUrl: createExternalMediaUrl(filePath),
     filename: path.basename(filePath),
     durationSec: 0,
     width: 0,
@@ -2459,7 +2464,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     const updatedProject = {
       ...project,
       localFilePath: inputPath,
-      localVideoPath: createMediaUrl(inputPath),
+      localVideoPath: createExternalMediaUrl(inputPath),
       durationSec: inspected.durationSec || project.durationSec,
       width: inspected.width || project.width,
       height: inspected.height || project.height,
@@ -2664,9 +2669,6 @@ app.whenReady().then(async () => {
 
   protocol.handle("media", async (request) => {
     const url = new URL(request.url);
-    // Two URL shapes:
-    //   media://local/<encoded-absolute-path>           — legacy / external user files
-    //   media://project/<projectId>/<encoded-rel-path>  — userData-relative project artifacts
     let filePath;
     if (url.host === "project") {
       const segs = url.pathname.split("/").filter(Boolean);
@@ -2674,8 +2676,10 @@ app.whenReady().then(async () => {
       const projectId = decodeURIComponent(segs[0]);
       const rel = segs.slice(1).map(decodeURIComponent).join(path.sep);
       filePath = path.join(getProjectDir(projectId), rel);
-    } else {
+    } else if (url.host === "external") {
       filePath = decodeURIComponent(url.pathname.slice(1));
+    } else {
+      return new Response(`Unknown media host: ${url.host}`, { status: 400 });
     }
     let stat;
     try {
