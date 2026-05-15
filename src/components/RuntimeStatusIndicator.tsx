@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Activity } from "lucide-react";
 import { useApp } from "../AppContext";
-import type { LlamaModelInfo, LlamaStatus } from "../electron-api";
+import type { LlamaStatus } from "../electron-api";
+import type { ModelDescriptor } from "../types";
 
 export function RuntimeStatusIndicator() {
   const [open, setOpen] = useState(false);
   const [llamaStatus, setLlamaStatus] = useState<LlamaStatus | null>(null);
-  const [llamaModels, setLlamaModels] = useState<LlamaModelInfo[]>([]);
+  const [llamaModels, setLlamaModels] = useState<ModelDescriptor[]>([]);
   const { providers, taskSlots, audioSlot, setCurrentScreen } = useApp();
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -66,7 +67,7 @@ export function RuntimeStatusIndicator() {
   const llamaModelLabel = (() => {
     if (!llamaStatus?.modelKey) return null;
     return (
-      llamaModels.find((m) => m.key === llamaStatus.modelKey)?.name || llamaStatus.modelKey
+      llamaModels.find((m) => m.id === llamaStatus.modelKey)?.label || llamaStatus.modelKey
     );
   })();
 

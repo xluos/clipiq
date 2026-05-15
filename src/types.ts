@@ -5,12 +5,15 @@ export type ProviderKind = "video" | "audio";
 
 export type ModelCapability =
   | "vision"
+  | "audio_transcription"
   | "reasoning"
   | "fast"
-  | "audio_transcription";
+  | "long_context"
+  | "text";
 
-// 本地模型 manifest 能力分类(扩展 ModelCapability)
-// primary 决定槽位过滤;secondary 只做 UI hint
+// 本地模型 manifest 能力分类
+// primary 决定槽位过滤;secondary 大多走 ModelDescriptor.capabilities 直接提升;
+// chinese/english/code/video 这种只做 UI hint 的留在 secondary
 export type LocalPrimaryCapability = "vision" | "audio" | "text";
 export type LocalSecondaryTag =
   | "chinese"
@@ -32,6 +35,7 @@ export type LocalQuantization = {
 
 export type LocalFitLevel = "perfect" | "good" | "marginal" | "tight";
 
+// manifest 原始条目(磁盘 source of truth); 投影成 ModelDescriptor 给下游消费
 export type LocalModelEntry = {
   key: string;
   family: string;
@@ -43,13 +47,46 @@ export type LocalModelEntry = {
   available: boolean;
   contextSize: number;
   quantizations: LocalQuantization[];
-  // 由 main 进程计算后回传给 renderer
   fit?: LocalFitLevel;
   memPercent?: number;
   tps?: number;
   downloaded?: boolean;
   llmBytes?: number;
   mmprojBytes?: number;
+};
+
+// 通用模型描述 - 远程 /models / 本地 llama manifest / 本地 whisper 都统一映射到这里
+// 下游一套逻辑判断 capabilities + availability,不再分 source 分叉
+export type ModelAvailability =
+  | { state: "ready" }
+  | { state: "needs_install"; sizeBytes?: number }
+  | { state: "coming_soon" }
+  | { state: "unknown"; reason?: string };
+
+export type ModelDescriptorSource = "remote" | "local_llama" | "local_whisper";
+
+export type ModelDescriptor = {
+  source: ModelDescriptorSource;
+  id: string;                          // 远程: OpenAI id; 本地: manifest key
+  label: string;
+  family?: string;
+  params?: string;
+  description?: string;
+  capabilities: ModelCapability[];
+  // inferred = id 正则推断 (远程); manifest = 本地 manifest 派生; manual = 用户手改覆盖
+  capabilitiesSource: "inferred" | "manifest" | "manual";
+  availability: ModelAvailability;
+  contextSize?: number;
+  ownedBy?: string;                    // 远程 /models 的 owned_by 兜底展示
+  local?: {
+    fit?: LocalFitLevel;
+    memPercent?: number;
+    tps?: number;
+    downloaded?: boolean;
+    downloadedBytes?: number;
+    quantizations?: LocalQuantization[];
+    secondaryTags?: LocalSecondaryTag[]; // chinese/english/code/video - UI hint
+  };
 };
 
 export type MachineSpecs = {
@@ -74,13 +111,21 @@ export type ProviderEndpointType =
   | "local_whisper_wasm" // 老 config 残留,migrate 后会被改写为 local_whisper_cpp
   | "local_llama_server";
 
+// 持久化在 config.providers[*].models[] 内的用户选定 model.
+// 字段是 ModelDescriptor 的子集 + 用户配置(maxOutputTokens/temperature/language)
+// 运行时的 availability/fit/tps 不写入 config,每次 IPC 重新拉取
 export type ProviderModel = {
-  id: string; // provider 内部唯一,如 "gpt-4o-mini" / "qwen3_5_2b_q4km"
-  label: string; // 人类可读 "Qwen3.5-2B (Q4_K_M)"
+  id: string;
+  label: string;
   capabilities: ModelCapability[];
+  capabilitiesSource?: "inferred" | "manifest" | "manual";
+  family?: string;
+  params?: string;
+  contextSize?: number;
+  ownedBy?: string;
   maxOutputTokens?: number;
   temperature?: number;
-  // 本地推理 model 专属
+  // 本地推理 model 专属(冗余,等价于 id,但旧 config 还在用)
   localKey?: string;
   // 本地 whisper 专属
   localWhisperModel?: string;

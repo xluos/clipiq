@@ -4,6 +4,8 @@ import type {
   AnalysisProgressEvent,
   AnalysisReport,
   AppConfig,
+  MachineSpecs,
+  ModelDescriptor,
   ModelProvider,
   Project,
   ProjectSource,
@@ -72,20 +74,8 @@ export type ExportFormat = "markdown" | "json" | "csv";
 export type ProviderTestResult = {
   ok: boolean;
   message: string;
-};
-
-export type LlamaModelInfo = {
-  key: string;
-  name: string;
-  description: string;
-  approxBytes: number;
-  llmDownloaded: boolean;
-  llmBytes: number;
-  mmprojDownloaded: boolean;
-  mmprojBytes: number;
-  downloaded: boolean;
-  llmPath: string;
-  mmprojPath: string;
+  // 远程 provider 测试连接成功时,带上 /models 返回的统一 schema
+  models?: ModelDescriptor[];
 };
 
 export type LlamaStatus = {
@@ -128,16 +118,6 @@ export type LlamaSelfTestResult = {
   text: string;
   modelKey: string | null;
   usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
-};
-
-export type WhisperCppModelInfo = {
-  key: string;
-  name: string;
-  description: string;
-  approxBytes: number;
-  downloaded: boolean;
-  downloadedBytes: number;
-  modelPath: string | null;
 };
 
 export type WhisperCppStatus = {
@@ -218,11 +198,8 @@ declare global {
       openDataFolder: (which?: "projects" | "userData") => Promise<{ ok: boolean; path: string }>;
       purgeProjects: () => Promise<{ ok: boolean; message?: string }>;
       llama: {
-        listModels: () => Promise<LlamaModelInfo[]>;
-        listManifest: () => Promise<{
-          machine: import("./types").MachineSpecs;
-          models: import("./types").LocalModelEntry[];
-        }>;
+        listModels: () => Promise<ModelDescriptor[]>;
+        listManifest: () => Promise<{ machine: MachineSpecs; models: ModelDescriptor[] }>;
         getStatus: () => Promise<LlamaStatus>;
         ensureBinary: () => Promise<{ ok: true; binaryPath: string }>;
         ensureModel: (modelKey: string) => Promise<{ ok: true; modelKey: string }>;
@@ -233,7 +210,7 @@ declare global {
         onLog: (callback: (event: LlamaLogEntry) => void) => () => void;
       };
       whisperCpp: {
-        listModels: () => Promise<WhisperCppModelInfo[]>;
+        listModels: () => Promise<ModelDescriptor[]>;
         getStatus: () => Promise<WhisperCppStatus>;
         ensureModel: (modelKey: string) => Promise<{ ok: true; modelKey: string }>;
         start: (modelKey: string) => Promise<{ ok: true; port: number; reused: boolean }>;
