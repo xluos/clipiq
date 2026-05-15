@@ -1,4 +1,4 @@
-// 本地初筛: 用启动中的 llama-server (Qwen3.5-VL 系列) 对候选帧批量打标。
+// 本地初筛: 用启动中的 llama-server (Qwen3.5 系列) 对候选帧批量打标。
 // 输出严格 JSON 结构 PrefilterTag,供主管线做"删空镜/dedup/排序"的二次精筛。
 //
 // 设计:
