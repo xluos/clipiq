@@ -5,7 +5,7 @@ import { ArrowLeft, CheckCircle2, Download, FileText, AlertTriangle, Search, Ref
 import { formatTime } from "@/lib/utils";
 import { useEffect, useMemo, useRef, useState, type FC, type PointerEvent as ReactPointerEvent } from "react";
 import type { ExportFormat } from "../electron-api";
-import type { AnalysisNode, AnalysisTiming, VideoGenre, MethodologyTag, MethodologyMiss } from "../types";
+import type { AnalysisNode, AnalysisTiming, DanmakuReport, VideoGenre, MethodologyTag, MethodologyMiss } from "../types";
 import { useVideoFrames } from "@/lib/use-video-frames";
 
 const REPORT_SECTIONS = [
@@ -13,11 +13,22 @@ const REPORT_SECTIONS = [
   { id: "structure", label: "结构拆解" },
   { id: "methodology", label: "方法论诊断" },
   { id: "emotion", label: "情感曲线" },
+  { id: "audience", label: "观众反应" },
   { id: "pacing", label: "节奏分析" },
   { id: "editing", label: "剪辑风格" },
   { id: "composition", label: "构图特点" },
   { id: "takeaways", label: "核心洞察" },
 ] as const;
+
+// 弹幕情绪 → 颜色 (与 WorkspaceScreen 保持一致)
+const AUDIENCE_EMOTION_COLORS: Record<string, string> = {
+  joy: "#f59e0b",
+  surprise: "#06b6d4",
+  anger: "#ef4444",
+  sadness: "#3b82f6",
+  disgust: "#84cc16",
+  neutral: "#94a3b8",
+};
 
 const STAGE_PALETTE = [
   "from-indigo-500 to-indigo-400",
@@ -511,6 +522,15 @@ export function ReportScreen() {
               {report.composition || "暂无构图分析。"}
             </div>
           </section>
+
+          {report.danmaku && report.danmaku.totalCount > 0 && (
+            <section id="audience" className="space-y-4 scroll-mt-6">
+              <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">
+                观众反应 · {report.danmaku.totalCount} 条弹幕
+              </h2>
+              <AudienceSection danmaku={report.danmaku} />
+            </section>
+          )}
 
           <section id="takeaways" className="space-y-4 scroll-mt-6">
              <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">核心洞察</h2>
@@ -1116,6 +1136,94 @@ function TimingBar({ timings, totalMs }: { timings: AnalysisTiming[]; totalMs?: 
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// 观众反应 section: 情绪分布柱状 + 词云(按 value 决定字号) + summary
+function AudienceSection({ danmaku }: { danmaku: DanmakuReport }) {
+  const axes = ["joy", "surprise", "anger", "sadness", "disgust"] as const;
+  const axisLabelZh: Record<typeof axes[number], string> = {
+    joy: "笑场",
+    surprise: "惊讶",
+    anger: "吐槽",
+    sadness: "感伤",
+    disgust: "无语",
+  };
+
+  // 整体平均情绪 (用所有非空 window 取平均)
+  const totals = { joy: 0, surprise: 0, anger: 0, sadness: 0, disgust: 0 };
+  let nonEmpty = 0;
+  for (const w of danmaku.windows) {
+    if (w.danmakuCount === 0) continue;
+    nonEmpty++;
+    for (const a of axes) totals[a] += w.intensities[a];
+  }
+  const avg = nonEmpty > 0
+    ? axes.reduce((acc, a) => ({ ...acc, [a]: totals[a] / nonEmpty }), {} as Record<typeof axes[number], number>)
+    : null;
+
+  // 词云字号映射: value [min, max] → fontSize [12, 28]
+  const values = danmaku.wordCloud.map((w) => w.value);
+  const minV = values.length > 0 ? Math.min(...values) : 1;
+  const maxV = values.length > 0 ? Math.max(...values) : 1;
+  const sizeOf = (v: number) => {
+    if (maxV <= minV) return 14;
+    const t = (v - minV) / (maxV - minV);
+    return Math.round(12 + t * 16);
+  };
+
+  return (
+    <div className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 p-6 rounded-xl shadow-sm space-y-6">
+      {danmaku.summary && (
+        <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed">{danmaku.summary}</p>
+      )}
+
+      {avg && (
+        <div className="grid grid-cols-5 gap-3">
+          {axes.map((a) => {
+            const v = avg[a];
+            return (
+              <div key={a} className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/40 p-3">
+                <div className="flex items-center gap-1.5 mb-1.5">
+                  <span
+                    className="inline-block w-2 h-2 rounded-full"
+                    style={{ background: AUDIENCE_EMOTION_COLORS[a] }}
+                  />
+                  <span className="text-xs text-slate-600 dark:text-slate-300">{axisLabelZh[a]}</span>
+                </div>
+                <div className="font-mono text-sm tabular-nums text-slate-700 dark:text-slate-200">
+                  {(v * 100).toFixed(0)}%
+                </div>
+                <div className="mt-1.5 h-1 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                  <div
+                    className="h-full rounded-full"
+                    style={{ width: `${Math.round(v * 100)}%`, background: AUDIENCE_EMOTION_COLORS[a] }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {danmaku.wordCloud.length > 0 && (
+        <div>
+          <p className="text-[11px] text-slate-500 uppercase tracking-widest mb-3 font-bold">高频弹幕词</p>
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-2 leading-snug">
+            {danmaku.wordCloud.map((w) => (
+              <span
+                key={w.text}
+                className="text-slate-700 dark:text-slate-300"
+                style={{ fontSize: `${sizeOf(w.value)}px` }}
+                title={`出现 ${w.value} 次`}
+              >
+                {w.text}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

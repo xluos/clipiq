@@ -6,8 +6,26 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { FileText, Play, Pause, ArrowLeft, Folder, Search, Star, ExternalLink, Copy, Check } from "lucide-react";
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { AnalysisNode, AnalysisNodeType, Project } from "../types";
+import { AnalysisNode, AnalysisNodeType, DanmakuEmotionAxis, Project } from "../types";
 import { formatTime } from "@/lib/utils";
+
+// 弹幕情绪 → 颜色 / 中文标签 (用于时间轴情绪带 + 节点卡片小标签)
+const EMOTION_COLORS: Record<DanmakuEmotionAxis | "neutral", string> = {
+  joy: "#f59e0b",       // amber
+  surprise: "#06b6d4",  // cyan
+  anger: "#ef4444",     // red
+  sadness: "#3b82f6",   // blue
+  disgust: "#84cc16",   // lime
+  neutral: "#94a3b8",   // slate
+};
+const EMOTION_ZH: Record<DanmakuEmotionAxis | "neutral", string> = {
+  joy: "笑场",
+  surprise: "惊讶",
+  anger: "吐槽",
+  sadness: "感伤",
+  disgust: "无语",
+  neutral: "平淡",
+};
 
 export function WorkspaceScreen() {
   const { setCurrentScreen, projects, activeProjectId, nodesByProject, setNodesForProject, reportByProject } = useApp();
@@ -267,7 +285,7 @@ export function WorkspaceScreen() {
           </div>
           
           {/* Enhanced Progress Bar */}
-          <div className="h-28 bg-white dark:bg-slate-900/40 rounded-xl border border-slate-200 dark:border-slate-800 mx-4 mb-4 p-4 flex flex-col justify-center gap-2 shrink-0 shadow-sm backdrop-blur-sm">
+          <div className="h-32 bg-white dark:bg-slate-900/40 rounded-xl border border-slate-200 dark:border-slate-800 mx-4 mb-4 p-4 flex flex-col justify-center gap-2 shrink-0 shadow-sm backdrop-blur-sm">
             <div className="flex justify-between items-center text-xs text-slate-500 font-mono mb-1">
               <span>{formatTime(currentTime)}</span>
               <span>{formatTime(project.durationSec)}</span>
@@ -355,6 +373,37 @@ export function WorkspaceScreen() {
                 </div>
               )}
             </div>
+            {/* 弹幕情绪带 (仅 B 站项目, 时间桶 → 颜色) */}
+            {report?.danmaku && report.danmaku.windows.length > 0 && (
+              <div className="relative h-2 rounded overflow-hidden bg-slate-100 dark:bg-[#0A0A0B] border border-slate-200 dark:border-slate-800/60">
+                {report.danmaku.windows.map((w, i) => {
+                  if (w.danmakuCount === 0) return null;
+                  const leftPct = (w.startSec / project.durationSec) * 100;
+                  const widthPct = ((w.endSec - w.startSec) / project.durationSec) * 100;
+                  const maxIntensity = Math.max(
+                    w.intensities.joy,
+                    w.intensities.surprise,
+                    w.intensities.anger,
+                    w.intensities.sadness,
+                    w.intensities.disgust,
+                  );
+                  const opacity = w.dominantEmotion === "neutral" ? 0.2 : Math.max(0.35, Math.min(1, maxIntensity));
+                  return (
+                    <div
+                      key={i}
+                      className="absolute top-0 bottom-0"
+                      style={{
+                        left: `${leftPct}%`,
+                        width: `${widthPct}%`,
+                        background: EMOTION_COLORS[w.dominantEmotion],
+                        opacity,
+                      }}
+                      title={`${formatTime(w.startSec)}-${formatTime(w.endSec)} · ${w.danmakuCount} 条 · ${w.summary || EMOTION_ZH[w.dominantEmotion]}`}
+                    />
+                  );
+                })}
+              </div>
+            )}
             <div className="flex items-center justify-center mt-1">
               <Button variant="ghost" size="icon" className="w-8 h-8 rounded-full text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors" onClick={togglePlay}>
                 {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
@@ -711,6 +760,18 @@ export function WorkspaceScreen() {
                                   </span>
                                 );
                               })()}
+                              {node.audienceReaction && node.audienceReaction.danmakuCount > 0 && (
+                                <>
+                                  <span className="text-slate-300 dark:text-slate-700">·</span>
+                                  <span className="normal-case font-sans inline-flex items-center gap-1">
+                                    <span
+                                      className="inline-block w-1.5 h-1.5 rounded-full"
+                                      style={{ background: EMOTION_COLORS[node.audienceReaction.dominantEmotion] }}
+                                    />
+                                    {node.audienceReaction.summary} · {node.audienceReaction.danmakuCount} 条弹幕
+                                  </span>
+                                </>
+                              )}
                             </div>
                           </>
                         )}
@@ -798,6 +859,33 @@ export function WorkspaceScreen() {
                             </ul>
                           </div>
                         </div>
+                        {node.audienceReaction && node.audienceReaction.danmakuCount > 0 && (
+                          <div>
+                            <p className="text-[11px] text-slate-500 uppercase tracking-widest mb-1.5 font-bold flex items-center">
+                              <span
+                                className="w-1.5 h-1.5 rounded-full mr-2"
+                                style={{ background: EMOTION_COLORS[node.audienceReaction.dominantEmotion] }}
+                              />
+                              观众反应 · {node.audienceReaction.danmakuCount} 条弹幕
+                            </p>
+                            <div className="rounded-lg border border-slate-100 dark:border-slate-800/50 bg-white dark:bg-slate-900/40 p-3 space-y-2 shadow-sm">
+                              <p className="text-sm text-slate-700 dark:text-slate-300">{node.audienceReaction.summary}</p>
+                              {node.audienceReaction.topTerms && node.audienceReaction.topTerms.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5">
+                                  {node.audienceReaction.topTerms.slice(0, 8).map((t) => (
+                                    <span
+                                      key={t.text}
+                                      className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400"
+                                    >
+                                      {t.text}
+                                      <span className="ml-1 text-slate-400 dark:text-slate-500">×{t.value}</span>
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
                         <div>
                           <p className="text-[11px] text-slate-500 uppercase tracking-widest mb-1.5 font-bold flex items-center">
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-2" /> 备注
