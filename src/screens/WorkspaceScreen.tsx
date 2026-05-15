@@ -3,7 +3,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { FileText, Play, Pause, ArrowLeft, Folder, Search, Star, ExternalLink, Copy, Check } from "lucide-react";
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
@@ -31,6 +30,7 @@ export function WorkspaceScreen() {
   const [sourceCopied, setSourceCopied] = useState(false);
   const [isDraggingProgress, setIsDraggingProgress] = useState(false);
   const [hoverProgress, setHoverProgress] = useState<{ x: number; time: number } | null>(null);
+  const [expandedSubtitleShots, setExpandedSubtitleShots] = useState<Set<number>>(new Set());
   const progressTrackRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -364,7 +364,7 @@ export function WorkspaceScreen() {
         </div>
 
         {/* Right: Nodes List Sidebar */}
-        <div className={`${isPortrait ? 'flex-1' : 'w-full md:w-[450px]'} border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] flex flex-col min-h-0 shadow-sm z-10`}>
+        <div className={`${isPortrait ? 'flex-1' : 'w-full md:w-[540px]'} border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] flex flex-col min-h-0 shadow-sm z-10`}>
           <div className="p-3 border-b border-slate-200 dark:border-slate-800 flex-none bg-slate-50/80 dark:bg-[#0E0E10] space-y-3">
             {report?.globalSummary && (
               <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-3">
@@ -376,15 +376,43 @@ export function WorkspaceScreen() {
                 </p>
               </div>
             )}
-            <Tabs value={tab} onValueChange={(value) => setTab(value as "timeline" | "shots" | "insights")}>
-              <TabsList className="grid w-full grid-cols-3 bg-slate-100 dark:bg-slate-900 p-1 rounded-lg">
-                <TabsTrigger value="timeline" className="data-[state=active]:bg-white dark:data-[state=active]:bg-[#0E0E10] rounded-md shadow-sm dark:shadow-none font-medium">逻辑节点</TabsTrigger>
-                <TabsTrigger value="shots" className="data-[state=active]:bg-white dark:data-[state=active]:bg-[#0E0E10] rounded-md shadow-sm dark:shadow-none font-medium">
-                  镜头{shotContexts.length > 0 ? ` · ${shotContexts.length}` : ""}
-                </TabsTrigger>
-                <TabsTrigger value="insights" className="data-[state=active]:bg-white dark:data-[state=active]:bg-[#0E0E10] rounded-md shadow-sm dark:shadow-none font-medium">概览</TabsTrigger>
-              </TabsList>
-            </Tabs>
+            <div className="flex border-b border-slate-200 dark:border-slate-800" role="tablist">
+              {([
+                { key: "timeline", label: "逻辑节点", count: nodes.length },
+                { key: "shots", label: "镜头", count: shotContexts.length },
+                { key: "insights", label: "概览" },
+              ] as const).map((item) => {
+                const isActive = tab === item.key;
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    onClick={() => setTab(item.key)}
+                    className={`relative flex-1 h-10 inline-flex items-center justify-center gap-1.5 text-sm transition-colors ${
+                      isActive
+                        ? "text-slate-900 dark:text-slate-100 font-semibold"
+                        : "text-slate-500 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                    }`}
+                  >
+                    <span>{item.label}</span>
+                    {typeof item.count === "number" && item.count > 0 && (
+                      <span className={`font-mono text-[10.5px] tabular-nums px-1 rounded ${
+                        isActive
+                          ? "text-indigo-700 bg-indigo-50 dark:bg-indigo-950/60 dark:text-indigo-300"
+                          : "text-slate-400 dark:text-slate-600"
+                      }`}>
+                        {item.count}
+                      </span>
+                    )}
+                    {isActive && (
+                      <span className="absolute left-0 right-0 -bottom-px h-[2px] bg-indigo-600 dark:bg-indigo-400" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
             {tab === "timeline" && (
               <div className="flex gap-2">
                 <div className="relative flex-1">
@@ -418,7 +446,9 @@ export function WorkspaceScreen() {
                 ) : (
                   shotContexts.map((sc) => {
                     const isCurrent = currentTime >= sc.startSec && currentTime < sc.endSec;
-                    const frames = sc.frames || sc.representativeFrames || [];
+                    const reps = sc.representativeFrames || [];
+                    const allFrames = sc.frames || reps;
+                    const heroFrame = reps[0] || allFrames[0] || null;
                     const dur = Math.max(0, sc.endSec - sc.startSec);
                     return (
                       <div
@@ -435,66 +465,98 @@ export function WorkspaceScreen() {
                             : "bg-white dark:bg-slate-900/40 border-slate-200 dark:border-slate-800/60 hover:border-slate-300 dark:hover:bg-slate-900/60"
                         }`}
                       >
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700">
-                            S{sc.shotIndex + 1}
-                          </span>
-                          <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
-                            {formatTime(sc.startSec)} → {formatTime(sc.endSec)}
-                          </span>
-                          <span className="text-[10px] font-mono text-slate-400">{dur.toFixed(1)}s</span>
+                        <div className="flex gap-3">
+                          {/* Left: hero thumbnail fills the full card height */}
+                          <div
+                            className="shrink-0 self-stretch w-[148px] min-h-[83px] rounded-md border border-slate-200 dark:border-slate-800 overflow-hidden bg-slate-100 dark:bg-slate-900/40 relative"
+                            onClick={(e) => {
+                              if (!heroFrame) return;
+                              e.stopPropagation();
+                              if (videoRef.current) {
+                                videoRef.current.currentTime = heroFrame.midSec;
+                                setCurrentTime(heroFrame.midSec);
+                              }
+                            }}
+                          >
+                            {heroFrame ? (
+                              <>
+                                <img
+                                  src={heroFrame.thumbnailUrl}
+                                  alt={`t=${heroFrame.midSec.toFixed(1)}s`}
+                                  className="absolute inset-0 w-full h-full object-cover"
+                                />
+                                <div className="absolute bottom-1 left-1 right-1 flex justify-center">
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-black/65 text-white tabular-nums">
+                                    {heroFrame.midSec.toFixed(1)}s
+                                  </span>
+                                </div>
+                              </>
+                            ) : (
+                              <div className="absolute inset-0 grid place-items-center text-slate-400 dark:text-slate-600 text-[10px] font-mono">
+                                NO FRAME
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Right: meta + description */}
+                          <div className="flex-1 min-w-0 flex flex-col gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700">
+                                S{sc.shotIndex + 1}
+                              </span>
+                              <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400 tabular-nums">
+                                {formatTime(sc.startSec)} → {formatTime(sc.endSec)}
+                              </span>
+                              <span className="text-[10px] font-mono text-slate-400 tabular-nums">{dur.toFixed(1)}s</span>
+                            </div>
+                            {sc.shotDescription && (
+                              <p className="text-[13px] text-slate-700 dark:text-slate-300 leading-relaxed">
+                                {sc.shotDescription}
+                              </p>
+                            )}
+                          </div>
                         </div>
-                        {frames.length > 0 && (
-                          <div className="flex gap-1.5 overflow-x-auto pb-1 mb-2">
-                            {frames.map((f, fi) => {
-                              const isRep = (sc.representativeFrames || []).some((r) => r.framePath === f.framePath);
-                              return (
-                                <div
-                                  key={fi}
-                                  className={`flex-none rounded border overflow-hidden bg-white dark:bg-slate-900/40 ${
-                                    isRep
-                                      ? "border-sky-400 dark:border-sky-500 ring-1 ring-sky-300/40"
-                                      : "border-slate-200 dark:border-slate-800"
-                                  }`}
-                                  style={{ width: 96 }}
-                                  title={f.caption || f.signature || `t=${f.midSec.toFixed(1)}s`}
+
+                        {/* Subtitles row — full width below the hero+description block */}
+                        {Array.isArray(sc.subtitleSegments) && sc.subtitleSegments.length > 0 ? (() => {
+                          const isExpanded = expandedSubtitleShots.has(sc.shotIndex);
+                          const visible = isExpanded ? sc.subtitleSegments : sc.subtitleSegments.slice(0, 4);
+                          const overflow = sc.subtitleSegments.length - 4;
+                          return (
+                            <div className="mt-3 rounded-md bg-slate-50 dark:bg-slate-900/40 border border-slate-100 dark:border-slate-800/60 px-3 py-2 space-y-1">
+                              {visible.map((seg, si) => (
+                                <div key={si} className="text-[12px] text-slate-700 dark:text-slate-300 leading-snug flex gap-2">
+                                  <span className="font-mono text-slate-400 tabular-nums shrink-0">
+                                    {formatTime(seg.start)}
+                                  </span>
+                                  <span className="min-w-0">{seg.text}</span>
+                                </div>
+                              ))}
+                              {overflow > 0 && (
+                                <button
+                                  type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    if (videoRef.current) {
-                                      videoRef.current.currentTime = f.midSec;
-                                      setCurrentTime(f.midSec);
-                                    }
+                                    setExpandedSubtitleShots((prev) => {
+                                      const next = new Set(prev);
+                                      if (next.has(sc.shotIndex)) next.delete(sc.shotIndex);
+                                      else next.add(sc.shotIndex);
+                                      return next;
+                                    });
                                   }}
+                                  className="text-[11px] font-mono text-indigo-600 dark:text-indigo-400 hover:underline mt-0.5"
                                 >
-                                  <img src={f.thumbnailUrl} alt={`t=${f.midSec}s`} className="w-full h-14 object-cover" />
-                                  <div className="px-1 py-0.5 text-[9px] font-mono text-slate-500 text-center bg-slate-50 dark:bg-slate-900/60">
-                                    {f.midSec.toFixed(1)}s{typeof f.salience === "number" ? ` · ${f.salience}` : ""}
-                                  </div>
-                                </div>
-                              );
-                            })}
+                                  {isExpanded ? "收起" : `展开剩余 ${overflow} 条`}
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })() : sc.subtitleText ? (
+                          <div className="mt-3 rounded-md bg-slate-50 dark:bg-slate-900/40 border border-slate-100 dark:border-slate-800/60 px-3 py-2">
+                            <p className="text-[12px] text-slate-700 dark:text-slate-300 leading-snug">
+                              {sc.subtitleText}
+                            </p>
                           </div>
-                        )}
-                        {sc.shotDescription && (
-                          <p className="text-[13px] text-slate-700 dark:text-slate-300 leading-relaxed mb-2">
-                            {sc.shotDescription}
-                          </p>
-                        )}
-                        {Array.isArray(sc.subtitleSegments) && sc.subtitleSegments.length > 0 ? (
-                          <div className="space-y-0.5 mt-1.5 pl-2 border-l-2 border-slate-200 dark:border-slate-700">
-                            {sc.subtitleSegments.map((seg, si) => (
-                              <div key={si} className="text-[11px] text-slate-600 dark:text-slate-400 leading-snug">
-                                <span className="font-mono text-slate-400 mr-2">
-                                  {formatTime(seg.start)}
-                                </span>
-                                {seg.text}
-                              </div>
-                            ))}
-                          </div>
-                        ) : sc.subtitleText ? (
-                          <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-snug mt-1.5 pl-2 border-l-2 border-slate-200 dark:border-slate-700">
-                            {sc.subtitleText}
-                          </p>
                         ) : null}
                       </div>
                     );
@@ -550,6 +612,10 @@ export function WorkspaceScreen() {
               {filteredNodes.map((node) => {
                 const isActive = activeNodeId === node.id;
                 const isHovered = hoveredNodeId === node.id;
+                const nodeFrames = node.representativeFrames && node.representativeFrames.length > 0
+                  ? node.representativeFrames
+                  : node.framesInShot || [];
+                const heroFrame = nodeFrames[0];
                 return (
                   <div
                     key={node.id}
@@ -567,128 +633,137 @@ export function WorkspaceScreen() {
                       }
                     `}
                   >
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="flex items-center space-x-3">
-                        <span className={`text-xs font-mono px-2 py-0.5 rounded-md border ${isActive ? 'bg-indigo-100 text-indigo-700 border-indigo-200 dark:bg-indigo-500/20 dark:text-indigo-400 dark:border-indigo-500/30' : 'bg-slate-100/50 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700'}`}>
-                          {formatTime(node.startSec)}
-                        </span>
-                        <h3 className={`font-semibold text-sm ${isActive ? 'text-indigo-900 dark:text-slate-50' : 'text-slate-800 dark:text-slate-300'}`}>{node.title}</h3>
-                      </div>
-                      <button
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          updateNode(node.id, { isHighlight: !node.isHighlight });
-                        }}
-                        className={`rounded p-1 transition ${node.isHighlight ? "text-amber-500" : "text-slate-400 hover:text-amber-500"}`}
-                        title={node.isHighlight ? "取消重点" : "标记重点"}
-                      >
-                        <Star className={`h-4 w-4 ${node.isHighlight ? "fill-current" : ""}`} />
-                      </button>
-                    </div>
-                    
-                    {/* Default state: single primary chip + monospace meta line.
-                        Full badge stack (methodology / prefilter / emotion) only on expand. */}
-                    {!isActive && (
-                      <>
-                        <div className="flex items-center gap-2 mb-2">
-                          {node.isHighlight ? (
-                            <span className="inline-flex items-center gap-1 h-5 px-1.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20">
-                              <Star className="w-2.5 h-2.5 fill-current" /> 高光
+                    <div className="flex gap-3 items-center">
+                      {heroFrame && (
+                        <div
+                          className="shrink-0 w-[132px] rounded-md border border-slate-200 dark:border-slate-800 overflow-hidden bg-slate-100 dark:bg-slate-900/40 relative"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (videoRef.current) {
+                              videoRef.current.currentTime = heroFrame.midSec;
+                              setCurrentTime(heroFrame.midSec);
+                            }
+                          }}
+                          title={`跳转到 ${heroFrame.midSec.toFixed(1)}s`}
+                        >
+                          <img
+                            src={heroFrame.thumbnailUrl}
+                            alt={`t=${heroFrame.midSec.toFixed(1)}s`}
+                            className="w-full aspect-video object-cover"
+                          />
+                          <div className="absolute bottom-1 left-1 right-1 flex justify-center">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-black/65 text-white tabular-nums">
+                              {heroFrame.midSec.toFixed(1)}s
                             </span>
-                          ) : (
-                            <span className="inline-flex items-center h-5 px-1.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-slate-100 text-slate-600 border border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700">
-                              {node.narrativeFunction || "节点"}
-                            </span>
-                          )}
+                          </div>
                         </div>
-                        <div className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 dark:text-slate-500 flex items-center gap-2 flex-wrap">
-                          {node.emotionLabel && (
-                            <>
-                              <span className="normal-case font-sans">{node.emotionLabel} {node.emotionIntensity}/10</span>
-                              <span className="text-slate-300 dark:text-slate-700">·</span>
-                            </>
-                          )}
-                          {(() => {
-                            const hits = (node.methodologyTags || []).filter(t => t.status === "hit").length;
-                            const vios = (node.methodologyTags || []).filter(t => t.status === "violation").length;
-                            if (hits === 0 && vios === 0) return null;
-                            return (
-                              <>
-                                <span>
-                                  {hits > 0 && <span className="text-indigo-600 dark:text-indigo-400">命中 {hits}</span>}
-                                  {hits > 0 && vios > 0 && <span className="mx-1 text-slate-300 dark:text-slate-700">/</span>}
-                                  {vios > 0 && <span className="text-amber-600 dark:text-amber-400">违反 {vios}</span>}
+                      )}
+
+                      <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-center gap-2 flex-wrap min-w-0">
+                            <span className={`text-xs font-mono px-2 py-0.5 rounded-md border tabular-nums ${isActive ? 'bg-indigo-100 text-indigo-700 border-indigo-200 dark:bg-indigo-500/20 dark:text-indigo-400 dark:border-indigo-500/30' : 'bg-slate-100/50 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700'}`}>
+                              {formatTime(node.startSec)}
+                            </span>
+                            <h3 className={`font-semibold text-sm leading-snug ${isActive ? 'text-indigo-900 dark:text-slate-50' : 'text-slate-800 dark:text-slate-300'}`}>{node.title}</h3>
+                          </div>
+                          <button
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              updateNode(node.id, { isHighlight: !node.isHighlight });
+                            }}
+                            className={`shrink-0 rounded p-1 transition ${node.isHighlight ? "text-amber-500" : "text-slate-400 hover:text-amber-500"}`}
+                            title={node.isHighlight ? "取消重点" : "标记重点"}
+                          >
+                            <Star className={`h-4 w-4 ${node.isHighlight ? "fill-current" : ""}`} />
+                          </button>
+                        </div>
+
+                        {!isActive && (
+                          <>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              {node.isHighlight ? (
+                                <span className="inline-flex items-center gap-1 h-5 px-1.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20">
+                                  <Star className="w-2.5 h-2.5 fill-current" /> 高光
                                 </span>
-                              </>
-                            );
-                          })()}
-                        </div>
-                      </>
-                    )}
+                              ) : (
+                                <span className="inline-flex items-center h-5 px-1.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-slate-100 text-slate-600 border border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700">
+                                  {node.narrativeFunction || "节点"}
+                                </span>
+                              )}
+                            </div>
+                            <div className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 dark:text-slate-500 flex items-center gap-2 flex-wrap">
+                              {node.emotionLabel && (
+                                <>
+                                  <span className="normal-case font-sans">{node.emotionLabel} {node.emotionIntensity}/10</span>
+                                  <span className="text-slate-300 dark:text-slate-700">·</span>
+                                </>
+                              )}
+                              {(() => {
+                                const hits = (node.methodologyTags || []).filter(t => t.status === "hit").length;
+                                const vios = (node.methodologyTags || []).filter(t => t.status === "violation").length;
+                                if (hits === 0 && vios === 0) return null;
+                                return (
+                                  <span>
+                                    {hits > 0 && <span className="text-indigo-600 dark:text-indigo-400">命中 {hits}</span>}
+                                    {hits > 0 && vios > 0 && <span className="mx-1 text-slate-300 dark:text-slate-700">/</span>}
+                                    {vios > 0 && <span className="text-amber-600 dark:text-amber-400">违反 {vios}</span>}
+                                  </span>
+                                );
+                              })()}
+                            </div>
+                          </>
+                        )}
 
-                    {/* Expanded state: keep the rich badge stack and description here for context. */}
-                    {isActive && (
-                      <>
-                        <div className="flex flex-wrap gap-2 mb-3">
-                          <Badge variant="secondary" className="bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700 dark:hover:bg-slate-700 text-[11px] px-2 py-0.5 font-medium shadow-none">{node.narrativeFunction}</Badge>
-                          <Badge variant="secondary" className="bg-emerald-50 text-emerald-600 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 text-[11px] px-2 py-0.5 font-medium dark:border-emerald-500/20 shadow-none">{node.emotionLabel}</Badge>
-                          {(node.methodologyTags || []).map((tag, ti) => (
-                            <Badge
-                              key={`${tag.ruleId}-${ti}`}
-                              variant="secondary"
-                              title={`${tag.ruleName}${tag.evidence ? "：" + tag.evidence : ""}${tag.status === "violation" && tag.fixSuggestion ? "\n修复：" + tag.fixSuggestion : ""}`}
-                              className={`text-[11px] px-2 py-0.5 font-medium shadow-none ${
-                                tag.status === "hit"
-                                  ? "bg-indigo-50 text-indigo-600 border-indigo-200 dark:bg-indigo-500/10 dark:text-indigo-400 dark:border-indigo-500/20"
-                                  : "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20"
-                              }`}
-                            >
-                              {tag.status === "hit" ? "✓" : "⚠"} {tag.ruleName}
-                            </Badge>
-                          ))}
-                          {node.prefilterTag && (
-                            <Badge
-                              variant="secondary"
-                              title={`本地初筛\n场景: ${node.prefilterTag.sceneType}\n主体: ${node.prefilterTag.subject}\n信息量: ${node.prefilterTag.salience}/10\n签名: ${node.prefilterTag.signature}${node.prefilterTag.hasText !== "none" ? `\n含文字: ${node.prefilterTag.hasText}` : ""}`}
-                              className={`text-[11px] px-2 py-0.5 font-medium shadow-none ${
-                                node.prefilterTag.salience >= 7
-                                  ? "bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-500/10 dark:text-sky-300 dark:border-sky-500/20"
-                                  : "bg-slate-50 text-slate-500 border-slate-200 dark:bg-slate-800/60 dark:text-slate-400 dark:border-slate-700"
-                              }`}
-                            >
-                              ✨ {node.prefilterTag.subject} · {node.prefilterTag.salience}
-                            </Badge>
-                          )}
-                        </div>
+                        {isActive && (
+                          <>
+                            <div className="flex flex-wrap gap-2">
+                              <Badge variant="secondary" className="bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700 dark:hover:bg-slate-700 text-[11px] px-2 py-0.5 font-medium shadow-none">{node.narrativeFunction}</Badge>
+                              <Badge variant="secondary" className="bg-emerald-50 text-emerald-600 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 text-[11px] px-2 py-0.5 font-medium dark:border-emerald-500/20 shadow-none">{node.emotionLabel}</Badge>
+                              {(node.methodologyTags || []).map((tag, ti) => (
+                                <Badge
+                                  key={`${tag.ruleId}-${ti}`}
+                                  variant="secondary"
+                                  title={`${tag.ruleName}${tag.evidence ? "：" + tag.evidence : ""}${tag.status === "violation" && tag.fixSuggestion ? "\n修复：" + tag.fixSuggestion : ""}`}
+                                  className={`text-[11px] px-2 py-0.5 font-medium shadow-none ${
+                                    tag.status === "hit"
+                                      ? "bg-indigo-50 text-indigo-600 border-indigo-200 dark:bg-indigo-500/10 dark:text-indigo-400 dark:border-indigo-500/20"
+                                      : "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/20"
+                                  }`}
+                                >
+                                  {tag.status === "hit" ? "✓" : "⚠"} {tag.ruleName}
+                                </Badge>
+                              ))}
+                              {node.prefilterTag && (
+                                <Badge
+                                  variant="secondary"
+                                  title={`本地初筛\n场景: ${node.prefilterTag.sceneType}\n主体: ${node.prefilterTag.subject}\n信息量: ${node.prefilterTag.salience}/10\n签名: ${node.prefilterTag.signature}${node.prefilterTag.hasText !== "none" ? `\n含文字: ${node.prefilterTag.hasText}` : ""}`}
+                                  className={`text-[11px] px-2 py-0.5 font-medium shadow-none ${
+                                    node.prefilterTag.salience >= 7
+                                      ? "bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-500/10 dark:text-sky-300 dark:border-sky-500/20"
+                                      : "bg-slate-50 text-slate-500 border-slate-200 dark:bg-slate-800/60 dark:text-slate-400 dark:border-slate-700"
+                                  }`}
+                                >
+                                  {node.prefilterTag.subject} · {node.prefilterTag.salience}
+                                </Badge>
+                              )}
+                            </div>
 
-                        <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-300">
-                          {node.shotDescription}
-                        </p>
-                      </>
-                    )}
+                          </>
+                        )}
+                      </div>
+                    </div>
 
                     {isActive && (
                       <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800/50 space-y-4 animate-in fade-in slide-in-from-top-2">
-                        {Array.isArray(node.representativeFrames) && node.representativeFrames.length > 0 && (
+                        {node.shotDescription && (
                           <div>
                             <p className="text-[11px] text-slate-500 uppercase tracking-widest mb-1.5 font-bold flex items-center">
-                              <span className="w-1.5 h-1.5 rounded-full bg-sky-500 mr-2" /> 镜头代表帧
+                              <span className="w-1.5 h-1.5 rounded-full bg-sky-500 mr-2" /> 镜头描述
                             </p>
-                            <div className="flex gap-2 flex-wrap">
-                              {node.representativeFrames.map((rf, i) => (
-                                <div
-                                  key={i}
-                                  className="rounded-md border border-slate-200 dark:border-slate-800 overflow-hidden bg-white dark:bg-slate-900/40 shadow-sm"
-                                  style={{ width: 140 }}
-                                >
-                                  <img src={rf.thumbnailUrl} alt="代表帧" className="w-full h-20 object-cover" />
-                                  <div className="px-2 py-1.5 text-[11px] text-slate-600 dark:text-slate-400 leading-snug">
-                                    <div className="text-[10px] text-slate-400 mb-0.5">t={rf.midSec.toFixed(1)}s · sal={rf.salience ?? "?"}</div>
-                                    <div className="line-clamp-2">{rf.caption || rf.signature || "—"}</div>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
+                            <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed">
+                              {node.shotDescription}
+                            </p>
                           </div>
                         )}
                         {node.prefilterTag?.caption && (

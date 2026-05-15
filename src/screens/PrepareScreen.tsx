@@ -294,7 +294,7 @@ export function PrepareScreen() {
           <div className="flex items-start gap-2 rounded-lg border border-amber-200 dark:border-amber-900/40 bg-amber-50 dark:bg-amber-950/30 px-3.5 py-2.5 text-[13px] text-amber-700 dark:text-amber-300">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>
-              未检测到 {missingDeps.join("、")},需要先安装才能进行真实拉片分析。
+              未检测到 {missingDeps.join("、")},需要先安装才能进行视频分析。
               <button
                 type="button"
                 onClick={() => setCurrentScreen("settings")}
