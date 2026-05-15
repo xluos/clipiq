@@ -314,7 +314,7 @@ async function fetchLatestYtDlpRelease() {
   const response = await fetch(YT_DLP_LATEST_REDIRECT, {
     method: "HEAD",
     redirect: "follow",
-    headers: { "user-agent": "video-analyzer-electron" },
+    headers: { "user-agent": "clipiq-electron" },
   });
   if (!response.ok) {
     throw new Error(`GitHub ${response.status}`);
@@ -2621,7 +2621,7 @@ async function createWindow() {
     height: 860,
     minWidth: 1080,
     minHeight: 720,
-    title: "ClipIQ · 自动拉片分析工具",
+    title: "ClipIQ · 看懂每一帧的逻辑",
     titleBarStyle: "hiddenInset",
     backgroundColor: "#0F172A",
     icon: icon || undefined,

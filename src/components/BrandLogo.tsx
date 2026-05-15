@@ -1,5 +1,3 @@
-import { useId } from "react";
-
 export function BrandLogo({
   size = 32,
   className = "",
@@ -9,78 +7,33 @@ export function BrandLogo({
   className?: string;
   variant?: "color" | "mono-dark" | "mono-light" | "gray";
 }) {
-  const uid = useId().replace(/[:]/g, "");
-  const bg = `bg-${uid}`;
-  const play = `play-${uid}`;
-  const bar1 = `bar1-${uid}`;
-  const bar2 = `bar2-${uid}`;
-  const bar3 = `bar3-${uid}`;
-
-  if (variant === "gray") {
-    return (
-      <svg viewBox="0 0 100 100" width={size} height={size} className={className} xmlns="http://www.w3.org/2000/svg">
-        <rect width="100" height="100" rx="22" fill="#CBD5E1" />
-        <path d="M30 28 L30 72 L62 50 Z" fill="#94A3B8" />
-        <rect x="60" y="60" width="8" height="14" rx="2" fill="#94A3B8" />
-        <rect x="70" y="50" width="8" height="24" rx="2" fill="#94A3B8" />
-        <rect x="80" y="38" width="8" height="36" rx="2" fill="#94A3B8" />
-      </svg>
-    );
-  }
-
-  if (variant === "mono-dark") {
-    return (
-      <svg viewBox="0 0 100 100" width={size} height={size} className={className} xmlns="http://www.w3.org/2000/svg">
-        <rect width="100" height="100" rx="22" fill="#0F172A" />
-        <path d="M30 28 L30 72 L62 50 Z" fill="#8B5CF6" />
-        <rect x="60" y="60" width="8" height="14" rx="2" fill="#8B5CF6" />
-        <rect x="70" y="50" width="8" height="24" rx="2" fill="#8B5CF6" />
-        <rect x="80" y="38" width="8" height="36" rx="2" fill="#8B5CF6" />
-      </svg>
-    );
-  }
-
-  if (variant === "mono-light") {
-    return (
-      <svg viewBox="0 0 100 100" width={size} height={size} className={className} xmlns="http://www.w3.org/2000/svg">
-        <rect width="100" height="100" rx="22" fill="#F8FAFC" />
-        <path d="M30 28 L30 72 L62 50 Z" fill="#8B5CF6" />
-        <rect x="60" y="60" width="8" height="14" rx="2" fill="#8B5CF6" />
-        <rect x="70" y="50" width="8" height="24" rx="2" fill="#8B5CF6" />
-        <rect x="80" y="38" width="8" height="36" rx="2" fill="#8B5CF6" />
-      </svg>
-    );
-  }
+  const palette = (() => {
+    switch (variant) {
+      case "mono-dark":
+        // dark canvas, light marks
+        return { bg: "#0F172A", frameBack: "#312e81", frameMid: "#6366f1", frameTop: "#F8FAFC", play: "#0F172A" };
+      case "mono-light":
+        // light canvas, dark marks
+        return { bg: "#F8FAFC", frameBack: "#c7cbf5", frameMid: "#6366f1", frameTop: "#1c1e2a", play: "#F8FAFC" };
+      case "gray":
+        return { bg: "#94a3b8", frameBack: "#475569", frameMid: "#cbd5e1", frameTop: "#f8fafc", play: "#94a3b8" };
+      case "color":
+      default:
+        // brand indigo canvas, white top frame, indigo play knockout
+        return { bg: "#4f46e5", frameBack: "#3730a3", frameMid: "#a5a4f2", frameTop: "#ffffff", play: "#4f46e5" };
+    }
+  })();
 
   return (
     <svg viewBox="0 0 100 100" width={size} height={size} className={className} xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <linearGradient id={bg} x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#1E1B4B" />
-          <stop offset="100%" stopColor="#0B0B1E" />
-        </linearGradient>
-        <linearGradient id={play} x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#C4B5FD" />
-          <stop offset="100%" stopColor="#7C3AED" />
-        </linearGradient>
-        <linearGradient id={bar1} x1="0%" y1="100%" x2="0%" y2="0%">
-          <stop offset="0%" stopColor="#06B6D4" />
-          <stop offset="100%" stopColor="#0EA5E9" />
-        </linearGradient>
-        <linearGradient id={bar2} x1="0%" y1="100%" x2="0%" y2="0%">
-          <stop offset="0%" stopColor="#0EA5E9" />
-          <stop offset="100%" stopColor="#6366F1" />
-        </linearGradient>
-        <linearGradient id={bar3} x1="0%" y1="100%" x2="0%" y2="0%">
-          <stop offset="0%" stopColor="#6366F1" />
-          <stop offset="100%" stopColor="#8B5CF6" />
-        </linearGradient>
-      </defs>
-      <rect width="100" height="100" rx="22" fill={`url(#${bg})`} />
-      <path d="M30 28 L30 72 L62 50 Z" fill={`url(#${play})`} />
-      <rect x="60" y="60" width="8" height="14" rx="2" fill={`url(#${bar1})`} />
-      <rect x="70" y="50" width="8" height="24" rx="2" fill={`url(#${bar2})`} />
-      <rect x="80" y="38" width="8" height="36" rx="2" fill={`url(#${bar3})`} />
+      <rect width="100" height="100" rx="22" fill={palette.bg} />
+      <rect x="18" y="22" width="46" height="34" rx="9" fill={palette.frameBack} />
+      <rect x="28" y="32" width="46" height="34" rx="9" fill={palette.frameMid} />
+      <rect x="38" y="42" width="46" height="34" rx="9" fill={palette.frameTop} />
+      <path
+        d="M57 51 Q55 51 55 54 L55 64 Q55 67 57 67 Q58 67 59 66 L71 60 Q73 59 73 59 Q73 59 71 58 L59 52 Q58 51 57 51 Z"
+        fill={palette.play}
+      />
     </svg>
   );
 }
