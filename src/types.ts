@@ -305,6 +305,19 @@ export type FrameContext = {
   signature?: string;       // 来自 prefilterTag.signature
 };
 
+// 弹幕情绪 5 维强度 (0-1)。LLM 一次评一桶,产出整组分布。
+export type DanmakuEmotionAxis = "joy" | "surprise" | "anger" | "sadness" | "disgust";
+export type DanmakuEmotionScores = Record<DanmakuEmotionAxis, number>;
+
+// 单条节点上的观众反应聚合。danmaku 块缺失时整体为 undefined。
+export type AudienceReaction = {
+  dominantEmotion: DanmakuEmotionAxis | "neutral";
+  intensities: DanmakuEmotionScores;
+  danmakuCount: number;
+  summary: string;                       // 一句话(≤30 汉字): "集体笑场 + 少量吐槽"
+  topTerms?: WordCloudEntry[];           // 该节点时间区间的 mini 词云 (top 5-10)
+};
+
 export type AnalysisNode = {
   id: string;
   startSec: number;
@@ -331,6 +344,7 @@ export type AnalysisNode = {
   representativeFrames?: FrameContext[];   // 由 medium_text 选出的该镜头代表帧 (1-3 张)
   framesInShot?: FrameContext[];           // 该镜头内所有抽帧候选, 调试/详情面板用
   subtitleSegments?: Array<{ start: number; end: number; text: string }>; // 落在该镜头区间内的字幕段
+  audienceReaction?: AudienceReaction;     // B 站弹幕情绪聚合(可选; 仅 platform=bilibili 项目产出)
 };
 
 // PR2 金字塔管线: medium_text 合并出来的镜头级上下文, 喂给主分析做评审 + UI 镜头时间线渲染
@@ -344,6 +358,33 @@ export type ShotContext = {
   subtitleSegments?: Array<{ start: number; end: number; text: string }>; // 落在该镜头区间的字幕段, 保留分段
   subtitleText?: string;            // 该镜头时间段内的拼接字幕 (向后兼容老 report)
   framesInShot?: number;            // 兼容字段: 旧 report 只存了帧数; 新 report 用 frames.length
+};
+
+// 词云一条目 (text + 频次/权重)
+export type WordCloudEntry = {
+  text: string;
+  value: number;            // 频次 (归一化前的原始计数)
+};
+
+// 单个时间桶的弹幕聚合 + 情绪打分
+export type DanmakuEmotionWindow = {
+  shotIndex?: number;                    // 若按 shot 切; 退化到固定桶时为 undefined
+  startSec: number;
+  endSec: number;
+  danmakuCount: number;
+  dominantEmotion: DanmakuEmotionAxis | "neutral";
+  intensities: DanmakuEmotionScores;
+  sampleTexts: string[];                 // 代表性弹幕 (≤5 条)
+};
+
+// 顶层 report.danmaku 块: 仅 bilibili 项目产出
+export type DanmakuReport = {
+  platform: "bilibili";
+  totalCount: number;
+  windows: DanmakuEmotionWindow[];
+  wordCloud: WordCloudEntry[];
+  fetchedAt: string;                     // ISO 时间, 用于判断"是否过期"
+  summary?: string;                      // 一句话(≤120 汉字): 整体观众反应总结
 };
 
 export type AnalysisReport = {
@@ -375,6 +416,8 @@ export type AnalysisReport = {
   // PR2 金字塔管线新增字段
   globalSummary?: string;           // medium_text 在主分析前生成的全局摘要 (优先于 summary 展示)
   shotContexts?: ShotContext[];     // 所有镜头的中间产物, 时间轴渲染 + 调试用
+  // B 站弹幕情绪分析 + 词云 (仅 platform=bilibili 项目)
+  danmaku?: DanmakuReport;
 };
 
 export type AnalysisTiming = {
