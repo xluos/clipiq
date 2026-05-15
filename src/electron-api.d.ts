@@ -219,6 +219,10 @@ declare global {
       purgeProjects: () => Promise<{ ok: boolean; message?: string }>;
       llama: {
         listModels: () => Promise<LlamaModelInfo[]>;
+        listManifest: () => Promise<{
+          machine: import("./types").MachineSpecs;
+          models: import("./types").LocalModelEntry[];
+        }>;
         getStatus: () => Promise<LlamaStatus>;
         ensureBinary: () => Promise<{ ok: true; binaryPath: string }>;
         ensureModel: (modelKey: string) => Promise<{ ok: true; modelKey: string }>;

@@ -546,16 +546,28 @@ function migrateProviderV1(raw) {
   };
 }
 
-// builtin local_llama: 内置本地推理 provider,3 个 Qwen3.5-VL 规格。
+// builtin local_llama: 内置本地推理 provider,覆盖 manifest 里所有可用模型。
 // 每次 loadConfig 强制重写这个 entry,避免用户的旧配置把它覆盖。
+// model.capabilities 由 manifest 的 primaryCapabilities + secondaryTags 推算,
+// 任务分配 dropdown 据此过滤(vision 槽只看 capabilities.includes("vision"))。
 function buildBuiltinLocalLlamaProvider() {
   const llamaRuntime = require("./llama-runtime.cjs");
-  const models = Object.values(llamaRuntime.MODELS).map((meta) => ({
-    id: meta.key,
-    label: meta.name,
-    capabilities: ["vision", "fast"],
-    localKey: meta.key,
-  }));
+  const models = Object.values(llamaRuntime.MODELS)
+    .filter((meta) => meta._manifest && meta._manifest.available !== false)
+    .map((meta) => {
+      const m = meta._manifest || {};
+      const caps = [];
+      if (m.primaryCapabilities?.includes("vision")) caps.push("vision");
+      if (m.primaryCapabilities?.includes("audio")) caps.push("audio_transcription");
+      if (m.secondaryTags?.includes("reasoning")) caps.push("reasoning");
+      if (m.secondaryTags?.includes("fast")) caps.push("fast");
+      return {
+        id: meta.key,
+        label: meta.name,
+        capabilities: caps,
+        localKey: meta.key,
+      };
+    });
   return {
     id: "builtin-local-llama",
     name: "本地模型",
@@ -765,6 +777,7 @@ function migrateConfigV1ToV2(raw) {
     taskSlots,
     audioSlot,
     lastLlamaModelKey: cfg.lastLlamaModelKey || null,
+    defaultAnalysis: cfg.defaultAnalysis || null,
     schemaVersion: 2,
   };
 }
@@ -3213,6 +3226,27 @@ app.whenReady().then(async () => {
   ipcMain.handle("llama:listModels", async () => llamaRuntime.listModels());
 
   ipcMain.handle("llama:getStatus", async () => llamaRuntime.getStatus());
+
+  // 新:返回 manifest + 机器规格 + 每模型 fit/tps/memPercent + downloaded 状态
+  ipcMain.handle("llama:listManifest", async () => {
+    const machineDetect = require("./machine-detect.cjs");
+    const machine = machineDetect.detectMachine();
+    const manifest = llamaRuntime.getManifest();
+    const annotated = machineDetect.annotateManifest(manifest, machine);
+    // 合并 downloaded / llmBytes / mmprojBytes (来自 listModels)
+    const installed = await llamaRuntime.listModels();
+    const installedMap = Object.fromEntries(installed.map((m) => [m.key, m]));
+    const merged = Object.values(annotated).map((entry) => {
+      const inst = installedMap[entry.key] || {};
+      return {
+        ...entry,
+        downloaded: !!inst.downloaded,
+        llmBytes: inst.llmBytes || 0,
+        mmprojBytes: inst.mmprojBytes || 0,
+      };
+    });
+    return { machine, models: merged };
+  });
 
   ipcMain.handle("llama:ensureBinary", async (event) => {
     const path = await llamaRuntime.ensureLlamaServer((progress) => {

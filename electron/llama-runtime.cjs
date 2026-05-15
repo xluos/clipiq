@@ -32,40 +32,36 @@ const LLAMA_CPP_ASSETS = {
   "win32-x64": { name: "llama-${REL}-bin-win-cpu-x64.zip", format: "zip" },
 };
 
-// 预设模型清单。3 档可选,按机器配置 / 质量诉求选用。
-// 体积 = 权重 + mmproj-F16,首次下载会被缓存到 userData/models/llama/<key>/。
-const MODELS = {
-  qwen3_5_0_8b_q4km: {
-    key: "qwen3_5_0_8b_q4km",
-    name: "Qwen3.5-0.8B (Q4_K_M)",
-    description: "约 1.2GB · 单帧 ~1s · 极速档,适合海量画面初筛",
-    repo: "unsloth/Qwen3.5-0.8B-GGUF",
-    llmFile: "Qwen3.5-0.8B-Q4_K_M.gguf",
-    mmprojFile: "mmproj-F16.gguf",
-    approxBytes: 1180 * 1024 * 1024,
-    contextSize: 8192,
-  },
-  qwen3_5_2b_q4km: {
-    key: "qwen3_5_2b_q4km",
-    name: "Qwen3.5-2B (Q4_K_M)",
-    description: "约 1.9GB · 单帧 ~2s · 中文识别和叙事更稳,推荐档",
-    repo: "unsloth/Qwen3.5-2B-GGUF",
-    llmFile: "Qwen3.5-2B-Q4_K_M.gguf",
-    mmprojFile: "mmproj-F16.gguf",
-    approxBytes: 1860 * 1024 * 1024,
-    contextSize: 8192,
-  },
-  qwen3_5_4b_q4km: {
-    key: "qwen3_5_4b_q4km",
-    name: "Qwen3.5-4B (Q4_K_M)",
-    description: "约 3.3GB · 单帧 ~3-4s · 准确度最高,适合大内存机器",
-    repo: "unsloth/Qwen3.5-4B-GGUF",
-    llmFile: "Qwen3.5-4B-Q4_K_M.gguf",
-    mmprojFile: "mmproj-F16.gguf",
-    approxBytes: 3250 * 1024 * 1024,
-    contextSize: 8192,
-  },
-};
+// 模型清单从 manifest 文件读取。新增 / 修改模型 → 编辑 local-models.manifest.cjs。
+// runtime 内部沿用扁平的 MODELS 形状(key/name/description/repo/llmFile/mmprojFile/
+// approxBytes/contextSize),其余 manifest 字段(family/params/primaryCapabilities/
+// secondaryTags/available/quantizations)通过 getManifest() 单独暴露给上层 IPC。
+const { PRESETS: MANIFEST } = require("./local-models.manifest.cjs");
+
+function manifestToRuntimeModel(entry) {
+  // 默认选第一个量化档(目前每个模型只有一档)
+  const q = entry.quantizations && entry.quantizations[0];
+  return {
+    key: entry.key,
+    name: entry.name,
+    description: entry.description,
+    repo: q?.repo || "",
+    llmFile: q?.llmFile || "",
+    mmprojFile: q?.mmprojFile || "",
+    approxBytes: q?.sizeBytes || 0,
+    contextSize: entry.contextSize || 8192,
+    // runtime 不直接用,但保留给 listModels 透传给上层
+    _manifest: entry,
+  };
+}
+
+const MODELS = Object.fromEntries(
+  Object.entries(MANIFEST).map(([key, entry]) => [key, manifestToRuntimeModel(entry)]),
+);
+
+function getManifest() {
+  return MANIFEST;
+}
 
 function modelsRootDir() {
   return path.join(app.getPath("userData"), "models", "llama");
@@ -332,6 +328,9 @@ async function downloadFile(url, destPath, onProgress) {
 async function ensureModel(modelKey, onProgress = () => {}) {
   const meta = MODELS[modelKey];
   if (!meta) throw new Error(`未知模型: ${modelKey}`);
+  if (meta._manifest && meta._manifest.available === false) {
+    throw new Error(`${meta.name} 暂未实装,即将上线`);
+  }
   const dir = modelDir(modelKey);
   await fs.mkdir(dir, { recursive: true });
   const mirror = process.env.HF_MIRROR || HF_MIRROR_DEFAULT;
@@ -447,6 +446,9 @@ async function start(modelKey, { onLog } = {}) {
   }
   const meta = MODELS[modelKey];
   if (!meta) throw new Error(`未知模型: ${modelKey}`);
+  if (meta._manifest && meta._manifest.available === false) {
+    throw new Error(`${meta.name} 暂未实装,即将上线`);
+  }
   const binary = state.binaryPath || (await resolveLlamaServerPath());
   if (!binary) {
     const err = new Error(
@@ -642,6 +644,7 @@ module.exports = {
   LLAMA_CPP_RELEASE,
   init,
   listModels,
+  getManifest,
   ensureModel,
   ensureLlamaServer,
   start,

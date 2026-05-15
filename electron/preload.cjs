@@ -49,6 +49,7 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   purgeProjects: () => ipcRenderer.invoke("data:purgeProjects"),
   llama: {
     listModels: () => ipcRenderer.invoke("llama:listModels"),
+    listManifest: () => ipcRenderer.invoke("llama:listManifest"),
     getStatus: () => ipcRenderer.invoke("llama:getStatus"),
     ensureBinary: () => ipcRenderer.invoke("llama:ensureBinary"),
     ensureModel: (modelKey) => ipcRenderer.invoke("llama:ensureModel", modelKey),

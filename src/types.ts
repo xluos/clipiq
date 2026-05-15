@@ -9,6 +9,61 @@ export type ModelCapability =
   | "fast"
   | "audio_transcription";
 
+// 本地模型 manifest 能力分类(扩展 ModelCapability)
+// primary 决定槽位过滤;secondary 只做 UI hint
+export type LocalPrimaryCapability = "vision" | "audio" | "text";
+export type LocalSecondaryTag =
+  | "chinese"
+  | "english"
+  | "code"
+  | "reasoning"
+  | "video"
+  | "long_context"
+  | "fast";
+
+export type LocalQuantization = {
+  key: string;
+  label: string; // "Q4_K_M"
+  sizeBytes: number;
+  repo?: string;
+  llmFile?: string;
+  mmprojFile?: string;
+};
+
+export type LocalFitLevel = "perfect" | "good" | "marginal" | "tight";
+
+export type LocalModelEntry = {
+  key: string;
+  family: string;
+  params: string;
+  name: string;
+  description: string;
+  primaryCapabilities: LocalPrimaryCapability[];
+  secondaryTags: LocalSecondaryTag[];
+  available: boolean;
+  contextSize: number;
+  quantizations: LocalQuantization[];
+  // 由 main 进程计算后回传给 renderer
+  fit?: LocalFitLevel;
+  memPercent?: number;
+  tps?: number;
+  downloaded?: boolean;
+  llmBytes?: number;
+  mmprojBytes?: number;
+};
+
+export type MachineSpecs = {
+  platform: NodeJS.Platform;
+  arch: string;
+  totalMemoryBytes: number;
+  availableMemoryBytes: number;
+  isAppleSilicon: boolean;
+  cpuModel: string;
+  backend: "metal" | "cuda" | "rocm" | "cpu";
+  speedConstant: number; // K factor used in TPS estimate
+  recommendedQuant: string; // 默认推荐量化档 label
+};
+
 export type ProviderSource = "remote" | "local_llama" | "local_whisper";
 
 export type ProviderEndpointType =
@@ -292,6 +347,13 @@ export type AnalysisOptions = {
   manualGenre?: VideoGenre | "auto";
 };
 
+// 全局默认分析参数: PrepareScreen 在 project.analysisOptions 缺省时读取
+export type DefaultAnalysisPreset = "quick" | "standard" | "deep";
+export type DefaultAnalysis = {
+  preset: DefaultAnalysisPreset;
+  manualGenre: VideoGenre | "auto";
+};
+
 export type AnalysisProgressEvent = {
   projectId: string;
   progress: number;
@@ -305,6 +367,8 @@ export type AppConfig = {
   audioSlot: SlotAssignment;
   // 上次启动过的本地推理模型(key)。下次应用启动时自动恢复。
   lastLlamaModelKey?: string | null;
+  // 全局默认分析参数; PrepareScreen 在新项目首次进入时读取
+  defaultAnalysis?: DefaultAnalysis;
   schemaVersion: 2;
   // v1 残留字段,仅在 migrateConfigV1ToV2 内读取,迁移后写回时不再产生
   /** @deprecated migrated to taskSlots.complex_vision */
