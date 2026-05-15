@@ -546,28 +546,123 @@ function migrateProviderV1(raw) {
   };
 }
 
+// 远程 model id → capabilities 推断,规则表与辅助函数都在 model-detection-rules.cjs.
+// 规则集对齐 cherry-studio main 分支 config/models/{vision,reasoning,embedding}.ts,
+// 覆盖 GPT-4/5 / Claude 3-4 / Gemini 1.5-3 / Qwen-VL / GLM / Doubao / Kimi 等主流家族.
+const { inferCapabilitiesFromRemoteId } = require("./model-detection-rules.cjs");
+
+// 把远程 /models 里的一条原始 entry map 成 ModelDescriptor
+function remoteEntryToDescriptor(entry) {
+  const id = String(entry?.id || "").trim();
+  if (!id) return null;
+  return {
+    source: "remote",
+    id,
+    label: id,
+    family: id.split(/[-_/]/)[0] || undefined,
+    capabilities: inferCapabilitiesFromRemoteId(id),
+    capabilitiesSource: "inferred",
+    availability: { state: "ready" },
+    ownedBy: entry?.owned_by || undefined,
+  };
+}
+
+// 本地 llama manifest entry → ModelDescriptor
+// primaryCapabilities 直接映 vision/audio_transcription/text;
+// secondary 里有信息密度的(reasoning/long_context/fast)提升进 capabilities,
+// 其余(chinese/english/code/video)留在 local.secondaryTags 做 UI hint
+function localLlamaEntryToDescriptor(entry) {
+  if (!entry) return null;
+  const caps = new Set();
+  if (entry.primaryCapabilities?.includes("vision")) caps.add("vision");
+  if (entry.primaryCapabilities?.includes("audio")) caps.add("audio_transcription");
+  if (entry.primaryCapabilities?.includes("text")) caps.add("text");
+  if (entry.secondaryTags?.includes("reasoning")) caps.add("reasoning");
+  if (entry.secondaryTags?.includes("long_context")) caps.add("long_context");
+  if (entry.secondaryTags?.includes("fast")) caps.add("fast");
+
+  let availability;
+  if (entry.available === false) {
+    availability = { state: "coming_soon" };
+  } else if (entry.downloaded) {
+    availability = { state: "ready" };
+  } else {
+    const bytes = entry.quantizations?.[0]?.sizeBytes;
+    availability = bytes ? { state: "needs_install", sizeBytes: bytes } : { state: "needs_install" };
+  }
+
+  // 已提升到 capabilities 的 secondary key 从 secondaryTags 里剔除,避免 UI 重复展示
+  const PROMOTED = new Set(["reasoning", "long_context", "fast"]);
+  const remainingSecondary = (entry.secondaryTags || []).filter((t) => !PROMOTED.has(t));
+
+  return {
+    source: "local_llama",
+    id: entry.key,
+    label: entry.name,
+    family: entry.family,
+    params: entry.params,
+    description: entry.description,
+    capabilities: Array.from(caps),
+    capabilitiesSource: "manifest",
+    availability,
+    contextSize: entry.contextSize,
+    local: {
+      fit: entry.fit,
+      memPercent: entry.memPercent,
+      tps: entry.tps,
+      downloaded: !!entry.downloaded,
+      downloadedBytes: (entry.llmBytes || 0) + (entry.mmprojBytes || 0),
+      quantizations: entry.quantizations,
+      secondaryTags: remainingSecondary,
+    },
+  };
+}
+
+// 本地 whisper 模型 (whisperCppRuntime.MODELS / listModels) → ModelDescriptor
+function localWhisperEntryToDescriptor(entry) {
+  if (!entry) return null;
+  const fastKeys = new Set(["ggml-tiny", "ggml-base"]);
+  const caps = ["audio_transcription"];
+  if (fastKeys.has(entry.key)) caps.push("fast");
+  return {
+    source: "local_whisper",
+    id: entry.key,
+    label: entry.name || entry.key,
+    family: "Whisper",
+    description: entry.description,
+    capabilities: caps,
+    capabilitiesSource: "manifest",
+    availability: entry.downloaded
+      ? { state: "ready" }
+      : { state: "needs_install", sizeBytes: entry.approxBytes },
+    local: {
+      downloaded: !!entry.downloaded,
+      downloadedBytes: entry.downloadedBytes || 0,
+    },
+  };
+}
+
 // builtin local_llama: 内置本地推理 provider,覆盖 manifest 里所有可用模型。
 // 每次 loadConfig 强制重写这个 entry,避免用户的旧配置把它覆盖。
-// model.capabilities 由 manifest 的 primaryCapabilities + secondaryTags 推算,
-// 任务分配 dropdown 据此过滤(vision 槽只看 capabilities.includes("vision"))。
+// capabilities 派生统一走 localLlamaEntryToDescriptor,跟 listManifest 输出对齐。
 function buildBuiltinLocalLlamaProvider() {
   const llamaRuntime = require("./llama-runtime.cjs");
   const models = Object.values(llamaRuntime.MODELS)
     .filter((meta) => meta._manifest && meta._manifest.available !== false)
     .map((meta) => {
-      const m = meta._manifest || {};
-      const caps = [];
-      if (m.primaryCapabilities?.includes("vision")) caps.push("vision");
-      if (m.primaryCapabilities?.includes("audio")) caps.push("audio_transcription");
-      if (m.secondaryTags?.includes("reasoning")) caps.push("reasoning");
-      if (m.secondaryTags?.includes("fast")) caps.push("fast");
+      const descriptor = localLlamaEntryToDescriptor(meta._manifest);
+      if (!descriptor) return null;
       return {
-        id: meta.key,
-        label: meta.name,
-        capabilities: caps,
-        localKey: meta.key,
+        id: descriptor.id,
+        label: descriptor.label,
+        capabilities: descriptor.capabilities,
+        capabilitiesSource: descriptor.capabilitiesSource,
+        family: descriptor.family,
+        contextSize: descriptor.contextSize,
+        localKey: descriptor.id,
       };
-    });
+    })
+    .filter(Boolean);
   return {
     id: "builtin-local-llama",
     name: "本地模型",
@@ -3024,10 +3119,16 @@ app.whenReady().then(async () => {
       const response = await fetch(`${base}/models`, { method: "GET", headers });
       if (response.ok) {
         const data = await response.json().catch(() => null);
-        const modelCount = Array.isArray(data?.data) ? data.data.length : null;
+        const rawList = Array.isArray(data?.data) ? data.data : [];
+        const descriptors = rawList
+          .map((entry) => remoteEntryToDescriptor(entry))
+          .filter(Boolean);
         return {
           ok: true,
-          message: modelCount != null ? `连接成功，发现 ${modelCount} 个可用模型。` : "连接成功。",
+          message: descriptors.length > 0
+            ? `连接成功，发现 ${descriptors.length} 个可用模型。`
+            : "连接成功。",
+          models: descriptors,
         };
       }
       if (response.status === 401 || response.status === 403) {
@@ -3223,29 +3324,48 @@ app.whenReady().then(async () => {
   await llamaRuntime.init();
   await whisperCppRuntime.init();
 
-  ipcMain.handle("llama:listModels", async () => llamaRuntime.listModels());
+  // listModels 与 listManifest 共用同一映射,差别只在不带 machine 字段
+  ipcMain.handle("llama:listModels", async () => {
+    const machineDetect = require("./machine-detect.cjs");
+    const machine = machineDetect.detectMachine();
+    const annotated = machineDetect.annotateManifest(llamaRuntime.getManifest(), machine);
+    const installed = await llamaRuntime.listModels();
+    const installedMap = Object.fromEntries(installed.map((m) => [m.key, m]));
+    return Object.values(annotated)
+      .map((entry) => {
+        const inst = installedMap[entry.key] || {};
+        return localLlamaEntryToDescriptor({
+          ...entry,
+          downloaded: !!inst.downloaded,
+          llmBytes: inst.llmBytes || 0,
+          mmprojBytes: inst.mmprojBytes || 0,
+        });
+      })
+      .filter(Boolean);
+  });
 
   ipcMain.handle("llama:getStatus", async () => llamaRuntime.getStatus());
 
-  // 新:返回 manifest + 机器规格 + 每模型 fit/tps/memPercent + downloaded 状态
+  // 返回 ModelDescriptor[] + 机器规格. annotated manifest 合并 downloaded 状态后投影成统一 schema
   ipcMain.handle("llama:listManifest", async () => {
     const machineDetect = require("./machine-detect.cjs");
     const machine = machineDetect.detectMachine();
     const manifest = llamaRuntime.getManifest();
     const annotated = machineDetect.annotateManifest(manifest, machine);
-    // 合并 downloaded / llmBytes / mmprojBytes (来自 listModels)
     const installed = await llamaRuntime.listModels();
     const installedMap = Object.fromEntries(installed.map((m) => [m.key, m]));
-    const merged = Object.values(annotated).map((entry) => {
-      const inst = installedMap[entry.key] || {};
-      return {
-        ...entry,
-        downloaded: !!inst.downloaded,
-        llmBytes: inst.llmBytes || 0,
-        mmprojBytes: inst.mmprojBytes || 0,
-      };
-    });
-    return { machine, models: merged };
+    const descriptors = Object.values(annotated)
+      .map((entry) => {
+        const inst = installedMap[entry.key] || {};
+        return localLlamaEntryToDescriptor({
+          ...entry,
+          downloaded: !!inst.downloaded,
+          llmBytes: inst.llmBytes || 0,
+          mmprojBytes: inst.mmprojBytes || 0,
+        });
+      })
+      .filter(Boolean);
+    return { machine, models: descriptors };
   });
 
   ipcMain.handle("llama:ensureBinary", async (event) => {
@@ -3283,7 +3403,10 @@ app.whenReady().then(async () => {
   });
 
   // whisper.cpp runtime IPC ----------------------------------------------------
-  ipcMain.handle("whisperCpp:listModels", async () => whisperCppRuntime.listModels());
+  ipcMain.handle("whisperCpp:listModels", async () => {
+    const raws = await whisperCppRuntime.listModels();
+    return raws.map((e) => localWhisperEntryToDescriptor(e)).filter(Boolean);
+  });
 
   ipcMain.handle("whisperCpp:getStatus", async () => whisperCppRuntime.getStatus());
 
