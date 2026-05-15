@@ -336,7 +336,7 @@ export function HomeScreen() {
     event.stopPropagation();
     const ok = await confirm({
       title: "删除项目",
-      description: "确定要删除这个项目吗?项目的分析结果会从应用记录中一并移除。",
+      description: "确定要删除这个项目吗?分析结果会一同删除。",
       confirmLabel: "删除",
       destructive: true,
     });

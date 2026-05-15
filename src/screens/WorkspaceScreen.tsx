@@ -806,7 +806,7 @@ export function WorkspaceScreen() {
                             value={node.note || ""}
                             onClick={(event) => event.stopPropagation()}
                             onChange={(event) => updateNode(node.id, { note: event.target.value })}
-                            placeholder="补充人工备注，会自动保存到项目数据。"
+                            placeholder="补充人工备注"
                             className="min-h-20 resize-none bg-white text-sm dark:bg-slate-900/40"
                           />
                         </div>

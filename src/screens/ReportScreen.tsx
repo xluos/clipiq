@@ -400,18 +400,18 @@ export function ReportScreen() {
                   <FindingCard
                     label="高光节点"
                     value={String(highlightCount)}
-                    hint={highlightCount > 0 ? "建议保留,是视频的辨识度来源。" : "本视频尚未识别出高光节点。"}
+                    hint={highlightCount > 0 ? undefined : "尚未识别高光节点"}
                   />
                   <FindingCard
                     label="方法论违反"
                     value={String(violationCount)}
-                    hint={violationCount > 0 ? "见下方方法论诊断,按建议修复。" : "未触发任何方法论违反。"}
+                    hint={violationCount > 0 ? undefined : "未触发方法论违反"}
                     tone={violationCount > 0 ? "warn" : "default"}
                   />
                   <FindingCard
                     label="方法论命中"
                     value={String(hitCount)}
-                    hint={hitCount > 0 ? "命中的规则代表已掌握的剪辑章法。" : "暂未命中规则,可对照参考。"}
+                    hint={hitCount > 0 ? undefined : "暂未命中规则"}
                   />
                 </div>
               )}
@@ -679,11 +679,11 @@ function MethodologyDiagnostics({ audit, currentManualGenre, onReanalyze, onSeek
               <CheckCircle2 className="w-4 h-4 text-emerald-500" />
               做得不错的点 <span className="text-xs text-slate-500 font-normal">({hits.length})</span>
             </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">这些动作很到位，下次继续保持。</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">命中的方法论规则</p>
           </div>
         </div>
         {hits.length === 0 ? (
-          <p className="text-xs text-slate-500 dark:text-slate-400">这次没找到特别值得夸的亮点。</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">暂无</p>
         ) : (
           <ul className="space-y-2">
             {hits.map((h, idx) => (
@@ -711,11 +711,11 @@ function MethodologyDiagnostics({ audit, currentManualGenre, onReanalyze, onSeek
               <AlertTriangle className="w-4 h-4 text-amber-500" />
               可以再打磨一下的地方 <span className="text-xs text-slate-500 font-normal">({violations.length})</span>
             </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">这些点和常见做法有点出入，调整一下效果会更好。</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">违反的方法论规则</p>
           </div>
         </div>
         {violations.length === 0 ? (
-          <p className="text-xs text-slate-500 dark:text-slate-400">没找到明显需要返工的地方，整体节奏稳。</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">暂无</p>
         ) : (
           <ul className="space-y-3">
             {violations.map((v, idx) => (
@@ -742,11 +742,11 @@ function MethodologyDiagnostics({ audit, currentManualGenre, onReanalyze, onSeek
               <Search className="w-4 h-4 text-rose-500" />
               建议补上的环节 <span className="text-xs text-slate-500 font-normal">({misses.length})</span>
             </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">这些常规动作在视频里没看到，加上对观众体验会有明显帮助。</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">本应出现但缺失的方法论环节</p>
           </div>
         </div>
         {misses.length === 0 ? (
-          <p className="text-xs text-slate-500 dark:text-slate-400">该有的环节都到位了，没什么明显缺口。</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">暂无</p>
         ) : (
           <ul className="space-y-3">
             {misses.map((m, idx) => (
