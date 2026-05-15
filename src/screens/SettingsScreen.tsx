@@ -7,6 +7,13 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   ArrowLeft,
   CheckCircle2,
   DownloadCloud,
@@ -14,6 +21,7 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  Settings2,
   Sparkles,
   Square,
   Trash2,
@@ -22,15 +30,18 @@ import {
 import { Fragment, type FunctionComponent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import {
   DefaultAnalysisPreset,
+  ModelCapability,
+  ModelDescriptor,
   ModelProvider,
   ProviderKind,
+  ProviderModel,
   SlotAssignment,
   TaskAxis,
   TaskDifficulty,
   TaskSlotKey,
   VideoGenre,
 } from "../types";
-import type { LlamaModelInfo, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
+import type { LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
 
 type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "data";
 
@@ -62,9 +73,11 @@ function whisperModelHint(modelId?: string) {
 // ModelCapability (provider.models[i].capabilities) 的中文映射,任务分配 dropdown 用
 const CAPABILITY_LABELS_ZH: Record<string, string> = {
   vision: "视觉",
+  audio_transcription: "音频",
   reasoning: "推理",
   fast: "快速",
-  audio_transcription: "音频",
+  long_context: "长上下文",
+  text: "文本",
 };
 
 function formatBytes(bytes: number) {
@@ -199,7 +212,7 @@ function ProvidersSection() {
     if (!p) return;
     const ok = await confirm({
       title: "删除供应商",
-      description: `确定删除「${p.name}」?这个供应商配置将从应用中移除。`,
+      description: `确定删除「${p.name}」?`,
       confirmLabel: "删除",
       destructive: true,
     });
@@ -216,13 +229,13 @@ function ProvidersSection() {
     <>
       <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">供应商</h2>
       <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
-        管理可用的模型供应商。在「任务分配」里挑选每个分析步骤实际使用哪个。
+        管理可用的模型供应商。
       </p>
 
       <ProviderGroup
         kind="video"
         title="视觉模型"
-        emptyHint="还没有添加视觉模型,点右上「新增」配置一个。"
+        emptyHint="暂无视觉模型"
         providers={videoProviders}
         activeId={activeVideoProviderId}
         onAdd={() => handleAdd("video")}
@@ -234,7 +247,7 @@ function ProvidersSection() {
       <ProviderGroup
         kind="audio"
         title="字幕识别"
-        emptyHint="还没有添加字幕识别服务,点右上「新增」配置一个。"
+        emptyHint="暂无字幕识别服务"
         providers={audioProviders}
         activeId={activeAudioProviderId}
         onAdd={() => handleAdd("audio")}
@@ -277,6 +290,27 @@ const PIPELINE_STAGES: Array<{
 
 function TaskAssignmentSection() {
   const { providers, taskSlots, setTaskSlot, audioSlot, setAudioSlot } = useApp();
+  // 本地 llama 已下载且可启动的 model id 集合; 任务分配 dropdown 据此过滤未下载项
+  const [readyLocalIds, setReadyLocalIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!window.videoAnalyzer?.llama) return;
+    let cancelled = false;
+    const refresh = async () => {
+      const r = await window.videoAnalyzer!.llama.listManifest().catch(() => null);
+      if (cancelled || !r) return;
+      const ready = new Set(
+        r.models.filter((m) => m.availability.state === "ready").map((m) => m.id),
+      );
+      setReadyLocalIds(ready);
+    };
+    refresh();
+    const unsub = window.videoAnalyzer.llama.onProgress(() => refresh());
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, []);
 
   const slotMetaByKey: Record<string, SlotMeta> = SLOT_METAS.reduce((acc, m) => {
     acc[m.key] = m;
@@ -316,6 +350,7 @@ function TaskAssignmentSection() {
               assignment={assignment}
               onChange={onChange}
               audioMode={isAudio}
+              readyLocalIds={readyLocalIds}
             />
           );
         })}
@@ -332,27 +367,35 @@ type PipelineRowProps = {
   assignment: SlotAssignment;
   onChange: (a: SlotAssignment) => void;
   audioMode?: boolean;
+  readyLocalIds: Set<string>;
 };
 
 const PipelineRow: FunctionComponent<PipelineRowProps> = ({
-  stage, isFirst, providers, meta, assignment, onChange, audioMode,
+  stage, isFirst, providers, meta, assignment, onChange, audioMode, readyLocalIds,
 }) => {
+  // 本地 llama provider 下未 ready (未下载) 的 model id 一律不出现在 dropdown
+  const isModelEligible = (p: ModelProvider, m: ProviderModel) => {
+    if (p.source === "local_llama" && !readyLocalIds.has(m.id)) return false;
+    return true;
+  };
+
   const candidateProviders = audioMode
     ? providers.filter((p) =>
-        p.models.some((m) => m.capabilities.includes("audio_transcription")) ||
+        p.models.some((m) => isModelEligible(p, m) && m.capabilities.includes("audio_transcription")) ||
         p.endpointType === "openai_audio_transcriptions" ||
         p.endpointType === "local_whisper_cpp",
       )
     : providers.filter((p) =>
         meta.axis === "vision"
-          ? p.models.some((m) => m.capabilities.includes("vision"))
-          : true,
+          ? p.models.some((m) => isModelEligible(p, m) && m.capabilities.includes("vision"))
+          : p.models.some((m) => isModelEligible(p, m)),
       );
   const selectedProvider = assignment ? providers.find((p) => p.id === assignment.providerId) : null;
   const candidateModels = (() => {
     if (!selectedProvider) return [];
+    const eligible = selectedProvider.models.filter((m) => isModelEligible(selectedProvider, m));
     if (audioMode) {
-      return selectedProvider.models.filter(
+      return eligible.filter(
         (m) =>
           m.capabilities.includes("audio_transcription") ||
           selectedProvider.endpointType === "openai_audio_transcriptions" ||
@@ -360,9 +403,9 @@ const PipelineRow: FunctionComponent<PipelineRowProps> = ({
       );
     }
     if (meta.axis === "vision") {
-      return selectedProvider.models.filter((m) => m.capabilities.includes("vision"));
+      return eligible.filter((m) => m.capabilities.includes("vision"));
     }
-    return selectedProvider.models;
+    return eligible;
   })();
 
   const handleProviderChange = (id: string) => {
@@ -371,11 +414,12 @@ const PipelineRow: FunctionComponent<PipelineRowProps> = ({
       return;
     }
     const p = providers.find((x) => x.id === id);
+    const eligibleModels = p?.models.filter((m) => isModelEligible(p, m)) || [];
     const firstModel = audioMode
-      ? p?.models.find((m) => m.capabilities.includes("audio_transcription")) || p?.models[0]
+      ? eligibleModels.find((m) => m.capabilities.includes("audio_transcription")) || eligibleModels[0]
       : meta.axis === "vision"
-      ? p?.models.find((m) => m.capabilities.includes("vision")) || p?.models[0]
-      : p?.models[0];
+      ? eligibleModels.find((m) => m.capabilities.includes("vision")) || eligibleModels[0]
+      : eligibleModels[0];
     onChange(firstModel ? { providerId: id, modelId: firstModel.id } : null);
   };
 
@@ -527,10 +571,13 @@ function ProviderCard({
   onUpdate: (patch: Partial<ModelProvider>) => void;
   kind: ProviderKind;
 }) {
+  const { taskSlots, audioSlot } = useApp();
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [whisperCache, setWhisperCache] = useState<{ cached: boolean; sizeBytes?: number } | null>(null);
   const [draft, setDraft] = useState<ModelProvider>(persisted);
+  // 测试连接成功后,/models 返回的 ModelDescriptor 列表; combobox 下拉数据源
+  const [fetchedModels, setFetchedModels] = useState<ModelDescriptor[]>([]);
 
   // 当外部 persisted 引用变化（保存后 / 切换默认 / 改名），同步 draft
   useEffect(() => {
@@ -548,7 +595,11 @@ function ProviderCard({
       "localWhisperModel",
       "localWhisperMirror",
     ];
-    return keys.some((k) => (draft[k] ?? "") !== (persisted[k] ?? ""));
+    if (keys.some((k) => (draft[k] ?? "") !== (persisted[k] ?? ""))) return true;
+    // 测试连接后自动对齐会改 draft.models[0].capabilities,这里也算 dirty
+    const stripModel = (m?: ProviderModel) =>
+      m ? { id: m.id, capabilities: [...(m.capabilities || [])].sort().join(",") } : "";
+    return stripModel(draft.models?.[0]) !== stripModel(persisted.models?.[0]);
   }, [draft, persisted]);
 
   // 这两个别名让下方 JSX 的编辑控件直接走草稿 / 草稿写入,header 和保存提交才走 persisted
@@ -565,7 +616,38 @@ function ProviderCard({
     setDraft(persisted);
   };
 
+  // 模型管理 dialog 内的增删改即时 persist:走 persist({...persisted, models: next}),
+  // 同步 setDraft 让 UI 一致;不依赖 ProviderCard 的 "保存" 按钮
+  const persistModels = useCallback(
+    (nextModels: ProviderModel[]) => {
+      persist({ ...persisted, models: nextModels });
+      setDraft((d) => ({ ...d, models: nextModels }));
+    },
+    [persist, persisted],
+  );
+
+  // 给 ModelManagerDialog 用:查某 modelId 被哪些 slot 引用
+  const slotUsage = useCallback(
+    (modelId: string): string[] => {
+      const usage: string[] = [];
+      Object.entries(taskSlots).forEach(([slotKey, raw]) => {
+        const asn = raw as SlotAssignment;
+        if (asn?.providerId === persisted.id && asn.modelId === modelId) {
+          usage.push(slotKey);
+        }
+      });
+      if (audioSlot?.providerId === persisted.id && audioSlot.modelId === modelId) {
+        usage.push("audio");
+      }
+      return usage;
+    },
+    [taskSlots, audioSlot, persisted.id],
+  );
+
   const isLocalWhisper = draft.endpointType === "local_whisper_cpp";
+  const isLocalLlama = draft.source === "local_llama";
+  const isLocalProvider = isLocalWhisper || isLocalLlama;
+  const [manageOpen, setManageOpen] = useState(false);
   const modelKey = isLocalWhisper ? draft.localWhisperModel || draft.model : null;
 
   // 通过 whisperCpp.listModels 拿"已下载 + size"信息, 给按钮文案提供"已就绪 (XX MB)" / "下载并预热"
@@ -578,9 +660,9 @@ function ProviderCard({
     setWhisperCache(null);
     window.videoAnalyzer.whisperCpp.listModels().then((models) => {
       if (cancelled) return;
-      const target = models.find((m) => m.key === modelKey);
+      const target = models.find((m) => m.id === modelKey);
       if (target) {
-        setWhisperCache({ cached: target.downloaded, sizeBytes: target.downloadedBytes });
+        setWhisperCache({ cached: !!target.local?.downloaded, sizeBytes: target.local?.downloadedBytes });
       } else {
         setWhisperCache({ cached: false });
       }
@@ -598,11 +680,15 @@ function ProviderCard({
     try {
       if (window.videoAnalyzer) {
         const result = await window.videoAnalyzer.testProvider(draft);
-        setTestResult(result);
+        setTestResult({ ok: result.ok, message: result.message });
+        if (result.ok && result.models) {
+          // fetched 仅作 ModelManagerDialog 的"待添加"候选源;不再 silently 写 draft.models
+          setFetchedModels(result.models);
+        }
         if (isLocalWhisper && modelKey && window.videoAnalyzer.whisperCpp) {
           const models = await window.videoAnalyzer.whisperCpp.listModels().catch(() => null);
-          const target = models?.find((m) => m.key === modelKey);
-          if (target) setWhisperCache({ cached: target.downloaded, sizeBytes: target.downloadedBytes });
+          const target = models?.find((m) => m.id === modelKey);
+          if (target) setWhisperCache({ cached: !!target.local?.downloaded, sizeBytes: target.local?.downloadedBytes });
         }
         return;
       }
@@ -733,6 +819,8 @@ function ProviderCard({
                 onChange={(e) => onUpdate({ baseUrl: e.target.value })}
                 placeholder="https://api.openai.com/v1"
                 className="font-mono"
+                readOnly={isLocalLlama}
+                disabled={isLocalLlama}
               />
             </Field>
             <Field label="API Key">
@@ -742,37 +830,23 @@ function ProviderCard({
                 onChange={(e) => onUpdate({ apiKeyRef: e.target.value })}
                 placeholder="sk-..."
                 className="font-mono"
+                readOnly={isLocalLlama}
+                disabled={isLocalLlama}
               />
             </Field>
           </>
         )}
-        {kind === "video" || provider.endpointType !== "local_whisper_cpp" ? (
-          <Field label="模型名">
-            <Input
-              value={provider.model}
-              onChange={(e) => onUpdate({ model: e.target.value })}
-              placeholder={kind === "audio" ? "whisper-1 / large-v3 / ..." : "gpt-4o-mini / qwen-vl-max / ..."}
-              className="font-mono max-w-[260px]"
-            />
-          </Field>
-        ) : (
-          <Field label="本地模型" hint={whisperModelHint(provider.localWhisperModel)}>
-            <Select
-              value={provider.localWhisperModel || "ggml-base"}
-              onValueChange={(v) => onUpdate({ localWhisperModel: v, model: v })}
-            >
-              <SelectTrigger className="w-[300px]">
-                <SelectValue>{provider.localWhisperModel || "ggml-base"}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="ggml-tiny">whisper-tiny</SelectItem>
-                <SelectItem value="ggml-base">whisper-base</SelectItem>
-                <SelectItem value="ggml-small">whisper-small</SelectItem>
-                <SelectItem value="ggml-medium">whisper-medium</SelectItem>
-              </SelectContent>
-            </Select>
-          </Field>
-        )}
+        <Field label="模型">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setManageOpen(true)}
+            className="font-mono text-xs"
+          >
+            <Settings2 className="w-3.5 h-3.5 mr-1.5" />
+            管理模型 ({provider.models?.length || 0})
+          </Button>
+        </Field>
         {kind === "video" ? (
           <>
             <Field
@@ -877,6 +951,15 @@ function ProviderCard({
           <span className="text-[10px] text-slate-400 font-mono">{persisted.id}</span>
         </div>
       </footer>
+      <ModelManagerDialog
+        open={manageOpen}
+        onOpenChange={setManageOpen}
+        provider={persisted}
+        fetched={fetchedModels}
+        readOnly={isLocalProvider}
+        onPersistModels={persistModels}
+        slotUsage={slotUsage}
+      />
     </div>
   );
 }
@@ -892,6 +975,344 @@ function Field({ label, hint, children }: { label: string; hint?: ReactNode; chi
     </div>
   );
 }
+
+// 提供给 ModelManagerDialog 编辑用的可勾选 capability 列表
+const EDITABLE_CAPABILITIES: ModelCapability[] = [
+  "vision",
+  "audio_transcription",
+  "reasoning",
+  "fast",
+  "long_context",
+  "text",
+];
+
+function ModelManagerDialog({
+  open,
+  onOpenChange,
+  provider,
+  fetched,
+  readOnly,
+  onPersistModels,
+  slotUsage,
+}: {
+  open: boolean;
+  onOpenChange: (next: boolean) => void;
+  provider: ModelProvider;
+  fetched: ModelDescriptor[];
+  readOnly: boolean;
+  onPersistModels: (next: ProviderModel[]) => void;
+  slotUsage: (modelId: string) => string[];
+}) {
+  const confirm = useConfirm();
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+
+  // fetched 中尚未在 provider.models 里的 candidate
+  const candidates = useMemo(() => {
+    const existing = new Set((provider.models || []).map((m) => m.id));
+    return fetched.filter((f) => !existing.has(f.id));
+  }, [fetched, provider.models]);
+
+  // 弹窗关掉时清空临时勾选 + 编辑态
+  useEffect(() => {
+    if (!open) {
+      setEditingId(null);
+      setPicked(new Set());
+    }
+  }, [open]);
+
+  const handleAddPicked = () => {
+    const adds: ProviderModel[] = candidates
+      .filter((c) => picked.has(c.id))
+      .map((c) => ({
+        id: c.id,
+        label: c.label || c.id,
+        capabilities: c.capabilities,
+        capabilitiesSource: c.capabilitiesSource,
+        family: c.family,
+        contextSize: c.contextSize,
+        ownedBy: c.ownedBy,
+      }));
+    if (adds.length === 0) return;
+    onPersistModels([...(provider.models || []), ...adds]);
+    setPicked(new Set());
+  };
+
+  const handleRemove = async (modelId: string) => {
+    const used = slotUsage(modelId);
+    if (used.length > 0) {
+      const ok = await confirm({
+        title: "删除模型?",
+        description: `${used.length} 个任务槽位正在引用它,删除后这些槽位会变成未配置。`,
+        destructive: true,
+        confirmLabel: "确定删除",
+      });
+      if (!ok) return;
+    }
+    onPersistModels((provider.models || []).filter((m) => m.id !== modelId));
+  };
+
+  const handleSaveEdit = (modelId: string, patch: Partial<ProviderModel>) => {
+    onPersistModels(
+      (provider.models || []).map((m) =>
+        m.id === modelId ? { ...m, ...patch, capabilitiesSource: "manual" } : m,
+      ),
+    );
+    setEditingId(null);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{provider.name} · 模型管理</DialogTitle>
+          {readOnly && <DialogDescription>只读</DialogDescription>}
+        </DialogHeader>
+        <div className="mt-3 space-y-5 text-sm">
+          {/* 已保存 */}
+          <section>
+            <div className="flex items-baseline justify-between mb-2">
+              <h3 className="text-[12px] font-semibold uppercase tracking-wider text-slate-500">
+                已保存 ({provider.models?.length || 0})
+              </h3>
+            </div>
+            {(provider.models || []).length === 0 ? (
+              <div className="rounded-lg border border-dashed border-slate-200 dark:border-slate-800 p-4 text-xs text-slate-400">
+                空
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {(provider.models || []).map((m) => (
+                  <ModelRow
+                    key={m.id}
+                    model={m}
+                    readOnly={readOnly}
+                    editing={editingId === m.id}
+                    onEdit={() => setEditingId(m.id)}
+                    onCancel={() => setEditingId(null)}
+                    onSave={(patch) => handleSaveEdit(m.id, patch)}
+                    onRemove={() => handleRemove(m.id)}
+                    usage={slotUsage(m.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* 待添加 */}
+          {!readOnly && candidates.length > 0 && (
+            <section className="border-t border-slate-200 dark:border-slate-800 pt-4">
+              <div className="flex items-baseline justify-between mb-2">
+                <h3 className="text-[12px] font-semibold uppercase tracking-wider text-slate-500">
+                  待添加 ({candidates.length})
+                </h3>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() =>
+                      setPicked(
+                        picked.size === candidates.length
+                          ? new Set()
+                          : new Set(candidates.map((c) => c.id)),
+                      )
+                    }
+                  >
+                    {picked.size === candidates.length ? "取消全选" : "全选"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={handleAddPicked}
+                    disabled={picked.size === 0}
+                    className={picked.size > 0 ? "bg-indigo-600 hover:bg-indigo-700 text-white" : ""}
+                  >
+                    添加 {picked.size} 个
+                  </Button>
+                </div>
+              </div>
+              <div className="space-y-1">
+                {candidates.map((c) => (
+                  <label
+                    key={c.id}
+                    className="flex items-center gap-3 p-2 rounded hover:bg-slate-50 dark:hover:bg-slate-800/40 cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={picked.has(c.id)}
+                      onChange={(e) => {
+                        const next = new Set(picked);
+                        if (e.target.checked) next.add(c.id);
+                        else next.delete(c.id);
+                        setPicked(next);
+                      }}
+                      className="rounded border-slate-300"
+                    />
+                    <span className="font-mono text-xs text-slate-800 dark:text-slate-100 truncate flex-1">{c.id}</span>
+                    <span className="text-[10.5px] text-slate-400 dark:text-slate-500 shrink-0">
+                      {c.capabilities.length > 0
+                        ? c.capabilities.map((cap) => CAPABILITY_LABELS_ZH[cap] || cap).join(" · ")
+                        : "未识别"}
+                      {c.capabilitiesSource === "inferred" && " · 自动识别"}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+type ModelRowProps = {
+  model: ProviderModel;
+  readOnly: boolean;
+  editing: boolean;
+  onEdit: () => void;
+  onCancel: () => void;
+  onSave: (patch: Partial<ProviderModel>) => void;
+  onRemove: () => void;
+  usage: string[];
+};
+
+// 已保存模型 row;non-editing 显 chip + 按钮;editing 展开 form
+const ModelRow: FunctionComponent<ModelRowProps> = ({
+  model,
+  readOnly,
+  editing,
+  onEdit,
+  onCancel,
+  onSave,
+  onRemove,
+  usage,
+}) => {
+  const [labelDraft, setLabelDraft] = useState(model.label);
+  const [capsDraft, setCapsDraft] = useState<Set<ModelCapability>>(new Set(model.capabilities));
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [contextDraft, setContextDraft] = useState(model.contextSize?.toString() || "");
+
+  useEffect(() => {
+    if (editing) {
+      setLabelDraft(model.label);
+      setCapsDraft(new Set(model.capabilities));
+      setContextDraft(model.contextSize?.toString() || "");
+      setShowAdvanced(false);
+    }
+  }, [editing, model]);
+
+  if (!editing) {
+    return (
+      <div className="flex items-center gap-3 rounded-lg border border-slate-200 dark:border-slate-800 px-3 py-2 bg-white dark:bg-[#0E0E10]">
+        <div className="min-w-0 flex-1">
+          <div className="font-mono text-xs text-slate-800 dark:text-slate-100 truncate">{model.id}</div>
+          <div className="text-[10.5px] text-slate-400 dark:text-slate-500 flex items-center gap-1.5 mt-0.5">
+            <span>
+              {model.capabilities.length > 0
+                ? model.capabilities.map((c) => CAPABILITY_LABELS_ZH[c] || c).join(" · ")
+                : "未标记 capability"}
+            </span>
+            {model.capabilitiesSource === "manual" && <span className="text-slate-300">· 手动</span>}
+            {model.capabilitiesSource === "inferred" && <span className="text-slate-300">· 自动识别</span>}
+            {usage.length > 0 && (
+              <span className="text-indigo-500 dark:text-indigo-400">· {usage.length} 槽位在用</span>
+            )}
+          </div>
+        </div>
+        {!readOnly && (
+          <div className="flex items-center gap-1 shrink-0">
+            <Button size="sm" variant="ghost" onClick={onEdit} className="h-7 text-xs">
+              编辑
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onRemove}
+              className="h-7 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </Button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-indigo-200 dark:border-indigo-500/40 bg-indigo-50/30 dark:bg-indigo-500/5 px-3 py-3 space-y-3">
+      <div className="font-mono text-xs text-slate-700 dark:text-slate-200">{model.id}</div>
+      <div className="space-y-2">
+        <div>
+          <Label className="text-[11px] text-slate-500 mb-1 block">显示名</Label>
+          <Input value={labelDraft} onChange={(e) => setLabelDraft(e.target.value)} className="h-8 text-sm" />
+        </div>
+        <div>
+          <Label className="text-[11px] text-slate-500 mb-1 block">capabilities</Label>
+          <div className="flex flex-wrap gap-2">
+            {EDITABLE_CAPABILITIES.map((cap) => {
+              const on = capsDraft.has(cap);
+              return (
+                <button
+                  key={cap}
+                  type="button"
+                  onClick={() => {
+                    const next = new Set(capsDraft);
+                    if (on) next.delete(cap);
+                    else next.add(cap);
+                    setCapsDraft(next);
+                  }}
+                  className={
+                    on
+                      ? "px-2 py-1 text-[11px] rounded border border-indigo-300 bg-indigo-100 text-indigo-700 dark:border-indigo-500/50 dark:bg-indigo-500/20 dark:text-indigo-300"
+                      : "px-2 py-1 text-[11px] rounded border border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400"
+                  }
+                >
+                  {CAPABILITY_LABELS_ZH[cap] || cap}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+        >
+          {showAdvanced ? "− 收起高级" : "+ 高级"}
+        </button>
+        {showAdvanced && (
+          <div>
+            <Label className="text-[11px] text-slate-500 mb-1 block">上下文长度</Label>
+            <Input
+              value={contextDraft}
+              onChange={(e) => setContextDraft(e.target.value)}
+              placeholder="如 128000"
+              className="h-8 text-sm font-mono w-[180px]"
+            />
+          </div>
+        )}
+      </div>
+      <div className="flex items-center justify-end gap-2 pt-1">
+        <Button size="sm" variant="ghost" onClick={onCancel} className="h-7 text-xs">
+          取消
+        </Button>
+        <Button
+          size="sm"
+          onClick={() =>
+            onSave({
+              label: labelDraft,
+              capabilities: Array.from(capsDraft),
+              contextSize: contextDraft ? Number(contextDraft) : undefined,
+            })
+          }
+          className="h-7 text-xs bg-indigo-600 hover:bg-indigo-700 text-white"
+        >
+          保存
+        </Button>
+      </div>
+    </div>
+  );
+};
 
 function DepsSection() {
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
@@ -976,13 +1397,6 @@ function llamaSizeFromName(name: string) {
   return m ? m[1] : name;
 }
 
-// 主能力(决定槽位过滤)的中文标签
-const PRIMARY_LABELS: Record<string, string> = {
-  vision: "视觉",
-  audio: "音频",
-  text: "文本",
-};
-
 // 副能力(纯展示 hint)的中文标签
 const SECONDARY_LABELS: Record<string, string> = {
   chinese: "中文",
@@ -1018,23 +1432,6 @@ function FitChip({ fit }: { fit?: string }) {
   );
 }
 
-type ManifestModel = {
-  key: string;
-  family: string;
-  params: string;
-  name: string;
-  description: string;
-  primaryCapabilities: string[];
-  secondaryTags: string[];
-  available: boolean;
-  contextSize: number;
-  quantizations: Array<{ key: string; label: string; sizeBytes: number }>;
-  fit?: string;
-  memPercent?: number;
-  tps?: number;
-  downloaded?: boolean;
-};
-
 type MachineInfo = {
   platform: string;
   arch: string;
@@ -1050,7 +1447,7 @@ type MachineInfo = {
 function LocalInferenceSection() {
   const [status, setStatus] = useState<LlamaStatus | null>(null);
   const [machine, setMachine] = useState<MachineInfo | null>(null);
-  const [manifestModels, setManifestModels] = useState<ManifestModel[]>([]);
+  const [manifestModels, setManifestModels] = useState<ModelDescriptor[]>([]);
   const [progress, setProgress] = useState<LlamaProgress | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<"binary" | "download" | "start" | "stop" | "selftest" | null>(null);
@@ -1070,7 +1467,7 @@ function LocalInferenceSection() {
     ]);
     setStatus(s);
     setMachine(manifest.machine as unknown as MachineInfo);
-    setManifestModels(manifest.models as unknown as ManifestModel[]);
+    setManifestModels(manifest.models);
   }, []);
 
   useEffect(() => {
@@ -1093,8 +1490,8 @@ function LocalInferenceSection() {
         setBusyAction("binary");
         await window.videoAnalyzer.llama.ensureBinary();
       }
-      const target = manifestModels.find((m) => m.key === modelKey);
-      if (target && !target.downloaded) {
+      const target = manifestModels.find((m) => m.id === modelKey);
+      if (target && !target.local?.downloaded) {
         setBusyAction("download");
         await window.videoAnalyzer.llama.ensureModel(modelKey);
       }
@@ -1172,9 +1569,9 @@ function LocalInferenceSection() {
   const runningKey = status?.running ? status.modelKey : null;
   const isAnyBusy = busyAction !== null && busyAction !== "selftest";
 
-  const visionModels = manifestModels.filter((m) => m.primaryCapabilities.includes("vision"));
+  const visionModels = manifestModels.filter((m) => m.capabilities.includes("vision"));
   const textModels = manifestModels.filter((m) =>
-    !m.primaryCapabilities.includes("vision") && m.primaryCapabilities.includes("text")
+    !m.capabilities.includes("vision") && m.capabilities.includes("text")
   );
 
   const showProgress =
@@ -1188,7 +1585,7 @@ function LocalInferenceSection() {
     <>
       <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">本地推理</h2>
       <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
-        下载与管理可在本机运行的开源模型。任务分配里再决定每个步骤用哪个。
+        下载与管理可在本机运行的开源模型。
       </p>
 
       {/* Machine banner */}
@@ -1268,7 +1665,7 @@ function LocalInferenceSection() {
           <span className="text-[11px] text-slate-400">需先启动模型</span>
         </div>
         <p className="text-xs text-slate-500">
-          选一张本地图片(可以是项目里抽的视频帧),让运行中的模型描述它,验证视觉链路是否真的工作,顺便看每帧推理延迟。
+          选一张本地图片,让运行中的模型描述它。
         </p>
         <div className="flex items-center gap-3 flex-wrap">
           <label className="inline-flex items-center gap-2 text-sm cursor-pointer">
@@ -1322,7 +1719,7 @@ function LocalInferenceSection() {
 type ModelGroupProps = {
   title: string;
   subtitle: string;
-  models: ManifestModel[];
+  models: ModelDescriptor[];
   runningKey: string | null | undefined;
   busyKey: string | null;
   busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
@@ -1344,7 +1741,7 @@ const ModelGroup: FunctionComponent<ModelGroupProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
         {models.map((m) => (
           <ModelCard
-            key={m.key}
+            key={m.id}
             model={m}
             runningKey={runningKey}
             busyKey={busyKey}
@@ -1360,7 +1757,7 @@ const ModelGroup: FunctionComponent<ModelGroupProps> = ({
 };
 
 type ModelCardProps = {
-  model: ManifestModel;
+  model: ModelDescriptor;
   runningKey: string | null | undefined;
   busyKey: string | null;
   busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
@@ -1372,13 +1769,14 @@ type ModelCardProps = {
 const ModelCard: FunctionComponent<ModelCardProps> = ({
   model, runningKey, busyKey, busyAction, isAnyBusy, onStart, onStop,
 }) => {
-  const isRunning = runningKey === model.key;
-  const isDownloaded = !!model.downloaded;
-  const isBusy = busyKey === model.key && isAnyBusy;
-  const defaultQuant = model.quantizations[0];
+  const isRunning = runningKey === model.id;
+  const isDownloaded = !!model.local?.downloaded;
+  const isBusy = busyKey === model.id && isAnyBusy;
+  const defaultQuant = model.local?.quantizations?.[0];
+  const isComingSoon = model.availability.state === "coming_soon";
 
   let action: { label: string; variant: "default" | "outline" | "ghost"; onClick?: () => void; disabled?: boolean };
-  if (!model.available) {
+  if (isComingSoon) {
     action = { label: "即将上线", variant: "ghost", disabled: true };
   } else if (isBusy) {
     const lbl = busyAction === "binary" ? "下载引擎…" : busyAction === "download" ? "下载…" : "启动…";
@@ -1386,11 +1784,11 @@ const ModelCard: FunctionComponent<ModelCardProps> = ({
   } else if (isRunning) {
     action = { label: "停止", variant: "outline", onClick: onStop };
   } else if (runningKey) {
-    action = { label: "切换", variant: "default", onClick: () => onStart(model.key) };
+    action = { label: "切换", variant: "default", onClick: () => onStart(model.id) };
   } else if (!isDownloaded) {
-    action = { label: "下载", variant: "default", onClick: () => onStart(model.key) };
+    action = { label: "下载", variant: "default", onClick: () => onStart(model.id) };
   } else {
-    action = { label: "启动", variant: "default", onClick: () => onStart(model.key) };
+    action = { label: "启动", variant: "default", onClick: () => onStart(model.id) };
   }
 
   const cardCls = isRunning
@@ -1409,10 +1807,10 @@ const ModelCard: FunctionComponent<ModelCardProps> = ({
     <div className={`relative rounded-lg border ${cardCls} p-3 flex flex-col gap-1.5`}>
       {/* row1 — 身份 */}
       <div className="flex items-center gap-2 min-w-0">
-        <span className="font-semibold text-[13px] text-slate-900 dark:text-slate-100 truncate">{model.name}</span>
+        <span className="font-semibold text-[13px] text-slate-900 dark:text-slate-100 truncate">{model.label}</span>
         {statusPill}
         <span className="flex-1" />
-        <FitChip fit={model.fit} />
+        <FitChip fit={model.local?.fit} />
         <button
           type="button"
           disabled={action.disabled}
@@ -1437,19 +1835,19 @@ const ModelCard: FunctionComponent<ModelCardProps> = ({
         <span className="text-slate-300">·</span>
         <span className="text-slate-700 dark:text-slate-300">{formatBytes(defaultQuant?.sizeBytes || 0)}</span>
         <span className="text-slate-300">·</span>
-        <span><span className="text-slate-700 dark:text-slate-300">{model.memPercent ?? 0}%</span> 内存</span>
+        <span><span className="text-slate-700 dark:text-slate-300">{model.local?.memPercent ?? 0}%</span> 内存</span>
         <span className="text-slate-300">·</span>
-        <span><span className="text-slate-700 dark:text-slate-300">{model.tps ?? 0}</span> tok/s</span>
+        <span><span className="text-slate-700 dark:text-slate-300">{model.local?.tps ?? 0}</span> tok/s</span>
       </div>
 
-      {/* row3 — 能力 chip */}
+      {/* row3 — 能力 chip; capabilities 是任务分配过滤源,secondaryTags 仅展示语种/题材 hint */}
       <div className="flex flex-wrap gap-1">
-        {model.primaryCapabilities.map((cap) => (
+        {model.capabilities.map((cap) => (
           <span key={cap} className="text-[10.5px] px-1.5 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-500/10 dark:text-indigo-300">
-            {PRIMARY_LABELS[cap] || cap}
+            {CAPABILITY_LABELS_ZH[cap] || cap}
           </span>
         ))}
-        {model.secondaryTags.map((tag) => (
+        {(model.local?.secondaryTags || []).map((tag) => (
           <span key={tag} className="text-[10.5px] px-1.5 py-0.5 rounded border border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-400">
             {SECONDARY_LABELS[tag] || tag}
           </span>
@@ -1479,7 +1877,7 @@ function AnalysisDefaultsSection() {
     <>
       <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">默认分析</h2>
       <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
-        新建项目首次进入「准备分析」时使用的默认参数。每个项目仍可单独覆盖。
+        新建项目首次进入「准备分析」时使用的默认参数。
       </p>
 
       <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
@@ -1579,7 +1977,7 @@ function DataSection() {
     if (!window.videoAnalyzer) return;
     const ok = await confirm({
       title: "清空本地项目数据",
-      description: `确定清空 ${info?.projectCount ?? 0} 个项目的本地文件?此操作不可恢复;应用内的项目列表需要单独从首页删除。`,
+      description: `确定清空 ${info?.projectCount ?? 0} 个项目的本地文件?此操作不可恢复。`,
       confirmLabel: "清空",
       destructive: true,
     });
