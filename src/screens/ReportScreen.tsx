@@ -345,9 +345,6 @@ export function ReportScreen() {
                 {report.providerSnapshot?.model && (
                   <span>模型 · {report.providerSnapshot.model}</span>
                 )}
-                {report.providerSnapshot?.inputMode && (
-                  <span>输入模式 · {report.providerSnapshot.inputMode}</span>
-                )}
                 {report.pipelineVersion && <span>流水线 · {report.pipelineVersion}</span>}
                 {report.schemaVersion && <span>Schema · {report.schemaVersion}</span>}
                 {report.generatedAt && (

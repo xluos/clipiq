@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment } from "./types";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis } from "./types";
 
 interface AppState {
   currentScreen: ScreenState;
@@ -14,6 +14,8 @@ interface AppState {
   setTaskSlot: (key: TaskSlotKey, assignment: SlotAssignment) => void;
   audioSlot: SlotAssignment;
   setAudioSlot: (assignment: SlotAssignment) => void;
+  defaultAnalysis: DefaultAnalysis;
+  setDefaultAnalysis: React.Dispatch<React.SetStateAction<DefaultAnalysis>>;
   /** @deprecated derived from taskSlots.complex_vision; will be removed in PR-3 */
   activeVideoProviderId: string | null;
   /** @deprecated 写入会同步到 taskSlots.complex_vision.providerId,保留是为了在 PR-3 完成前旧 UI 不崩 */
@@ -55,6 +57,11 @@ const DEFAULT_PROVIDERS: ModelProvider[] = [
   },
 ];
 
+const DEFAULT_ANALYSIS: DefaultAnalysis = {
+  preset: "standard",
+  manualGenre: "auto",
+};
+
 const DEFAULT_TASK_SLOTS: TaskSlots = {
   simple_vision: null,
   simple_text: null,
@@ -75,6 +82,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [providers, setProviders] = useState<ModelProvider[]>(DEFAULT_PROVIDERS);
   const [taskSlots, setTaskSlots] = useState<TaskSlots>(DEFAULT_TASK_SLOTS);
   const [audioSlot, setAudioSlotState] = useState<SlotAssignment>(null);
+  const [defaultAnalysis, setDefaultAnalysis] = useState<DefaultAnalysis>(DEFAULT_ANALYSIS);
 
   // ref 始终指向最新 providers,供下面的 setActiveXxxProviderId 在更换 provider 时挑首个 model
   const providersRef = useRef<ModelProvider[]>(providers);
@@ -177,6 +185,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
           if (config?.audioSlot !== undefined) {
             setAudioSlotState(config.audioSlot);
           }
+          if (config?.defaultAnalysis) {
+            setDefaultAnalysis(config.defaultAnalysis);
+          }
           const projectList = await window.videoAnalyzer.listProjects();
           setProjects(projectList);
           previousProjectsRef.current = new Map(projectList.map((p) => [p.id, p]));
@@ -197,6 +208,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             if (state.providers?.length) setProviders(state.providers);
             if (state.taskSlots) setTaskSlots(state.taskSlots);
             if (state.audioSlot !== undefined) setAudioSlotState(state.audioSlot);
+            if (state.defaultAnalysis) setDefaultAnalysis(state.defaultAnalysis);
             setProjects(state.projects || []);
             setNodesByProject(state.nodesByProject || {});
             setReportByProject(state.reportByProject || {});
@@ -220,6 +232,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       providers,
       taskSlots,
       audioSlot,
+      defaultAnalysis,
       schemaVersion: 2,
     };
     const timer = window.setTimeout(() => {
@@ -236,7 +249,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [providers, taskSlots, audioSlot, hasHydrated]);
+  }, [providers, taskSlots, audioSlot, defaultAnalysis, hasHydrated]);
 
   useEffect(() => {
     if (!hasHydrated) return;
@@ -274,6 +287,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setTaskSlot,
         audioSlot,
         setAudioSlot,
+        defaultAnalysis,
+        setDefaultAnalysis,
         activeVideoProviderId,
         setActiveVideoProviderId,
         activeAudioProviderId,

@@ -89,16 +89,21 @@ function matchPreset(opts: AnalysisOptions | undefined): PresetKey {
 }
 
 export function PrepareScreen() {
-  const { setCurrentScreen, projects, setProjects, activeProjectId, providers, activeVideoProviderId } = useApp();
+  const { setCurrentScreen, projects, setProjects, activeProjectId, providers, activeVideoProviderId, defaultAnalysis } = useApp();
   const project = projects.find(p => p.id === activeProjectId);
   const provider = providers.find(p => p.id === activeVideoProviderId);
 
+  // 从全局默认 preset 推导首次进入项目时的 mode/density/focus。
+  // PRESETS 的 key 是 quick/standard/deep,和 DefaultAnalysisPreset 对齐。
+  const defaultPresetOptions = PRESETS.find((p) => p.key === defaultAnalysis.preset)?.options
+    || { mode: "standard" as const, density: "standard" as const, focus: "all" as const };
+
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [mode, setMode] = useState<AnalysisOptions["mode"]>(project?.analysisOptions?.mode || "standard");
-  const [density, setDensity] = useState<AnalysisOptions["density"]>(project?.analysisOptions?.density || "standard");
-  const [focus, setFocus] = useState<AnalysisOptions["focus"]>(project?.analysisOptions?.focus || "all");
+  const [mode, setMode] = useState<AnalysisOptions["mode"]>(project?.analysisOptions?.mode || defaultPresetOptions.mode);
+  const [density, setDensity] = useState<AnalysisOptions["density"]>(project?.analysisOptions?.density || defaultPresetOptions.density);
+  const [focus, setFocus] = useState<AnalysisOptions["focus"]>(project?.analysisOptions?.focus || defaultPresetOptions.focus);
   const [manualGenre, setManualGenre] = useState<VideoGenre | "auto">(
-    project?.analysisOptions?.manualGenre || "auto"
+    project?.analysisOptions?.manualGenre || defaultAnalysis.manualGenre
   );
   const [advancedOpen, setAdvancedOpen] = useState(false);
 

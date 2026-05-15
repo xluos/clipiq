@@ -21,13 +21,14 @@ import {
 } from "lucide-react";
 import { Fragment, type FunctionComponent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import {
-  ModelInputMode,
+  DefaultAnalysisPreset,
   ModelProvider,
   ProviderKind,
   SlotAssignment,
   TaskAxis,
   TaskDifficulty,
   TaskSlotKey,
+  VideoGenre,
 } from "../types";
 import type { LlamaModelInfo, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
 
@@ -58,17 +59,13 @@ function whisperModelHint(modelId?: string) {
   }
 }
 
-function inputModeHint(mode?: string) {
-  switch (mode) {
-    case "direct_video":
-      return "直接把视频传给模型,只有少数模型支持。";
-    case "keyframe_sequence":
-      return "从视频抽取关键画面再发给模型,兼容性最好。";
-    case "auto":
-    default:
-      return "目前等同于抽取关键画面;未来会根据模型能力自动切换。";
-  }
-}
+// ModelCapability (provider.models[i].capabilities) 的中文映射,任务分配 dropdown 用
+const CAPABILITY_LABELS_ZH: Record<string, string> = {
+  vision: "视觉",
+  reasoning: "推理",
+  fast: "快速",
+  audio_transcription: "音频",
+};
 
 function formatBytes(bytes: number) {
   if (!bytes) return "0 B";
@@ -224,7 +221,7 @@ function ProvidersSection() {
 
       <ProviderGroup
         kind="video"
-        title="🎞️ 视觉模型"
+        title="视觉模型"
         emptyHint="还没有添加视觉模型,点右上「新增」配置一个。"
         providers={videoProviders}
         activeId={activeVideoProviderId}
@@ -236,7 +233,7 @@ function ProvidersSection() {
 
       <ProviderGroup
         kind="audio"
-        title="🎙️ 字幕识别"
+        title="字幕识别"
         emptyHint="还没有添加字幕识别服务,点右上「新增」配置一个。"
         providers={audioProviders}
         activeId={activeAudioProviderId}
@@ -260,11 +257,8 @@ type SlotMeta = {
 
 const SLOT_METAS: SlotMeta[] = [
   { key: "simple_vision", label: "简单 · 视觉", difficulty: "simple", axis: "vision", hint: "用于本地视觉初筛打标", used: true },
-  { key: "simple_text", label: "简单 · 文本", difficulty: "simple", axis: "text", hint: "暂未消费,留作快速文本任务", used: false },
-  { key: "medium_vision", label: "中等 · 视觉", difficulty: "medium", axis: "vision", hint: "暂未消费,留作中等视觉任务", used: false },
   { key: "medium_text", label: "中等 · 文本", difficulty: "medium", axis: "text", hint: "用于字幕推断视频类型", used: true },
   { key: "complex_vision", label: "复杂 · 视觉", difficulty: "complex", axis: "vision", hint: "用于主分析:拉片打标 + 方法论审计", used: true },
-  { key: "complex_text", label: "复杂 · 文本", difficulty: "complex", axis: "text", hint: "暂未消费,留作复杂文本任务", used: false },
 ];
 
 const PIPELINE_STAGES: Array<{
@@ -281,11 +275,8 @@ const PIPELINE_STAGES: Array<{
   { num: "04", title: "主分析", badges: ["complex · vision"], desc: "基于镜头描述 + 字幕 + 关键帧,产出节点评审、方法论审计、情绪曲线。", slot: "complex_vision", isKey: true },
 ];
 
-const EXTRA_SLOTS: TaskSlotKey[] = ["simple_text", "medium_vision", "complex_text"];
-
 function TaskAssignmentSection() {
   const { providers, taskSlots, setTaskSlot, audioSlot, setAudioSlot } = useApp();
-  const [extrasOpen, setExtrasOpen] = useState(false);
 
   const slotMetaByKey: Record<string, SlotMeta> = SLOT_METAS.reduce((acc, m) => {
     acc[m.key] = m;
@@ -304,7 +295,7 @@ function TaskAssignmentSection() {
     <>
       <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">分析管线</h2>
       <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
-        每一步绑定独立模型,改完立即生效。
+        每一步绑定独立模型。
       </p>
 
       <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] overflow-hidden">
@@ -329,33 +320,6 @@ function TaskAssignmentSection() {
           );
         })}
       </div>
-
-      <button
-        type="button"
-        onClick={() => setExtrasOpen(v => !v)}
-        className="self-start font-mono text-[10.5px] uppercase tracking-wider text-slate-500 hover:text-slate-900 dark:hover:text-slate-100 transition-colors"
-      >
-        {extrasOpen ? "▴ 隐藏未启用槽位" : "▾ 显示 3 个未启用槽位"}
-      </button>
-
-      {extrasOpen && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {EXTRA_SLOTS.map((key) => {
-            const meta = slotMetaByKey[key];
-            if (!meta) return null;
-            return (
-              <Fragment key={key}>
-                <SlotCard
-                  meta={meta}
-                  providers={providers}
-                  assignment={taskSlots[key]}
-                  onChange={(a) => setTaskSlot(key, a)}
-                />
-              </Fragment>
-            );
-          })}
-        </div>
-      )}
     </>
   );
 }
@@ -484,143 +448,13 @@ const PipelineRow: FunctionComponent<PipelineRowProps> = ({
               <SelectItem key={m.id} value={m.id}>
                 <span className="flex items-center gap-2">
                   <span>{m.label}</span>
-                  <span className="text-[10px] text-slate-400">{m.capabilities.join(" · ")}</span>
+                  <span className="text-[10px] text-slate-400">{m.capabilities.map((c) => CAPABILITY_LABELS_ZH[c] || c).join(" · ")}</span>
                 </span>
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
       </div>
-    </div>
-  );
-}
-
-function SlotCard({
-  meta,
-  providers,
-  assignment,
-  onChange,
-  audioMode,
-}: {
-  meta: SlotMeta;
-  providers: ModelProvider[];
-  assignment: SlotAssignment;
-  onChange: (a: SlotAssignment) => void;
-  audioMode?: boolean;
-}) {
-  // 按 axis/audio 模式过滤候选 provider 和 model
-  const candidateProviders = audioMode
-    ? providers.filter((p) =>
-        p.models.some((m) => m.capabilities.includes("audio_transcription")) ||
-        p.endpointType === "openai_audio_transcriptions" ||
-        p.endpointType === "local_whisper_cpp",
-      )
-    : providers.filter((p) =>
-        // 任意 model 满足 axis 要求即可:vision 槽需要至少一个 vision 能力 model;text 不限
-        meta.axis === "vision"
-          ? p.models.some((m) => m.capabilities.includes("vision"))
-          : true,
-      );
-
-  const selectedProvider = assignment ? providers.find((p) => p.id === assignment.providerId) : null;
-  const candidateModels = (() => {
-    if (!selectedProvider) return [];
-    if (audioMode) {
-      return selectedProvider.models.filter(
-        (m) =>
-          m.capabilities.includes("audio_transcription") ||
-          selectedProvider.endpointType === "openai_audio_transcriptions" ||
-          selectedProvider.endpointType === "local_whisper_cpp",
-      );
-    }
-    if (meta.axis === "vision") {
-      return selectedProvider.models.filter((m) => m.capabilities.includes("vision"));
-    }
-    return selectedProvider.models;
-  })();
-
-  const handleProviderChange = (id: string) => {
-    if (id === NONE) {
-      onChange(null);
-      return;
-    }
-    const p = providers.find((x) => x.id === id);
-    const firstModel = audioMode
-      ? p?.models.find((m) => m.capabilities.includes("audio_transcription")) || p?.models[0]
-      : meta.axis === "vision"
-      ? p?.models.find((m) => m.capabilities.includes("vision")) || p?.models[0]
-      : p?.models[0];
-    onChange(firstModel ? { providerId: id, modelId: firstModel.id } : null);
-  };
-
-  const handleModelChange = (id: string) => {
-    if (!assignment) return;
-    onChange({ ...assignment, modelId: id });
-  };
-
-  return (
-    <div
-      className={`rounded-xl border ${meta.used ? "border-slate-200 dark:border-slate-800" : "border-dashed border-slate-200 dark:border-slate-800"} bg-white dark:bg-[#0E0E10] p-4 space-y-2.5 shadow-sm`}
-    >
-      <div className="flex items-center justify-between">
-        <div className="text-sm font-semibold text-slate-800 dark:text-slate-100">{meta.label}</div>
-        {!meta.used && (
-          <Badge variant="outline" className="text-[10px] text-slate-400 border-slate-200 dark:border-slate-700">
-            暂未启用
-          </Badge>
-        )}
-      </div>
-      <div className="text-[11px] text-slate-500 dark:text-slate-400">{meta.hint}</div>
-
-      <Select value={assignment?.providerId ?? NONE} onValueChange={handleProviderChange}>
-        <SelectTrigger className="h-8 text-xs bg-slate-50 dark:bg-[#0A0A0B] border-slate-200 dark:border-slate-800">
-          <SelectValue placeholder="选供应商">
-            {selectedProvider ? selectedProvider.name : "选供应商"}
-          </SelectValue>
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value={NONE}>不启用</SelectItem>
-          {candidateProviders.length === 0 && (
-            <SelectItem value={NONE} disabled>
-              没有符合能力的供应商
-            </SelectItem>
-          )}
-          {candidateProviders.map((p) => (
-            <SelectItem key={p.id} value={p.id}>
-              {p.name}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-
-      <Select value={assignment?.modelId ?? NONE} onValueChange={handleModelChange} disabled={!selectedProvider}>
-        <SelectTrigger className="h-8 text-xs bg-slate-50 dark:bg-[#0A0A0B] border-slate-200 dark:border-slate-800">
-          <SelectValue placeholder="选模型">
-            {(() => {
-              if (!assignment || !selectedProvider) return "选模型";
-              const m = selectedProvider.models.find((x) => x.id === assignment.modelId);
-              return m?.label || assignment.modelId;
-            })()}
-          </SelectValue>
-        </SelectTrigger>
-        <SelectContent>
-          {candidateModels.length === 0 && (
-            <SelectItem value={NONE} disabled>
-              {meta.axis === "vision" ? "该供应商无视觉能力的 model" : "该供应商没有 model"}
-            </SelectItem>
-          )}
-          {candidateModels.map((m) => (
-            <SelectItem key={m.id} value={m.id}>
-              <span className="flex items-center gap-2">
-                <span>{m.label}</span>
-                <span className="text-[10px] text-slate-400">
-                  {m.capabilities.join(" · ")}
-                </span>
-              </span>
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
     </div>
   );
 }
@@ -710,7 +544,6 @@ function ProviderCard({
       "apiKeyRef",
       "model",
       "endpointType",
-      "inputMode",
       "language",
       "localWhisperModel",
       "localWhisperMirror",
@@ -965,23 +798,6 @@ function ProviderCard({
                 </SelectContent>
               </Select>
             </Field>
-            <Field label="输入模式" hint={inputModeHint(provider.inputMode)}>
-              <Select
-                value={provider.inputMode}
-                onValueChange={(v) => onUpdate({ inputMode: v as ModelInputMode })}
-              >
-                <SelectTrigger className="w-[260px]">
-                  <SelectValue>
-                    {provider.inputMode === "direct_video" ? "直接视频上传" : provider.inputMode === "keyframe_sequence" ? "抽帧序列" : "自动选择"}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="auto">自动选择</SelectItem>
-                  <SelectItem value="direct_video">直接视频上传</SelectItem>
-                  <SelectItem value="keyframe_sequence">抽帧序列</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
           </>
         ) : (
           <>
@@ -1160,11 +976,83 @@ function llamaSizeFromName(name: string) {
   return m ? m[1] : name;
 }
 
+// 主能力(决定槽位过滤)的中文标签
+const PRIMARY_LABELS: Record<string, string> = {
+  vision: "视觉",
+  audio: "音频",
+  text: "文本",
+};
+
+// 副能力(纯展示 hint)的中文标签
+const SECONDARY_LABELS: Record<string, string> = {
+  chinese: "中文",
+  english: "英文",
+  code: "代码",
+  reasoning: "推理",
+  video: "视频",
+  long_context: "长上下文",
+  fast: "快速",
+};
+
+// fit 四档中文化
+const FIT_LABELS: Record<string, string> = {
+  perfect: "推荐",
+  good: "可用",
+  marginal: "紧张",
+  tight: "不可用",
+};
+
+function FitChip({ fit }: { fit?: string }) {
+  if (!fit) return null;
+  const cls = ({
+    perfect: "bg-emerald-50 border-emerald-200 text-emerald-700 dark:bg-emerald-900/20 dark:border-emerald-800 dark:text-emerald-300",
+    good: "bg-emerald-50/50 border-emerald-100 text-emerald-700 dark:bg-emerald-900/10 dark:border-emerald-900/40 dark:text-emerald-400",
+    marginal: "bg-amber-50/40 border-amber-100 text-amber-700 dark:bg-amber-900/10 dark:border-amber-900/40 dark:text-amber-400",
+    tight: "bg-red-50 border-red-200 text-red-700 dark:bg-red-900/20 dark:border-red-800 dark:text-red-300",
+  } as Record<string, string>)[fit] || "border-slate-200 text-slate-600";
+  return (
+    <span className={`inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-2 py-0.5 rounded border ${cls}`}>
+      <span className="w-1.5 h-1.5 rounded-full bg-current" />
+      {FIT_LABELS[fit] || fit}
+    </span>
+  );
+}
+
+type ManifestModel = {
+  key: string;
+  family: string;
+  params: string;
+  name: string;
+  description: string;
+  primaryCapabilities: string[];
+  secondaryTags: string[];
+  available: boolean;
+  contextSize: number;
+  quantizations: Array<{ key: string; label: string; sizeBytes: number }>;
+  fit?: string;
+  memPercent?: number;
+  tps?: number;
+  downloaded?: boolean;
+};
+
+type MachineInfo = {
+  platform: string;
+  arch: string;
+  totalMemoryBytes: number;
+  availableMemoryBytes: number;
+  isAppleSilicon: boolean;
+  cpuModel: string;
+  backend: string;
+  speedConstant: number;
+  recommendedQuant: string;
+};
+
 function LocalInferenceSection() {
   const [status, setStatus] = useState<LlamaStatus | null>(null);
-  const [models, setModels] = useState<LlamaModelInfo[]>([]);
+  const [machine, setMachine] = useState<MachineInfo | null>(null);
+  const [manifestModels, setManifestModels] = useState<ManifestModel[]>([]);
   const [progress, setProgress] = useState<LlamaProgress | null>(null);
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<"binary" | "download" | "start" | "stop" | "selftest" | null>(null);
   const [error, setError] = useState<string>("");
   const [selfTestImage, setSelfTestImage] = useState<{ name: string; dataUrl: string } | null>(null);
@@ -1176,12 +1064,13 @@ function LocalInferenceSection() {
 
   const refresh = useCallback(async () => {
     if (!window.videoAnalyzer?.llama) return;
-    const [s, m] = await Promise.all([
+    const [s, manifest] = await Promise.all([
       window.videoAnalyzer.llama.getStatus(),
-      window.videoAnalyzer.llama.listModels(),
+      window.videoAnalyzer.llama.listManifest(),
     ]);
     setStatus(s);
-    setModels(m);
+    setMachine(manifest.machine as unknown as MachineInfo);
+    setManifestModels(manifest.models as unknown as ManifestModel[]);
   }, []);
 
   useEffect(() => {
@@ -1193,28 +1082,18 @@ function LocalInferenceSection() {
     return unsub;
   }, [refresh]);
 
-  // 自动选中:running 的优先,其次第一个已下载的,再退到第一个
-  useEffect(() => {
-    if (selectedKey && models.some((m) => m.key === selectedKey)) return;
-    const next =
-      (status?.modelKey && models.find((m) => m.key === status.modelKey)?.key) ||
-      models.find((m) => m.downloaded)?.key ||
-      models[0]?.key ||
-      null;
-    setSelectedKey(next);
-  }, [models, status?.modelKey, selectedKey]);
-
   const handleStart = async (modelKey: string) => {
     if (!window.videoAnalyzer?.llama) return;
     setError("");
     setProgress(null);
+    setBusyKey(modelKey);
     try {
       const currentStatus = await window.videoAnalyzer.llama.getStatus();
       if (!currentStatus.binaryFound) {
         setBusyAction("binary");
         await window.videoAnalyzer.llama.ensureBinary();
       }
-      const target = (await window.videoAnalyzer.llama.listModels()).find((m) => m.key === modelKey);
+      const target = manifestModels.find((m) => m.key === modelKey);
       if (target && !target.downloaded) {
         setBusyAction("download");
         await window.videoAnalyzer.llama.ensureModel(modelKey);
@@ -1227,6 +1106,7 @@ function LocalInferenceSection() {
       await refresh();
     } finally {
       setBusyAction(null);
+      setBusyKey(null);
     }
   };
 
@@ -1289,162 +1169,87 @@ function LocalInferenceSection() {
     );
   }
 
-  const selectedModel = models.find((m) => m.key === selectedKey) || null;
   const runningKey = status?.running ? status.modelKey : null;
-  const isSelectedRunning = !!runningKey && runningKey === selectedKey;
-  const isBusy = busyAction !== null && busyAction !== "selftest";
+  const isAnyBusy = busyAction !== null && busyAction !== "selftest";
 
-  type MainAction = {
-    label: string;
-    loading: boolean;
-    disabled: boolean;
-    danger: boolean;
-    onClick?: () => void;
-  };
-  const mainAction: MainAction = (() => {
-    if (busyAction === "binary") return { label: "下载引擎中…", loading: true, disabled: true, danger: false };
-    if (busyAction === "download") return { label: "下载模型中…", loading: true, disabled: true, danger: false };
-    if (busyAction === "start") return { label: "启动中…", loading: true, disabled: true, danger: false };
-    if (busyAction === "stop") return { label: "停止中…", loading: true, disabled: true, danger: false };
-    if (!selectedModel) return { label: "启动", loading: false, disabled: true, danger: false };
-    if (isSelectedRunning) {
-      return { label: "停止", loading: false, disabled: false, danger: true, onClick: handleStop };
-    }
-    if (!!runningKey && !isSelectedRunning) {
-      return {
-        label: `切换到 ${llamaSizeFromName(selectedModel.name)}`,
-        loading: false,
-        disabled: false,
-        danger: false,
-        onClick: () => handleStart(selectedModel.key),
-      };
-    }
-    if (!selectedModel.downloaded) {
-      return {
-        label: "下载并启动",
-        loading: false,
-        disabled: false,
-        danger: false,
-        onClick: () => handleStart(selectedModel.key),
-      };
-    }
-    return {
-      label: "启动",
-      loading: false,
-      disabled: false,
-      danger: false,
-      onClick: () => handleStart(selectedModel.key),
-    };
-  })();
-
-  const statusLine = (() => {
-    if (status?.status === "ready" && status.modelKey) {
-      return (
-        <span className="text-emerald-600 dark:text-emerald-400">
-          运行中 · {llamaSizeFromName(models.find((m) => m.key === status.modelKey)?.name || status.modelKey)} · 端口 {status.port}
-        </span>
-      );
-    }
-    if (status?.status === "starting") return <span className="text-amber-500">启动中…</span>;
-    if (status?.status === "error") return <span className="text-red-500">出错: {status.lastError}</span>;
-    if (selectedModel?.downloaded) return <span className="text-slate-500">未运行 · 已下载,随时可启动</span>;
-    if (selectedModel) return <span className="text-slate-500">未下载 · 首次启动会先下载约 {formatBytes(selectedModel.approxBytes)}</span>;
-    return <span className="text-slate-500">未运行</span>;
-  })();
+  const visionModels = manifestModels.filter((m) => m.primaryCapabilities.includes("vision"));
+  const textModels = manifestModels.filter((m) =>
+    !m.primaryCapabilities.includes("vision") && m.primaryCapabilities.includes("text")
+  );
 
   const showProgress =
     progress && (busyAction === "binary" || busyAction === "download") && progress.percent != null;
 
+  const totalMemoryGB = machine ? machine.totalMemoryBytes / 1024 / 1024 / 1024 : 0;
+  const availMemoryGB = machine ? machine.availableMemoryBytes / 1024 / 1024 / 1024 : 0;
+  const sysReservedGB = totalMemoryGB - availMemoryGB;
+
   return (
     <>
       <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">本地推理</h2>
+      <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
+        下载与管理可在本机运行的开源模型。任务分配里再决定每个步骤用哪个。
+      </p>
 
-      <section className="rounded-xl border-2 border-orange-300/80 dark:border-orange-500/40 bg-orange-50/40 dark:bg-orange-500/[0.04] shadow-sm overflow-hidden">
-        <div className="p-5 flex items-start gap-4">
-          <div className="w-12 h-12 shrink-0 rounded-xl bg-gradient-to-br from-violet-500 via-fuchsia-500 to-rose-500 grid place-items-center text-white shadow-sm">
-            <Sparkles className="w-5 h-5" />
+      {/* Machine banner */}
+      {machine && (
+        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] px-5 py-3.5 grid grid-cols-[auto_1fr_auto] gap-5 items-center">
+          <div className="w-9 h-9 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 grid place-items-center font-mono text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+            {machine.isAppleSilicon ? machine.arch.toUpperCase() : machine.platform}
           </div>
-          <div className="flex-1 min-w-0 space-y-1.5">
-            <div className="flex items-center flex-wrap gap-1.5">
-              <span className="text-base font-semibold text-slate-900 dark:text-slate-100">Qwen3.5-VL</span>
-              <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100 border-orange-200 dark:bg-orange-500/15 dark:text-orange-300 dark:border-orange-500/30">视觉初筛</Badge>
-              <Badge variant="outline" className="text-slate-600 dark:text-slate-300">本地</Badge>
-              <Badge variant="outline" className="text-slate-600 dark:text-slate-300">Apple GPU</Badge>
+          <div className="min-w-0">
+            <div className="font-mono text-[12.5px] text-slate-900 dark:text-slate-100">
+              {machine.cpuModel} · {totalMemoryGB.toFixed(0)} GB unified memory
             </div>
-            <p className="text-xs text-slate-500 leading-relaxed">
-              抽帧后让本地模型给每张候选画面快速打标,按信息量和签名相似度精筛,降低送给视觉主模型的画面数。
-            </p>
-          </div>
-          <div className="shrink-0 space-y-1.5">
-            <div className="text-[11px] text-slate-500 text-right">选择规格</div>
-            <div className="flex flex-col gap-1.5">
-              {models.map((m) => {
-                const checked = selectedKey === m.key;
-                const running = runningKey === m.key;
-                return (
-                  <button
-                    key={m.key}
-                    onClick={() => setSelectedKey(m.key)}
-                    disabled={isBusy}
-                    className={`group inline-flex items-center gap-3 pl-2.5 pr-3 py-1.5 rounded-md border text-xs transition-colors min-w-[170px] ${
-                      checked
-                        ? "border-orange-400 bg-white dark:bg-orange-500/10 shadow-sm"
-                        : "border-slate-200 dark:border-slate-800 hover:border-slate-300 bg-white/60 dark:bg-slate-900/40"
-                    } disabled:cursor-not-allowed disabled:opacity-60`}
-                  >
-                    <span
-                      className={`w-2 h-2 rounded-full shrink-0 ${
-                        checked ? "bg-orange-500 ring-2 ring-orange-200 dark:ring-orange-500/30" : "bg-slate-300 dark:bg-slate-600"
-                      }`}
-                    />
-                    <span className="font-semibold text-slate-700 dark:text-slate-200 text-left">{llamaSizeFromName(m.name)}</span>
-                    <span className="ml-auto text-slate-500 dark:text-slate-400">{formatBytes(m.approxBytes)}</span>
-                    {running ? (
-                      <span className="text-emerald-500" title="运行中">●</span>
-                    ) : m.downloaded ? (
-                      <span className="text-emerald-500" title="已下载">✓</span>
-                    ) : (
-                      <span className="text-slate-300 dark:text-slate-700">·</span>
-                    )}
-                  </button>
-                );
-              })}
+            <div className="text-[12px] text-slate-500 dark:text-slate-400">
+              系统占用 <code className="font-mono bg-slate-100 dark:bg-slate-800 px-1 rounded">~{sysReservedGB.toFixed(1)} GB</code>
+              {" · "}可用于推理 <code className="font-mono bg-slate-100 dark:bg-slate-800 px-1 rounded">~{availMemoryGB.toFixed(1)} GB</code>
+              {" · "}{machine.backend === "metal" ? "Metal" : machine.backend === "cuda" ? "CUDA" : machine.backend === "rocm" ? "ROCm" : "CPU"} 后端
             </div>
           </div>
+          <div className="flex flex-col items-end gap-1">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500">建议量化</span>
+            <span className="font-mono text-[12.5px] px-2 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-500/10 dark:text-indigo-300">
+              {machine.recommendedQuant}
+            </span>
+          </div>
+        </section>
+      )}
+
+      {/* 模型库 */}
+      <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-baseline justify-between bg-slate-50/60 dark:bg-slate-900/20">
+          <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">本地模型库</h3>
+          <span className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500">按能力分组 · 按适配度排序</span>
         </div>
 
-        <div className="border-t border-orange-200/60 dark:border-orange-500/20 bg-white/70 dark:bg-black/20 px-5 py-3.5 flex items-center justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold mb-0.5">模型状态</div>
-            <div className="text-sm">{statusLine}</div>
-            <div className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">
-              引擎: {status?.binaryFound ? <span className="text-emerald-500">✓ 已安装</span> : <span className="text-amber-500">未安装 · 启动时会自动下载约 8MB</span>}
-            </div>
-          </div>
-          <Button
-            size="sm"
-            onClick={mainAction.onClick}
-            disabled={mainAction.disabled}
-            variant={mainAction.danger ? "outline" : "default"}
-            className={
-              mainAction.danger
-                ? "h-9 px-4 border-red-300 text-red-600 hover:bg-red-50 dark:border-red-500/40 dark:text-red-400 dark:hover:bg-red-500/10"
-                : "h-9 px-4 bg-orange-500 hover:bg-orange-600 text-white border-orange-500"
-            }
-          >
-            {mainAction.loading ? (
-              <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
-            ) : mainAction.danger ? (
-              <Square className="w-3.5 h-3.5 mr-1.5 fill-current" />
-            ) : (
-              <DownloadCloud className="w-3.5 h-3.5 mr-1.5" />
-            )}
-            {mainAction.label}
-          </Button>
+        <div className="p-5 space-y-6">
+          <ModelGroup
+            title="视觉 · 多模态"
+            subtitle="用于 simple_vision / medium_vision / complex_vision · 也可被 text 槽位选"
+            models={visionModels}
+            runningKey={runningKey}
+            busyKey={busyKey}
+            busyAction={busyAction}
+            isAnyBusy={isAnyBusy}
+            onStart={handleStart}
+            onStop={handleStop}
+          />
+          <ModelGroup
+            title="纯文本"
+            subtitle="仅用于 simple_text / medium_text / complex_text"
+            models={textModels}
+            runningKey={runningKey}
+            busyKey={busyKey}
+            busyAction={busyAction}
+            isAnyBusy={isAnyBusy}
+            onStart={handleStart}
+            onStop={handleStop}
+          />
         </div>
 
         {showProgress && (
-          <div className="border-t border-orange-200/60 dark:border-orange-500/20 px-5 py-2.5 bg-white/50 dark:bg-black/10">
+          <div className="border-t border-slate-200 dark:border-slate-800 px-5 py-2.5 bg-slate-50/60 dark:bg-slate-900/20">
             <Progress value={progress!.percent || 0} className="h-1.5" />
             <div className="text-[11px] text-slate-500 mt-1.5">{progress!.message}</div>
           </div>
@@ -1514,19 +1319,224 @@ function LocalInferenceSection() {
   );
 }
 
+type ModelGroupProps = {
+  title: string;
+  subtitle: string;
+  models: ManifestModel[];
+  runningKey: string | null | undefined;
+  busyKey: string | null;
+  busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
+  isAnyBusy: boolean;
+  onStart: (modelKey: string) => void;
+  onStop: () => void;
+};
+
+const ModelGroup: FunctionComponent<ModelGroupProps> = ({
+  title, subtitle, models, runningKey, busyKey, busyAction, isAnyBusy, onStart, onStop,
+}) => {
+  if (models.length === 0) return null;
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <h4 className="text-[12.5px] font-semibold text-slate-900 dark:text-slate-100">{title}</h4>
+        <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500">{subtitle}</span>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        {models.map((m) => (
+          <ModelCard
+            key={m.key}
+            model={m}
+            runningKey={runningKey}
+            busyKey={busyKey}
+            busyAction={busyAction}
+            isAnyBusy={isAnyBusy}
+            onStart={onStart}
+            onStop={onStop}
+          />
+        ))}
+      </div>
+    </div>
+  );
+};
+
+type ModelCardProps = {
+  model: ManifestModel;
+  runningKey: string | null | undefined;
+  busyKey: string | null;
+  busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
+  isAnyBusy: boolean;
+  onStart: (modelKey: string) => void;
+  onStop: () => void;
+};
+
+const ModelCard: FunctionComponent<ModelCardProps> = ({
+  model, runningKey, busyKey, busyAction, isAnyBusy, onStart, onStop,
+}) => {
+  const isRunning = runningKey === model.key;
+  const isDownloaded = !!model.downloaded;
+  const isBusy = busyKey === model.key && isAnyBusy;
+  const defaultQuant = model.quantizations[0];
+
+  let action: { label: string; variant: "default" | "outline" | "ghost"; onClick?: () => void; disabled?: boolean };
+  if (!model.available) {
+    action = { label: "即将上线", variant: "ghost", disabled: true };
+  } else if (isBusy) {
+    const lbl = busyAction === "binary" ? "下载引擎…" : busyAction === "download" ? "下载…" : "启动…";
+    action = { label: lbl, variant: "outline", disabled: true };
+  } else if (isRunning) {
+    action = { label: "停止", variant: "outline", onClick: onStop };
+  } else if (runningKey) {
+    action = { label: "切换", variant: "default", onClick: () => onStart(model.key) };
+  } else if (!isDownloaded) {
+    action = { label: "下载", variant: "default", onClick: () => onStart(model.key) };
+  } else {
+    action = { label: "启动", variant: "default", onClick: () => onStart(model.key) };
+  }
+
+  const cardCls = isRunning
+    ? "border-indigo-300 bg-indigo-50/50 dark:border-indigo-500/40 dark:bg-indigo-500/10 shadow-[inset_2px_0_0] shadow-indigo-600"
+    : isDownloaded
+      ? "border-indigo-200 bg-indigo-50/30 dark:border-indigo-500/30 dark:bg-indigo-500/5"
+      : "border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10]";
+
+  const statusPill = isRunning
+    ? <span className="font-mono text-[9.5px] uppercase tracking-wide bg-emerald-100 border border-emerald-200 text-emerald-700 px-1.5 py-0.5 rounded dark:bg-emerald-900/30 dark:border-emerald-700 dark:text-emerald-300">运行中</span>
+    : isDownloaded
+      ? <span className="font-mono text-[9.5px] uppercase tracking-wide bg-indigo-100 border border-indigo-200 text-indigo-700 px-1.5 py-0.5 rounded dark:bg-indigo-900/30 dark:border-indigo-700 dark:text-indigo-300">已安装</span>
+      : null;
+
+  return (
+    <div className={`relative rounded-lg border ${cardCls} p-3 flex flex-col gap-1.5`}>
+      {/* row1 — 身份 */}
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="font-semibold text-[13px] text-slate-900 dark:text-slate-100 truncate">{model.name}</span>
+        {statusPill}
+        <span className="flex-1" />
+        <FitChip fit={model.fit} />
+        <button
+          type="button"
+          disabled={action.disabled}
+          onClick={action.onClick}
+          className={
+            action.variant === "default"
+              ? "px-2.5 py-1 text-[11.5px] rounded border border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium shrink-0"
+              : action.variant === "outline"
+                ? "px-2.5 py-1 text-[11.5px] rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                : "px-2.5 py-1 text-[11.5px] rounded text-slate-400 disabled:cursor-not-allowed shrink-0"
+          }
+        >
+          {action.label}
+        </button>
+      </div>
+
+      {/* row2 — 数字 meta */}
+      <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-2">
+        <span className="bg-white dark:bg-[#0A0A0B] border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 px-1.5 py-0.5 rounded">
+          {defaultQuant?.label || "—"}
+        </span>
+        <span className="text-slate-300">·</span>
+        <span className="text-slate-700 dark:text-slate-300">{formatBytes(defaultQuant?.sizeBytes || 0)}</span>
+        <span className="text-slate-300">·</span>
+        <span><span className="text-slate-700 dark:text-slate-300">{model.memPercent ?? 0}%</span> 内存</span>
+        <span className="text-slate-300">·</span>
+        <span><span className="text-slate-700 dark:text-slate-300">{model.tps ?? 0}</span> tok/s</span>
+      </div>
+
+      {/* row3 — 能力 chip */}
+      <div className="flex flex-wrap gap-1">
+        {model.primaryCapabilities.map((cap) => (
+          <span key={cap} className="text-[10.5px] px-1.5 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-500/10 dark:text-indigo-300">
+            {PRIMARY_LABELS[cap] || cap}
+          </span>
+        ))}
+        {model.secondaryTags.map((tag) => (
+          <span key={tag} className="text-[10.5px] px-1.5 py-0.5 rounded border border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-400">
+            {SECONDARY_LABELS[tag] || tag}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const PRESET_OPTIONS: { key: DefaultAnalysisPreset; title: string; est: string; hint: string }[] = [
+  { key: "quick", title: "轻拉片", est: "~ 45s", hint: "5-8 个节点;不跑方法论审计。" },
+  { key: "standard", title: "标准拉片", est: "~ 2 min", hint: "10-15 个节点 + 字幕 + 方法论审计。" },
+  { key: "deep", title: "深度拉片", est: "~ 5 min", hint: "20+ 节点;含构图 / 剪辑意图反推。" },
+];
+
+const GENRE_OPTIONS: { value: VideoGenre | "auto"; label: string }[] = [
+  { value: "auto", label: "自动识别" },
+  { value: "vlog", label: "vlog" },
+  { value: "review", label: "测评" },
+  { value: "short-drama", label: "短剧" },
+];
+
 function AnalysisDefaultsSection() {
+  const { defaultAnalysis, setDefaultAnalysis } = useApp();
+
   return (
     <>
       <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">默认分析</h2>
-      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-3 text-sm text-slate-600 dark:text-slate-300">
-        <p>每个项目的分析参数（模式 / 节点密度 / 关注重点）目前在「准备分析」页设置，并和项目一起保存。</p>
-        <p>未来这里会暴露：</p>
-        <ul className="list-disc list-inside space-y-1 text-slate-500 dark:text-slate-400">
-          <li>默认分析模式 / 节点密度 / 关注重点</li>
-          <li>抽帧上限 / 每分钟基础帧数</li>
-          <li>token 预算上限</li>
-          <li>是否在分析失败时回退到骨架结果</li>
-        </ul>
+      <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
+        新建项目首次进入「准备分析」时使用的默认参数。每个项目仍可单独覆盖。
+      </p>
+
+      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-800/60">
+          <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-3">默认拉片强度</div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {PRESET_OPTIONS.map((p) => {
+              const active = defaultAnalysis.preset === p.key;
+              return (
+                <button
+                  key={p.key}
+                  type="button"
+                  onClick={() => setDefaultAnalysis((prev) => ({ ...prev, preset: p.key }))}
+                  className={`text-left rounded-lg border p-4 transition-colors ${
+                    active
+                      ? "border-indigo-400 bg-indigo-50 dark:bg-indigo-500/10 dark:border-indigo-500/50"
+                      : "border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0A0A0B] hover:border-slate-300 dark:hover:border-slate-700"
+                  }`}
+                >
+                  <div className="flex items-baseline justify-between">
+                    <span className={`text-sm font-semibold ${active ? "text-indigo-700 dark:text-indigo-300" : "text-slate-900 dark:text-slate-100"}`}>
+                      {p.title}
+                    </span>
+                    <span className="font-mono text-[10.5px] text-slate-500">{p.est}</span>
+                  </div>
+                  <p className="text-[12px] text-slate-500 dark:text-slate-400 mt-1.5 leading-snug">{p.hint}</p>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="px-5 py-4">
+          <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-3">默认视频类型</div>
+          <div className="flex flex-wrap gap-2">
+            {GENRE_OPTIONS.map((g) => {
+              const active = defaultAnalysis.manualGenre === g.value;
+              return (
+                <button
+                  key={g.value}
+                  type="button"
+                  onClick={() => setDefaultAnalysis((prev) => ({ ...prev, manualGenre: g.value }))}
+                  className={`h-8 px-3 rounded-md border text-xs transition-colors ${
+                    active
+                      ? "border-indigo-400 bg-indigo-50 text-indigo-700 dark:bg-indigo-500/10 dark:border-indigo-500/50 dark:text-indigo-300"
+                      : "border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0A0A0B] text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-700"
+                  }`}
+                >
+                  {g.label}
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-[12px] text-slate-500 dark:text-slate-400 mt-2.5">
+            选「自动识别」时,管线会让 LLM 根据字幕和镜头切换推断;指定具体类型可加载对应规则集。
+          </p>
+        </div>
       </section>
     </>
   );
