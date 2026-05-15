@@ -10,6 +10,9 @@ const whisperCppRuntime = require("./whisper-cpp-runtime.cjs");
 const prefilter = require("./prefilter.cjs");
 const shotMerger = require("./shot-merger.cjs");
 const summarizer = require("./summarizer.cjs");
+const danmakuFetcher = require("./danmaku-fetcher.cjs");
+const danmakuEmotion = require("./danmaku-emotion.cjs");
+const danmakuWordcloud = require("./danmaku-wordcloud.cjs");
 const openaiClient = require("./openai-client.cjs");
 const { getTranscriber } = require("./transcribe/index.cjs");
 const OpenCC = require("opencc-js");
@@ -2551,6 +2554,98 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       // 视觉主分析未配置, 但中间层有产物, 让 fallback report 至少能带上 globalSummary
       if (globalContext?.globalSummary) report.globalSummary = globalContext.globalSummary;
       if (shotContexts) report.shotContexts = shotContexts;
+    }
+
+    // ----- B 站弹幕 → 时间轴情绪 + 词云 ----------------------------------
+    // 触发条件: project.source 是 URL 且 platform=bilibili。其他平台不进。
+    // 失败一律降级 (拉取/解析/LLM 任一阶段错都跳过, 不阻断主流程)。
+    if (
+      project.source?.type === "url" &&
+      project.source.platform === "bilibili" &&
+      project.source.url
+    ) {
+      try {
+        ensureNotCancelled(handle);
+        send(86, "拉取弹幕", "向 B 站请求弹幕分段…");
+        const danmakuStart = Date.now();
+        const danmakuRaw = await danmakuFetcher.fetchDanmakuWithCache({
+          url: project.source.url,
+          userDataDir: app.getPath("userData"),
+          abortSignal: handle.abortController?.signal,
+          onProgress: ({ segment, total, count, fromCache }) => {
+            if (handle.cancelled) return;
+            if (fromCache) {
+              send(87, "拉取弹幕", `命中缓存,直接使用 ${count} 条历史弹幕。`);
+            } else {
+              const pct = 86 + Math.min(1, Math.round((segment / Math.max(total, 1)) * 1));
+              send(pct, "拉取弹幕", `已拉 ${segment}/${total} 段 · 累计 ${count} 条`);
+            }
+          },
+        });
+        await writeJson(path.join(projectDir, "danmaku.json"), danmakuRaw);
+
+        let windows = [];
+        let danmakuSummary = "";
+        if (mediumTextProvider?.apiKeyRef && danmakuRaw.messages.length > 0) {
+          ensureNotCancelled(handle);
+          send(88, "弹幕情绪聚合", `让 ${mediumTextProvider.name} 给 ${danmakuRaw.totalCount} 条弹幕分段评分。`);
+          const aggStart = Date.now();
+          const agg = await danmakuEmotion.aggregateEmotions({
+            messages: danmakuRaw.messages,
+            shots: Array.isArray(shots) ? shots : [],
+            durationSec: projectMeta.durationSec || inspected.durationSec,
+            provider: mediumTextProvider,
+            handle,
+            onProgress: ({ done, total }) => {
+              if (handle.cancelled) return;
+              send(88, "弹幕情绪聚合", `已评 ${done}/${total} 个时间桶`);
+            },
+          });
+          windows = agg.windows;
+          danmakuSummary = agg.summary;
+          send(89, "弹幕情绪聚合完成", `${windows.filter((w) => w.danmakuCount > 0).length} 个时间桶 · ${((Date.now() - aggStart) / 1000).toFixed(1)}s`);
+        }
+
+        // 词云 (LLM 不可用也能跑, 纯本地启发式)
+        const wordCloud = danmakuWordcloud.buildWordCloud(danmakuRaw.messages);
+        const nodeTopTerms = danmakuWordcloud.buildNodeTopTerms(danmakuRaw.messages, nodes);
+
+        // emotion windows → 节点级 AudienceReaction
+        if (windows.length > 0) {
+          danmakuEmotion.attachReactionsToNodes(nodes, windows, danmakuRaw.messages);
+        }
+        // 把节点 mini 词云挂上
+        for (const node of nodes) {
+          const top = nodeTopTerms.get(node.id);
+          if (top && top.length > 0) {
+            node.audienceReaction = node.audienceReaction || {
+              dominantEmotion: "neutral",
+              intensities: { joy: 0, surprise: 0, anger: 0, sadness: 0, disgust: 0 },
+              danmakuCount: 0,
+              summary: "反应平淡",
+            };
+            node.audienceReaction.topTerms = top;
+          }
+        }
+
+        report.danmaku = {
+          platform: "bilibili",
+          totalCount: danmakuRaw.totalCount,
+          windows,
+          wordCloud,
+          fetchedAt: danmakuRaw.fetchedAt || new Date().toISOString(),
+          summary: danmakuSummary || undefined,
+        };
+
+        send(
+          89,
+          "弹幕分析完成",
+          `${danmakuRaw.totalCount} 条弹幕 · 词云 ${wordCloud.length} 词 · ${((Date.now() - danmakuStart) / 1000).toFixed(1)}s`,
+        );
+      } catch (error) {
+        if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
+        send(89, "弹幕分析失败", `${error?.message || error}（不影响主分析结果）`);
+      }
     }
 
     ensureNotCancelled(handle);
