@@ -15,8 +15,164 @@ const danmakuFetcher = require("./danmaku-fetcher.cjs");
 const danmakuEmotion = require("./danmaku-emotion.cjs");
 const danmakuWordcloud = require("./danmaku-wordcloud.cjs");
 const openaiClient = require("./openai-client.cjs");
+const cacheStore = require("./cache-store.cjs");
 const { getTranscriber } = require("./transcribe/index.cjs");
 const OpenCC = require("opencc-js");
+
+const DEFAULT_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
+// 每个阶段一份 prompt/输入格式 VERSION 常量, 改 prompt 时手动 bump → 旧 cache 自动失效。
+const CACHE_VERSIONS = {
+  transcript: "v1",
+  prefilter: "v1",
+  shotMerger: "v1",
+  summarizer: "v1",
+  detectGenre: "v1",
+  mainAnalysis: "v1",
+  danmakuEmotion: "v1",
+};
+
+function getDefaultCacheDir() {
+  return path.join(app.getPath("userData"), "cache");
+}
+
+function resolveCacheConfig(config) {
+  const dir = config?.cacheDir && typeof config.cacheDir === "string"
+    ? config.cacheDir
+    : getDefaultCacheDir();
+  const maxBytes = Number.isFinite(Number(config?.cacheMaxBytes))
+    ? Number(config.cacheMaxBytes)
+    : DEFAULT_CACHE_MAX_BYTES;
+  return { dir, maxBytes };
+}
+
+async function initializeCacheStore() {
+  const raw = await readJson(getConfigPath(), null);
+  const { dir, maxBytes } = resolveCacheConfig(raw);
+  cacheStore.configure({ dir, maxBytes });
+}
+
+// 包一个"输入 → output"的纯函数 LLM 调用为 cache-aware 版本。
+// scope/key 由 main.cjs 各调用点构造, run 是命中失败时实际跑的副作用函数。
+async function runWithCache(scope, key, run, meta = {}) {
+  if (!cacheStore.isConfigured() || !key) return run();
+  try {
+    const hit = await cacheStore.get(scope, key);
+    if (hit) return hit.payload;
+  } catch { /* 缓存读失败 → 走 LLM */ }
+  const output = await run();
+  if (output != null) {
+    try { await cacheStore.set(scope, key, output, { meta }); }
+    catch { /* 缓存写失败不阻塞 */ }
+  }
+  return output;
+}
+
+// 给 prefilter.tagFrames 用的逐帧 cache injector
+function makePrefilterCache(modelKey) {
+  if (!cacheStore.isConfigured()) return null;
+  return {
+    lookup: async (frame) => {
+      try {
+        const filePath = frame.prefilterFramePath || frame.framePath;
+        const sha = await cacheStore.sha256File(filePath);
+        const key = cacheStore.makeKey({ sha, modelKey, version: CACHE_VERSIONS.prefilter });
+        const hit = await cacheStore.get("prefilter", key);
+        return hit ? { tag: hit.payload, meta: hit.meta } : null;
+      } catch { return null; }
+    },
+    store: async (frame, tag, meta) => {
+      try {
+        const filePath = frame.prefilterFramePath || frame.framePath;
+        const sha = await cacheStore.sha256File(filePath);
+        const key = cacheStore.makeKey({ sha, modelKey, version: CACHE_VERSIONS.prefilter });
+        await cacheStore.set("prefilter", key, tag, { meta: { ...meta, modelKey } });
+      } catch { /* ignore */ }
+    },
+  };
+}
+
+function normalizeShotMergerBatch(batch) {
+  return batch.map((s) => ({
+    startSec: Number(s.startSec).toFixed(2),
+    endSec: Number(s.endSec).toFixed(2),
+    subtitle: (s.subtitleText || "").trim(),
+    frames: Array.isArray(s.frames)
+      ? s.frames.map((f) => ({
+          caption: f.caption || "",
+          subject: f.subject || "",
+          signature: f.signature || "",
+          salience: f.salience ?? 0,
+        }))
+      : [],
+  }));
+}
+
+function makeShotMergerCache(provider) {
+  if (!cacheStore.isConfigured() || !provider?.model) return null;
+  return {
+    lookup: async (batch) => {
+      try {
+        const key = cacheStore.makeKey({
+          batch: normalizeShotMergerBatch(batch),
+          model: provider.model,
+          baseUrl: provider.baseUrl,
+          version: CACHE_VERSIONS.shotMerger,
+        });
+        const hit = await cacheStore.get("shot-merger", key);
+        return hit?.payload || null;
+      } catch { return null; }
+    },
+    store: async (batch, payload, meta) => {
+      try {
+        const key = cacheStore.makeKey({
+          batch: normalizeShotMergerBatch(batch),
+          model: provider.model,
+          baseUrl: provider.baseUrl,
+          version: CACHE_VERSIONS.shotMerger,
+        });
+        await cacheStore.set("shot-merger", key, payload, { meta: { ...meta, model: provider.model } });
+      } catch { /* ignore */ }
+    },
+  };
+}
+
+function normalizeDanmakuBatch(batch) {
+  return batch.map((b) => ({
+    startSec: Number(b.startSec).toFixed(1),
+    endSec: Number(b.endSec).toFixed(1),
+    totalCount: b.totalCount,
+    summaries: (b.summaries || []).map((s) => ({ text: s.text, count: s.count })),
+  }));
+}
+
+function makeDanmakuEmotionCache(provider) {
+  if (!cacheStore.isConfigured() || !provider?.model) return null;
+  return {
+    lookup: async (batch) => {
+      try {
+        const key = cacheStore.makeKey({
+          batch: normalizeDanmakuBatch(batch),
+          model: provider.model,
+          baseUrl: provider.baseUrl,
+          version: CACHE_VERSIONS.danmakuEmotion,
+        });
+        const hit = await cacheStore.get("danmaku-emotion", key);
+        return hit?.payload || null;
+      } catch { return null; }
+    },
+    store: async (batch, payload, meta) => {
+      try {
+        const key = cacheStore.makeKey({
+          batch: normalizeDanmakuBatch(batch),
+          model: provider.model,
+          baseUrl: provider.baseUrl,
+          version: CACHE_VERSIONS.danmakuEmotion,
+        });
+        await cacheStore.set("danmaku-emotion", key, payload, { meta: { ...meta, model: provider.model } });
+      } catch { /* ignore */ }
+    },
+  };
+}
 
 // 云端 whisper 同样会有简繁混排,做一层 t2s 兜底。
 const SIMPLIFIED_PROMPT_ZH = "以下是普通话的句子，请使用简体中文输出。";
@@ -2109,7 +2265,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     const payload = { projectId: project.id, progress, stage, message };
     handle.lastProgress = payload;
     handle.lastProgressAt = Date.now();
-    // 广播到所有窗口:关窗后再开的 renderer (attach 模式) 也能收到进度。
+    // 广播到所有窗口,允许关窗后重开的新 renderer 继续接收进度。
     broadcastToWindows("analysis:progress", payload);
   };
 
@@ -2256,13 +2412,14 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           port: localStatus.port,
           modelKey: localStatus.modelKey,
           perFrameTimeoutMs: 30_000,
-          onProgress: (i, total) => {
+          cache: makePrefilterCache(localStatus.modelKey),
+          onProgress: (i, total, _tag, _elapsedMs, fromCache) => {
             ensureNotCancelled(handle);
             const avgMs = Math.round((Date.now() - prefilterStartedAt) / (i + 1));
             send(
               48 + Math.round(((i + 1) / total) * 6),
               "本地初筛",
-              `已打标 ${i + 1} / ${total} 张 · 平均 ${avgMs} ms/帧`,
+              `已打标 ${i + 1} / ${total} 张 · 平均 ${avgMs} ms/帧${fromCache ? " · 命中缓存" : ""}`,
             );
           },
         });
@@ -2308,9 +2465,31 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         await extractAudioWav(ffmpeg, inputPath, wavPath, handle);
         send(60, "字幕识别", `${audioProvider.name} 准备就绪`);
         ensureNotCancelled(handle);
-        transcript = await transcribeAudio(audioProvider, wavPath, handle, (p) => {
-          send(62, "字幕识别", p.message);
-        });
+
+        // 缓存 key: 音频文件 sha + 模型 + 语言 + 后端来源 + prompt 版本
+        let transcriptCacheKey = null;
+        try {
+          const audioSha = await cacheStore.sha256File(wavPath);
+          transcriptCacheKey = cacheStore.makeKey({
+            sha: audioSha,
+            model: audioProvider.localWhisperModel || audioProvider.model,
+            lang: audioProvider.language || null,
+            source: audioProvider.source || audioProvider.endpointType,
+            version: CACHE_VERSIONS.transcript,
+          });
+        } catch { /* sha 失败 → 跳过缓存 */ }
+
+        const transcribeMeta = {
+          model: audioProvider.localWhisperModel || audioProvider.model,
+          lang: audioProvider.language || null,
+          source: audioProvider.source || audioProvider.endpointType,
+        };
+        transcript = await runWithCache("transcript", transcriptCacheKey, async () => {
+          return await transcribeAudio(audioProvider, wavPath, handle, (p) => {
+            send(62, "字幕识别", p.message);
+          });
+        }, transcribeMeta);
+
         if (transcript) {
           await writeJson(path.join(artifactDir, "transcript.json"), transcript);
           send(66, "字幕识别完成", `共 ${transcript.segments.length} 段字幕、${transcript.text.length} 个字。`);
@@ -2371,10 +2550,12 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           provider: mediumTextProvider,
           batchSize: 6,
           handle,
-          onProgress: ({ done, total, batchIndex }) => {
+          cache: makeShotMergerCache(mediumTextProvider),
+          onProgress: ({ done, total, batchIndex, mode }) => {
             ensureNotCancelled(handle);
             const pct = 67 + Math.round((done / total) * 4);
-            send(pct, "镜头合并", `已合并 ${done}/${total} (batch ${batchIndex}, 平均 ${Math.round((Date.now()-mergeStart)/done)}ms/镜头)`);
+            const tail = mode === "cache-hit" ? " · 命中缓存" : "";
+            send(pct, "镜头合并", `已合并 ${done}/${total} (batch ${batchIndex}, 平均 ${Math.round((Date.now()-mergeStart)/done)}ms/镜头)${tail}`);
           },
         });
         // 写回 shots: shotDescription + representativeFrameIndex
@@ -2475,7 +2656,23 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             buildShotListFromScenes(scenes, projectMeta.durationSec, []),
             projectMeta.durationSec,
           );
-          globalContext = await summarizer.summarizeVideo({
+          const summarizerCacheKey = cacheStore.isConfigured() && mediumTextProvider?.model
+            ? cacheStore.makeKey({
+                shots: shotContexts.map((c) => ({
+                  idx: c.shotIndex,
+                  start: Number(c.startSec).toFixed(1),
+                  end: Number(c.endSec).toFixed(1),
+                  desc: c.shotDescription || "",
+                })),
+                transcriptText: (transcript?.text || "").slice(0, 4000),
+                stats,
+                allowedGenres: [...ALLOWED_GENRES],
+                model: mediumTextProvider.model,
+                baseUrl: mediumTextProvider.baseUrl,
+                version: CACHE_VERSIONS.summarizer,
+              })
+            : null;
+          globalContext = await runWithCache("summarizer", summarizerCacheKey, () => summarizer.summarizeVideo({
             shotContexts,
             transcript,
             shotStats: stats,
@@ -2484,7 +2681,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             genreCatalog: GENRE_CATALOG,
             allowedGenres: [...ALLOWED_GENRES],
             handle,
-          });
+          }), { model: mediumTextProvider?.model });
           if (globalContext?.detectedGenre) {
             send(74, "全局聚合完成", `判定 ${globalContext.detectedGenre} (${Math.round((globalContext.genreConfidence||0)*100)}%) · 摘要 ${globalContext.globalSummary?.length || 0} 字 · ${((Date.now()-sumStart)/1000).toFixed(1)}s`);
           } else {
@@ -2517,7 +2714,21 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           const genreProvider = mediumTextProvider || provider;
           send(77, "识别视频类型", `根据字幕和镜头切换让 ${genreProvider.name} 推断视频类型。`);
           const detectStartedAt = Date.now();
-          const detected = await detectGenreLightweight(genreProvider, projectMeta, scenes, transcript, handle);
+          const detectGenreCacheKey = cacheStore.isConfigured() && genreProvider?.model
+            ? cacheStore.makeKey({
+                scenes: (scenes || []).map((s) => Math.round(Number(s) * 1000)),
+                duration: Math.round(projectMeta.durationSec || 0),
+                width: projectMeta.width,
+                height: projectMeta.height,
+                transcriptText: (transcript?.text || "").slice(0, 4000),
+                model: genreProvider.model,
+                baseUrl: genreProvider.baseUrl,
+                version: CACHE_VERSIONS.detectGenre,
+              })
+            : null;
+          const detected = await runWithCache("detect-genre", detectGenreCacheKey,
+            () => detectGenreLightweight(genreProvider, projectMeta, scenes, transcript, handle),
+            { model: genreProvider?.model });
           if (detected?.detectedGenre) {
             effectiveOptions = { ...options, detectedGenre: detected.detectedGenre };
             send(77, "识别视频类型完成", `判定为 ${detected.detectedGenre}（置信度 ${(detected.genreConfidence * 100).toFixed(0)}%，耗时 ${Math.round((Date.now() - detectStartedAt) / 1000)}s）。`);
@@ -2537,7 +2748,36 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         }
 
         send(78, "模型分析画面", `正在请 ${provider.name} 分析这段视频。`);
-        const modelResult = await callOpenAICompatible(provider, projectMeta, frames, transcript, scenes, fallbackNodes, fallbackReport, effectiveOptions, handle);
+        let mainAnalysisCacheKey = null;
+        if (cacheStore.isConfigured() && provider?.model) {
+          try {
+            const frameShas = await Promise.all(
+              frames.map((f) => cacheStore.sha256File(f.framePath).catch(() => null)),
+            );
+            // 任何一帧 sha 算不出来 → 整段跳过缓存, 避免误命中
+            if (frameShas.every(Boolean)) {
+              mainAnalysisCacheKey = cacheStore.makeKey({
+                frames: frameShas,
+                transcriptText: (transcript?.text || "").slice(0, 4000),
+                scenes: (scenes || []).map((s) => Math.round(Number(s) * 1000)),
+                options: {
+                  detectedGenre: effectiveOptions?.detectedGenre,
+                  manualGenre: effectiveOptions?.manualGenre,
+                  preset: effectiveOptions?.preset,
+                  globalSummary: effectiveOptions?.globalSummary || null,
+                  structureHint: effectiveOptions?.structureHint || null,
+                },
+                model: provider.model,
+                baseUrl: provider.baseUrl,
+                inputMode: provider.inputMode,
+                version: CACHE_VERSIONS.mainAnalysis,
+              });
+            }
+          } catch { /* 算 key 失败 → 不缓存 */ }
+        }
+        const modelResult = await runWithCache("main-analysis", mainAnalysisCacheKey,
+          () => callOpenAICompatible(provider, projectMeta, frames, transcript, scenes, fallbackNodes, fallbackReport, effectiveOptions, handle),
+          { model: provider?.model });
         nodes = modelResult.nodes;
         // 把金字塔中间产物 (代表帧 / 帧 captions / 字幕段) 挂到节点上, 让 UI 能渲染镜头级 evidence
         if (Array.isArray(shots) && shots.length > 0) {
@@ -2600,6 +2840,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             durationSec: projectMeta.durationSec || inspected.durationSec,
             provider: mediumTextProvider,
             handle,
+            cache: makeDanmakuEmotionCache(mediumTextProvider),
             onProgress: ({ done, total }) => {
               if (handle.cancelled) return;
               send(88, "弹幕情绪聚合", `已评 ${done}/${total} 个时间桶`);
@@ -2692,6 +2933,14 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       .filter((t) => t.durationMs > 0 && t.stage !== "完成")
       .sort((a, b) => b.durationMs - a.durationMs)[0];
     const topLabel = top ? ` · 最耗时 ${top.stage} ${(top.durationMs / 1000).toFixed(1)}s` : "";
+    if (!handle.cancelled) {
+      broadcastToWindows("analysis:progress", {
+        projectId: project.id,
+        progress: 100,
+        stage: "完成",
+        message: `总耗时 ${(totalDurationMs / 1000).toFixed(1)}s${topLabel}`,
+      });
+    }
     report = { ...report, timings: finalTimings, totalDurationMs };
     await writeJson(path.join(projectDir, "analysis-result.json"), { project: updatedProject, nodes, report });
     await writeJson(path.join(projectDir, "timings.json"), { totalDurationMs, timings: finalTimings });
@@ -2711,15 +2960,6 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     } catch (persistError) {
       // 不阻断返回:JSON 文件已经写了,renderer 路径仍可兜底
       console.warn("[clipiq] main 端 SQLite 持久化失败,renderer 路径会兜底:", persistError);
-    }
-    // 最终广播放在 DB 写盘之后:attach 模式的 renderer 收到这条后 fetch 可拿到完整结果。
-    if (!handle.cancelled) {
-      broadcastToWindows("analysis:progress", {
-        projectId: project.id,
-        progress: 100,
-        stage: "完成",
-        message: `总耗时 ${(totalDurationMs / 1000).toFixed(1)}s${topLabel}`,
-      });
     }
     return { project: updatedProject, nodes, report };
   } finally {
@@ -2807,7 +3047,7 @@ function getAppIcon() {
 }
 
 // 系统栏托盘 + 真退出标志。
-// 关窗默认 = 隐藏到托盘,仅 isQuitting=true 时才真销毁;Cmd+Q / 托盘"退出" / before-quit 都会设这个标志。
+// 关闭主窗口默认 = 隐藏到托盘,仅 isQuitting=true 时才真销毁;Cmd+Q / 托盘"退出"会设此标志。
 let trayInstance = null;
 let isQuitting = false;
 let mainWindowRef = null;
@@ -2820,7 +3060,7 @@ function broadcastToWindows(channel, payload) {
     try {
       wc.send(channel, payload);
     } catch {
-      // 渲染端可能正在销毁,忽略
+      // 渲染端正在销毁,忽略
     }
   }
 }
@@ -2940,7 +3180,7 @@ async function createWindow() {
 
   mainWindowRef = mainWindow;
 
-  // 关窗 = 隐藏到托盘;真退出走 isQuitting 标志(托盘"退出" / Cmd+Q before-quit 会设)。
+  // 关窗 = 隐藏到托盘,真退出走 isQuitting 标志(托盘"退出"或 Cmd+Q before-quit 会设)。
   mainWindow.on("close", (event) => {
     if (!isQuitting) {
       event.preventDefault();
@@ -2954,6 +3194,7 @@ async function createWindow() {
   mainWindow.on("hide", rebuildTrayMenu);
   mainWindow.on("minimize", rebuildTrayMenu);
   mainWindow.on("restore", rebuildTrayMenu);
+
   mainWindow.on("closed", () => {
     if (mainWindowRef === mainWindow) mainWindowRef = null;
     rebuildTrayMenu();
@@ -2975,6 +3216,12 @@ app.whenReady().then(async () => {
     if (icon) app.dock.setIcon(icon);
   }
   app.setName("ClipIQ");
+
+  try {
+    await initializeCacheStore();
+  } catch (err) {
+    console.warn("[cache-store] 初始化失败:", err?.message || err);
+  }
 
   protocol.handle("media", async (request) => {
     const url = new URL(request.url);
@@ -3094,6 +3341,82 @@ app.whenReady().then(async () => {
     }
   });
 
+  ipcMain.handle("cache:getStats", async () => {
+    try {
+      return cacheStore.stats();
+    } catch (err) {
+      return {
+        totalEntries: 0,
+        totalBytes: 0,
+        maxBytes: 0,
+        cacheDir: null,
+        byScope: {},
+        error: err?.message || String(err),
+      };
+    }
+  });
+
+  ipcMain.handle("cache:list", async (_event, params) => {
+    try {
+      return cacheStore.list(params || {});
+    } catch {
+      return [];
+    }
+  });
+
+  ipcMain.handle("cache:clear", async (_event, params) => {
+    try {
+      return await cacheStore.clear(params || {});
+    } catch (err) {
+      return { freedBytes: 0, freedEntries: 0, error: err?.message || String(err) };
+    }
+  });
+
+  ipcMain.handle("cache:setMaxBytes", async (_event, bytes) => {
+    const next = Math.max(0, Math.floor(Number(bytes) || 0));
+    const cur = await readJson(getConfigPath(), null);
+    if (cur) {
+      await writeJson(getConfigPath(), { ...cur, cacheMaxBytes: next, savedAt: new Date().toISOString() });
+    }
+    cacheStore.configure({
+      dir: cacheStore.getCacheDir() || getDefaultCacheDir(),
+      maxBytes: next,
+    });
+    return { ok: true, maxBytes: next };
+  });
+
+  ipcMain.handle("cache:setDir", async (_event, rawDir) => {
+    const dir = typeof rawDir === "string" && rawDir.trim() ? rawDir.trim() : null;
+    if (!dir) return { ok: false, message: "目录路径为空" };
+    try {
+      const result = await cacheStore.migrate(dir);
+      const cur = await readJson(getConfigPath(), null);
+      if (cur) {
+        await writeJson(getConfigPath(), { ...cur, cacheDir: cacheStore.getCacheDir(), savedAt: new Date().toISOString() });
+      }
+      return { ok: true, cacheDir: cacheStore.getCacheDir(), mode: result.mode };
+    } catch (err) {
+      return { ok: false, message: err?.message || String(err) };
+    }
+  });
+
+  ipcMain.handle("cache:browseDir", async () => {
+    const result = await dialog.showOpenDialog({
+      title: "选择缓存目录",
+      properties: ["openDirectory", "createDirectory"],
+      defaultPath: cacheStore.getCacheDir() || getDefaultCacheDir(),
+    });
+    if (result.canceled || !result.filePaths?.[0]) return { canceled: true };
+    return { canceled: false, dir: result.filePaths[0] };
+  });
+
+  ipcMain.handle("cache:openDir", async () => {
+    const target = cacheStore.getCacheDir() || getDefaultCacheDir();
+    await fs.mkdir(target, { recursive: true });
+    await shell.openPath(target);
+    return { ok: true, path: target };
+  });
+
   ipcMain.handle("runtime:getStatus", async () => {
     const [ffmpeg, ffprobe, ytDlp] = await Promise.all([
       commandPath("ffmpeg"),
@@ -3108,6 +3431,43 @@ app.whenReady().then(async () => {
       ffprobeBundled: ffprobe ? ffprobe === bundledFfprobePath() : false,
       ytDlpBundled: ytDlp ? ytDlp === ytDlpLocalPath() : false,
       ytDlpVersion: ytDlp ? await getYtDlpVersion(ytDlp).catch(() => null) : null,
+    };
+  });
+
+  // 系统资源采样: CPU% 需两次采样做差; freemem 在 macOS 偏低是 OS 缓存策略,
+  // 这里上报的"已用%" = 1 - free/total,作为粗略可视化指标,够看出"是否吃紧"。
+  let lastCpuSample = null;
+  ipcMain.handle("system:getStats", async () => {
+    const cpus = os.cpus();
+    let idle = 0;
+    let total = 0;
+    for (const cpu of cpus) {
+      for (const [type, value] of Object.entries(cpu.times)) {
+        total += value;
+        if (type === "idle") idle += value;
+      }
+    }
+    let cpuPercent = 0;
+    if (lastCpuSample) {
+      const idleDiff = idle - lastCpuSample.idle;
+      const totalDiff = total - lastCpuSample.total;
+      if (totalDiff > 0) {
+        cpuPercent = Math.max(0, Math.min(100, Math.round((1 - idleDiff / totalDiff) * 100)));
+      }
+    }
+    lastCpuSample = { idle, total };
+
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = Math.max(0, totalMem - freeMem);
+    const memoryPercent = totalMem > 0 ? Math.round((usedMem / totalMem) * 100) : 0;
+
+    return {
+      cpuPercent,
+      cpuCount: cpus.length,
+      memoryPercent,
+      memoryUsedBytes: usedMem,
+      memoryTotalBytes: totalMem,
     };
   });
 
@@ -3160,6 +3520,15 @@ app.whenReady().then(async () => {
     };
     const migrated = migrateConfigV1ToV2(merged);
     await writeJson(getConfigPath(), { ...migrated, savedAt: new Date().toISOString() });
+    // maxBytes 改了就同步 cache-store; cacheDir 走专门的 cache:setDir IPC, 这里不动
+    try {
+      const { maxBytes } = resolveCacheConfig(migrated);
+      if (cacheStore.isConfigured() && maxBytes !== cacheStore.getMaxBytes()) {
+        cacheStore.configure({ dir: cacheStore.getCacheDir(), maxBytes });
+      }
+    } catch (err) {
+      console.warn("[cache-store] 同步 maxBytes 失败:", err?.message || err);
+    }
     return { ok: true };
   });
 
@@ -3228,6 +3597,7 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("analysis:start", async (event, args) => {
     const projectName = args?.project?.videoName || args?.project?.title || "视频";
+    const projectId = args?.project?.id;
     try {
       const result = await analyzeProject(event, args);
       notifyIfBackground({
@@ -3238,10 +3608,19 @@ app.whenReady().then(async () => {
     } catch (err) {
       // 用户主动取消不弹通知,失败才弹
       if (!(err instanceof AnalysisCancelledError)) {
-        const msg = String(err?.message || err).slice(0, 140);
+        const msg = String(err?.message || err).slice(0, 200);
+        // 广播失败,让 attach 模式的 renderer (关窗后重开) 也能感知
+        if (projectId) {
+          broadcastToWindows("analysis:progress", {
+            projectId,
+            progress: 0,
+            stage: "失败",
+            message: msg,
+          });
+        }
         notifyIfBackground({
           title: "ClipIQ · 分析失败",
-          body: `「${projectName}」: ${msg}`,
+          body: `「${projectName}」: ${msg.slice(0, 140)}`,
           urgency: "critical",
         });
       }
@@ -3641,12 +4020,20 @@ app.whenReady().then(async () => {
   ipcMain.handle("whisperCpp:stop", async () => whisperCppRuntime.stop());
 
   await createWindow();
+  createTray();
 
   scheduleYtDlpAutoCheck();
   scheduleLlamaAutoResume();
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    // 关窗后是 hide 不是 destroy,所以 getAllWindows() 通常非空。
+    // 点 Dock 图标(macOS)或重新打开 app 时,把已有窗口 show 回来;真的没有了再重建。
+    const wins = BrowserWindow.getAllWindows();
+    if (wins.length === 0) {
+      createWindow();
+    } else {
+      showMainWindow();
+    }
   });
 });
 
@@ -3750,7 +4137,10 @@ function cleanupSidecars(reason) {
   try { llamaRuntime.shutdownSync(); } catch {}
   try { whisperCppRuntime.shutdownSync(); } catch {}
 }
-app.on("before-quit", () => cleanupSidecars("before-quit"));
+app.on("before-quit", () => {
+  isQuitting = true;
+  cleanupSidecars("before-quit");
+});
 process.on("exit", () => cleanupSidecars("process.exit"));
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(sig, () => {
@@ -3761,6 +4151,9 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   });
 }
 
+// 关窗后默认 hide 而非 destroy,所以 window-all-closed 通常不会触发。
+// 仅在窗口真销毁后才进入这里;此时如果用户已经走"退出"路径(isQuitting=true),交给 app.quit() 流转。
+// 否则保留 app 进程在托盘里(包括非 darwin 平台,行为也按"驻留托盘"对齐)。
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  if (isQuitting) app.quit();
 });

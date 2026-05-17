@@ -146,10 +146,48 @@ export type WhisperCppProgress = {
 
 export type WhisperCppLogEntry = { channel: "stdout" | "stderr"; line: string };
 
+export type SystemStats = {
+  cpuPercent: number;
+  cpuCount: number;
+  memoryPercent: number;
+  memoryUsedBytes: number;
+  memoryTotalBytes: number;
+};
+
+export type CacheScopeStats = {
+  count: number;
+  bytes: number;
+  lastUsedAt: number;
+};
+
+export type CacheStats = {
+  totalEntries: number;
+  totalBytes: number;
+  maxBytes: number;
+  cacheDir: string | null;
+  byScope: Record<string, CacheScopeStats>;
+};
+
+export type CacheEntry = {
+  scope: string;
+  key: string;
+  sizeBytes: number;
+  createdAt: number;
+  lastUsedAt: number;
+  hitCount: number;
+  meta: Record<string, unknown> | null;
+};
+
+export type CacheClearResult = { freedBytes: number; freedEntries: number };
+export type CacheSetDirResult =
+  | { ok: true; cacheDir: string; mode: "rename" | "merge" | "copy" | "fresh" | "noop" }
+  | { ok: false; message: string };
+
 declare global {
   interface Window {
     videoAnalyzer?: {
       getRuntimeStatus: () => Promise<RuntimeStatus>;
+      getSystemStats: () => Promise<SystemStats>;
       openVideoFile: () => Promise<InspectedVideo | null>;
       inspectVideoPath: (filePath: string) => Promise<InspectedVideo>;
       getPathForFile: (file: File) => string;
@@ -221,6 +259,15 @@ declare global {
         stop: () => Promise<{ ok: true }>;
         onProgress: (callback: (event: WhisperCppProgress) => void) => () => void;
         onLog: (callback: (event: WhisperCppLogEntry) => void) => () => void;
+      };
+      cache: {
+        getStats: () => Promise<CacheStats>;
+        list: (params?: { scope?: string; limit?: number; offset?: number }) => Promise<CacheEntry[]>;
+        clear: (params?: { scope?: string }) => Promise<CacheClearResult>;
+        setMaxBytes: (bytes: number) => Promise<{ ok: true; maxBytes: number }>;
+        setDir: (dir: string) => Promise<CacheSetDirResult>;
+        browseDir: () => Promise<{ canceled: boolean; dir?: string }>;
+        openDir: () => Promise<{ ok: boolean; path: string }>;
       };
     };
   }

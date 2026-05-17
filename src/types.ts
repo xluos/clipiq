@@ -459,6 +459,11 @@ export type AppConfig = {
   defaultAnalysis?: DefaultAnalysis;
   // 本地模型下载镜像选择: hf-mirror (默认) 或 modelscope (魔搭/国内 CDN)
   localModelMirror?: "hf-mirror" | "modelscope";
+  // 分析阶段结果缓存目录, null/缺省 → userData/cache;
+  // 可在设置里改到外部盘 (改路径会触发整目录迁移)。
+  cacheDir?: string | null;
+  // 缓存总容量上限 (字节), 0 = 无上限, 默认 10 GB。
+  cacheMaxBytes?: number;
   schemaVersion: 2;
   // v1 残留字段,仅在 migrateConfigV1ToV2 内读取,迁移后写回时不再产生
   /** @deprecated migrated to taskSlots.complex_vision */

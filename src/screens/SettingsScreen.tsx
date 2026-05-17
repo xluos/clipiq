@@ -41,9 +41,9 @@ import {
   TaskSlotKey,
   VideoGenre,
 } from "../types";
-import type { LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
+import type { CacheScopeStats, CacheStats, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
 
-type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "data";
+type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "cache" | "data";
 
 const NONE = "__none__";
 
@@ -53,8 +53,19 @@ const SECTIONS: { key: Section; label: string }[] = [
   { key: "local", label: "本地推理" },
   { key: "deps", label: "本地依赖" },
   { key: "analysis", label: "默认分析" },
+  { key: "cache", label: "分析缓存" },
   { key: "data", label: "项目数据" },
 ];
+
+const SCOPE_LABELS_ZH: Record<string, string> = {
+  "transcript": "字幕识别",
+  "prefilter": "本地初筛",
+  "shot-merger": "镜头合并",
+  "summarizer": "全局聚合",
+  "detect-genre": "视频类型识别",
+  "main-analysis": "主分析",
+  "danmaku-emotion": "弹幕情绪",
+};
 
 function whisperModelHint(modelId?: string) {
   switch (modelId) {
@@ -134,6 +145,7 @@ export function SettingsScreen() {
             {section === "deps" && <DepsSection />}
             {section === "local" && <LocalInferenceSection />}
             {section === "analysis" && <AnalysisDefaultsSection />}
+            {section === "cache" && <CacheSection />}
             {section === "data" && <DataSection />}
           </div>
         </div>
@@ -1762,6 +1774,48 @@ function LocalInferenceSection() {
   );
 }
 
+type ModelGroupProps = {
+  title: string;
+  subtitle: string;
+  models: ModelDescriptor[];
+  runningKey: string | null | undefined;
+  busyKey: string | null;
+  busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
+  isAnyBusy: boolean;
+  progress: LlamaProgress | null;
+  onStart: (modelKey: string) => void;
+  onStop: () => void;
+};
+
+const ModelGroup: FunctionComponent<ModelGroupProps> = ({
+  title, subtitle, models, runningKey, busyKey, busyAction, isAnyBusy, progress, onStart, onStop,
+}) => {
+  if (models.length === 0) return null;
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <h4 className="text-[12.5px] font-semibold text-slate-900 dark:text-slate-100">{title}</h4>
+        <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500">{subtitle}</span>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        {models.map((m) => (
+          <ModelCard
+            key={m.id}
+            model={m}
+            runningKey={runningKey}
+            busyKey={busyKey}
+            busyAction={busyAction}
+            isAnyBusy={isAnyBusy}
+            progress={progress}
+            onStart={onStart}
+            onStop={onStop}
+          />
+        ))}
+      </div>
+    </div>
+  );
+};
+
 type ProgressButtonProps = {
   progress: LlamaProgress | null;
   busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
@@ -1875,48 +1929,6 @@ const ProgressButton: FunctionComponent<ProgressButtonProps> = ({ progress, busy
             {tooltipBody}
           </div>
         </div>
-      </div>
-    </div>
-  );
-};
-
-type ModelGroupProps = {
-  title: string;
-  subtitle: string;
-  models: ModelDescriptor[];
-  runningKey: string | null | undefined;
-  busyKey: string | null;
-  busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
-  isAnyBusy: boolean;
-  progress: LlamaProgress | null;
-  onStart: (modelKey: string) => void;
-  onStop: () => void;
-};
-
-const ModelGroup: FunctionComponent<ModelGroupProps> = ({
-  title, subtitle, models, runningKey, busyKey, busyAction, isAnyBusy, progress, onStart, onStop,
-}) => {
-  if (models.length === 0) return null;
-  return (
-    <div>
-      <div className="flex items-baseline justify-between mb-2">
-        <h4 className="text-[12.5px] font-semibold text-slate-900 dark:text-slate-100">{title}</h4>
-        <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500">{subtitle}</span>
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-        {models.map((m) => (
-          <ModelCard
-            key={m.id}
-            model={m}
-            runningKey={runningKey}
-            busyKey={busyKey}
-            busyAction={busyAction}
-            isAnyBusy={isAnyBusy}
-            progress={progress}
-            onStart={onStart}
-            onStop={onStop}
-          />
-        ))}
       </div>
     </div>
   );
@@ -2110,6 +2122,205 @@ function AnalysisDefaultsSection() {
             选「自动识别」时,管线会让 LLM 根据字幕和镜头切换推断;指定具体类型可加载对应规则集。
           </p>
         </div>
+      </section>
+    </>
+  );
+}
+
+function CacheSection() {
+  const confirm = useConfirm();
+  const [stats, setStats] = useState<CacheStats | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState("");
+  const [maxBytesInput, setMaxBytesInput] = useState<string>("");
+  const [maxBytesDirty, setMaxBytesDirty] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!window.videoAnalyzer) return;
+    const next = await window.videoAnalyzer.cache.getStats().catch(() => null);
+    setStats(next);
+    if (next && !maxBytesDirty) {
+      setMaxBytesInput(next.maxBytes > 0 ? (next.maxBytes / 1024 / 1024 / 1024).toFixed(2) : "0");
+    }
+  }, [maxBytesDirty]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const handleClearScope = async (scope: string) => {
+    if (!window.videoAnalyzer) return;
+    const ok = await confirm({
+      title: `清除「${SCOPE_LABELS_ZH[scope] || scope}」缓存`,
+      description: "该阶段下次分析会从头跑,其他阶段缓存不受影响。",
+      confirmLabel: "清除",
+      destructive: true,
+    });
+    if (!ok) return;
+    setBusy(scope);
+    setStatusMessage("");
+    try {
+      const result = await window.videoAnalyzer.cache.clear({ scope });
+      setStatusMessage(`已清除 ${SCOPE_LABELS_ZH[scope] || scope}, 释放 ${formatBytes(result.freedBytes)}`);
+      refresh();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleClearAll = async () => {
+    if (!window.videoAnalyzer) return;
+    const ok = await confirm({
+      title: "清除全部缓存",
+      description: `${stats?.totalEntries ?? 0} 条缓存共 ${formatBytes(stats?.totalBytes ?? 0)}, 清除后下次分析所有 LLM 阶段都会重跑。`,
+      confirmLabel: "清除全部",
+      destructive: true,
+    });
+    if (!ok) return;
+    setBusy("__all__");
+    setStatusMessage("");
+    try {
+      const result = await window.videoAnalyzer.cache.clear({});
+      setStatusMessage(`已清除全部, 释放 ${formatBytes(result.freedBytes)}`);
+      refresh();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleApplyMaxBytes = async () => {
+    if (!window.videoAnalyzer) return;
+    const gb = Number(maxBytesInput);
+    if (!Number.isFinite(gb) || gb < 0) {
+      setStatusMessage("容量上限要是 0 或正数, 0 表示不限。");
+      return;
+    }
+    const bytes = Math.floor(gb * 1024 * 1024 * 1024);
+    setBusy("__maxBytes__");
+    try {
+      await window.videoAnalyzer.cache.setMaxBytes(bytes);
+      setStatusMessage(`容量上限已改为 ${gb === 0 ? "不限" : `${gb} GB`}`);
+      setMaxBytesDirty(false);
+      refresh();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleChangeDir = async () => {
+    if (!window.videoAnalyzer) return;
+    const picked = await window.videoAnalyzer.cache.browseDir();
+    if (picked.canceled || !picked.dir) return;
+    const ok = await confirm({
+      title: "迁移缓存目录",
+      description: `把现有缓存搬到\n${picked.dir}\n继续?`,
+      confirmLabel: "迁移",
+    });
+    if (!ok) return;
+    setBusy("__setDir__");
+    setStatusMessage("");
+    try {
+      const result = await window.videoAnalyzer.cache.setDir(picked.dir);
+      if (result.ok === true) {
+        setStatusMessage(`已迁移到 ${result.cacheDir} (mode=${result.mode})`);
+      } else {
+        setStatusMessage(`迁移失败: ${result.message}`);
+      }
+      refresh();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleOpenDir = async () => {
+    if (!window.videoAnalyzer) return;
+    await window.videoAnalyzer.cache.openDir();
+  };
+
+  const scopeEntries: Array<[string, CacheScopeStats]> = stats
+    ? (Object.entries(stats.byScope) as Array<[string, CacheScopeStats]>).sort((a, b) => b[1].bytes - a[1].bytes)
+    : [];
+
+  return (
+    <>
+      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">分析缓存</h2>
+      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4 text-sm">
+        <Stat label="总占用" value={stats ? `${formatBytes(stats.totalBytes)} · ${stats.totalEntries} 条` : "—"} />
+        <Stat label="容量上限" value={stats ? (stats.maxBytes > 0 ? formatBytes(stats.maxBytes) : "不限") : "—"} />
+        <Stat label="缓存目录" value={stats?.cacheDir ?? "—"} mono />
+
+        <div className="grid grid-cols-[160px_1fr] items-center gap-3 pt-2">
+          <span className="text-slate-500 dark:text-slate-400 text-right">改容量上限 (GB)</span>
+          <div className="flex gap-2">
+            <Input
+              type="number"
+              min={0}
+              step={1}
+              value={maxBytesInput}
+              onChange={(e) => { setMaxBytesInput(e.target.value); setMaxBytesDirty(true); }}
+              className="max-w-[120px] font-mono text-xs"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!maxBytesDirty || busy === "__maxBytes__"}
+              onClick={handleApplyMaxBytes}
+              className="border-slate-200 dark:border-slate-800"
+            >
+              应用
+            </Button>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2 pt-2">
+          <Button variant="outline" size="sm" onClick={handleChangeDir} disabled={busy === "__setDir__"} className="border-slate-200 dark:border-slate-800">
+            <FolderOpen className="w-4 h-4 mr-1.5" />
+            迁移到新目录
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleOpenDir} className="border-slate-200 dark:border-slate-800">
+            <FolderOpen className="w-4 h-4 mr-1.5" />
+            打开缓存目录
+          </Button>
+          <Button variant="ghost" size="sm" onClick={refresh} className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-100">
+            <RefreshCw className="w-4 h-4 mr-1.5" />
+            刷新
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={busy === "__all__" || !stats?.totalEntries}
+            onClick={handleClearAll}
+            className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+          >
+            <Trash2 className="w-4 h-4 mr-1.5" />
+            清除全部
+          </Button>
+        </div>
+
+        {scopeEntries.length > 0 && (
+          <div className="pt-2 space-y-2 border-t border-slate-200 dark:border-slate-800">
+            <div className="text-xs text-slate-500 dark:text-slate-400 pt-2">按阶段</div>
+            {scopeEntries.map(([scope, info]) => (
+              <div key={scope} className="grid grid-cols-[160px_1fr_auto] items-center gap-3">
+                <span className="text-slate-700 dark:text-slate-300">{SCOPE_LABELS_ZH[scope] || scope}</span>
+                <span className="font-mono text-xs text-slate-500">{formatBytes(info.bytes)} · {info.count} 条</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy === scope}
+                  onClick={() => handleClearScope(scope)}
+                  className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+                >
+                  清除
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+        {scopeEntries.length === 0 && stats && (
+          <p className="text-xs text-slate-500">还没有缓存数据。下次跑分析时会自动写入。</p>
+        )}
+        {statusMessage && <p className="text-xs text-slate-500">{statusMessage}</p>}
       </section>
     </>
   );

@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("videoAnalyzer", {
   getRuntimeStatus: () => ipcRenderer.invoke("runtime:getStatus"),
+  getSystemStats: () => ipcRenderer.invoke("system:getStats"),
   openVideoFile: () => ipcRenderer.invoke("video:openFile"),
   inspectVideoPath: (path) => ipcRenderer.invoke("video:inspectPath", path),
   getPathForFile: (file) => {
@@ -87,5 +88,14 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
       ipcRenderer.on("whisperCpp:log", listener);
       return () => ipcRenderer.removeListener("whisperCpp:log", listener);
     },
+  },
+  cache: {
+    getStats: () => ipcRenderer.invoke("cache:getStats"),
+    list: (params) => ipcRenderer.invoke("cache:list", params || {}),
+    clear: (params) => ipcRenderer.invoke("cache:clear", params || {}),
+    setMaxBytes: (bytes) => ipcRenderer.invoke("cache:setMaxBytes", bytes),
+    setDir: (dir) => ipcRenderer.invoke("cache:setDir", dir),
+    browseDir: () => ipcRenderer.invoke("cache:browseDir"),
+    openDir: () => ipcRenderer.invoke("cache:openDir"),
   },
 });

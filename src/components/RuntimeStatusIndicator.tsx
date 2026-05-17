@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Activity } from "lucide-react";
 import { useApp } from "../AppContext";
-import type { LlamaStatus } from "../electron-api";
+import type { LlamaStatus, SystemStats } from "../electron-api";
 import type { ModelDescriptor } from "../types";
 
 export function RuntimeStatusIndicator() {
   const [open, setOpen] = useState(false);
   const [llamaStatus, setLlamaStatus] = useState<LlamaStatus | null>(null);
   const [llamaModels, setLlamaModels] = useState<ModelDescriptor[]>([]);
+  const [sysStats, setSysStats] = useState<SystemStats | null>(null);
   const { providers, taskSlots, audioSlot, setCurrentScreen } = useApp();
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -46,6 +47,26 @@ export function RuntimeStatusIndicator() {
     };
     document.addEventListener("mousedown", onDocMouseDown);
     return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [open]);
+
+  // 仅弹层打开时采样系统资源,1.5s 一次。第一次返回 cpu=0 是采样基线,无碍。
+  useEffect(() => {
+    if (!open || !window.videoAnalyzer?.getSystemStats) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const s = await window.videoAnalyzer!.getSystemStats();
+        if (!cancelled) setSysStats(s);
+      } catch {
+        // ignore
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, [open]);
 
   // 主分析: complex_vision 槽 → provider + model label
@@ -107,32 +128,46 @@ export function RuntimeStatusIndicator() {
       </button>
       {open && (
         <div
-          className="absolute right-0 top-full mt-1.5 w-80 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#0F172A] shadow-lg p-4 z-50 text-sm divide-y divide-slate-200 dark:divide-slate-700"
+          className="absolute right-0 top-full mt-1.5 w-96 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#0F172A] shadow-lg p-4 z-50 text-sm divide-y divide-slate-200 dark:divide-slate-700"
           style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
         >
           <Section title="本地推理 · 视觉初筛">
-            {!window.videoAnalyzer?.llama ? (
-              <Hint>浏览器预览环境</Hint>
-            ) : llamaStatus?.running ? (
-              <>
-                <Row label="状态" value={<StatusPill tone="ok">运行中</StatusPill>} />
-                <Row label="模型" value={llamaModelLabel || "-"} />
-                <Row label="端口" value={String(llamaStatus.port || "-")} mono />
-              </>
-            ) : llamaStatus?.status === "starting" ? (
-              <Row label="状态" value={<StatusPill tone="busy">启动中…</StatusPill>} />
-            ) : llamaStatus?.status === "error" ? (
-              <>
-                <Row label="状态" value={<StatusPill tone="error">出错</StatusPill>} />
-                {llamaStatus.lastError && (
-                  <Hint className="break-words">{llamaStatus.lastError}</Hint>
+            <div className="flex gap-4">
+              <div className="flex-1 min-w-0 space-y-1">
+                {!window.videoAnalyzer?.llama ? (
+                  <Hint>浏览器预览环境</Hint>
+                ) : llamaStatus?.running ? (
+                  <>
+                    <Row label="状态" value={<StatusPill tone="ok">运行中</StatusPill>} />
+                    <Row label="模型" value={llamaModelLabel || "-"} />
+                    <Row label="端口" value={String(llamaStatus.port || "-")} mono />
+                  </>
+                ) : llamaStatus?.status === "starting" ? (
+                  <Row label="状态" value={<StatusPill tone="busy">启动中…</StatusPill>} />
+                ) : llamaStatus?.status === "error" ? (
+                  <>
+                    <Row label="状态" value={<StatusPill tone="error">出错</StatusPill>} />
+                    {llamaStatus.lastError && (
+                      <Hint className="break-words">{llamaStatus.lastError}</Hint>
+                    )}
+                  </>
+                ) : llamaStatus?.binaryFound ? (
+                  <Hint>未启动（去设置启动，或下次会自动恢复）</Hint>
+                ) : (
+                  <Hint>推理引擎未安装</Hint>
                 )}
-              </>
-            ) : llamaStatus?.binaryFound ? (
-              <Hint>未启动（去设置启动，或下次会自动恢复）</Hint>
-            ) : (
-              <Hint>推理引擎未安装</Hint>
-            )}
+              </div>
+              {sysStats && (
+                <div className="w-32 shrink-0 space-y-2.5 pt-0.5">
+                  <MiniGauge label="CPU" percent={sysStats.cpuPercent} />
+                  <MiniGauge
+                    label="内存"
+                    percent={sysStats.memoryPercent}
+                    sub={`${formatBytes(sysStats.memoryUsedBytes)} / ${formatBytes(sysStats.memoryTotalBytes)}`}
+                  />
+                </div>
+              )}
+            </div>
           </Section>
 
           <Section title="主分析 · 视觉理解">
@@ -225,4 +260,48 @@ function StatusPill({ children, tone }: { children: ReactNode; tone: "ok" | "bus
       ? "text-amber-500"
       : "text-red-500";
   return <span className={`text-sm font-medium ${cls}`}>{children}</span>;
+}
+
+function MiniGauge({ label, percent, sub }: { label: string; percent: number; sub?: string }) {
+  const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+  const tone =
+    clamped >= 85
+      ? "bg-red-500 dark:bg-red-400"
+      : clamped >= 60
+      ? "bg-amber-500 dark:bg-amber-400"
+      : "bg-emerald-500 dark:bg-emerald-400";
+  return (
+    <div className="space-y-1">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-[10px] text-slate-400 dark:text-slate-500 font-semibold uppercase tracking-wider">
+          {label}
+        </span>
+        <span className="text-[11px] font-mono text-slate-700 dark:text-slate-200 tabular-nums">
+          {clamped}%
+        </span>
+      </div>
+      <div className="h-1.5 w-full rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-[width] duration-500 ease-out ${tone}`}
+          style={{ width: `${clamped}%` }}
+        />
+      </div>
+      {sub && (
+        <div
+          className="text-[10px] font-mono text-slate-400 dark:text-slate-500 tabular-nums truncate"
+          title={sub}
+        >
+          {sub}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  const gb = bytes / (1024 * 1024 * 1024);
+  if (gb >= 10) return `${gb.toFixed(0)}G`;
+  if (gb >= 1) return `${gb.toFixed(1)}G`;
+  const mb = bytes / (1024 * 1024);
+  return `${mb.toFixed(0)}M`;
 }

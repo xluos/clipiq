@@ -65,6 +65,11 @@ export function ProgressScreen() {
   const hasStarted = useRef(false);
   const cancelledRef = useRef(false);
   const lastLoggedStage = useRef<string>("");
+  // attach 模式 = renderer 不是发起者,而是关窗后重开 / 切回 ProgressScreen,挂到已经在跑的分析上。
+  // 完成 / 失败的"兜底处理"只在 attach 模式触发,避免跟 kickoff 路径的 await 结果重复。
+  const inAttachMode = useRef(false);
+  const completionHandledRef = useRef(false);
+  const failureHandledRef = useRef(false);
 
   const project = projects.find(p => p.id === activeProjectId);
 
@@ -131,6 +136,36 @@ export function ProgressScreen() {
       setStageLabel(event.stage);
       setDetail(event.message || "");
       recordLog(event.stage, event.message || "");
+
+      // attach 模式下,完成 / 失败要走广播兜底——kickoff 路径已通过 await 结果自己处理。
+      if (!inAttachMode.current || !window.videoAnalyzer) return;
+      if (event.stage === "完成" && event.progress >= 100 && !completionHandledRef.current) {
+        completionHandledRef.current = true;
+        void (async () => {
+          try {
+            const [nodes, report] = await Promise.all([
+              window.videoAnalyzer!.getNodes(project.id),
+              window.videoAnalyzer!.getReport(project.id),
+            ]);
+            if (nodes && nodes.length) setNodesForProject(project.id, nodes);
+            if (report) setReportForProject(project.id, report);
+            setProjects(prev => prev.map(p => p.id === project.id
+              ? { ...p, status: "completed", updatedAt: new Date().toISOString() }
+              : p));
+            window.setTimeout(() => setCurrentScreen("workspace"), 800);
+          } catch (err) {
+            console.warn("attach completion fetch 失败", err);
+          }
+        })();
+      } else if (event.stage === "失败" && !failureHandledRef.current) {
+        failureHandledRef.current = true;
+        const msg = event.message || "分析失败";
+        setError(msg);
+        recordLog("失败", msg);
+        setProjects(prev => prev.map(p => p.id === project.id
+          ? { ...p, status: "failed", updatedAt: new Date().toISOString() }
+          : p));
+      }
     });
     return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -189,6 +224,7 @@ export function ProgressScreen() {
     const launchOrAttach = async () => {
       const alreadyRunning = await window.videoAnalyzer!.isAnalysisActive(project.id);
       if (alreadyRunning) {
+        inAttachMode.current = true;
         try {
           const last = await window.videoAnalyzer!.getLastAnalysisProgress(project.id);
           if (last) applyProgressSnapshot(last);
