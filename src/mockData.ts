@@ -17,7 +17,17 @@ export const generateMockNodes = (duration: number = 180): AnalysisNode[] => {
       narrativeFunction: "Hook",
       confidence: 0.95,
       isHighlight: true,
-      note: "Great hook, consider using this clip for trailer."
+      note: "Great hook, consider using this clip for trailer.",
+      methodologyTags: [
+        {
+          ruleId: "R-HOOK-001",
+          ruleName: "黄金 3 秒钩子",
+          category: "hook",
+          status: "hit",
+          evidence: "开场 0-3s 用神秘箱 + 主持人放大表情 + '你绝对想不到里面是什么' 三层同步",
+          confidence: 0.9,
+        },
+      ],
     },
     {
       id: "node-2",
@@ -33,7 +43,18 @@ export const generateMockNodes = (duration: number = 180): AnalysisNode[] => {
       emotionIntensity: 5,
       narrativeFunction: "Development",
       confidence: 0.88,
-      isHighlight: false
+      isHighlight: false,
+      methodologyTags: [
+        {
+          ruleId: "R-PACE-001",
+          ruleName: "镜头长短交替",
+          category: "pacing",
+          status: "violation",
+          evidence: "15-45s 全部是中景 4s+ 的长镜头，缺少短切作信息密度",
+          confidence: 0.75,
+          fixSuggestion: "在 development 段插入 2-3 个 1-2s 的图表/数据短切",
+        },
+      ],
     },
     {
       id: "node-3",
@@ -49,7 +70,25 @@ export const generateMockNodes = (duration: number = 180): AnalysisNode[] => {
       emotionIntensity: 9,
       narrativeFunction: "Climax",
       confidence: 0.92,
-      isHighlight: true
+      isHighlight: true,
+      methodologyTags: [
+        {
+          ruleId: "R-PACE-002",
+          ruleName: "节奏与情绪匹配",
+          category: "pacing",
+          status: "hit",
+          evidence: "高潮段大量 1-2s 快切配合 riser 音效，节奏与情绪同步上升",
+          confidence: 0.88,
+        },
+        {
+          ruleId: "R-SOUND-001",
+          ruleName: "BGM 节拍同步",
+          category: "sound",
+          status: "hit",
+          evidence: "切点准确落在 riser 音效的爆点上",
+          confidence: 0.82,
+        },
+      ],
     },
     {
       id: "node-4",
@@ -65,7 +104,17 @@ export const generateMockNodes = (duration: number = 180): AnalysisNode[] => {
       emotionIntensity: 6,
       narrativeFunction: "Ending",
       confidence: 0.90,
-      isHighlight: false
+      isHighlight: false,
+      methodologyTags: [
+        {
+          ruleId: "R-COMPLETE-001",
+          ruleName: "结尾回收",
+          category: "completion",
+          status: "hit",
+          evidence: "结尾给出明确 CTA + Subscribe 字幕，配 outro 音乐",
+          confidence: 0.86,
+        },
+      ],
     }
   ];
 };
@@ -87,6 +136,76 @@ export const generateMockReport = (): AnalysisReport => {
       "Use physical props to create curiosity gaps in the hook.",
       "Don't let the development phase drag; punctuate with graphics.",
       "Match audio riser intensity with cut frequency."
-    ]
+    ],
+    methodologyAudit: {
+      detectedGenre: "review",
+      lengthBucket: "long",
+      appliedRuleSets: ["_common", "length/long", "genre/review"],
+      genreConfidence: 0.86,
+      overallScore: 74,
+      hits: [
+        {
+          ruleId: "R-HOOK-001",
+          ruleName: "黄金 3 秒钩子",
+          category: "hook",
+          status: "hit",
+          evidence: "开场 0-3s 用神秘箱 + 主持人放大表情 + '你绝对想不到里面是什么' 三层同步",
+          confidence: 0.9,
+        },
+        {
+          ruleId: "R-PACE-002",
+          ruleName: "节奏与情绪匹配",
+          category: "pacing",
+          status: "hit",
+          evidence: "高潮段大量 1-2s 快切配合 riser 音效",
+          confidence: 0.88,
+        },
+        {
+          ruleId: "R-SOUND-001",
+          ruleName: "BGM 节拍同步",
+          category: "sound",
+          status: "hit",
+          evidence: "切点准确落在 riser 音效的爆点上",
+          confidence: 0.82,
+        },
+        {
+          ruleId: "R-COMPLETE-001",
+          ruleName: "结尾回收",
+          category: "completion",
+          status: "hit",
+          evidence: "结尾给出明确 CTA + Subscribe 字幕",
+          confidence: 0.86,
+        },
+      ],
+      violations: [
+        {
+          ruleId: "R-PACE-001",
+          ruleName: "镜头长短交替",
+          category: "pacing",
+          status: "violation",
+          evidence: "15-45s 全部是中景 4s+ 的长镜头，缺少短切作信息密度",
+          confidence: 0.75,
+          fixSuggestion: "在 development 段插入 2-3 个 1-2s 的图表/数据短切",
+        },
+      ],
+      misses: [
+        {
+          ruleId: "R-REVIEW-006",
+          ruleName: "横向对比",
+          category: "structure",
+          expectedAt: "测评中后段",
+          reason: "全片只讲了一个产品，没有任何与竞品/旧款的对比镜头或参数表",
+          fixSuggestion: "在 60-90s 之间插入一段与同价位竞品的横向对比",
+        },
+        {
+          ruleId: "R-LONG-004",
+          ruleName: "中段缓冲段",
+          category: "structure",
+          expectedAt: "约 50% 位置（90-120s）",
+          reason: "信息密度从头压到尾，中段没有故事 / 幽默缓冲",
+          fixSuggestion: "在 90-120s 加入一段使用场景模拟或主创小故事，给观众喘息",
+        },
+      ],
+    },
   };
 };

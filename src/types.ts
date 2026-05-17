@@ -1,16 +1,177 @@
 export type ModelInputMode = "auto" | "direct_video" | "keyframe_sequence";
 
+// Legacy: kept for v1 config compatibility. New code should read `source` + capabilities.
+export type ProviderKind = "video" | "audio";
+
+export type ModelCapability =
+  | "vision"
+  | "audio_transcription"
+  | "reasoning"
+  | "fast"
+  | "long_context"
+  | "text";
+
+// 本地模型 manifest 能力分类
+// primary 决定槽位过滤;secondary 大多走 ModelDescriptor.capabilities 直接提升;
+// chinese/english/code/video 这种只做 UI hint 的留在 secondary
+export type LocalPrimaryCapability = "vision" | "audio" | "text";
+export type LocalSecondaryTag =
+  | "chinese"
+  | "english"
+  | "code"
+  | "reasoning"
+  | "video"
+  | "long_context"
+  | "fast";
+
+export type LocalQuantization = {
+  key: string;
+  label: string; // "Q4_K_M"
+  sizeBytes: number;
+  repo?: string;
+  llmFile?: string;
+  mmprojFile?: string;
+};
+
+export type LocalFitLevel = "perfect" | "good" | "marginal" | "tight";
+
+// manifest 原始条目(磁盘 source of truth); 投影成 ModelDescriptor 给下游消费
+export type LocalModelEntry = {
+  key: string;
+  family: string;
+  params: string;
+  name: string;
+  description: string;
+  primaryCapabilities: LocalPrimaryCapability[];
+  secondaryTags: LocalSecondaryTag[];
+  available: boolean;
+  contextSize: number;
+  quantizations: LocalQuantization[];
+  fit?: LocalFitLevel;
+  memPercent?: number;
+  tps?: number;
+  downloaded?: boolean;
+  llmBytes?: number;
+  mmprojBytes?: number;
+};
+
+// 通用模型描述 - 远程 /models / 本地 llama manifest / 本地 whisper 都统一映射到这里
+// 下游一套逻辑判断 capabilities + availability,不再分 source 分叉
+export type ModelAvailability =
+  | { state: "ready" }
+  | { state: "needs_install"; sizeBytes?: number }
+  | { state: "coming_soon" }
+  | { state: "unknown"; reason?: string };
+
+export type ModelDescriptorSource = "remote" | "local_llama" | "local_whisper";
+
+export type ModelDescriptor = {
+  source: ModelDescriptorSource;
+  id: string;                          // 远程: OpenAI id; 本地: manifest key
+  label: string;
+  family?: string;
+  params?: string;
+  description?: string;
+  capabilities: ModelCapability[];
+  // inferred = id 正则推断 (远程); manifest = 本地 manifest 派生; manual = 用户手改覆盖
+  capabilitiesSource: "inferred" | "manifest" | "manual";
+  availability: ModelAvailability;
+  contextSize?: number;
+  ownedBy?: string;                    // 远程 /models 的 owned_by 兜底展示
+  local?: {
+    fit?: LocalFitLevel;
+    memPercent?: number;
+    tps?: number;
+    downloaded?: boolean;
+    downloadedBytes?: number;
+    quantizations?: LocalQuantization[];
+    secondaryTags?: LocalSecondaryTag[]; // chinese/english/code/video - UI hint
+  };
+};
+
+export type MachineSpecs = {
+  platform: NodeJS.Platform;
+  arch: string;
+  totalMemoryBytes: number;
+  availableMemoryBytes: number;
+  isAppleSilicon: boolean;
+  cpuModel: string;
+  backend: "metal" | "cuda" | "rocm" | "cpu";
+  speedConstant: number; // K factor used in TPS estimate
+  recommendedQuant: string; // 默认推荐量化档 label
+};
+
+export type ProviderSource = "remote" | "local_llama" | "local_whisper";
+
+export type ProviderEndpointType =
+  | "openai_chat_completions"
+  | "openai_responses"
+  | "openai_audio_transcriptions"
+  | "local_whisper_cpp"
+  | "local_whisper_wasm" // 老 config 残留,migrate 后会被改写为 local_whisper_cpp
+  | "local_llama_server";
+
+// 持久化在 config.providers[*].models[] 内的用户选定 model.
+// 字段是 ModelDescriptor 的子集 + 用户配置(maxOutputTokens/temperature/language)
+// 运行时的 availability/fit/tps 不写入 config,每次 IPC 重新拉取
+export type ProviderModel = {
+  id: string;
+  label: string;
+  capabilities: ModelCapability[];
+  capabilitiesSource?: "inferred" | "manifest" | "manual";
+  family?: string;
+  params?: string;
+  contextSize?: number;
+  ownedBy?: string;
+  maxOutputTokens?: number;
+  temperature?: number;
+  // 本地推理 model 专属(冗余,等价于 id,但旧 config 还在用)
+  localKey?: string;
+  // 本地 whisper 专属
+  localWhisperModel?: string;
+  localWhisperMirror?: string;
+  language?: string;
+};
+
 export type ModelProvider = {
   id: string;
   name: string;
+  source: ProviderSource;
+  builtin?: boolean; // builtin local_llama/local_whisper 不可删
   baseUrl: string;
   apiKeyRef: string;
-  model: string;
-  endpointType: "openai_chat_completions";
+  endpointType: ProviderEndpointType;
   inputMode: ModelInputMode;
+  models: ProviderModel[];
+  // 以下字段是 v1 schema 残留,仅用于兼容性读取(配置迁移完成后从 models[0] 反推)
+  /** @deprecated use models[0].id */
+  model?: string;
+  /** @deprecated derived from source + endpointType */
+  kind?: ProviderKind;
+  /** @deprecated use models[0].localWhisperModel */
+  localWhisperModel?: string;
+  /** @deprecated use models[0].localWhisperMirror */
+  localWhisperMirror?: string;
+  /** @deprecated use models[0].language */
+  language?: string;
+  /** @deprecated use models[0].maxOutputTokens */
   maxOutputTokens?: number;
+  /** @deprecated use models[0].temperature */
   temperature?: number;
 };
+
+export type TaskDifficulty = "simple" | "medium" | "complex";
+export type TaskAxis = "vision" | "text";
+export type TaskSlotKey =
+  | "simple_vision"
+  | "simple_text"
+  | "medium_vision"
+  | "medium_text"
+  | "complex_vision"
+  | "complex_text";
+
+export type SlotAssignment = { providerId: string; modelId: string } | null;
+export type TaskSlots = Record<TaskSlotKey, SlotAssignment>;
 
 export type ProjectSource =
   | { type: "local_file"; originalPath: string }
@@ -31,7 +192,8 @@ export type ProjectStatus =
 export type Project = {
   id: string;
   source: ProjectSource;
-  localVideoPath: string; // Object URL for browser demo
+  localVideoPath: string; // media:// URL in Electron or Object URL for browser demo
+  localFilePath?: string;
   videoName: string;
   durationSec: number;
   width: number;
@@ -40,7 +202,15 @@ export type Project = {
   status: ProjectStatus;
   providerId?: string;
   model?: string;
+  analysisOptions?: AnalysisOptions;
   thumbnailUrl?: string; // For recent projects list
+  // 标记: videoName 已被 LLM 自动生成过, 后续分析阶段不要再覆盖。
+  // - URL 拉取: yt-dlp 写完 info.json 后 medium_text 直接生成 → true
+  // - 本地选取: 缺省 false; 分析跑出 globalSummary 后再生成一次, 同时置 true
+  // - 用户手动改名: 也置 true (后续不要 LLM 覆盖人工命名)
+  titleAutoGenerated?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 export type AnalysisNodeType =
@@ -49,6 +219,104 @@ export type AnalysisNodeType =
   | "info_point"
   | "edit_intent"
   | "audio_change";
+
+export type VideoGenre =
+  | "vlog"
+  | "review"
+  | "travel"
+  | "tutorial"
+  | "knowledge"
+  | "documentary"
+  | "short-drama"
+  | "other";
+
+export type LengthBucket = "short" | "mid" | "long" | "deep";
+
+export type MethodologyRuleCategory =
+  | "hook"
+  | "structure"
+  | "pacing"
+  | "engagement"
+  | "sound"
+  | "density"
+  | "completion"
+  | "visual";
+
+export type MethodologyTagStatus = "hit" | "violation";
+
+export type MethodologyTag = {
+  ruleId: string; // e.g. "R-HOOK-001"
+  ruleName: string; // 人类可读名
+  category: MethodologyRuleCategory;
+  status: MethodologyTagStatus;
+  evidence: string; // 引用具体画面/旁白/时间段
+  confidence: number; // 0-1
+  fixSuggestion?: string; // 仅 violation 必填
+};
+
+export type MethodologyMiss = {
+  ruleId: string;
+  ruleName: string;
+  category: MethodologyRuleCategory;
+  expectedAt?: string; // 应该出现的位置/时间段描述
+  reason: string; // 为什么判定缺失
+  fixSuggestion: string;
+};
+
+export type MethodologyAudit = {
+  detectedGenre: VideoGenre; // LLM 推断的视频类型
+  lengthBucket: LengthBucket; // 根据 duration 推断
+  appliedRuleSets: string[]; // 加载了哪些规则集，如 ["_common", "length/long", "genre/review"]
+  hits: MethodologyTag[]; // 命中（节点级 hit 的聚合）
+  violations: MethodologyTag[]; // 违反（节点级 violation 的聚合）
+  misses: MethodologyMiss[]; // 缺失（报告级判定，没有对应节点）
+  overallScore?: number; // 0-100 综合评分（可选）
+  genreConfidence?: number; // 0-1 LLM 对类型推断的信心
+};
+
+export type PrefilterSceneType =
+  | "outdoor"
+  | "indoor"
+  | "transition"
+  | "text_card"
+  | "person"
+  | "product"
+  | "ui"
+  | "landscape"
+  | "other";
+
+export type PrefilterTag = {
+  sceneType: PrefilterSceneType;
+  subject: string;       // 主体一句话(≤8 汉字)
+  hasText: "none" | "chinese" | "english" | "mixed";
+  salience: number;      // 0-10,信息量
+  isEmpty: boolean;
+  signature: string;     // 3-5 汉字概括,用于 dedup
+  caption?: string;      // 一句话画面描述(≤30 汉字),给下游 shot 合并 / 节点详情用
+};
+
+// 单帧的轻量上下文 (本地初筛产物), 用作 shot 合并 / 节点详情展示
+export type FrameContext = {
+  thumbnailUrl: string;     // media:// URL
+  framePath: string;        // 磁盘路径
+  midSec: number;           // 抽帧时刻
+  caption?: string;         // 来自 prefilterTag.caption
+  salience?: number;        // 来自 prefilterTag.salience
+  signature?: string;       // 来自 prefilterTag.signature
+};
+
+// 弹幕情绪 5 维强度 (0-1)。LLM 一次评一桶,产出整组分布。
+export type DanmakuEmotionAxis = "joy" | "surprise" | "anger" | "sadness" | "disgust";
+export type DanmakuEmotionScores = Record<DanmakuEmotionAxis, number>;
+
+// 单条节点上的观众反应聚合。danmaku 块缺失时整体为 undefined。
+export type AudienceReaction = {
+  dominantEmotion: DanmakuEmotionAxis | "neutral";
+  intensities: DanmakuEmotionScores;
+  danmakuCount: number;
+  summary: string;                       // 一句话(≤30 汉字): "集体笑场 + 少量吐槽"
+  topTerms?: WordCloudEntry[];           // 该节点时间区间的 mini 词云 (top 5-10)
+};
 
 export type AnalysisNode = {
   id: string;
@@ -70,6 +338,53 @@ export type AnalysisNode = {
   isHighlight: boolean;
   note?: string;
   thumbnailUrl?: string; // Captured from video for the node
+  methodologyTags?: MethodologyTag[]; // 该节点命中/违反的方法论规则
+  prefilterTag?: PrefilterTag; // 本地初筛打标(若启用)
+  // 金字塔管线新增字段 (PR2)
+  representativeFrames?: FrameContext[];   // 由 medium_text 选出的该镜头代表帧 (1-3 张)
+  framesInShot?: FrameContext[];           // 该镜头内所有抽帧候选, 调试/详情面板用
+  subtitleSegments?: Array<{ start: number; end: number; text: string }>; // 落在该镜头区间内的字幕段
+  audienceReaction?: AudienceReaction;     // B 站弹幕情绪聚合(可选; 仅 platform=bilibili 项目产出)
+};
+
+// PR2 金字塔管线: medium_text 合并出来的镜头级上下文, 喂给主分析做评审 + UI 镜头时间线渲染
+export type ShotContext = {
+  shotIndex: number;
+  startSec: number;
+  endSec: number;
+  shotDescription: string;          // medium_text 输出: 综合画面+字幕的一段话 (30-80 汉字)
+  frames?: FrameContext[];          // 该镜头内全部抽帧 (带 thumbnailUrl + caption + midSec), 严格拉片时间线渲染用
+  representativeFrames?: FrameContext[]; // 由 medium_text 挑出的 1-3 张代表帧 (frames 的子集)
+  subtitleSegments?: Array<{ start: number; end: number; text: string }>; // 落在该镜头区间的字幕段, 保留分段
+  subtitleText?: string;            // 该镜头时间段内的拼接字幕 (向后兼容老 report)
+  framesInShot?: number;            // 兼容字段: 旧 report 只存了帧数; 新 report 用 frames.length
+};
+
+// 词云一条目 (text + 频次/权重)
+export type WordCloudEntry = {
+  text: string;
+  value: number;            // 频次 (归一化前的原始计数)
+};
+
+// 单个时间桶的弹幕聚合 + 情绪打分
+export type DanmakuEmotionWindow = {
+  shotIndex?: number;                    // 若按 shot 切; 退化到固定桶时为 undefined
+  startSec: number;
+  endSec: number;
+  danmakuCount: number;
+  dominantEmotion: DanmakuEmotionAxis | "neutral";
+  intensities: DanmakuEmotionScores;
+  sampleTexts: string[];                 // 代表性弹幕 (≤5 条)
+};
+
+// 顶层 report.danmaku 块: 仅 bilibili 项目产出
+export type DanmakuReport = {
+  platform: "bilibili";
+  totalCount: number;
+  windows: DanmakuEmotionWindow[];
+  wordCloud: WordCloudEntry[];
+  fetchedAt: string;                     // ISO 时间, 用于判断"是否过期"
+  summary?: string;                      // 一句话(≤120 汉字): 整体观众反应总结
 };
 
 export type AnalysisReport = {
@@ -85,6 +400,76 @@ export type AnalysisReport = {
   editingStyle: string;
   composition: string;
   takeaways: string[];
+  providerSnapshot?: Pick<ModelProvider, "name" | "baseUrl" | "model" | "inputMode">;
+  audioProviderSnapshot?: Pick<ModelProvider, "name" | "baseUrl" | "model"> | null;
+  transcript?: {
+    language?: string;
+    segmentCount?: number;
+    textPreview?: string;
+  } | null;
+  pipelineVersion?: string;
+  schemaVersion?: string;
+  generatedAt?: string;
+  timings?: AnalysisTiming[];
+  totalDurationMs?: number;
+  methodologyAudit?: MethodologyAudit;
+  // PR2 金字塔管线新增字段
+  globalSummary?: string;           // medium_text 在主分析前生成的全局摘要 (优先于 summary 展示)
+  shotContexts?: ShotContext[];     // 所有镜头的中间产物, 时间轴渲染 + 调试用
+  // B 站弹幕情绪分析 + 词云 (仅 platform=bilibili 项目)
+  danmaku?: DanmakuReport;
+};
+
+export type AnalysisTiming = {
+  stage: string;
+  durationMs: number;
+  note?: string;
+};
+
+export type AnalysisOptions = {
+  mode: "quick" | "standard" | "detailed";
+  density: "sparse" | "standard" | "dense";
+  focus: "all" | "narrative" | "rhythm" | "emotion";
+  // Hybrid: 用户可在 PrepareScreen 预指定类型；不指定（"auto"）则让 LLM 识别。
+  // 分析完成后用户也可在 ReportScreen 改类型并重新分析。
+  manualGenre?: VideoGenre | "auto";
+};
+
+// 全局默认分析参数: PrepareScreen 在 project.analysisOptions 缺省时读取
+export type DefaultAnalysisPreset = "quick" | "standard" | "deep";
+export type DefaultAnalysis = {
+  preset: DefaultAnalysisPreset;
+  manualGenre: VideoGenre | "auto";
+};
+
+export type AnalysisProgressEvent = {
+  projectId: string;
+  progress: number;
+  stage: string;
+  message?: string;
+};
+
+export type AppConfig = {
+  providers: ModelProvider[];
+  taskSlots: TaskSlots;
+  audioSlot: SlotAssignment;
+  // 上次启动过的本地推理模型(key)。下次应用启动时自动恢复。
+  lastLlamaModelKey?: string | null;
+  // 全局默认分析参数; PrepareScreen 在新项目首次进入时读取
+  defaultAnalysis?: DefaultAnalysis;
+  // 本地模型下载镜像选择: hf-mirror (默认) 或 modelscope (魔搭/国内 CDN)
+  localModelMirror?: "hf-mirror" | "modelscope";
+  // 分析阶段结果缓存目录, null/缺省 → userData/cache;
+  // 可在设置里改到外部盘 (改路径会触发整目录迁移)。
+  cacheDir?: string | null;
+  // 缓存总容量上限 (字节), 0 = 无上限, 默认 10 GB。
+  cacheMaxBytes?: number;
+  schemaVersion: 2;
+  // v1 残留字段,仅在 migrateConfigV1ToV2 内读取,迁移后写回时不再产生
+  /** @deprecated migrated to taskSlots.complex_vision */
+  activeVideoProviderId?: string | null;
+  /** @deprecated migrated to audioSlot */
+  activeAudioProviderId?: string | null;
 };
 
 export type ScreenState = 

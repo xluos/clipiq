@@ -1,143 +1,972 @@
 import { useApp } from "../AppContext";
-import { Button } from "@/components/ui/button";
-import { FolderOpen, CloudDownload, UploadCloud, ChevronRight, CheckCircle2, Clock, XCircle, Search } from "lucide-react";
-import { useRef } from "react";
+import {
+  Plus, ArrowUp, ChevronDown, Link as LinkIcon, FileVideo,
+  CheckCircle2, Clock, XCircle, Trash2, Film, Loader2, AlertTriangle, Sparkles,
+  Upload,
+} from "lucide-react";
+import { type ChangeEvent, type DragEvent, type FunctionComponent, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import type { InspectedVideo } from "../electron-api";
+import { BrandLogo } from "../components/BrandLogo";
+import { useConfirm } from "../components/ConfirmDialog";
+import type { AnalysisOptions, Project, ProjectSource, VideoGenre } from "../types";
+
+type PresetKey = "quick" | "standard" | "deep" | "custom";
+
+type PresetDef = {
+  key: Exclude<PresetKey, "custom">;
+  title: string;
+  est: string;
+  description: string;
+  options: { mode: AnalysisOptions["mode"]; density: AnalysisOptions["density"]; focus: AnalysisOptions["focus"] };
+};
+
+const PRESETS: PresetDef[] = [
+  { key: "quick",    title: "轻拉片",   est: "~ 45s",  description: "只识别镜头切换和关键叙事点,不做方法论审计。", options: { mode: "quick",    density: "sparse",   focus: "all" } },
+  { key: "standard", title: "标准拉片", est: "~ 2 min", description: "识别节点、情绪曲线、字幕,跑方法论 audit。",       options: { mode: "standard", density: "standard", focus: "all" } },
+  { key: "deep",     title: "深度拉片", est: "~ 5 min", description: "每个镜头独立分析,加做剪辑意图反推和构图分析。",     options: { mode: "detailed", density: "dense",    focus: "all" } },
+];
+
+function matchPreset(opts: { mode: AnalysisOptions["mode"]; density: AnalysisOptions["density"]; focus: AnalysisOptions["focus"] }): PresetKey {
+  for (const p of PRESETS) {
+    if (p.options.mode === opts.mode && p.options.density === opts.density && p.options.focus === opts.focus) return p.key;
+  }
+  return "custom";
+}
+
+type SourceKind = "empty" | "url" | "file" | "unknown";
+
+type SourceState = {
+  kind: SourceKind;
+  platform?: Extract<ProjectSource, { type: "url" }>["platform"];
+  label: string;
+};
+
+type Tab = "all" | "inProgress" | "completed" | "broken";
+
+// Match URLs anywhere in the text. Share text from 抖音 / 小红书 / B 站 wraps the URL
+// in copy-and-paste blobs like "2.02 复制打开抖音... https://v.douyin.com/xxx/ 05/25 K@j.Cu",
+// so we extract the first URL instead of requiring the input to *start* with one.
+const URL_REGEX = /https?:\/\/[^\s一-龥,，)]+/i;
+
+export function extractUrl(raw: string): string | null {
+  const m = raw.match(URL_REGEX);
+  return m ? m[0] : null;
+}
+
+function detectSource(raw: string): SourceState {
+  const v = raw.trim();
+  if (!v) return { kind: "empty", label: "选择来源" };
+  const url = extractUrl(v);
+  if (url) {
+    const lower = url.toLowerCase();
+    let platform: Extract<ProjectSource, { type: "url" }>["platform"] = "unknown";
+    let label = "链接";
+    if (lower.includes("douyin")) { platform = "douyin"; label = "链接 · DOUYIN"; }
+    else if (lower.includes("bilibili") || lower.includes("b23.tv")) { platform = "bilibili"; label = "链接 · BILIBILI"; }
+    else if (lower.includes("youtube") || lower.includes("youtu.be")) { label = "链接 · YOUTUBE"; }
+    else if (lower.includes("xiaohongshu") || lower.includes("xhslink") || lower.includes("xhs")) { platform = "xiaohongshu"; label = "链接 · XHS"; }
+    else if (lower.includes("tiktok")) { platform = "tiktok"; label = "链接 · TIKTOK"; }
+    return { kind: "url", platform, label };
+  }
+  if (v.startsWith("/") || v.startsWith("~/")) {
+    return { kind: "file", label: "本地路径" };
+  }
+  return { kind: "unknown", label: "未识别" };
+}
 
 function formatDate(date: Date) {
-  return date.toISOString().replace('T', ' ').substring(0, 16);
+  const diffMs = Date.now() - date.getTime();
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return "刚刚";
+  if (diffMin < 60) return `${diffMin} 分钟前`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `${diffHour} 小时前`;
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  return sameYear ? `${m}-${d} ${hh}:${mm}` : `${date.getFullYear()}-${m}-${d} ${hh}:${mm}`;
+}
+
+function formatDuration(sec: number) {
+  if (!Number.isFinite(sec) || sec <= 0) return "—";
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec - m * 60);
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function formatResolution(w?: number, h?: number) {
+  if (!w || !h) return null;
+  return `${w}×${h}`;
+}
+
+function platformBadge(p?: Extract<ProjectSource, { type: "url" }>["platform"]) {
+  switch (p) {
+    case "douyin": return "DOUYIN";
+    case "bilibili": return "BILIBILI";
+    case "xiaohongshu": return "XHS";
+    case "tiktok": return "TIKTOK";
+    case "unknown": return "URL";
+    default: return null;
+  }
+}
+
+function projectSourceLabel(source: ProjectSource): string {
+  if (source.type === "local_file") return "LOCAL";
+  return platformBadge(source.platform) ?? "URL";
 }
 
 export function HomeScreen() {
-  const { setCurrentScreen, projects, setActiveProjectId, setProjects } = useApp();
+  const { setCurrentScreen, projects, setActiveProjectId, setProjects, removeProject } = useApp();
+  const confirm = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const [inputValue, setInputValue] = useState("");
+  const [status, setStatus] = useState<"idle" | "downloading" | "failed">("idle");
+  const [error, setError] = useState("");
+  const [isDragging, setIsDragging] = useState(false);
+  const [dropError, setDropError] = useState("");
+  const [tab, setTab] = useState<Tab>("all");
+  const [mode, setMode] = useState<AnalysisOptions["mode"]>("standard");
+  const [density, setDensity] = useState<AnalysisOptions["density"]>("standard");
+  const [focus, setFocus] = useState<AnalysisOptions["focus"]>("all");
+  const [manualGenre, setManualGenre] = useState<VideoGenre | "auto">("auto");
+  const [presetOpen, setPresetOpen] = useState(false);
+  const presetRef = useRef<HTMLDivElement>(null);
+
+  const currentPreset = matchPreset({ mode, density, focus });
+  const presetMeta = PRESETS.find(p => p.key === currentPreset);
+  const presetLabel = presetMeta?.title ?? "自定义";
+
+  useEffect(() => {
+    if (!presetOpen) return;
+    const onDown = (e: globalThis.MouseEvent) => {
+      if (presetRef.current && !presetRef.current.contains(e.target as Node)) setPresetOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [presetOpen]);
+
+  const pickPreset = (preset: PresetDef) => {
+    setMode(preset.options.mode);
+    setDensity(preset.options.density);
+    setFocus(preset.options.focus);
+  };
+
+  const analysisOptions: AnalysisOptions = { mode, density, focus, manualGenre };
+
+  const source = useMemo(() => detectSource(inputValue), [inputValue]);
+  const canSubmit = source.kind === "url" || source.kind === "file";
+
+  const { inProgress, completed, broken, all } = useMemo(() => {
+    const sorted = [...projects].sort(
+      (a, b) =>
+        new Date(b.updatedAt || b.createdAt || 0).getTime() -
+        new Date(a.updatedAt || a.createdAt || 0).getTime(),
+    );
+    const inProgress: Project[] = [];
+    const completed: Project[] = [];
+    const broken: Project[] = [];
+    for (const p of sorted) {
+      if (p.status === "completed") completed.push(p);
+      else if (p.status === "failed" || p.status === "download_failed") broken.push(p);
+      else inProgress.push(p);
+    }
+    return { inProgress, completed, broken, all: sorted };
+  }, [projects]);
+
+  const visibleProjects = useMemo(() => {
+    switch (tab) {
+      case "inProgress": return inProgress;
+      case "completed": return completed;
+      case "broken": return broken;
+      default: return all;
+    }
+  }, [tab, all, inProgress, completed, broken]);
+
+  const setThumbnail = (projectId: string, dataUrl: string) => {
+    setProjects(prev => prev.map(p => p.id === projectId ? { ...p, thumbnailUrl: dataUrl } : p));
+  };
+
+  const goToProject = (proj: Project) => {
+    setActiveProjectId(proj.id);
+    if (proj.status === "completed") setCurrentScreen("workspace");
+    else if (proj.status === "analyzing" || proj.status === "downloading") setCurrentScreen("progress");
+    else setCurrentScreen("prepare");
+  };
+
+  const addInspectedProject = (video: InspectedVideo) => {
+    const newProjectId = "proj-" + Date.now();
+    const now = new Date().toISOString();
+    setProjects(prev => [{
+      id: newProjectId,
+      source: { type: "local_file", originalPath: video.filePath },
+      localVideoPath: video.mediaUrl,
+      localFilePath: video.filePath,
+      videoName: video.filename,
+      durationSec: video.durationSec,
+      width: video.width,
+      height: video.height,
+      orientation: video.orientation,
+      status: "analyzing",
+      analysisOptions,
+      createdAt: now,
+      updatedAt: now,
+    }, ...prev]);
+    setActiveProjectId(newProjectId);
+    setCurrentScreen("progress");
+  };
+
+  const handleFilePicker = async () => {
+    setDropError("");
+    if (window.videoAnalyzer) {
+      try {
+        const video = await window.videoAnalyzer.openVideoFile();
+        if (video) addInspectedProject(video);
+      } catch (err) {
+        setDropError(err instanceof Error ? err.message : String(err));
+      }
+      return;
+    }
+    fileInputRef.current?.click();
+  };
+
+  const handleFileInputChange = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const objectUrl = URL.createObjectURL(file);
+    if (!file) return;
+    const objectUrl = URL.createObjectURL(file);
+    const videoEl = document.createElement("video");
+    videoEl.src = objectUrl;
+    videoEl.onloadedmetadata = () => {
       const newProjectId = "proj-" + Date.now();
-      const video = document.createElement('video');
-      video.src = objectUrl;
-      video.onloadedmetadata = () => {
-        setProjects(prev => [{
-          id: newProjectId,
-          source: { type: "local_file", originalPath: file.name },
-          localVideoPath: objectUrl,
-          videoName: file.name,
-          durationSec: video.duration,
-          width: video.videoWidth,
-          height: video.videoHeight,
-          orientation: video.videoWidth > video.videoHeight ? "landscape" : video.videoWidth < video.videoHeight ? "portrait" : "square",
-          status: "not_analyzed"
-        }, ...prev]);
-        setActiveProjectId(newProjectId);
-        setCurrentScreen("prepare");
-      };
+      const now = new Date().toISOString();
+      setProjects(prev => [{
+        id: newProjectId,
+        source: { type: "local_file", originalPath: file.name },
+        localVideoPath: objectUrl,
+        videoName: file.name,
+        durationSec: videoEl.duration,
+        width: videoEl.videoWidth,
+        height: videoEl.videoHeight,
+        orientation: videoEl.videoWidth > videoEl.videoHeight ? "landscape" : videoEl.videoWidth < videoEl.videoHeight ? "portrait" : "square",
+        status: "analyzing",
+        analysisOptions,
+        createdAt: now,
+        updatedAt: now,
+      }, ...prev]);
+      setActiveProjectId(newProjectId);
+      setCurrentScreen("progress");
+    };
+  };
+
+  const handleSubmit = async () => {
+    if (!canSubmit || status === "downloading") return;
+    setError("");
+
+    if (source.kind === "file") {
+      const path = inputValue.trim().replace(/^~\//, `${(window as unknown as { videoAnalyzer?: { homedir?: string } }).videoAnalyzer?.homedir ?? ""}/`);
+      if (!window.videoAnalyzer) {
+        setError("浏览器预览模式下无法直接读取本地路径,请用 + 按钮选择文件。");
+        setStatus("failed");
+        return;
+      }
+      try {
+        const video = await window.videoAnalyzer.inspectVideoPath(path);
+        addInspectedProject(video);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        setStatus("failed");
+      }
+      return;
+    }
+
+    // url — extract from share text if present (抖音/小红书/B 站口令)
+    const targetUrl = extractUrl(inputValue) || inputValue.trim();
+    setStatus("downloading");
+    try {
+      if (!window.videoAnalyzer) {
+        setError("浏览器预览模式下无法拉取链接,请改用本地视频。");
+        setStatus("failed");
+        return;
+      }
+      const video = await window.videoAnalyzer.downloadVideo(targetUrl);
+      const displayTitle = video.title || video.filename;
+      const now = new Date().toISOString();
+      setProjects(prev => [{
+        id: video.projectId,
+        source: { type: "url", url: targetUrl, platform: video.platform },
+        localVideoPath: video.mediaUrl,
+        localFilePath: video.filePath,
+        videoName: displayTitle,
+        titleAutoGenerated: !!video.title,
+        durationSec: video.durationSec,
+        width: video.width,
+        height: video.height,
+        orientation: video.orientation,
+        status: "analyzing",
+        analysisOptions,
+        createdAt: now,
+        updatedAt: now,
+      }, ...prev]);
+      setActiveProjectId(video.projectId);
+      setStatus("idle");
+      setInputValue("");
+      window.setTimeout(() => setCurrentScreen("progress"), 300);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setStatus("failed");
     }
   };
 
+  const handleInputKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      handleSubmit();
+    }
+  };
+
+  const autoGrow = (el: HTMLTextAreaElement) => {
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  };
+
+  const handleDelete = async (event: MouseEvent<HTMLButtonElement>, projectId: string) => {
+    event.stopPropagation();
+    const ok = await confirm({
+      title: "删除项目",
+      description: "确定要删除这个项目吗?分析结果会一同删除。",
+      confirmLabel: "删除",
+      destructive: true,
+    });
+    if (!ok) return;
+    removeProject(projectId);
+  };
+
+  const handleDragEnter = (event: DragEvent<HTMLElement>) => {
+    if (!event.dataTransfer?.types.includes("Files")) return;
+    event.preventDefault();
+    setIsDragging(true);
+  };
+  const handleDragOver = (event: DragEvent<HTMLElement>) => {
+    if (!event.dataTransfer?.types.includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  };
+  const handleDragLeave = (event: DragEvent<HTMLElement>) => {
+    if (event.currentTarget === event.target) setIsDragging(false);
+  };
+  const handleDrop = async (event: DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    setIsDragging(false);
+    setDropError("");
+    const file = event.dataTransfer?.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("video/") && !/\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(file.name)) {
+      setDropError(`不是视频文件: ${file.name}`);
+      return;
+    }
+    if (window.videoAnalyzer) {
+      const filePath = window.videoAnalyzer.getPathForFile(file) || (file as File & { path?: string }).path;
+      if (filePath) {
+        try {
+          const video = await window.videoAnalyzer.inspectVideoPath(filePath);
+          addInspectedProject(video);
+        } catch (err) {
+          setDropError(err instanceof Error ? err.message : String(err));
+        }
+        return;
+      }
+    }
+    const objectUrl = URL.createObjectURL(file);
+    const videoEl = document.createElement("video");
+    videoEl.src = objectUrl;
+    videoEl.onloadedmetadata = () => {
+      const newProjectId = "proj-" + Date.now();
+      const now = new Date().toISOString();
+      setProjects(prev => [{
+        id: newProjectId,
+        source: { type: "local_file", originalPath: file.name },
+        localVideoPath: objectUrl,
+        videoName: file.name,
+        durationSec: videoEl.duration,
+        width: videoEl.videoWidth,
+        height: videoEl.videoHeight,
+        orientation: videoEl.videoWidth > videoEl.videoHeight ? "landscape" : videoEl.videoWidth < videoEl.videoHeight ? "portrait" : "square",
+        status: "analyzing",
+        analysisOptions,
+        createdAt: now,
+        updatedAt: now,
+      }, ...prev]);
+      setActiveProjectId(newProjectId);
+      setCurrentScreen("progress");
+    };
+  };
+
+  const composerStateClass = (() => {
+    if (status === "downloading") return "border-indigo-300 dark:border-indigo-700 ring-4 ring-indigo-50 dark:ring-indigo-950/40";
+    if (status === "failed") return "border-rose-300 dark:border-rose-800 ring-4 ring-rose-50 dark:ring-rose-950/40";
+    if (source.kind === "url") return "border-indigo-200 dark:border-indigo-900 ring-4 ring-indigo-50 dark:ring-indigo-950/40";
+    return "border-slate-200 dark:border-slate-800";
+  })();
+
   return (
-    <div className="flex-1 flex h-full">
-      <main className="flex-1 overflow-y-auto bg-slate-50 dark:bg-[#0A0A0B] p-8 md:p-12 relative">
-        <div className="max-w-4xl mx-auto space-y-8 mt-4">
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <button 
-              onClick={() => fileInputRef.current?.click()}
-              className="group flex flex-col p-6 bg-white dark:bg-[#20283e] hover:bg-slate-50 dark:hover:bg-[#27304a] border border-slate-200 dark:border-blue-500/20 rounded-2xl transition-all text-left shadow-sm hover:shadow relative overflow-hidden"
-            >
-              <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/5 rounded-full blur-3xl group-hover:bg-blue-500/10 transition-colors" />
-              <div className="flex items-center gap-4 relative z-10">
-                <div className="w-12 h-12 rounded-xl bg-blue-100 dark:bg-blue-600 flex items-center justify-center group-hover:scale-105 transition-transform shrink-0">
-                  <FolderOpen className="w-6 h-6 text-blue-600 dark:text-blue-100" />
-                </div>
-                <div>
-                  <h3 className="font-semibold text-slate-800 dark:text-slate-100 text-lg">打开视频</h3>
-                  <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">选择本地视频文件</p>
-                </div>
-              </div>
-            </button>
-            <input type="file" ref={fileInputRef} className="hidden" accept="video/*" onChange={handleFileChange} />
+    <main
+      className="flex-1 overflow-y-auto bg-slate-50 dark:bg-[#0c0d10] relative"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      <div className="max-w-4xl mx-auto px-8 pt-12 pb-24 space-y-10">
 
-            <button 
-              onClick={() => setCurrentScreen("url_pull")}
-              className="group flex flex-col p-6 bg-white dark:bg-[#291f3a] hover:bg-slate-50 dark:hover:bg-[#322646] border border-slate-200 dark:border-purple-500/20 rounded-2xl transition-all text-left shadow-sm hover:shadow relative overflow-hidden"
-            >
-              <div className="absolute top-0 right-0 w-32 h-32 bg-purple-500/5 rounded-full blur-3xl group-hover:bg-purple-500/10 transition-colors" />
-              <div className="flex items-center gap-4 relative z-10">
-                <div className="w-12 h-12 rounded-xl bg-purple-100 dark:bg-purple-600 flex items-center justify-center group-hover:scale-105 transition-transform shrink-0">
-                  <CloudDownload className="w-6 h-6 text-purple-600 dark:text-purple-100" />
-                </div>
-                <div>
-                  <h3 className="font-semibold text-slate-800 dark:text-slate-100 text-lg">拉取视频</h3>
-                  <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">从链接拉取短视频</p>
-                </div>
-              </div>
-            </button>
+        {/* Header */}
+        <header className="flex items-center gap-4 select-none">
+          <BrandLogo size={56} className="shrink-0" />
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">ClipIQ</h1>
+            <p className="text-xs font-mono text-slate-500 dark:text-slate-500 tracking-wider uppercase mt-1">视频内容洞察</p>
+          </div>
+        </header>
+
+        {/* Hero block */}
+        <section className="space-y-3">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">新建项目</h2>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">粘贴链接、拖入文件,或输入本地路径。</p>
           </div>
 
-          <div 
-            onClick={() => fileInputRef.current?.click()}
-            className="border-2 border-dashed border-slate-300 dark:border-slate-800 bg-white/50 dark:bg-slate-900/20 rounded-2xl p-16 flex flex-col items-center justify-center text-center cursor-pointer hover:bg-white dark:hover:bg-slate-900/40 hover:border-blue-400 dark:hover:border-blue-500/50 transition-all shadow-sm group"
+          {/* Composer */}
+          <div
+            className={`rounded-[18px] border bg-white dark:bg-[#14151a] p-1 transition-all ${composerStateClass}`}
           >
-            <div className="bg-slate-100 dark:bg-slate-800 p-4 rounded-full mb-4 group-hover:scale-105 transition-transform">
-              <UploadCloud className="w-8 h-8 text-slate-500 dark:text-slate-400" />
+            <div className="flex items-center gap-2 px-3 pt-3 pb-1">
+              <button
+                type="button"
+                onClick={handleFilePicker}
+                title="选择本地视频文件"
+                className="self-center w-[38px] h-[52px] rounded-[10px] border border-dashed border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#1c1e24] grid place-items-center text-slate-500 hover:text-indigo-600 hover:border-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors shrink-0"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+              <textarea
+                ref={inputRef}
+                value={inputValue}
+                onChange={(e) => {
+                  setInputValue(e.target.value);
+                  autoGrow(e.currentTarget);
+                }}
+                onKeyDown={handleInputKeyDown}
+                disabled={status === "downloading"}
+                rows={1}
+                placeholder="粘贴抖音 / B 站 / YouTube 链接,或抖音分享口令,或拖入视频文件"
+                className="flex-1 min-h-[52px] max-h-[200px] py-[15px] resize-none bg-transparent border-0 outline-none text-sm leading-snug text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-600 px-2 min-w-0 disabled:opacity-60"
+              />
+              <input type="file" ref={fileInputRef} className="hidden" accept="video/*" onChange={handleFileInputChange} />
             </div>
-            <h3 className="font-semibold text-slate-800 dark:text-slate-200 text-lg">拖拽视频到这里</h3>
-            <p className="text-sm text-slate-500 mt-2">支持 MP4、MOV、MKV、WebM 等格式</p>
+
+            <div className="flex justify-between items-center gap-2 pl-3 pr-2 pb-2">
+              <div className="flex gap-1.5 flex-wrap min-w-0 items-center">
+                <SourceChip source={source} status={status} />
+                <div ref={presetRef} className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setPresetOpen(o => !o)}
+                    className={`inline-flex items-center gap-1.5 h-[30px] px-3 rounded-full border text-[12.5px] whitespace-nowrap transition-colors ${
+                      presetOpen
+                        ? "border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300"
+                        : "border-slate-200 dark:border-slate-800 bg-white dark:bg-[#1c1e24] text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-[#222530]"
+                    }`}
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>{presetLabel}</span>
+                    <ChevronDown className={`w-3 h-3 opacity-60 transition-transform ${presetOpen ? "rotate-180" : ""}`} />
+                  </button>
+                  {presetOpen && (
+                    <PresetPopover
+                      currentPreset={currentPreset}
+                      onPickPreset={pickPreset}
+                      mode={mode}
+                      setMode={setMode}
+                      density={density}
+                      setDensity={setDensity}
+                      focus={focus}
+                      setFocus={setFocus}
+                      manualGenre={manualGenre}
+                      setManualGenre={setManualGenre}
+                    />
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleSubmit}
+                disabled={!canSubmit || status === "downloading"}
+                title="开始分析"
+                className="w-9 h-9 rounded-full bg-indigo-600 hover:bg-indigo-700 active:scale-95 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 dark:disabled:text-slate-600 text-white grid place-items-center transition-all shrink-0"
+              >
+                {status === "downloading" ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" />}
+              </button>
+            </div>
           </div>
 
-          <div className="space-y-4 pt-6">
-            <div className="flex items-center justify-between">
-              <h3 className="font-semibold text-slate-800 dark:text-slate-200">最近项目</h3>
-              {projects.length > 0 && (
-                <button className="text-sm text-blue-600 dark:text-blue-400 font-medium hover:underline flex items-center">
-                  查看全部 <ChevronRight className="w-4 h-4 ml-0.5" />
-                </button>
+          {!window.videoAnalyzer && (
+            <div className="flex justify-end text-[11px] font-mono uppercase tracking-wider text-amber-600 dark:text-amber-400 px-1">
+              浏览器预览模式
+            </div>
+          )}
+
+          {(error || dropError) && (
+            <div className="flex items-start gap-2 rounded-lg border border-rose-200 dark:border-rose-900/50 bg-rose-50 dark:bg-rose-950/30 px-3 py-2 text-sm text-rose-700 dark:text-rose-300">
+              <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{error || dropError}</span>
+            </div>
+          )}
+        </section>
+
+        {/* Projects table */}
+        {projects.length > 0 ? (
+          <section>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">最近项目</h3>
+              <SegmentedTabs
+                tab={tab}
+                onChange={setTab}
+                counts={{
+                  all: all.length,
+                  inProgress: inProgress.length,
+                  completed: completed.length,
+                  broken: broken.length,
+                }}
+              />
+            </div>
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] overflow-hidden">
+              {/* Header row */}
+              <div className="hidden md:grid grid-cols-[80px_1fr_72px_120px_88px_36px] gap-4 items-center px-3 py-2 border-b border-slate-200 dark:border-slate-800 text-[10.5px] font-mono uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                <span />
+                <span>项目</span>
+                <span>时长</span>
+                <span>更新</span>
+                <span>状态</span>
+                <span />
+              </div>
+              {visibleProjects.length === 0 ? (
+                <div className="text-center py-12 text-sm text-slate-400 dark:text-slate-500">
+                  {tab === "inProgress" && "暂无进行中项目"}
+                  {tab === "completed" && "暂无已完成项目"}
+                  {tab === "broken" && "暂无失败项目"}
+                  {tab === "all" && "暂无项目"}
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-100 dark:divide-slate-900">
+                  {visibleProjects.map(proj => (
+                    <ProjectRow
+                      key={proj.id}
+                      project={proj}
+                      onOpen={() => goToProject(proj)}
+                      onDelete={(e) => handleDelete(e, proj.id)}
+                      onThumbnailReady={(dataUrl) => setThumbnail(proj.id, dataUrl)}
+                    />
+                  ))}
+                </div>
               )}
             </div>
-            
-            {projects.length === 0 ? (
-               <div className="text-center py-12 border border-slate-200 dark:border-slate-800/50 rounded-xl bg-white/50 dark:bg-[#0E0E10] text-slate-500 text-sm">
-                 暂无最近项目，请导入视频开始分析。
-               </div>
-            ) : (
-              <div className="space-y-3">
-                {projects.map(proj => (
-                  <div 
-                    key={proj.id}
-                    onClick={() => {
-                      setActiveProjectId(proj.id);
-                      if (proj.status === "completed") setCurrentScreen("workspace");
-                      else if (proj.status === "download_failed") setCurrentScreen("url_pull");
-                      else setCurrentScreen("prepare");
-                    }}
-                    className="flex items-center p-3 rounded-xl bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 hover:border-blue-300 dark:hover:border-blue-500/50 shadow-sm cursor-pointer transition-all group"
-                  >
-                    <div className="w-[120px] h-[68px] bg-slate-100 dark:bg-slate-900 rounded bg-cover bg-center mr-4 shrink-0 relative overflow-hidden" style={{ backgroundImage: `url(${proj.localVideoPath})` }}>
-                       <div className="absolute inset-0 bg-black/10 group-hover:bg-transparent transition-colors" />
-                    </div>
-                    
-                    <div className="flex-1 min-w-0 pr-4">
-                      <h4 className="font-medium text-slate-800 dark:text-slate-200 text-sm truncate mb-1.5">{proj.videoName}</h4>
-                      <div className="flex items-center gap-2 text-[11px]">
-                        {proj.status === "completed" && <span className="flex items-center text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-200 dark:border-emerald-500/20"><CheckCircle2 className="w-3 h-3 mr-1" /> 已完成分析</span>}
-                        {proj.status === "analyzing" && <span className="flex items-center text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-200 dark:border-blue-500/20"><Clock className="w-3 h-3 mr-1" /> 分析中</span>}
-                        {proj.status === "download_failed" && <span className="flex items-center text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/10 px-1.5 py-0.5 rounded border border-red-200 dark:border-red-500/20"><XCircle className="w-3 h-3 mr-1" /> 下载失败</span>}
-                        {proj.status === "not_analyzed" && <span className="flex items-center text-slate-600 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700"><Clock className="w-3 h-3 mr-1" /> 未分析</span>}
-                      </div>
-                    </div>
-                    
-                    <div className="text-xs text-slate-400 font-mono hidden md:block w-32 text-right">
-                      {formatDate(new Date())}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+          </section>
+        ) : (
+          <div className="text-center py-16 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl bg-white/50 dark:bg-[#0e0e10]/30 text-slate-500 text-sm">
+            暂无项目,粘贴链接或拖入视频开始。
+          </div>
+        )}
+      </div>
+
+      {/* Full-page drag overlay */}
+      {isDragging && (
+        <div className="fixed inset-0 z-50 pointer-events-none">
+          <div className="absolute inset-4 rounded-2xl border-2 border-dashed border-indigo-400 bg-indigo-50/85 dark:bg-indigo-950/70 backdrop-blur-sm flex flex-col items-center justify-center gap-3">
+            <div className="w-14 h-14 rounded-full bg-indigo-600 text-white grid place-items-center">
+              <Upload className="w-6 h-6" />
+            </div>
+            <div className="text-xl font-semibold text-indigo-900 dark:text-indigo-100">释放以导入视频</div>
+            <div className="text-[11px] font-mono uppercase tracking-wider text-indigo-700/70 dark:text-indigo-300/70">
+              支持 MP4 · MOV · MKV · WEBM · AVI · M4V
+            </div>
           </div>
         </div>
-      </main>
+      )}
+    </main>
+  );
+}
+
+function SegmentedTabs({
+  tab, onChange, counts,
+}: {
+  tab: Tab;
+  onChange: (t: Tab) => void;
+  counts: Record<Tab, number>;
+}) {
+  const items: { key: Tab; label: string }[] = [
+    { key: "all", label: "全部" },
+    { key: "inProgress", label: "进行中" },
+    { key: "completed", label: "已完成" },
+    { key: "broken", label: "失败" },
+  ];
+  return (
+    <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-0.5">
+      {items.map(it => {
+        const active = tab === it.key;
+        const count = counts[it.key];
+        return (
+          <button
+            key={it.key}
+            type="button"
+            onClick={() => onChange(it.key)}
+            className={`inline-flex items-center gap-1.5 h-7 px-3 rounded-md text-[12px] transition-colors ${
+              active
+                ? "bg-slate-100 dark:bg-[#1c1e24] text-slate-900 dark:text-slate-100 font-medium"
+                : "text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+            }`}
+          >
+            <span>{it.label}</span>
+            {count > 0 && (
+              <span className={`font-mono text-[10.5px] tabular-nums ${active ? "text-slate-500 dark:text-slate-400" : "text-slate-400 dark:text-slate-600"}`}>
+                {count}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function Chip({ icon, label, active }: {
+  icon: ReactNode;
+  label: string;
+  active?: boolean;
+}) {
+  return (
+    <div
+      className={`inline-flex items-center gap-1.5 h-[30px] px-3 rounded-full border text-[12.5px] whitespace-nowrap select-none ${
+        active
+          ? "border-indigo-200 dark:border-indigo-900 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300"
+          : "border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#1c1e24] text-slate-500 dark:text-slate-400"
+      }`}
+    >
+      {icon}
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function SourceChip({ source, status }: { source: SourceState; status: "idle" | "downloading" | "failed" }) {
+  if (status === "downloading") {
+    return <Chip icon={<Loader2 className="w-3.5 h-3.5 animate-spin" />} label="正在拉取…" active />;
+  }
+  if (source.kind === "url") {
+    return <Chip icon={<LinkIcon className="w-3.5 h-3.5" />} label={source.label} active />;
+  }
+  if (source.kind === "file") {
+    return <Chip icon={<FileVideo className="w-3.5 h-3.5" />} label={source.label} active />;
+  }
+  if (source.kind === "unknown") {
+    return <Chip icon={<AlertTriangle className="w-3.5 h-3.5" />} label="未识别" />;
+  }
+  return <Chip icon={<LinkIcon className="w-3.5 h-3.5" />} label="自动识别来源" />;
+}
+
+type ProjectRowProps = {
+  project: Project;
+  onOpen: () => void;
+  onDelete: (e: MouseEvent<HTMLButtonElement>) => void;
+  onThumbnailReady: (dataUrl: string) => void;
+};
+
+const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDelete, onThumbnailReady }) => {
+  const platformLabel = projectSourceLabel(project.source);
+  const resolution = formatResolution(project.width, project.height);
+  const [thumb, setThumb] = useState<string | null>(project.thumbnailUrl ?? null);
+  const captureAttemptedRef = useRef(false);
+
+  useEffect(() => {
+    if (thumb || captureAttemptedRef.current) return;
+    if (!project.localVideoPath) return;
+    captureAttemptedRef.current = true;
+    const video = document.createElement("video");
+    video.muted = true;
+    video.crossOrigin = "anonymous";
+    video.preload = "metadata";
+    video.src = project.localVideoPath;
+    const cleanup = () => {
+      video.removeAttribute("src");
+      video.load();
+    };
+    video.onloadeddata = () => {
+      try {
+        video.currentTime = Math.min(0.2, (video.duration || 1) * 0.05);
+      } catch {
+        cleanup();
+      }
+    };
+    video.onseeked = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        const w = video.videoWidth;
+        const h = video.videoHeight;
+        if (!w || !h) { cleanup(); return; }
+        const targetW = 160;
+        const targetH = Math.round(targetW * (h / w));
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { cleanup(); return; }
+        ctx.drawImage(video, 0, 0, targetW, targetH);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
+        setThumb(dataUrl);
+        onThumbnailReady(dataUrl);
+      } catch {
+        // canvas tainted (cross-origin) — fall back to Film icon
+      } finally {
+        cleanup();
+      }
+    };
+    video.onerror = cleanup;
+    return cleanup;
+  }, [project.localVideoPath, thumb, onThumbnailReady]);
+
+  return (
+    <div
+      onClick={onOpen}
+      className="group grid grid-cols-[80px_1fr_72px_120px_88px_36px] gap-4 items-center px-3 py-2.5 cursor-pointer transition-colors hover:bg-slate-50 dark:hover:bg-[#1c1e24]"
+    >
+      <div className="w-[80px] h-[48px] rounded-md relative overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-[#1c1e24]">
+        {thumb ? (
+          <img src={thumb} alt={project.videoName} className="absolute inset-0 h-full w-full object-cover" />
+        ) : (
+          <div className="absolute inset-0 flex items-center justify-center text-slate-400 dark:text-slate-600">
+            <Film className="h-4 w-4" />
+          </div>
+        )}
+      </div>
+      <div className="min-w-0">
+        <div className="font-medium text-[13.5px] text-slate-900 dark:text-slate-100 truncate">{project.videoName}</div>
+        <div className="flex items-center gap-2 text-[11px] font-mono uppercase tracking-wide text-slate-500 dark:text-slate-500 mt-0.5">
+          {resolution && <span>{resolution}</span>}
+          {resolution && <span className="text-slate-300 dark:text-slate-700">·</span>}
+          <span>{platformLabel}</span>
+        </div>
+      </div>
+      <div className="text-[12px] font-mono tabular-nums text-slate-600 dark:text-slate-400">
+        {formatDuration(project.durationSec)}
+      </div>
+      <div className="text-[11px] font-mono text-slate-500 dark:text-slate-500 tabular-nums">
+        {formatDate(new Date(project.updatedAt || project.createdAt || Date.now()))}
+      </div>
+      <div>
+        <StatusBadge status={project.status} />
+      </div>
+      <button
+        type="button"
+        onClick={onDelete}
+        title="删除项目"
+        className="h-7 w-7 grid place-items-center rounded-md text-slate-400 opacity-0 group-hover:opacity-100 hover:bg-rose-50 hover:text-rose-500 dark:hover:bg-rose-950/40 dark:hover:text-rose-400 transition-all"
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+};
+
+function StatusBadge({ status }: { status: Project["status"] }) {
+  const base = "inline-flex items-center gap-1 h-5 px-1.5 rounded text-[10.5px] font-mono uppercase tracking-wider";
+  switch (status) {
+    case "completed":
+      return <span className={`${base} bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400`}>
+        <CheckCircle2 className="w-3 h-3" /> 完成
+      </span>;
+    case "analyzing":
+      return <span className={`${base} bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-400`}>
+        <Loader2 className="w-3 h-3 animate-spin" /> 分析中
+      </span>;
+    case "downloading":
+      return <span className={`${base} bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-400`}>
+        <Loader2 className="w-3 h-3 animate-spin" /> 下载中
+      </span>;
+    case "failed":
+    case "download_failed":
+      return <span className={`${base} bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-400`}>
+        <XCircle className="w-3 h-3" /> 失败
+      </span>;
+    case "not_analyzed":
+    default:
+      return <span className={`${base} bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400`}>
+        <Clock className="w-3 h-3" /> 待开始
+      </span>;
+  }
+}
+
+function PresetPopover({
+  currentPreset, onPickPreset,
+  mode, setMode, density, setDensity, focus, setFocus, manualGenre, setManualGenre,
+}: {
+  currentPreset: PresetKey;
+  onPickPreset: (p: PresetDef) => void;
+  mode: AnalysisOptions["mode"];
+  setMode: (v: AnalysisOptions["mode"]) => void;
+  density: AnalysisOptions["density"];
+  setDensity: (v: AnalysisOptions["density"]) => void;
+  focus: AnalysisOptions["focus"];
+  setFocus: (v: AnalysisOptions["focus"]) => void;
+  manualGenre: VideoGenre | "auto";
+  setManualGenre: (v: VideoGenre | "auto") => void;
+}) {
+  return (
+    <div
+      className="absolute z-30 top-full mt-2 left-0 w-[460px] rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] shadow-lg shadow-slate-900/5 dark:shadow-black/40 p-3 space-y-3"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div>
+        <div className="text-[10.5px] font-mono uppercase tracking-wider text-slate-500 mb-2">拉片强度</div>
+        <div className="grid grid-cols-3 gap-2">
+          {PRESETS.map(preset => {
+            const isActive = preset.key === currentPreset;
+            return (
+              <button
+                key={preset.key}
+                type="button"
+                onClick={() => onPickPreset(preset)}
+                className={`text-left rounded-lg border p-2.5 transition-colors ${
+                  isActive
+                    ? "border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/30"
+                    : "border-slate-200 dark:border-slate-800 bg-white dark:bg-[#1c1e24] hover:border-slate-300 dark:hover:border-slate-700"
+                }`}
+              >
+                <div className="mb-1">
+                  <span className={`text-[13px] font-semibold ${isActive ? "text-indigo-900 dark:text-indigo-200" : "text-slate-900 dark:text-slate-100"}`}>
+                    {preset.title}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-snug line-clamp-2">
+                  {preset.description}
+                </p>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="pt-3 border-t border-slate-100 dark:border-slate-800">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-[10.5px] font-mono uppercase tracking-wider text-slate-500">高级参数</span>
+          {currentPreset === "custom" && (
+            <span className="text-[10px] font-mono uppercase tracking-wider text-indigo-600 dark:text-indigo-400">已自定义</span>
+          )}
+        </div>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-2.5">
+          <PopoverField label="视频类型" wide>
+            <div className="flex flex-wrap gap-1">
+              {([
+                { value: "auto",        label: "自动识别" },
+                { value: "vlog",        label: "vlog" },
+                { value: "review",      label: "测评" },
+                { value: "travel",      label: "旅行" },
+                { value: "tutorial",    label: "教程" },
+                { value: "knowledge",   label: "知识" },
+                { value: "documentary", label: "纪录" },
+                { value: "short-drama", label: "短剧" },
+                { value: "other",       label: "其他" },
+              ] as const).map(opt => {
+                const active = opt.value === manualGenre;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setManualGenre(opt.value)}
+                    className={`h-6 px-2 rounded-md text-[11px] border transition-colors ${
+                      active
+                        ? "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-950/60 dark:text-indigo-300 dark:border-indigo-900"
+                        : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100 dark:bg-slate-900 dark:text-slate-400 dark:border-slate-800 dark:hover:bg-slate-800"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </PopoverField>
+          <PopoverField label="分析模式">
+            <PopoverSegment
+              value={mode}
+              options={[
+                { value: "quick", label: "快速" },
+                { value: "standard", label: "标准" },
+                { value: "detailed", label: "深度" },
+              ]}
+              onChange={(v) => setMode(v as AnalysisOptions["mode"])}
+            />
+          </PopoverField>
+          <PopoverField label="节点密度">
+            <PopoverSegment
+              value={density}
+              options={[
+                { value: "sparse", label: "稀疏" },
+                { value: "standard", label: "标准" },
+                { value: "dense", label: "密集" },
+              ]}
+              onChange={(v) => setDensity(v as AnalysisOptions["density"])}
+            />
+          </PopoverField>
+          <PopoverField label="关注重点" wide>
+            <PopoverSegment
+              value={focus}
+              options={[
+                { value: "all", label: "全部" },
+                { value: "narrative", label: "叙事" },
+                { value: "rhythm", label: "节奏" },
+                { value: "emotion", label: "情绪" },
+              ]}
+              onChange={(v) => setFocus(v as AnalysisOptions["focus"])}
+            />
+          </PopoverField>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PopoverField({ label, children, wide }: { label: string; children: ReactNode; wide?: boolean }) {
+  return (
+    <div className={wide ? "col-span-2" : undefined}>
+      <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-1">{label}</div>
+      {children}
+    </div>
+  );
+}
+
+function PopoverSegment({ value, options, onChange }: {
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="inline-flex w-full rounded-md bg-slate-100 dark:bg-slate-900 p-0.5">
+      {options.map(opt => {
+        const active = opt.value === value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => onChange(opt.value)}
+            className={`flex-1 h-6 px-1.5 rounded text-[11px] transition-colors ${
+              active
+                ? "bg-white dark:bg-[#14151a] text-slate-900 dark:text-slate-100 font-medium"
+                : "text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+            }`}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
     </div>
   );
 }

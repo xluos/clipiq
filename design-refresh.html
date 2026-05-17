@@ -1,0 +1,3130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280" />
+<title>ClipIQ · Design Refresh v0</title>
+<style>
+  :root {
+    --ink-12: #0a0a0b;
+    --ink-11: #14151a;
+    --ink-10: #1f2128;
+    --ink-9:  #2c2f38;
+    --ink-7:  #5b606e;
+    --ink-6:  #6f7484;
+    --ink-5:  #8d92a1;
+    --ink-4:  #b6bac6;
+    --ink-3:  #d8dae2;
+    --ink-2:  #ebedf1;
+    --ink-1:  #f4f5f7;
+    --paper:  #fbfbfc;
+
+    --accent:        #4f46e5;
+    --accent-soft:   #eef0ff;
+    --accent-ink:    #3730a3;
+    --accent-line:   #c7cbf5;
+
+    --ok:            #10884a;
+    --ok-soft:       #e6f4ec;
+    --warn:          #b45309;
+    --warn-soft:     #fdf3e7;
+    --danger:        #b91c1c;
+    --danger-soft:   #fbeaea;
+
+    --radius-sm: 6px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+
+    --shadow-overlay: 0 1px 2px rgba(15,16,20,.04), 0 8px 24px rgba(15,16,20,.08);
+
+    --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+
+  [data-theme="dark"] {
+    --ink-12: #f5f6f8;
+    --ink-11: #e4e6ea;
+    --ink-10: #cdd0d8;
+    --ink-9:  #aab0bc;
+    --ink-7:  #767c8a;
+    --ink-6:  #5e6470;
+    --ink-5:  #494e58;
+    --ink-4:  #353942;
+    --ink-3:  #262930;
+    --ink-2:  #1c1e24;
+    --ink-1:  #14151a;
+    --paper:  #0c0d10;
+
+    --accent-soft:  #1c1e3d;
+    --accent-ink:   #b7bcff;
+    --accent-line:  #353a78;
+
+    --ok-soft:      #122722;
+    --warn-soft:    #2a200f;
+    --danger-soft:  #2a1818;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: var(--font-sans);
+    color: var(--ink-12);
+    background: var(--paper);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .mono { font-family: var(--font-mono); font-feature-settings: "tnum" 1, "zero" 1; }
+  .label-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--ink-6);
+  }
+
+  /* ──────────────── shell ──────────────── */
+  .app-shell {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    min-height: 100vh;
+  }
+  .nav-rail {
+    border-right: 1px solid var(--ink-2);
+    padding: 16px 14px;
+    background: var(--ink-1);
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .nav-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    margin-bottom: 18px;
+  }
+  .nav-brand svg { display: block; }
+  .nav-brand h1 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0;
+    color: var(--ink-12);
+    letter-spacing: -.01em;
+  }
+  .nav-brand small {
+    font-family: var(--font-mono);
+    color: var(--ink-6);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    margin-top: 1px;
+    display: block;
+  }
+  .nav-section-title {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--ink-5);
+    padding: 14px 8px 6px;
+  }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 9px;
+    border-radius: var(--radius-md);
+    color: var(--ink-10);
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+    border: 1px solid transparent;
+  }
+  .nav-item:hover { background: var(--ink-2); }
+  .nav-item.is-active {
+    background: var(--ink-12);
+    color: var(--paper);
+  }
+  [data-theme="dark"] .nav-item.is-active {
+    background: var(--ink-11);
+    color: var(--ink-1);
+  }
+  .nav-item .num {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: inherit;
+    opacity: .55;
+  }
+
+  .surface {
+    padding: 28px 40px 80px;
+    overflow-y: auto;
+  }
+  .page-header {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--ink-2);
+    padding-bottom: 18px;
+    margin-bottom: 28px;
+  }
+  .page-header h2 {
+    margin: 4px 0 0;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -.015em;
+  }
+  .page-header .meta-line {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    display: flex;
+    gap: 14px;
+    align-items: center;
+  }
+  .page-header .meta-line .dot {
+    width: 5px; height: 5px; border-radius: 50%; background: var(--ok);
+  }
+
+  /* ──────────────── primitives ──────────────── */
+  .card {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    background: var(--paper);
+  }
+  .card.muted {
+    background: var(--ink-1);
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 20px;
+    padding: 0 7px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    background: var(--ink-2);
+    color: var(--ink-9);
+    border: 1px solid transparent;
+  }
+  .badge.accent { background: var(--accent-soft); color: var(--accent-ink); }
+  .badge.ok     { background: var(--ok-soft);     color: var(--ok); }
+  .badge.warn   { background: var(--warn-soft);   color: var(--warn); }
+  .badge.danger { background: var(--danger-soft); color: var(--danger); }
+  .badge.outline {
+    background: transparent;
+    border-color: var(--ink-3);
+    color: var(--ink-7);
+  }
+  .btn {
+    height: 32px;
+    padding: 0 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--ink-3);
+    background: var(--paper);
+    color: var(--ink-11);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  .btn:hover { background: var(--ink-1); border-color: var(--ink-4); }
+  .btn.primary {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .btn.primary:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
+  .btn.ghost {
+    border-color: transparent;
+    background: transparent;
+    color: var(--ink-9);
+  }
+  .btn.ghost:hover { background: var(--ink-2); color: var(--ink-11); }
+  .btn.danger-ghost { color: var(--danger); border-color: transparent; background: transparent; }
+  .btn.danger-ghost:hover { background: var(--danger-soft); }
+  .btn-sm { height: 26px; padding: 0 9px; font-size: 12px; gap: 4px; }
+
+  .kv {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 4px 14px;
+    font-size: 12.5px;
+  }
+  .kv dt { color: var(--ink-6); font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  .kv dd { margin: 0; color: var(--ink-11); }
+
+  .icn {
+    width: 14px; height: 14px;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .icn-lg { width: 18px; height: 18px; }
+
+  /* ──────────────── home ──────────────── */
+  .home-hero {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    background: var(--paper);
+    padding: 32px;
+    display: grid;
+    gap: 22px;
+  }
+  .home-hero h3 {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+  }
+  .home-hero p.lede {
+    margin: 0;
+    color: var(--ink-7);
+    font-size: 13px;
+    max-width: 620px;
+  }
+  .composer {
+    border: 1px solid var(--ink-3);
+    border-radius: 18px;
+    background: var(--paper);
+    padding: 4px;
+    transition: border-color .15s, box-shadow .15s, background .15s;
+  }
+  .composer.is-url {
+    border-color: var(--accent-line);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+    background: var(--paper);
+  }
+  .composer:focus-within {
+    border-color: var(--ink-7);
+  }
+  .composer.is-url:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .composer-input-row {
+    display: flex;
+    gap: 10px;
+    padding: 14px 14px 6px;
+    align-items: flex-start;
+  }
+  .composer-attach {
+    width: 38px;
+    height: 52px;
+    border-radius: 10px;
+    border: 1px dashed var(--ink-3);
+    background: var(--ink-1);
+    display: grid;
+    place-items: center;
+    color: var(--ink-6);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: border-color .15s, color .15s, background .15s;
+  }
+  .composer-attach:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .composer-input-row input {
+    flex: 1;
+    height: 52px;
+    background: transparent;
+    border: 0;
+    outline: none;
+    font: inherit;
+    font-size: 16px;
+    color: var(--ink-12);
+    letter-spacing: -.003em;
+    padding: 0 6px;
+    min-width: 0;
+  }
+  .composer-input-row input::placeholder { color: var(--ink-6); }
+
+  .composer-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px 8px 14px;
+  }
+  .composer-chips {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 12px;
+    border-radius: 999px;
+    border: 1px solid var(--ink-2);
+    background: var(--paper);
+    color: var(--ink-9);
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: background .12s, border-color .12s, color .12s;
+    white-space: nowrap;
+  }
+  .chip:hover { background: var(--ink-1); border-color: var(--ink-3); }
+  .chip.is-active {
+    border-color: var(--accent-line);
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+  }
+  .chip.is-active .dot { background: var(--accent); }
+  .chip .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ink-4);
+    flex-shrink: 0;
+  }
+  .chip .caret { font-size: 9px; opacity: .7; margin-left: 2px; }
+  .chip svg { color: inherit; }
+
+  .send-btn {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    border: 0;
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+    transition: background .15s, transform .1s;
+    flex-shrink: 0;
+  }
+  .send-btn:hover { background: var(--accent-ink); }
+  .send-btn:active { transform: scale(.96); }
+  .send-btn:disabled {
+    background: var(--ink-3);
+    color: var(--ink-6);
+    cursor: not-allowed;
+  }
+  .send-btn svg { width: 16px; height: 16px; }
+
+  .composer-foot {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 8px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .07em;
+  }
+
+  .group-bar {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    margin: 36px 0 10px;
+  }
+  .group-bar h4 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink-12);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .group-bar h4 .count {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-6);
+    background: var(--ink-2);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-weight: 400;
+  }
+  .group-bar .group-tools {
+    display: flex; gap: 8px; align-items: center;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+
+  .project-row {
+    display: grid;
+    grid-template-columns: 100px 1fr auto;
+    gap: 16px;
+    padding: 12px;
+    border-radius: var(--radius-md);
+    border: 1px solid transparent;
+    align-items: center;
+    cursor: pointer;
+  }
+  .project-row:hover { background: var(--ink-1); border-color: var(--ink-2); }
+  .project-row .thumb {
+    width: 100px;
+    height: 60px;
+    border-radius: var(--radius-sm);
+    background: linear-gradient(135deg, var(--ink-3), var(--ink-5));
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .project-row .thumb::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,.18);
+  }
+  .project-row .thumb .play {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: #fff;
+    z-index: 1;
+  }
+  .project-row .meta-main {
+    min-width: 0;
+  }
+  .project-row .title {
+    font-weight: 500;
+    font-size: 13.5px;
+    color: var(--ink-12);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 3px;
+  }
+  .project-row .sub {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .project-row .sub .sep { color: var(--ink-4); }
+  .project-row .status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .progress-thin {
+    width: 100px;
+    height: 4px;
+    background: var(--ink-2);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .progress-thin > span {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+  }
+
+  .project-list-empty {
+    border: 1px dashed var(--ink-3);
+    border-radius: var(--radius-md);
+    padding: 18px;
+    text-align: center;
+    color: var(--ink-6);
+    font-size: 12.5px;
+  }
+
+  /* ──────────────── workspace ──────────────── */
+  .ws-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(380px, 1fr);
+    gap: 20px;
+    align-items: start;
+  }
+  .ws-video {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    background: var(--paper);
+  }
+  .ws-video .frame {
+    aspect-ratio: 16/9;
+    background: radial-gradient(circle at 30% 40%, #2a3142, #0c0e16);
+    position: relative;
+    color: #fff;
+  }
+  .ws-video .frame .scrim {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(60% 50% at 50% 60%, transparent 0%, rgba(0,0,0,.35) 100%);
+  }
+  .ws-video .frame .meta {
+    position: absolute;
+    bottom: 14px;
+    left: 16px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: .04em;
+    color: #e7e9f0;
+    text-transform: uppercase;
+    display: flex;
+    gap: 14px;
+  }
+  .ws-video .frame .subtitle {
+    position: absolute;
+    bottom: 50px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(8,9,12,.62);
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: #fff;
+    font-size: 13px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    text-align: center;
+    max-width: 70%;
+  }
+  .ws-bar {
+    padding: 12px 16px 14px;
+    border-top: 1px solid var(--ink-2);
+    background: var(--paper);
+  }
+  .ws-scrub {
+    height: 26px;
+    position: relative;
+    margin: 4px 0 4px;
+  }
+  .ws-scrub .track {
+    position: absolute;
+    inset: 11px 0 11px;
+    background: var(--ink-2);
+    border-radius: 2px;
+  }
+  .ws-scrub .filled {
+    position: absolute;
+    left: 0;
+    top: 11px;
+    width: 41%;
+    height: 4px;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+  .ws-scrub .marker {
+    position: absolute;
+    top: 6px;
+    width: 2px;
+    height: 14px;
+    background: var(--ink-4);
+    border-radius: 1px;
+  }
+  .ws-scrub .marker.highlight {
+    background: var(--accent);
+    width: 3px;
+    height: 18px;
+    top: 4px;
+  }
+  .ws-scrub .head {
+    position: absolute;
+    top: 4px;
+    width: 14px;
+    height: 18px;
+    background: var(--ink-12);
+    border-radius: 3px;
+    transform: translateX(-50%);
+    left: 41%;
+    border: 2px solid var(--paper);
+  }
+  .ws-times {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-6);
+  }
+  .ws-controls {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-top: 8px;
+  }
+  .ws-controls .btn { height: 28px; padding: 0 10px; font-size: 12px; }
+  .ws-controls .speed {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-7);
+  }
+
+  .ws-right {
+    display: grid;
+    gap: 14px;
+  }
+
+  .ws-summary {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    padding: 14px 16px;
+    background: var(--ink-1);
+  }
+  .ws-summary header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .ws-summary h3 {
+    margin: 0;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ink-12);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .ws-summary p {
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--ink-9);
+    line-height: 1.55;
+  }
+  .ws-summary .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 9px;
+  }
+  .ws-summary .chip {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-7);
+    border: 1px solid var(--ink-3);
+    background: var(--paper);
+    padding: 1px 7px;
+    border-radius: 999px;
+  }
+
+  .ws-toolbar {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 6px;
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-md);
+    background: var(--paper);
+  }
+  .ws-toolbar .seg {
+    display: flex;
+    background: var(--ink-1);
+    padding: 3px;
+    border-radius: 6px;
+  }
+  .ws-toolbar .seg .seg-btn {
+    border: 0;
+    background: transparent;
+    color: var(--ink-7);
+    font: inherit;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .ws-toolbar .seg .seg-btn.is-active {
+    background: var(--paper);
+    color: var(--ink-12);
+    box-shadow: 0 1px 2px rgba(15,16,20,.06);
+  }
+  .ws-toolbar .search {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 8px;
+    color: var(--ink-6);
+  }
+  .ws-toolbar .search input {
+    flex: 1;
+    border: 0;
+    background: transparent;
+    outline: none;
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--ink-11);
+  }
+  .ws-toolbar .search input::placeholder { color: var(--ink-6); }
+
+  .node-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .node {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-md);
+    background: var(--paper);
+    overflow: hidden;
+    transition: border-color .12s;
+  }
+  .node:hover { border-color: var(--ink-3); }
+  .node.is-current {
+    border-color: var(--accent-line);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .node-row {
+    display: grid;
+    grid-template-columns: 56px 1fr auto;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 12px;
+    cursor: pointer;
+  }
+  .node-time {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-7);
+    letter-spacing: .03em;
+    line-height: 1.2;
+  }
+  .node-time strong {
+    display: block;
+    color: var(--ink-12);
+    font-weight: 500;
+  }
+  .node-title {
+    font-size: 13px;
+    color: var(--ink-12);
+    font-weight: 500;
+    line-height: 1.4;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .node-title .label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .node-meta-line {
+    margin-top: 2px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    display: flex;
+    gap: 10px;
+  }
+  .node-meta-line .sep { color: var(--ink-4); }
+  .node-actions {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    color: var(--ink-6);
+  }
+  .node-actions .icn-btn {
+    width: 24px;
+    height: 24px;
+    border-radius: 5px;
+    display: grid;
+    place-items: center;
+    color: inherit;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+  }
+  .node-actions .icn-btn:hover { background: var(--ink-2); color: var(--ink-11); }
+  .node-detail {
+    display: none;
+    padding: 0 12px 14px 80px;
+    border-top: 1px dashed var(--ink-2);
+    padding-top: 12px;
+  }
+  .node.is-open .node-detail { display: block; }
+  .node.is-open .node-row .chev { transform: rotate(90deg); }
+  .node-detail p {
+    margin: 0 0 10px;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--ink-9);
+  }
+  .node-detail .frames {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+  .node-detail .frames .ft {
+    width: 88px; height: 50px;
+    border-radius: 4px;
+    background: linear-gradient(135deg, #4b5161, #232730);
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .node-detail .frames .ft.is-rep {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .node-detail .frames .ft span {
+    position: absolute;
+    bottom: 2px; left: 3px;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: #fff;
+    background: rgba(0,0,0,.4);
+    padding: 0 4px;
+    border-radius: 2px;
+  }
+  .node-detail .audit {
+    display: grid;
+    gap: 4px;
+    margin-bottom: 6px;
+  }
+  .node-detail .audit .row {
+    display: flex;
+    align-items: start;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--ink-9);
+  }
+  .node-detail .audit .row .badge { flex-shrink: 0; margin-top: 1px; }
+
+  /* ──────────────── settings ──────────────── */
+  .settings-wrap { display: grid; gap: 32px; }
+
+  .pipeline {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    background: var(--paper);
+    padding: 22px 24px;
+  }
+  .pipeline header { display: flex; justify-content: space-between; align-items: end; margin-bottom: 18px; }
+  .pipeline header h3 {
+    margin: 4px 0 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -.005em;
+  }
+  .pipeline header p {
+    margin: 4px 0 0;
+    font-size: 12.5px;
+    color: var(--ink-7);
+    max-width: 520px;
+  }
+  .pipeline-steps {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+    margin-top: 8px;
+  }
+  .stage {
+    display: grid;
+    grid-template-columns: 36px 1fr 280px;
+    gap: 18px;
+    padding: 14px 0;
+    border-top: 1px solid var(--ink-2);
+    position: relative;
+  }
+  .stage:first-child { border-top: 0; }
+  .stage-num {
+    width: 28px; height: 28px;
+    border-radius: 7px;
+    background: var(--ink-1);
+    border: 1px solid var(--ink-2);
+    display: grid; place-items: center;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-7);
+    font-weight: 500;
+  }
+  .stage.is-key .stage-num {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .stage-body h4 {
+    margin: 4px 0 4px;
+    font-size: 13.5px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--ink-12);
+  }
+  .stage-body p {
+    margin: 0;
+    font-size: 12px;
+    color: var(--ink-7);
+    line-height: 1.55;
+  }
+  .stage-body .tag-row {
+    margin-top: 6px;
+    display: flex; gap: 6px; flex-wrap: wrap;
+  }
+
+  .picker {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-md);
+    padding: 8px 10px;
+    background: var(--ink-1);
+  }
+  .picker .label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--ink-6);
+    margin-bottom: 4px;
+  }
+  .picker .body {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .picker .body .provider {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink-12);
+  }
+  .picker .body .model {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-7);
+    background: var(--paper);
+    border: 1px solid var(--ink-2);
+    padding: 1px 7px;
+    border-radius: 4px;
+  }
+  .picker .body .change {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--accent-ink);
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    padding: 4px 6px;
+    border-radius: 4px;
+  }
+  .picker .body .change:hover { background: var(--accent-soft); }
+
+  .providers {
+    display: grid;
+    gap: 14px;
+  }
+  .provider-card {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    background: var(--paper);
+    overflow: hidden;
+  }
+  .provider-card header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--ink-2);
+    background: var(--ink-1);
+  }
+  .provider-card header .title {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 14px; font-weight: 600;
+  }
+  .provider-card header .title .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+  }
+  .provider-card header .title .dot.local  { background: var(--ok); }
+  .provider-card header .title .dot.remote { background: var(--accent); }
+  .provider-card header .actions { display: flex; gap: 6px; }
+  .provider-card .body {
+    padding: 14px 18px;
+    display: grid;
+    gap: 8px;
+  }
+  .provider-card .model-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 12px;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px dashed var(--ink-2);
+  }
+  .provider-card .model-row:last-child { border-bottom: 0; }
+  .provider-card .model-row .id {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ink-12);
+  }
+  .provider-card .model-row .label-line {
+    font-size: 11.5px;
+    color: var(--ink-6);
+    margin-top: 1px;
+  }
+  .provider-card .caps { display: flex; gap: 4px; }
+  .provider-card .model-row .right-control { color: var(--ink-6); }
+
+  /* ──────────────── tweaks ──────────────── */
+  .tweaks {
+    position: fixed;
+    right: 18px;
+    bottom: 18px;
+    z-index: 50;
+    border: 1px solid var(--ink-2);
+    background: var(--paper);
+    border-radius: 12px;
+    box-shadow: var(--shadow-overlay);
+    overflow: hidden;
+    width: 240px;
+    font-size: 12.5px;
+  }
+  .tweaks header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 8px 14px;
+    background: var(--ink-12);
+    color: var(--paper);
+  }
+  [data-theme="dark"] .tweaks header { background: var(--ink-11); color: var(--ink-1); }
+  .tweaks header h3 {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    font-weight: 500;
+  }
+  .tweaks header button {
+    background: transparent;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    opacity: .7;
+    padding: 2px 6px;
+  }
+  .tweaks .group {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--ink-2);
+  }
+  .tweaks .group:last-child { border-bottom: 0; }
+  .tweaks .group label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    color: var(--ink-9);
+    cursor: pointer;
+  }
+  .tweaks .group label input { accent-color: var(--accent); }
+  .tweaks.is-collapsed { width: 130px; }
+  .tweaks.is-collapsed .group { display: none; }
+  .tweaks.is-collapsed header h3::after { content: " ▴"; }
+  .tweaks:not(.is-collapsed) header h3::after { content: " ▾"; }
+
+  /* ──────────────── design rationale page ──────────────── */
+  .rationale { max-width: 760px; }
+  .rationale h3 {
+    font-size: 16px;
+    margin: 32px 0 10px;
+    font-weight: 600;
+    letter-spacing: -.005em;
+  }
+  .rationale h3:first-child { margin-top: 0; }
+  .rationale h3 .n {
+    font-family: var(--font-mono);
+    color: var(--ink-5);
+    font-size: 12px;
+    margin-right: 12px;
+    font-weight: 400;
+  }
+  .rationale p {
+    margin: 0 0 12px;
+    line-height: 1.7;
+    color: var(--ink-10);
+    font-size: 13.5px;
+  }
+  .rationale .compare {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    margin: 12px 0 18px;
+  }
+  .rationale .compare-row {
+    display: grid;
+    grid-template-columns: 100px 1fr;
+    border-top: 1px solid var(--ink-2);
+  }
+  .rationale .compare-row:first-child { border-top: 0; }
+  .rationale .compare-row .h {
+    background: var(--ink-1);
+    padding: 12px 14px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    border-right: 1px solid var(--ink-2);
+    display: flex;
+    align-items: start;
+    padding-top: 14px;
+  }
+  .rationale .compare-row .b {
+    padding: 12px 16px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--ink-10);
+  }
+  .rationale .compare-row .b strong { color: var(--ink-12); }
+
+  /* ──────────────── prepare ──────────────── */
+  .prepare-wrap { display: grid; gap: 24px; }
+  .prepare-video {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    background: var(--paper);
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    overflow: hidden;
+  }
+  .prepare-video .thumb-large {
+    aspect-ratio: 16/9;
+    background: linear-gradient(135deg, #2a3142, #0c0e16);
+    position: relative;
+    color: #fff;
+  }
+  .prepare-video .thumb-large .play-overlay {
+    position: absolute;
+    inset: 0;
+    display: grid; place-items: center;
+    opacity: .8;
+  }
+  .prepare-video .thumb-large .duration-tag {
+    position: absolute;
+    bottom: 10px; right: 10px;
+    background: rgba(0,0,0,.55);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: #fff;
+  }
+  .prepare-video .vmeta { padding: 20px 24px; }
+  .prepare-video .vmeta h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -.005em;
+  }
+  .prepare-video .vmeta .src {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    margin-top: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .prepare-video .vmeta dl {
+    margin: 16px 0 0;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px 18px;
+  }
+  .prepare-video .vmeta dl > div { display: grid; gap: 2px; }
+  .prepare-video .vmeta dl dt {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    margin: 0;
+  }
+  .prepare-video .vmeta dl dd {
+    margin: 0;
+    font-size: 13px;
+    color: var(--ink-12);
+  }
+
+  .preset-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+  .preset {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    background: var(--paper);
+    padding: 18px 18px 14px;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .preset:hover { border-color: var(--ink-4); }
+  .preset.is-selected {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .preset.is-selected h4 { color: var(--accent-ink); }
+  .preset header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .preset h4 {
+    margin: 0;
+    font-size: 14.5px;
+    font-weight: 600;
+  }
+  .preset .est {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ink-7);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+  .preset.is-selected .est { color: var(--accent-ink); }
+  .preset p {
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--ink-8);
+    line-height: 1.55;
+  }
+  .preset .stats {
+    display: flex;
+    gap: 10px;
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--ink-2);
+  }
+  .preset.is-selected .stats { border-top-color: var(--accent-line); }
+  .preset .stats .stat { flex: 1; }
+  .preset .stats .v {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--ink-12);
+    font-weight: 500;
+  }
+  .preset .stats .k {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    margin-top: 1px;
+  }
+
+  .advanced {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    background: var(--paper);
+  }
+  .advanced summary {
+    cursor: pointer;
+    padding: 14px 18px;
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13.5px;
+    font-weight: 500;
+  }
+  .advanced summary::-webkit-details-marker { display: none; }
+  .advanced summary::after {
+    content: "▾";
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-6);
+  }
+  .advanced[open] summary::after { content: "▴"; }
+  .advanced .adv-body {
+    border-top: 1px solid var(--ink-2);
+    padding: 18px;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px 24px;
+  }
+  .adv-field { display: grid; gap: 6px; }
+  .adv-field .k {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .07em;
+  }
+  .adv-field .seg {
+    display: flex;
+    background: var(--ink-1);
+    padding: 3px;
+    border-radius: 6px;
+  }
+  .adv-field .seg button {
+    flex: 1;
+    border: 0;
+    background: transparent;
+    color: var(--ink-7);
+    font: inherit;
+    font-size: 12.5px;
+    padding: 6px 0;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .adv-field .seg button.is-active {
+    background: var(--paper);
+    color: var(--ink-12);
+    box-shadow: 0 1px 2px rgba(15,16,20,.05);
+  }
+
+  .prepare-cta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 18px 22px;
+    border-radius: var(--radius-lg);
+    background: var(--ink-12);
+    color: var(--paper);
+  }
+  [data-theme="dark"] .prepare-cta {
+    background: var(--ink-3);
+    color: var(--ink-12);
+  }
+  .prepare-cta .summary {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--ink-4);
+    display: flex; gap: 16px;
+  }
+  .prepare-cta .summary strong { color: var(--paper); font-weight: 500; }
+  [data-theme="dark"] .prepare-cta .summary { color: var(--ink-7); }
+  [data-theme="dark"] .prepare-cta .summary strong { color: var(--ink-12); }
+  .prepare-cta .btn.primary { height: 38px; padding: 0 22px; font-size: 14px; }
+
+  /* ──────────────── progress ──────────────── */
+  .progress-wrap {
+    display: grid;
+    gap: 18px;
+    max-width: 880px;
+    margin: 0 auto;
+  }
+  .progress-hero {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    background: var(--paper);
+    padding: 26px 30px 24px;
+  }
+  .progress-hero .topline {
+    display: flex;
+    justify-content: space-between;
+    align-items: end;
+    margin-bottom: 18px;
+    gap: 16px;
+  }
+  .progress-hero h3 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -.012em;
+    line-height: 1.3;
+  }
+  .progress-hero .topline .sub {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-6);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+  .progress-hero .eta {
+    text-align: right;
+    flex-shrink: 0;
+  }
+  .progress-hero .eta .big {
+    font-family: var(--font-mono);
+    font-size: 22px;
+    color: var(--ink-12);
+    font-weight: 500;
+    line-height: 1;
+    letter-spacing: -.01em;
+  }
+  .progress-hero .eta .small {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    margin-top: 5px;
+  }
+  .progress-bar-thick {
+    height: 8px;
+    background: var(--ink-2);
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 4px 0 12px;
+    position: relative;
+  }
+  .progress-bar-thick > span {
+    display: block;
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-ink));
+    border-radius: 4px;
+    width: 38%;
+    position: relative;
+  }
+  .progress-bar-thick > span::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,.35), transparent);
+    animation: shimmer 1.8s linear infinite;
+  }
+  @keyframes shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+  }
+  .progress-meta {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-7);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+  .progress-meta strong { color: var(--ink-12); font-weight: 500; }
+
+  .stages {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .stage-card {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    background: var(--paper);
+    padding: 16px 18px;
+  }
+  .stage-card.is-current {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
+  }
+  [data-theme="dark"] .stage-card.is-current { background: var(--ink-2); }
+  .stage-card h5 {
+    margin: 0 0 4px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    font-weight: 500;
+  }
+  .stage-card.is-current h5 { color: var(--accent-ink); }
+  .stage-card .step-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--ink-12);
+    margin: 0 0 4px;
+    letter-spacing: -.005em;
+  }
+  .stage-card .step-detail {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-7);
+  }
+  .stage-card .done-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+  .stage-card .done-list .row {
+    display: flex;
+    justify-content: space-between;
+    color: var(--ink-9);
+  }
+  .stage-card .done-list .row .t { color: var(--ink-6); }
+
+  .log-feed {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    background: var(--ink-1);
+    padding: 12px 16px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-8);
+    line-height: 1.7;
+    max-height: 132px;
+    overflow-y: auto;
+  }
+  .log-feed .ln { display: flex; gap: 12px; }
+  .log-feed .ln .ts { color: var(--ink-5); flex-shrink: 0; }
+  .log-feed .ln.ok .body { color: var(--ok); }
+  .log-feed .ln.warn .body { color: var(--warn); }
+
+  .progress-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+
+  /* ──────────────── report ──────────────── */
+  .report-wrap {
+    display: grid;
+    grid-template-columns: 200px minmax(0, 1fr);
+    gap: 28px;
+    align-items: start;
+  }
+  .report-toc {
+    position: sticky;
+    top: 28px;
+    display: grid;
+    gap: 2px;
+  }
+  .report-toc .toc-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 9px;
+    border-radius: 5px;
+    color: var(--ink-7);
+    font-size: 12.5px;
+    cursor: pointer;
+    font-family: var(--font-sans);
+  }
+  .report-toc .toc-item:hover { background: var(--ink-1); color: var(--ink-12); }
+  .report-toc .toc-item.is-active {
+    background: var(--ink-12);
+    color: var(--paper);
+  }
+  [data-theme="dark"] .report-toc .toc-item.is-active { background: var(--ink-11); color: var(--ink-1); }
+  .report-toc .toc-item .nm {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    opacity: .55;
+  }
+
+  .report-body { display: grid; gap: 16px; }
+
+  .report-hero {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    background: var(--paper);
+    padding: 26px 32px;
+    display: grid;
+    grid-template-columns: 1fr 200px;
+    gap: 32px;
+    align-items: center;
+  }
+  .report-hero .lead h3 {
+    margin: 4px 0 8px;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -.012em;
+    line-height: 1.4;
+  }
+  .report-hero .lead p {
+    margin: 0;
+    font-size: 13.5px;
+    color: var(--ink-9);
+    line-height: 1.65;
+  }
+  .report-hero .lead .chips {
+    margin-top: 14px;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .report-hero .score-block {
+    border-left: 1px solid var(--ink-2);
+    padding-left: 26px;
+    text-align: center;
+  }
+  .report-hero .score-block .score {
+    font-family: var(--font-mono);
+    font-size: 54px;
+    line-height: 1;
+    color: var(--ink-12);
+    font-weight: 500;
+    letter-spacing: -.04em;
+  }
+  .report-hero .score-block .score sup {
+    font-size: 18px;
+    color: var(--ink-5);
+    margin-left: 1px;
+    top: -.5em;
+    position: relative;
+  }
+  .report-hero .score-block .label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    margin-top: 4px;
+  }
+  .report-hero .score-block .grade {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ok);
+    margin-top: 7px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+
+  .findings {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+  .finding {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-md);
+    background: var(--paper);
+    padding: 14px 16px 13px;
+    cursor: pointer;
+  }
+  .finding:hover { border-color: var(--ink-4); }
+  .finding header {
+    display: flex; justify-content: space-between;
+    margin-bottom: 4px;
+    align-items: center;
+  }
+  .finding .k {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .07em;
+  }
+  .finding .v {
+    font-family: var(--font-mono);
+    font-size: 18px;
+    color: var(--ink-12);
+    font-weight: 500;
+    letter-spacing: -.01em;
+  }
+  .finding p {
+    margin: 4px 0 0;
+    font-size: 12.5px;
+    color: var(--ink-9);
+    line-height: 1.55;
+  }
+  .finding.is-warn {
+    background: var(--warn-soft);
+    border-color: rgba(180, 83, 9, .25);
+  }
+  .finding.is-warn .v { color: var(--warn); }
+
+  .report-section {
+    border: 1px solid var(--ink-2);
+    border-radius: var(--radius-lg);
+    background: var(--paper);
+    overflow: hidden;
+  }
+  .report-section summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 14px 22px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+  }
+  .report-section summary::-webkit-details-marker { display: none; }
+  .report-section summary .lhs {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex: 1;
+    min-width: 0;
+  }
+  .report-section summary .lhs .num {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-5);
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    flex-shrink: 0;
+  }
+  .report-section summary .lhs .title-line {
+    flex: 1;
+    min-width: 0;
+  }
+  .report-section summary h4 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .report-section summary .preview {
+    font-size: 12.5px;
+    color: var(--ink-7);
+    line-height: 1.5;
+    margin-top: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .report-section summary .chev {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-5);
+  }
+  .report-section[open] summary { border-bottom: 1px solid var(--ink-2); }
+  .report-section[open] summary .preview { display: none; }
+  .report-section[open] summary .chev::after { content: "收起 ▴"; }
+  .report-section:not([open]) summary .chev::after { content: "展开 ▾"; }
+  .report-section .section-body {
+    padding: 16px 22px 20px;
+    font-size: 13px;
+    color: var(--ink-10);
+    line-height: 1.65;
+  }
+  .report-section .section-body p { margin: 0 0 10px; }
+  .report-section .section-body p:last-child { margin-bottom: 0; }
+  .report-section .section-body .struct-grid {
+    display: grid;
+    grid-template-columns: 100px 1fr;
+    gap: 8px 18px;
+  }
+  .report-section .section-body .struct-grid dt {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-6);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    padding-top: 2px;
+  }
+  .report-section .section-body .struct-grid dd {
+    margin: 0;
+    color: var(--ink-10);
+  }
+
+  /* ──────────────── hidden surfaces ──────────────── */
+  .surface { display: none; }
+  .surface.is-visible { display: block; }
+</style>
+</head>
+<body data-theme="light">
+
+<div class="app-shell">
+  <aside class="nav-rail">
+    <div class="nav-brand">
+      <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
+        <rect x="2" y="2" width="28" height="28" rx="8" fill="var(--accent)"/>
+        <path d="M13 11 L21 16 L13 21 Z" fill="white"/>
+      </svg>
+      <div>
+        <h1>ClipIQ</h1>
+        <small>Design Refresh · v0</small>
+      </div>
+    </div>
+
+    <div class="nav-section-title">重设计页</div>
+    <div class="nav-item is-active" data-screen="home">
+      <span>主页 · 项目入口</span>
+      <span class="num">01</span>
+    </div>
+    <div class="nav-item" data-screen="prepare">
+      <span>准备 · 选 preset</span>
+      <span class="num">02</span>
+    </div>
+    <div class="nav-item" data-screen="progress">
+      <span>进度 · 分析中</span>
+      <span class="num">03</span>
+    </div>
+    <div class="nav-item" data-screen="workspace">
+      <span>工作台 · 拉片</span>
+      <span class="num">04</span>
+    </div>
+    <div class="nav-item" data-screen="report">
+      <span>报告 · 总结</span>
+      <span class="num">05</span>
+    </div>
+    <div class="nav-item" data-screen="settings">
+      <span>设置 · 模型管线</span>
+      <span class="num">06</span>
+    </div>
+
+    <div class="nav-section-title">说明</div>
+    <div class="nav-item" data-screen="rationale">
+      <span>设计取舍</span>
+      <span class="num">★</span>
+    </div>
+
+    <div style="margin-top: auto; padding: 8px; font-family: var(--font-mono); font-size: 10px; color: var(--ink-5); line-height: 1.5;">
+      右下角 Tweaks 可切换<br/>明暗 / 节点折叠 / 字幕显示。
+    </div>
+  </aside>
+
+  <!-- ═══════════════════════════════════════ HOME ═══════════════════════════════════════ -->
+  <main class="surface is-visible" data-screen="home">
+    <div class="page-header">
+      <div>
+        <div class="label-eyebrow">Screen 01 · Home</div>
+        <h2>把链接、文件或路径塞进去就行。</h2>
+      </div>
+      <div class="meta-line">
+        <span><span class="dot"></span> 本地推理 待命</span>
+        <span>主分析 qwen3-vl-plus</span>
+      </div>
+    </div>
+
+    <section class="home-hero">
+      <div>
+        <h3>新建项目</h3>
+        <p class="lede">粘贴链接、拖入文件,或输入本地路径。</p>
+      </div>
+
+      <div class="composer is-url" id="smart-field">
+        <div class="composer-input-row">
+          <button class="composer-attach" title="选择本地视频文件">
+            <svg class="icn icn-lg" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <input id="smart-input"
+                 type="text"
+                 placeholder="粘贴抖音 / B 站 / YouTube 链接,或拖入视频文件;支持 / 调出操作"
+                 value="https://v.douyin.com/hH37Ad_Dlik/" />
+        </div>
+        <div class="composer-toolbar">
+          <div class="composer-chips">
+            <button class="chip is-active" id="chip-source">
+              <svg class="icn" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>
+              <span id="chip-source-label">链接 · DOUYIN</span>
+              <span class="caret">▾</span>
+            </button>
+            <button class="chip">
+              <svg class="icn" viewBox="0 0 24 24"><path d="M4 4h6v6H4z"/><path d="M14 4h6v6h-6z"/><path d="M4 14h6v6H4z"/><path d="M14 14h6v6h-6z"/></svg>
+              <span>标准拉片</span>
+              <span class="caret">▾</span>
+            </button>
+            <button class="chip">
+              <svg class="icn" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/></svg>
+              <span>主分析 qwen-vl-plus</span>
+              <span class="caret">▾</span>
+            </button>
+          </div>
+          <button class="send-btn" title="开始分析">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="composer-foot">
+        ⏎ 回车开始 · ⌘V 粘贴 · ⌥V 沿用上次本地视频
+      </div>
+    </section>
+
+    <div class="group-bar">
+      <h4>进行中 <span class="count">2</span></h4>
+      <div class="group-tools"><span>按更新时间排序</span></div>
+    </div>
+    <div class="card" style="padding: 6px;">
+      <div class="project-row">
+        <div class="thumb"><div class="play"><svg class="icn icn-lg" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z" fill="currentColor"/></svg></div></div>
+        <div class="meta-main">
+          <div class="title">全上海最忧郁的机位 — 抖音转载</div>
+          <div class="sub">
+            <span class="mono">02:31</span>
+            <span class="sep">·</span>
+            <span class="mono">DOUYIN</span>
+            <span class="sep">·</span>
+            <span>正在生成节点</span>
+          </div>
+        </div>
+        <div class="status">
+          <div class="progress-thin"><span style="width: 67%"></span></div>
+          <span class="badge accent mono">67%</span>
+          <button class="btn ghost btn-sm">查看</button>
+        </div>
+      </div>
+      <div class="project-row">
+        <div class="thumb" style="background: linear-gradient(135deg, #6b3b2a, #2a1d18)"><div class="play"><svg class="icn icn-lg" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z" fill="currentColor"/></svg></div></div>
+        <div class="meta-main">
+          <div class="title">20260309-175950.mp4</div>
+          <div class="sub">
+            <span class="mono">01:51</span>
+            <span class="sep">·</span>
+            <span class="mono">LOCAL</span>
+            <span class="sep">·</span>
+            <span>等待抽帧</span>
+          </div>
+        </div>
+        <div class="status">
+          <div class="progress-thin"><span style="width: 9%"></span></div>
+          <span class="badge mono">9%</span>
+          <button class="btn ghost btn-sm">查看</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="group-bar">
+      <h4>已完成 <span class="count">5</span></h4>
+      <div class="group-tools"><span>近 30 天</span></div>
+    </div>
+    <div class="card" style="padding: 6px;">
+      <div class="project-row">
+        <div class="thumb" style="background: linear-gradient(135deg, #2a4a6b, #11202e)"><div class="play"><svg class="icn icn-lg" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z" fill="currentColor"/></svg></div></div>
+        <div class="meta-main">
+          <div class="title">Stripe Press · 25 周年纪录片</div>
+          <div class="sub">
+            <span class="mono">08:42</span>
+            <span class="sep">·</span>
+            <span class="mono">YOUTUBE</span>
+            <span class="sep">·</span>
+            <span>14 个节点 · 5 个亮点</span>
+          </div>
+        </div>
+        <div class="status">
+          <span class="badge ok mono">已完成</span>
+          <button class="btn ghost btn-sm">打开</button>
+        </div>
+      </div>
+      <div class="project-row">
+        <div class="thumb" style="background: linear-gradient(135deg, #614a8c, #2a2240)"><div class="play"><svg class="icn icn-lg" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z" fill="currentColor"/></svg></div></div>
+        <div class="meta-main">
+          <div class="title">城市漫步 vlog cut #03</div>
+          <div class="sub">
+            <span class="mono">03:18</span>
+            <span class="sep">·</span>
+            <span class="mono">LOCAL</span>
+            <span class="sep">·</span>
+            <span>9 个节点 · 评级 8.2</span>
+          </div>
+        </div>
+        <div class="status">
+          <span class="badge ok mono">已完成</span>
+          <button class="btn ghost btn-sm">打开</button>
+        </div>
+      </div>
+      <div class="project-row">
+        <div class="thumb" style="background: linear-gradient(135deg, #874f2a, #3a2218)"><div class="play"><svg class="icn icn-lg" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z" fill="currentColor"/></svg></div></div>
+        <div class="meta-main">
+          <div class="title">蜂蜜柠檬测评 · 5 款对比</div>
+          <div class="sub">
+            <span class="mono">06:01</span>
+            <span class="sep">·</span>
+            <span class="mono">BILIBILI</span>
+            <span class="sep">·</span>
+            <span>11 个节点 · 1 处违反</span>
+          </div>
+        </div>
+        <div class="status">
+          <span class="badge warn mono">1 处违反</span>
+          <button class="btn ghost btn-sm">打开</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="group-bar">
+      <h4>失败 <span class="count">1</span></h4>
+      <div class="group-tools"><span>可重试</span></div>
+    </div>
+    <div class="card" style="padding: 6px;">
+      <div class="project-row">
+        <div class="thumb" style="background: linear-gradient(135deg, #5a3030, #2a1818)"><div class="play"><svg class="icn icn-lg" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z" fill="currentColor"/></svg></div></div>
+        <div class="meta-main">
+          <div class="title">某条小红书链接（已删除）</div>
+          <div class="sub">
+            <span class="mono">—</span>
+            <span class="sep">·</span>
+            <span class="mono">XHS</span>
+            <span class="sep">·</span>
+            <span>来源 404 · 改用本地视频?</span>
+          </div>
+        </div>
+        <div class="status">
+          <span class="badge danger mono">下载失败</span>
+          <button class="btn ghost btn-sm">重试</button>
+          <button class="btn ghost btn-sm">删除</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ═══════════════════════════════════════ WORKSPACE ═══════════════════════════════════════ -->
+  <main class="surface" data-screen="workspace">
+    <div class="page-header">
+      <div>
+        <div class="label-eyebrow">Screen 02 · Workspace</div>
+        <h2>全上海最忧郁的机位</h2>
+      </div>
+      <div class="meta-line">
+        <span class="mono">02:31</span>
+        <span>14 个节点</span>
+        <span><span class="dot"></span> 已完成 · qwen3-vl-plus</span>
+      </div>
+    </div>
+
+    <div class="ws-grid">
+      <div class="ws-video">
+        <div class="frame">
+          <div class="scrim"></div>
+          <div class="subtitle" id="subtitle">"我猜这是一个故事的开头 也是一个故事的结尾"</div>
+          <div class="meta">
+            <span>01:02 / 02:31</span>
+            <span>1920 × 1080</span>
+            <span>NODE 5 · 情绪转折</span>
+          </div>
+        </div>
+        <div class="ws-bar">
+          <div class="ws-scrub">
+            <div class="track"></div>
+            <div class="filled"></div>
+            <div class="marker highlight" style="left: 8%"></div>
+            <div class="marker" style="left: 14%"></div>
+            <div class="marker" style="left: 22%"></div>
+            <div class="marker highlight" style="left: 33%"></div>
+            <div class="marker" style="left: 41%"></div>
+            <div class="marker" style="left: 53%"></div>
+            <div class="marker highlight" style="left: 64%"></div>
+            <div class="marker" style="left: 72%"></div>
+            <div class="marker" style="left: 88%"></div>
+            <div class="head"></div>
+          </div>
+          <div class="ws-times">
+            <span>00:00</span>
+            <span>01:02</span>
+            <span>02:31</span>
+          </div>
+          <div class="ws-controls">
+            <button class="btn">
+              <svg class="icn" viewBox="0 0 24 24"><path d="M6 5h3v14H6z" fill="currentColor" stroke="none"/><path d="M14 5h3v14h-3z" fill="currentColor" stroke="none"/></svg>
+              暂停
+            </button>
+            <button class="btn ghost btn-sm">⤺ -10s</button>
+            <button class="btn ghost btn-sm">+10s ⤻</button>
+            <button class="btn ghost btn-sm">上一节点 ⇡</button>
+            <button class="btn ghost btn-sm">下一节点 ⇣</button>
+            <span class="speed">1.0×</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="ws-right">
+
+        <!-- summary card 替代独立 tab -->
+        <div class="ws-summary">
+          <header>
+            <h3>
+              <svg class="icn" viewBox="0 0 24 24"><path d="M12 3l9 4.5v9L12 21l-9-4.5v-9z"/><path d="M3 7.5l9 4.5 9-4.5"/><path d="M12 12v9"/></svg>
+              全局概览
+            </h3>
+            <button class="btn ghost btn-sm">展开全文</button>
+          </header>
+          <p>城市夜景空镜开场，旁白快速切入"故事开头也是结尾"。中段反复用同一机位拍摄行人与高架，节奏放缓；尾段切到外滩天际线，旁白回到情绪化收束。整体属于&hellip;</p>
+          <div class="chips">
+            <span class="chip">vlog · 城市</span>
+            <span class="chip">慢节奏</span>
+            <span class="chip">空镜为主</span>
+            <span class="chip">无 BGM 段落 33%</span>
+          </div>
+        </div>
+
+        <div class="ws-toolbar">
+          <div class="seg">
+            <button class="seg-btn is-active">逻辑节点</button>
+            <button class="seg-btn">严格镜头</button>
+          </div>
+          <div class="search">
+            <svg class="icn" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <input placeholder="搜索节点 / 字幕 / 标签…" />
+          </div>
+          <button class="btn ghost btn-sm">
+            <svg class="icn" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+            筛选
+          </button>
+        </div>
+
+        <div class="node-list" id="node-list">
+
+          <article class="node" data-open="false">
+            <div class="node-row">
+              <div class="node-time">
+                <strong class="mono">00:00</strong>
+                <span class="mono">↳ 12s</span>
+              </div>
+              <div>
+                <div class="node-title">
+                  <span class="label">空镜开场 — 雨夜高架的灯流</span>
+                  <span class="badge accent">钩子</span>
+                </div>
+                <div class="node-meta-line">
+                  <span>SHOT CHANGE</span>
+                  <span class="sep">·</span>
+                  <span>沉郁 7/10</span>
+                  <span class="sep">·</span>
+                  <span>命中 R-HOOK-001</span>
+                </div>
+              </div>
+              <div class="node-actions">
+                <button class="icn-btn" title="跳到此处"><svg class="icn" viewBox="0 0 24 24"><path d="M5 4v16l14-8z" fill="currentColor" stroke="none"/></svg></button>
+                <button class="icn-btn chev" title="展开"><svg class="icn" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+              </div>
+            </div>
+            <div class="node-detail">
+              <p>3 个空镜组成开场,镜头从远景高架灯流缓慢推到一个静止的红绿灯,旁白迟到 4 秒才进入。镜头节奏比观众预期慢半拍,营造迟疑感,与下文&ldquo;故事开头&rdquo;的旁白形成呼应。</p>
+              <div class="frames">
+                <div class="ft is-rep" style="background: linear-gradient(135deg, #1d2535, #050811)"><span class="mono">00:02</span></div>
+                <div class="ft" style="background: linear-gradient(135deg, #2a334a, #0a0e1a)"><span class="mono">00:05</span></div>
+                <div class="ft is-rep" style="background: linear-gradient(135deg, #1f2b40, #06090f)"><span class="mono">00:08</span></div>
+                <div class="ft" style="background: linear-gradient(135deg, #1a2231, #04060c)"><span class="mono">00:11</span></div>
+              </div>
+              <div class="audit">
+                <div class="row"><span class="badge ok mono">命中</span><span><strong>R-HOOK-001</strong> · 前 3 秒建立视觉钩子。空镜+延迟旁白构成钩子,置信度 0.86。</span></div>
+              </div>
+            </div>
+          </article>
+
+          <article class="node is-current is-open" data-open="true">
+            <div class="node-row">
+              <div class="node-time">
+                <strong class="mono">01:02</strong>
+                <span class="mono">↳ 18s</span>
+              </div>
+              <div>
+                <div class="node-title">
+                  <span class="label">情绪反折 — 旁白回到&ldquo;故事开头&rdquo;</span>
+                  <span class="badge accent">关键</span>
+                </div>
+                <div class="node-meta-line">
+                  <span>EMOTION TURN</span>
+                  <span class="sep">·</span>
+                  <span>反差 9/10</span>
+                  <span class="sep">·</span>
+                  <span>违反 R-PACING-004</span>
+                </div>
+              </div>
+              <div class="node-actions">
+                <button class="icn-btn" title="跳到此处"><svg class="icn" viewBox="0 0 24 24"><path d="M5 4v16l14-8z" fill="currentColor" stroke="none"/></svg></button>
+                <button class="icn-btn chev" title="收起"><svg class="icn" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+              </div>
+            </div>
+            <div class="node-detail">
+              <p>同一机位静拍一对行人走过,旁白第一次回到开场的句式"故事的开头也是结尾",字幕居中、留白比例放大。镜头与旁白节奏从中段的快切回到开场的慢镜,完成情绪闭环。</p>
+              <div class="frames">
+                <div class="ft is-rep" style="background: linear-gradient(135deg, #2c2530, #100b14)"><span class="mono">01:02</span></div>
+                <div class="ft" style="background: linear-gradient(135deg, #2f2733, #110c17)"><span class="mono">01:08</span></div>
+                <div class="ft" style="background: linear-gradient(135deg, #322a36, #14101a)"><span class="mono">01:14</span></div>
+                <div class="ft is-rep" style="background: linear-gradient(135deg, #2a2530, #0f0a14)"><span class="mono">01:19</span></div>
+              </div>
+              <div class="audit">
+                <div class="row"><span class="badge accent mono">高光</span><span>情绪反差 9/10,字幕停留时长 +1.6s,被识别为该视频的&ldquo;转&rdquo;。</span></div>
+                <div class="row"><span class="badge warn mono">违反</span><span><strong>R-PACING-004</strong> · 关键节奏点字幕停留 ≤ 1.2s。当前 0.9s,建议延长 0.4s 以适配观众阅读速度。</span></div>
+              </div>
+            </div>
+          </article>
+
+          <article class="node" data-open="false">
+            <div class="node-row">
+              <div class="node-time">
+                <strong class="mono">01:23</strong>
+                <span class="mono">↳ 9s</span>
+              </div>
+              <div>
+                <div class="node-title">
+                  <span class="label">行人入画 — 第一次出现人物特写</span>
+                </div>
+                <div class="node-meta-line">
+                  <span>SHOT CHANGE</span>
+                  <span class="sep">·</span>
+                  <span>平静 5/10</span>
+                </div>
+              </div>
+              <div class="node-actions">
+                <button class="icn-btn"><svg class="icn" viewBox="0 0 24 24"><path d="M5 4v16l14-8z" fill="currentColor" stroke="none"/></svg></button>
+                <button class="icn-btn chev"><svg class="icn" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+              </div>
+            </div>
+            <div class="node-detail">
+              <p>占位:点击展开后会在此显示镜头描述 / 代表帧 / 命中与违反 / 字幕分段。默认折叠以减少首屏视觉噪声。</p>
+            </div>
+          </article>
+
+          <article class="node" data-open="false">
+            <div class="node-row">
+              <div class="node-time">
+                <strong class="mono">01:45</strong>
+                <span class="mono">↳ 14s</span>
+              </div>
+              <div>
+                <div class="node-title">
+                  <span class="label">高架灯流回切 — 节奏放慢</span>
+                  <span class="badge outline">叙事</span>
+                </div>
+                <div class="node-meta-line">
+                  <span>EDIT INTENT</span>
+                  <span class="sep">·</span>
+                  <span>沉郁 6/10</span>
+                </div>
+              </div>
+              <div class="node-actions">
+                <button class="icn-btn"><svg class="icn" viewBox="0 0 24 24"><path d="M5 4v16l14-8z" fill="currentColor" stroke="none"/></svg></button>
+                <button class="icn-btn chev"><svg class="icn" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+              </div>
+            </div>
+            <div class="node-detail">
+              <p>占位:点击展开看详情。</p>
+            </div>
+          </article>
+
+          <article class="node" data-open="false">
+            <div class="node-row">
+              <div class="node-time">
+                <strong class="mono">02:14</strong>
+                <span class="mono">↳ 17s</span>
+              </div>
+              <div>
+                <div class="node-title">
+                  <span class="label">外滩天际线收束</span>
+                  <span class="badge accent">结尾</span>
+                </div>
+                <div class="node-meta-line">
+                  <span>SHOT CHANGE</span>
+                  <span class="sep">·</span>
+                  <span>开放 8/10</span>
+                  <span class="sep">·</span>
+                  <span>命中 R-ENDING-002</span>
+                </div>
+              </div>
+              <div class="node-actions">
+                <button class="icn-btn"><svg class="icn" viewBox="0 0 24 24"><path d="M5 4v16l14-8z" fill="currentColor" stroke="none"/></svg></button>
+                <button class="icn-btn chev"><svg class="icn" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+              </div>
+            </div>
+            <div class="node-detail">
+              <p>占位:点击展开看详情。</p>
+            </div>
+          </article>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <!-- ═══════════════════════════════════════ SETTINGS ═══════════════════════════════════════ -->
+  <main class="surface" data-screen="settings">
+    <div class="page-header">
+      <div>
+        <div class="label-eyebrow">Screen 03 · Settings</div>
+        <h2>每个管线步骤用什么模型,自己看着办。</h2>
+      </div>
+      <div class="meta-line">
+        <span><span class="dot"></span> 配置自动保存</span>
+        <span class="mono">cfg v2 · 6 providers</span>
+      </div>
+    </div>
+
+    <div class="settings-wrap">
+
+      <section class="pipeline">
+        <header>
+          <div>
+            <div class="label-eyebrow">Section 01</div>
+            <h3>分析管线 · 4 个调用点</h3>
+            <p>每一步绑定独立模型,改完立即生效。</p>
+          </div>
+          <button class="btn">
+            <svg class="icn" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+            重置为默认
+          </button>
+        </header>
+
+        <div class="pipeline-steps">
+
+          <div class="stage">
+            <div class="stage-num">01</div>
+            <div class="stage-body">
+              <h4>抽帧初筛 <span class="badge outline">simple · vision</span></h4>
+              <p>对每秒 1-2 帧的抽帧打标(场景类型、主体、是否空帧),过滤重复与低信息量帧。</p>
+              <div class="tag-row">
+                <span class="badge">需要视觉</span>
+                <span class="badge">速度优先</span>
+                <span class="badge">本地推荐</span>
+              </div>
+            </div>
+            <div class="picker">
+              <div class="label">当前使用</div>
+              <div class="body">
+                <span class="provider">本地 llama</span>
+                <span class="model">qwen3-vl 0.8B Q4_K_M</span>
+                <button class="change">替换 ▾</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="stage">
+            <div class="stage-num">02</div>
+            <div class="stage-body">
+              <h4>字幕识别 <span class="badge outline">audio</span></h4>
+              <p>从音轨提取台词,作为节点字幕来源。</p>
+              <div class="tag-row">
+                <span class="badge">音频转写</span>
+                <span class="badge">本地推荐</span>
+              </div>
+            </div>
+            <div class="picker">
+              <div class="label">当前使用</div>
+              <div class="body">
+                <span class="provider">本地 whisper.cpp</span>
+                <span class="model">whisper-base</span>
+                <button class="change">替换 ▾</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="stage">
+            <div class="stage-num">03</div>
+            <div class="stage-body">
+              <h4>镜头合并 + 全局摘要 <span class="badge outline">medium · text</span></h4>
+              <p>把同一镜头的若干帧合并成镜头描述,聚合成全局摘要并推断视频类型。</p>
+              <div class="tag-row">
+                <span class="badge">推理</span>
+                <span class="badge">中等成本</span>
+              </div>
+            </div>
+            <div class="picker">
+              <div class="label">当前使用</div>
+              <div class="body">
+                <span class="provider">DashScope</span>
+                <span class="model">qwen-plus</span>
+                <button class="change">替换 ▾</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="stage is-key">
+            <div class="stage-num">04</div>
+            <div class="stage-body">
+              <h4>主分析 <span class="badge accent">complex · vision</span></h4>
+              <p>基于镜头描述 + 字幕 + 关键帧,产出节点评审、方法论审计、情绪曲线。</p>
+              <div class="tag-row">
+                <span class="badge accent">需要视觉</span>
+                <span class="badge accent">推理</span>
+                <span class="badge accent">最大上下文</span>
+              </div>
+            </div>
+            <div class="picker">
+              <div class="label">当前使用</div>
+              <div class="body">
+                <span class="provider">DashScope</span>
+                <span class="model">qwen-vl-plus</span>
+                <button class="change">替换 ▾</button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <section>
+        <header style="margin-bottom: 14px;">
+          <div class="label-eyebrow">Section 02</div>
+          <h3 style="margin: 4px 0 0; font-size: 15px; font-weight: 600;">供应商 · 可选项池</h3>
+          <p style="margin: 4px 0 0; font-size: 12.5px; color: var(--ink-7); max-width: 580px;">本地推理与 OpenAI 兼容供应商共用同一卡片格式。</p>
+        </header>
+
+        <div class="providers">
+
+          <div class="provider-card">
+            <header>
+              <div class="title">
+                <span class="dot local"></span>
+                本地 llama
+                <span class="badge ok mono">运行中 · 端口 65410</span>
+              </div>
+              <div class="actions">
+                <button class="btn btn-sm">下载模型</button>
+                <button class="btn btn-sm">停止</button>
+              </div>
+            </header>
+            <div class="body">
+              <div class="model-row">
+                <div>
+                  <div class="id">qwen3-vl 0.8B Q4_K_M</div>
+                  <div class="label-line">800 MB · 当前已加载</div>
+                </div>
+                <div class="caps">
+                  <span class="badge accent">视觉</span>
+                  <span class="badge">速度</span>
+                </div>
+                <div class="right-control">
+                  <span class="badge ok mono">已下载</span>
+                </div>
+              </div>
+              <div class="model-row">
+                <div>
+                  <div class="id">qwen3-vl 2B Q4_K_M</div>
+                  <div class="label-line">1.7 GB · 视觉能力更强</div>
+                </div>
+                <div class="caps">
+                  <span class="badge accent">视觉</span>
+                  <span class="badge">推理</span>
+                </div>
+                <div class="right-control">
+                  <button class="btn btn-sm">下载</button>
+                </div>
+              </div>
+              <div class="model-row">
+                <div>
+                  <div class="id">qwen3-vl 4B Q4_K_M</div>
+                  <div class="label-line">3.5 GB · 接近远端 mini 档</div>
+                </div>
+                <div class="caps">
+                  <span class="badge accent">视觉</span>
+                  <span class="badge">推理</span>
+                  <span class="badge">最大上下文</span>
+                </div>
+                <div class="right-control">
+                  <button class="btn btn-sm">下载</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="provider-card">
+            <header>
+              <div class="title">
+                <span class="dot local"></span>
+                本地 whisper.cpp
+                <span class="badge ok mono">运行中 · 端口 65420</span>
+              </div>
+              <div class="actions">
+                <button class="btn btn-sm">下载模型</button>
+              </div>
+            </header>
+            <div class="body">
+              <div class="model-row">
+                <div>
+                  <div class="id">whisper-base</div>
+                  <div class="label-line">142 MB · 当前管线在用</div>
+                </div>
+                <div class="caps"><span class="badge">音频</span></div>
+                <div class="right-control"><span class="badge ok mono">已下载</span></div>
+              </div>
+              <div class="model-row">
+                <div>
+                  <div class="id">whisper-small</div>
+                  <div class="label-line">466 MB</div>
+                </div>
+                <div class="caps"><span class="badge">音频</span></div>
+                <div class="right-control"><button class="btn btn-sm">下载</button></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="provider-card">
+            <header>
+              <div class="title">
+                <span class="dot remote"></span>
+                DashScope
+                <span class="badge mono">远端</span>
+              </div>
+              <div class="actions">
+                <button class="btn btn-sm">测试连接</button>
+                <button class="btn btn-sm">编辑</button>
+              </div>
+            </header>
+            <div class="body">
+              <div class="kv" style="margin-bottom: 6px;">
+                <dt>Base</dt><dd class="mono" style="font-size: 11.5px;">https://dashscope.aliyuncs.com/compatible-mode/v1</dd>
+                <dt>Key</dt><dd class="mono" style="font-size: 11.5px;">sk-************6c2b</dd>
+                <dt>协议</dt><dd>OpenAI · chat completions</dd>
+              </div>
+              <div class="model-row">
+                <div>
+                  <div class="id">qwen-vl-plus</div>
+                  <div class="label-line">主分析在用</div>
+                </div>
+                <div class="caps">
+                  <span class="badge accent">视觉</span>
+                  <span class="badge">推理</span>
+                </div>
+                <div class="right-control"><button class="btn ghost btn-sm">移除</button></div>
+              </div>
+              <div class="model-row">
+                <div>
+                  <div class="id">qwen-plus</div>
+                  <div class="label-line">镜头合并在用</div>
+                </div>
+                <div class="caps">
+                  <span class="badge">推理</span>
+                </div>
+                <div class="right-control"><button class="btn ghost btn-sm">移除</button></div>
+              </div>
+              <div class="model-row">
+                <div>
+                  <div class="id">qwen-turbo</div>
+                  <div class="label-line">未使用</div>
+                </div>
+                <div class="caps">
+                  <span class="badge">速度</span>
+                </div>
+                <div class="right-control"><button class="btn ghost btn-sm">移除</button></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="provider-card" style="border-style: dashed;">
+            <header style="background: transparent;">
+              <div class="title" style="color: var(--ink-6); font-weight: 500;">
+                + 添加远端供应商
+              </div>
+              <div class="actions">
+                <button class="btn btn-sm">OpenAI 兼容</button>
+                <button class="btn btn-sm">Anthropic</button>
+                <button class="btn btn-sm">自定义</button>
+              </div>
+            </header>
+          </div>
+
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <!-- ═══════════════════════════════════════ PREPARE ═══════════════════════════════════════ -->
+  <main class="surface" data-screen="prepare">
+    <div class="page-header">
+      <div>
+        <div class="label-eyebrow">Screen 02 · Prepare</div>
+        <h2>挑一个 preset,然后就可以走了。</h2>
+      </div>
+      <div class="meta-line">
+        <span><span class="dot"></span> 准备就绪</span>
+        <span>4 个调用点已绑定</span>
+      </div>
+    </div>
+
+    <div class="prepare-wrap">
+
+      <section class="prepare-video">
+        <div class="thumb-large">
+          <div class="play-overlay">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
+          </div>
+          <span class="duration-tag mono">02:31</span>
+        </div>
+        <div class="vmeta">
+          <h3>全上海最忧郁的机位</h3>
+          <div class="src">douyin · v.douyin.com/hH37Ad_Dlik</div>
+          <dl>
+            <div><dt>时长</dt><dd class="mono">02:31</dd></div>
+            <div><dt>分辨率</dt><dd class="mono">1920 × 1080</dd></div>
+            <div><dt>朝向</dt><dd>横屏</dd></div>
+            <div><dt>音轨</dt><dd>有 · 自动转写</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section>
+        <div class="label-eyebrow" style="margin-bottom: 10px;">Section 01 · 拉片强度</div>
+        <div class="preset-grid">
+          <div class="preset">
+            <header>
+              <h4>轻拉片</h4>
+              <span class="est">~ 45s</span>
+            </header>
+            <p>仅识别镜头切换和关键叙事点,不做方法论审计。适合快速浏览。</p>
+            <div class="stats">
+              <div class="stat"><div class="v">5-8</div><div class="k">节点</div></div>
+              <div class="stat"><div class="v">关</div><div class="k">字幕</div></div>
+              <div class="stat"><div class="v">关</div><div class="k">审计</div></div>
+            </div>
+          </div>
+          <div class="preset is-selected">
+            <header>
+              <h4>标准拉片</h4>
+              <span class="est">~ 2 min</span>
+            </header>
+            <p>识别节点、情绪曲线、字幕,跑方法论 audit。日常拉片够用。</p>
+            <div class="stats">
+              <div class="stat"><div class="v">10-15</div><div class="k">节点</div></div>
+              <div class="stat"><div class="v">开</div><div class="k">字幕</div></div>
+              <div class="stat"><div class="v">开</div><div class="k">审计</div></div>
+            </div>
+          </div>
+          <div class="preset">
+            <header>
+              <h4>深度拉片</h4>
+              <span class="est">~ 5 min</span>
+            </header>
+            <p>每个镜头独立分析,加做剪辑意图反推和构图分析。慢但全面。</p>
+            <div class="stats">
+              <div class="stat"><div class="v">20+</div><div class="k">节点</div></div>
+              <div class="stat"><div class="v">开</div><div class="k">字幕</div></div>
+              <div class="stat"><div class="v">深</div><div class="k">审计</div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <details class="advanced">
+        <summary>
+          <span>自定义高级参数</span>
+          <span style="font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-6); text-transform: uppercase; letter-spacing: .07em;">通常不用改</span>
+        </summary>
+        <div class="adv-body">
+          <div class="adv-field">
+            <div class="k">视频类型</div>
+            <div class="seg">
+              <button class="is-active">自动识别</button>
+              <button>vlog</button>
+              <button>测评</button>
+              <button>短剧</button>
+            </div>
+          </div>
+          <div class="adv-field">
+            <div class="k">节点密度</div>
+            <div class="seg">
+              <button>稀疏</button>
+              <button class="is-active">标准</button>
+              <button>密集</button>
+            </div>
+          </div>
+          <div class="adv-field">
+            <div class="k">关注重点</div>
+            <div class="seg">
+              <button class="is-active">全部</button>
+              <button>叙事</button>
+              <button>节奏</button>
+              <button>情绪</button>
+            </div>
+          </div>
+          <div class="adv-field">
+            <div class="k">抽帧策略</div>
+            <div class="seg">
+              <button>1 fps</button>
+              <button class="is-active">2 fps</button>
+              <button>关键帧</button>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <div class="prepare-cta">
+        <div class="summary">
+          <span>已选 · <strong>标准拉片</strong></span>
+          <span>预估 · <strong>2 min</strong></span>
+          <span>消耗 · <strong>~ ¥0.12</strong></span>
+        </div>
+        <button class="btn primary">
+          开始分析
+          <svg class="icn" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+        </button>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- ═══════════════════════════════════════ PROGRESS ═══════════════════════════════════════ -->
+  <main class="surface" data-screen="progress">
+    <div class="page-header">
+      <div>
+        <div class="label-eyebrow">Screen 03 · Progress</div>
+        <h2>正在拉片,你可以放着不管。</h2>
+      </div>
+      <div class="meta-line">
+        <span><span class="dot"></span> 分析中 · 标准拉片</span>
+        <span>已用 1:08</span>
+      </div>
+    </div>
+
+    <div class="progress-wrap">
+
+      <section class="progress-hero">
+        <div class="topline">
+          <div>
+            <div class="label-eyebrow">分析中</div>
+            <h3>全上海最忧郁的机位</h3>
+            <div class="sub">douyin · 02:31 · 标准拉片</div>
+          </div>
+          <div class="eta">
+            <div class="big mono">≈ 52s</div>
+            <div class="small">预计剩余</div>
+          </div>
+        </div>
+        <div class="progress-bar-thick"><span style="width: 38%"></span></div>
+        <div class="progress-meta">
+          <span>已完成 <strong class="mono">3 / 8</strong> 步</span>
+          <span><strong class="mono">38%</strong></span>
+        </div>
+      </section>
+
+      <section class="stages">
+        <div class="stage-card is-current">
+          <h5>当前步骤</h5>
+          <div class="step-name">镜头合并 + 全局摘要</div>
+          <div class="step-detail">medium · text · DashScope qwen-plus</div>
+          <div class="step-detail" style="margin-top: 8px; color: var(--accent-ink);">已处理 12 / 23 个镜头</div>
+        </div>
+        <div class="stage-card">
+          <h5>已完成</h5>
+          <div class="done-list">
+            <div class="row"><span>读取视频信息</span><span class="t mono">0.3s</span></div>
+            <div class="row"><span>抽帧 (2 fps · 305 帧)</span><span class="t mono">8.1s</span></div>
+            <div class="row"><span>字幕识别 (whisper-base)</span><span class="t mono">12.4s</span></div>
+            <div class="row" style="opacity: .35;"><span>主分析</span><span class="t">⋯</span></div>
+            <div class="row" style="opacity: .35;"><span>方法论审计</span><span class="t">⋯</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="log-feed">
+        <div class="ln"><span class="ts">01:06</span><span class="body">shot-merger: batch 3/5 received, parsing JSON&hellip;</span></div>
+        <div class="ln ok"><span class="ts">01:05</span><span class="body">whisper-base: transcription done · 47 segments</span></div>
+        <div class="ln"><span class="ts">00:53</span><span class="body">prefilter: 305 frames tagged · 89 deduped</span></div>
+        <div class="ln warn"><span class="ts">00:42</span><span class="body">prefilter: 6 frames flagged as low salience, skipped</span></div>
+        <div class="ln"><span class="ts">00:08</span><span class="body">ffmpeg: extracting frames at 2 fps</span></div>
+      </section>
+
+      <div class="progress-actions">
+        <button class="btn ghost">取消</button>
+        <button class="btn primary">
+          后台运行
+          <svg class="icn" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+        </button>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- ═══════════════════════════════════════ REPORT ═══════════════════════════════════════ -->
+  <main class="surface" data-screen="report">
+    <div class="page-header">
+      <div>
+        <div class="label-eyebrow">Screen 05 · Report</div>
+        <h2>全上海最忧郁的机位 · 拉片报告</h2>
+      </div>
+      <div class="meta-line">
+        <span class="mono">02:31</span>
+        <span>14 个节点</span>
+        <span><span class="dot"></span> qwen-vl-plus</span>
+        <button class="btn ghost btn-sm">导出 ▾</button>
+      </div>
+    </div>
+
+    <div class="report-wrap">
+
+      <nav class="report-toc">
+        <div class="toc-item is-active"><span>概览</span><span class="nm">01</span></div>
+        <div class="toc-item"><span>叙事结构</span><span class="nm">02</span></div>
+        <div class="toc-item"><span>节奏</span><span class="nm">03</span></div>
+        <div class="toc-item"><span>情绪曲线</span><span class="nm">04</span></div>
+        <div class="toc-item"><span>方法论审计</span><span class="nm">05</span></div>
+        <div class="toc-item"><span>剪辑风格</span><span class="nm">06</span></div>
+        <div class="toc-item"><span>构图</span><span class="nm">07</span></div>
+        <div class="toc-item"><span>建议清单</span><span class="nm">08</span></div>
+        <div style="height: 1px; background: var(--ink-2); margin: 8px 6px;"></div>
+        <div class="toc-item"><span>返回工作台</span><span class="nm">→</span></div>
+      </nav>
+
+      <div class="report-body">
+
+        <section class="report-hero">
+          <div class="lead">
+            <div class="label-eyebrow">一句话定调</div>
+            <h3>慢节奏的城市散文 — 用同一机位的复沓构造情绪闭环。</h3>
+            <p>开场以空镜+延迟旁白建立钩子,中段反复回到同一构图制造迟疑感,尾段用外滩天际线给出开放收束。<strong>情绪反差点出现在 01:02 处</strong>,字幕停留略短于方法论建议值,是唯一明显可优化处。</p>
+            <div class="chips">
+              <span class="chip">vlog · 城市</span>
+              <span class="chip">钩子有效</span>
+              <span class="chip">完播预期 78%</span>
+              <span class="chip">1 处方法论违反</span>
+            </div>
+          </div>
+          <div class="score-block">
+            <div class="score mono">8<sup>.2</sup></div>
+            <div class="label">综合评分</div>
+            <div class="grade">同类前 18%</div>
+          </div>
+        </section>
+
+        <section class="findings">
+          <div class="finding">
+            <header>
+              <span class="k">高光节点</span>
+              <span class="v mono">5</span>
+            </header>
+            <p>包括 01:02 情绪反折、02:14 外滩收束。<strong>建议保留</strong>,是视频的辨识度来源。</p>
+          </div>
+          <div class="finding is-warn">
+            <header>
+              <span class="k">方法论违反</span>
+              <span class="v mono">1</span>
+            </header>
+            <p>关键节奏点字幕停留 0.9s,低于建议的 1.2s。<strong>建议延长 0.4s</strong>。</p>
+          </div>
+          <div class="finding">
+            <header>
+              <span class="k">钩子有效性</span>
+              <span class="v mono">0.86</span>
+            </header>
+            <p>前 3 秒空镜+延迟旁白形成有效钩子。命中规则 R-HOOK-001。</p>
+          </div>
+        </section>
+
+        <details class="report-section" open>
+          <summary>
+            <div class="lhs">
+              <span class="num">02</span>
+              <div class="title-line">
+                <h4>叙事结构 · 三段闭环</h4>
+                <p class="preview">钩子→反复→收束,完成情绪闭环,无明显冗余段落。</p>
+              </div>
+            </div>
+            <span class="chev"></span>
+          </summary>
+          <div class="section-body">
+            <dl class="struct-grid">
+              <dt>钩子</dt><dd>0:00-0:12 空镜+延迟旁白,信息量低但情绪密度高。</dd>
+              <dt>发展</dt><dd>0:12-1:00 三个同机位镜头+中段插入人物特写,建立&ldquo;反复&rdquo;的语言。</dd>
+              <dt>反折</dt><dd>1:02-1:20 旁白回到开头句式,完成情绪闭环。是该视频的关键点。</dd>
+              <dt>高潮</dt><dd>1:23-1:45 行人入画+背景音逐渐推至前景。</dd>
+              <dt>结尾</dt><dd>2:14-2:31 外滩天际线长镜,给出开放结束。</dd>
+            </dl>
+          </div>
+        </details>
+
+        <details class="report-section">
+          <summary>
+            <div class="lhs">
+              <span class="num">03</span>
+              <div class="title-line">
+                <h4>节奏</h4>
+                <p class="preview">整体偏慢,平均镜头时长 11.2s,中段有意放缓。</p>
+              </div>
+            </div>
+            <span class="chev"></span>
+          </summary>
+          <div class="section-body">
+            <p>占位:展开后展示节奏曲线 SVG + 各段平均镜头时长 + 与同类型作品对比。</p>
+          </div>
+        </details>
+
+        <details class="report-section">
+          <summary>
+            <div class="lhs">
+              <span class="num">04</span>
+              <div class="title-line">
+                <h4>情绪曲线</h4>
+                <p class="preview">起始沉郁 7/10,中段平静 5/10,反折拉到 9/10,收束开放 8/10。</p>
+              </div>
+            </div>
+            <span class="chev"></span>
+          </summary>
+          <div class="section-body">
+            <p>占位:展开后展示沿时间轴的情绪强度 / 标签曲线,可点跳到对应节点。</p>
+          </div>
+        </details>
+
+        <details class="report-section">
+          <summary>
+            <div class="lhs">
+              <span class="num">05</span>
+              <div class="title-line">
+                <h4>方法论审计</h4>
+                <p class="preview">命中 4 · 违反 1 · 缺失 2 · 综合 0.83</p>
+              </div>
+            </div>
+            <span class="chev"></span>
+          </summary>
+          <div class="section-body">
+            <p>占位:命中 / 违反 / 缺失 各自列表,每条带规则名 + evidence + 修复建议。</p>
+          </div>
+        </details>
+
+        <details class="report-section">
+          <summary>
+            <div class="lhs">
+              <span class="num">08</span>
+              <div class="title-line">
+                <h4>建议清单</h4>
+                <p class="preview">3 条可执行修改 · 按优先级排序</p>
+              </div>
+            </div>
+            <span class="chev"></span>
+          </summary>
+          <div class="section-body">
+            <p>占位:列出可直接落到剪辑动作上的建议,每条标注预期收益。</p>
+          </div>
+        </details>
+
+      </div>
+    </div>
+  </main>
+
+  <!-- ═══════════════════════════════════════ RATIONALE ═══════════════════════════════════════ -->
+  <main class="surface" data-screen="rationale">
+    <div class="page-header">
+      <div>
+        <div class="label-eyebrow">Design Rationale</div>
+        <h2>三个改造的取舍说明</h2>
+      </div>
+    </div>
+
+    <div class="rationale">
+
+      <h3><span class="n">01</span>Home · 砍掉&ldquo;本地 vs 链接&rdquo;的二选一</h3>
+      <p>原界面要求用户先在&ldquo;本地视频&rdquo;和&ldquo;链接拉取&rdquo;两个大卡片里选一个。这是一个无意义的决策:同样的项目,同样的分析管线,只是输入源不同 —— 强行让用户分类是把内部架构暴露给了用户。</p>
+      <p>新方案是一个智能输入框,自动识别粘贴的链接、拖入的文件、输入的本地路径。下方 hint 条实时反馈识别结果,用户不需要选模式。url_pull 这一整个 screen 不再需要 —— 链接拉取的进度日志合并到&ldquo;进行中&rdquo;项目的进度条里。</p>
+      <div class="compare">
+        <div class="compare-row"><div class="h">改前</div><div class="b">7 个 screen, home/url_pull 是两个独立入口, 状态切换由 ScreenState 切片驱动</div></div>
+        <div class="compare-row"><div class="h">改后</div><div class="b">6 个 screen, home 是唯一入口, url_pull 退化成 home 进行中卡片上的进度条 + 错误回退</div></div>
+        <div class="compare-row"><div class="h">代价</div><div class="b">需要在 home 内联失败重试 / 切换为本地的逻辑; UrlPullScreen.tsx 可整文件删除</div></div>
+      </div>
+
+      <h3><span class="n">02</span>Workspace · 节点信息分级</h3>
+      <p>原节点卡片塞了 6 类 badge + 代表帧 + 镜头描述 + 字幕分段 + 方法论命中违反,展开后能占半屏。用户拉片时大部分时间只需要&ldquo;这是第几个节点、什么时间、什么主题&rdquo;,详情是请求型信息,不是默认信息。</p>
+      <p>新方案默认每个节点只显示 timestamp + title + 至多 1 个 primary badge(钩子 / 关键 / 结尾 / 高光),meta 行用 mono 排印,信息密度极低。点击 chev 才展开看 shot description、代表帧、方法论 audit。同时&ldquo;逻辑节点 / 严格镜头&rdquo;从 3 tab 收敛成 2 segmented control,&ldquo;概览&rdquo;变成右侧顶部一张可独立展开的 summary card,不参与切屏。</p>
+      <div class="compare">
+        <div class="compare-row"><div class="h">改前</div><div class="b">Tabs grid-cols-3 切屏, 节点卡片信息密度无分级</div></div>
+        <div class="compare-row"><div class="h">改后</div><div class="b">summary 始终可见, segment 在节点 / 镜头之间切, 节点默认折叠</div></div>
+        <div class="compare-row"><div class="h">代价</div><div class="b">需要在 NodeCard 上加 open state + 折叠动画; representativeFrames 渲染条件改</div></div>
+      </div>
+
+      <h3><span class="n">03</span>Settings · 管线图代替槽位矩阵</h3>
+      <p>原 6 槽位矩阵(simple_vision / medium_text / ...)是从工程视角设计的:开发者知道哪一档对应哪个调用点,但用户不知道。当用户看到&ldquo;simple_vision&rdquo;时,得反推&ldquo;这是哪个调用点&rdquo;。</p>
+      <p>新方案用具象的管线流程:01 抽帧初筛 → 02 字幕识别 → 03 镜头合并 → 04 主分析。每一步旁边一个 picker 直接挂 provider + model。槽位的能力标签(vision / text / fast)以 badge 形式辅助说明,而不是作为分类轴。供应商列表退到下方,只负责&ldquo;给上面的管线提供选项&rdquo;,本地推理和远端 OpenAI-兼容用同一抽象。</p>
+      <div class="compare">
+        <div class="compare-row"><div class="h">改前</div><div class="b">6 槽位矩阵 + 供应商列表 + 本地推理 + Whisper 四个独立 section, 用户得自己拼起来</div></div>
+        <div class="compare-row"><div class="h">改后</div><div class="b">两段式: 管线图(主) + 供应商池(辅), 本地与远端同卡片格式</div></div>
+        <div class="compare-row"><div class="h">代价</div><div class="b">需要把 simple_vision/medium_text 这种 key 在 UI 层映射成&ldquo;抽帧初筛 / 镜头合并&rdquo;这种业务名; 数据层不动</div></div>
+      </div>
+
+      <h3><span class="n">04</span>视觉语言收敛</h3>
+      <p>原视觉用了 slate + indigo + 若干 shadow 层级,在某些 screen 上出现紫粉味的渐变倾向。新方案的方向是 Editorial / quiet:</p>
+      <ul style="margin: 0 0 14px; padding-left: 18px; color: var(--ink-10); line-height: 1.7;">
+        <li>分层主要靠 <strong>1px border + 极浅的 muted 背景</strong>,几乎不用 shadow</li>
+        <li>indigo 只用在 primary CTA、当前节点高亮、is-active state,其他地方一律 slate</li>
+        <li>所有时间戳 / 模型名 / 端口 / 文件名走 monospace,与正文形成节奏</li>
+        <li>圆角收敛到 6 / 8 / 12 三档,徽章是 4px,小按钮 6px,主容器 12px,不再 rounded-xl/2xl 混用</li>
+      </ul>
+
+      <h3><span class="n">05</span>没改的部分</h3>
+      <p>PrepareScreen / ProgressScreen / ReportScreen 这次不重设计。三个 screen 现在的问题各自存在,但优先级低于 Home / Workspace / Settings:</p>
+      <ul style="margin: 0; padding-left: 18px; color: var(--ink-10); line-height: 1.7;">
+        <li><strong>Prepare</strong>: 配置项过多,但属于每个项目只用一次的页面,改造收益低</li>
+        <li><strong>Progress</strong>: 在新 Home 方案里会被合并成项目卡片的进度条 + 一个 modal 看阶段详情,不再是独立 screen</li>
+        <li><strong>Report</strong>: 信息架构复杂但合理,目前 scroll-spy 导航靠谱,8 个 section 自洽。重点应该是&ldquo;在 workspace 内联看 audit&rdquo;,而不是改 report 本身</li>
+      </ul>
+
+    </div>
+  </main>
+</div>
+
+<!-- ═══════════════════════════════════════ Tweaks ═══════════════════════════════════════ -->
+<aside class="tweaks" id="tweaks">
+  <header>
+    <h3 id="tweaks-title">Tweaks</h3>
+    <button id="tweaks-toggle"></button>
+  </header>
+  <div class="group">
+    <label><span>深色模式</span><input type="checkbox" id="t-dark"/></label>
+    <label><span>节点默认展开</span><input type="checkbox" id="t-expand"/></label>
+    <label><span>显示字幕浮层</span><input type="checkbox" id="t-subtitle" checked/></label>
+  </div>
+  <div class="group">
+    <label><span>视觉密度</span></label>
+    <label style="font-size:11.5px; color: var(--ink-7);"><span>紧凑</span><input type="radio" name="density" id="t-d-tight"/></label>
+    <label style="font-size:11.5px; color: var(--ink-7);"><span>标准</span><input type="radio" name="density" id="t-d-std" checked/></label>
+  </div>
+</aside>
+
+<script>
+  // ────── nav switching ──────
+  const navItems = document.querySelectorAll(".nav-item");
+  const surfaces = document.querySelectorAll(".surface");
+  navItems.forEach(item => {
+    item.addEventListener("click", () => {
+      const target = item.dataset.screen;
+      navItems.forEach(n => n.classList.toggle("is-active", n === item));
+      surfaces.forEach(s => s.classList.toggle("is-visible", s.dataset.screen === target));
+      document.querySelector(".surface.is-visible")?.scrollTo?.(0, 0);
+    });
+  });
+
+  // ────── smart input detection ──────
+  const smartInput = document.getElementById("smart-input");
+  const smartField = document.getElementById("smart-field");
+  const chipSource = document.getElementById("chip-source");
+  const chipSourceLabel = document.getElementById("chip-source-label");
+  function detect(v) {
+    const s = v.toLowerCase().trim();
+    if (s.startsWith("http")) {
+      smartField.classList.add("is-url");
+      chipSource.classList.add("is-active");
+      let plat = "URL";
+      if (s.includes("douyin")) plat = "DOUYIN";
+      else if (s.includes("bilibili") || s.includes("b23.tv")) plat = "BILIBILI";
+      else if (s.includes("youtube") || s.includes("youtu.be")) plat = "YOUTUBE";
+      else if (s.includes("xhs") || s.includes("xiaohongshu")) plat = "XHS";
+      else if (s.includes("tiktok")) plat = "TIKTOK";
+      chipSourceLabel.textContent = "链接 · " + plat;
+    } else if (s.startsWith("/") || s.startsWith("~/")) {
+      smartField.classList.remove("is-url");
+      chipSource.classList.add("is-active");
+      chipSourceLabel.textContent = "本地文件";
+    } else if (!s) {
+      smartField.classList.remove("is-url");
+      chipSource.classList.remove("is-active");
+      chipSourceLabel.textContent = "选择来源";
+    } else {
+      smartField.classList.remove("is-url");
+      chipSource.classList.remove("is-active");
+      chipSourceLabel.textContent = "未识别";
+    }
+  }
+  smartInput.addEventListener("input", e => detect(e.target.value));
+
+  // ────── workspace node expand ──────
+  document.querySelectorAll(".node").forEach(node => {
+    node.querySelector(".node-row").addEventListener("click", () => {
+      node.classList.toggle("is-open");
+    });
+  });
+
+  // ────── tweaks ──────
+  const tweaks = document.getElementById("tweaks");
+  const tweaksToggle = document.getElementById("tweaks-toggle");
+  tweaksToggle.addEventListener("click", () => tweaks.classList.toggle("is-collapsed"));
+
+  document.getElementById("t-dark").addEventListener("change", e => {
+    document.body.dataset.theme = e.target.checked ? "dark" : "light";
+  });
+  document.getElementById("t-expand").addEventListener("change", e => {
+    document.querySelectorAll(".node").forEach(n => n.classList.toggle("is-open", e.target.checked));
+  });
+  document.getElementById("t-subtitle").addEventListener("change", e => {
+    document.getElementById("subtitle").style.display = e.target.checked ? "block" : "none";
+  });
+</script>
+</body>
+</html>
