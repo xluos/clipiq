@@ -18,6 +18,19 @@ function pidFilePath() {
 }
 
 const HF_MIRROR_DEFAULT = "https://hf-mirror.com";
+const MODELSCOPE_BASE = "https://modelscope.cn";
+
+// 下载源路径模板。env HF_MIRROR 仍然优先, 让开发期可以临时绕过 UI 配置;
+// 否则按调用方传入的 mirror 选: hf-mirror (HF 镜像) 或 modelscope (魔搭).
+// ModelScope 的资源路径和 HF 兼容: /models/{owner}/{name}/resolve/master/{file}.
+function buildDownloadUrl(mirror, repo, file) {
+  const envOverride = process.env.HF_MIRROR;
+  if (envOverride) return `${envOverride}/${repo}/resolve/main/${file}`;
+  if (mirror === "modelscope") {
+    return `${MODELSCOPE_BASE}/models/${repo}/resolve/master/${file}`;
+  }
+  return `${HF_MIRROR_DEFAULT}/${repo}/resolve/main/${file}`;
+}
 
 // llama.cpp 官方 release。PIN 版本号,升级时改这里;tar.gz/zip 顶层目录是 llama-${REL}。
 const LLAMA_CPP_RELEASE = "b9128";
@@ -90,6 +103,55 @@ async function fileExists(p) {
     return true;
   } catch {
     return false;
+  }
+}
+
+// 校验 GGUF 文件是否完整: magic 头 + 大小下限。任何远小于 minBytes 的"GGUF"
+// 大概率是 ① 半截下载 ② HF mirror 返回错误页 ③ 旧版 manifest 残留。
+async function validateGgufFile(filePath, minBytes = 1024 * 1024) {
+  let stat;
+  try {
+    stat = await fs.stat(filePath);
+  } catch {
+    return { ok: false, reason: "missing", filePath };
+  }
+  if (stat.size < minBytes) {
+    return { ok: false, reason: "tooSmall", filePath, size: stat.size, minBytes };
+  }
+  let fh;
+  try {
+    fh = await fs.open(filePath, "r");
+    const buf = Buffer.alloc(4);
+    await fh.read(buf, 0, 4, 0);
+    if (buf.toString("ascii") !== "GGUF") {
+      return { ok: false, reason: "magic", filePath, size: stat.size };
+    }
+  } catch (e) {
+    return { ok: false, reason: "read", filePath, error: e?.message };
+  } finally {
+    if (fh) await fh.close().catch(() => {});
+  }
+  return { ok: true, size: stat.size };
+}
+
+function describeValidation(result, label) {
+  if (result.ok) return "";
+  const fmt = (n) => {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  };
+  switch (result.reason) {
+    case "missing":
+      return `${label}未下载`;
+    case "tooSmall":
+      return `${label}文件损坏 (大小 ${fmt(result.size)}, 预期 ≥ ${fmt(result.minBytes)})`;
+    case "magic":
+      return `${label}文件损坏 (缺少 GGUF 头)`;
+    case "read":
+      return `${label}文件无法读取${result.error ? ": " + result.error : ""}`;
+    default:
+      return `${label}文件异常`;
   }
 }
 
@@ -299,16 +361,62 @@ async function listModels() {
   return items;
 }
 
+// 支持断点续传:
+// - <dest>.part   未完成的部分文件
+// - <dest>.part.url   该 .part 对应的下载 URL (用于检测 mirror 切换 → 不能续)
+// 流中断或不完整时不 unlink .part, 让下次 fetch 用 Range 续上。
+// rename 成功后两个文件都清掉。
 async function downloadFile(url, destPath, onProgress) {
   const tmp = `${destPath}.part`;
-  const response = await fetch(url);
+  const metaPath = `${destPath}.part.url`;
+
+  // 判断能否续传: 之前的 .part + .part.url 都在, 且 url 一致
+  let startBytes = 0;
+  try {
+    const recordedUrl = (await fs.readFile(metaPath, "utf8")).trim();
+    if (recordedUrl === url) {
+      const st = await fs.stat(tmp).catch(() => null);
+      if (st && st.size > 0) startBytes = st.size;
+    } else {
+      // url 换了 (mirror 切换 / 模型重命名): 不能用老字节, 清掉
+      await fs.unlink(tmp).catch(() => {});
+      await fs.unlink(metaPath).catch(() => {});
+    }
+  } catch {
+    // meta 不存在 → 首次下载或老版本残留, 让 status 200 分支正常处理
+  }
+
+  let response = await fetch(url, startBytes > 0 ? { headers: { Range: `bytes=${startBytes}-` } } : undefined);
+  // 416 = .part 越界 (本地比远程还大, 或远程文件已变), 全部清掉重下
+  if (response.status === 416) {
+    await fs.unlink(tmp).catch(() => {});
+    await fs.unlink(metaPath).catch(() => {});
+    startBytes = 0;
+    response = await fetch(url);
+  }
   if (!response.ok || !response.body) {
     throw new Error(`下载失败 HTTP ${response.status} ${url}`);
   }
-  const total = Number(response.headers.get("content-length")) || 0;
+
+  // 总大小: 206 → Content-Range 末尾 /N; 200 → Content-Length 即总; 200 但 startBytes>0 = 服务端忽略 Range
+  let total = 0;
+  let appendMode = false;
+  if (response.status === 206 && startBytes > 0) {
+    const cr = response.headers.get("content-range") || "";
+    const m = cr.match(/\/(\d+)$/);
+    if (m) total = Number(m[1]);
+    appendMode = true;
+  } else {
+    total = Number(response.headers.get("content-length")) || 0;
+    startBytes = 0;
+  }
+
+  await fs.writeFile(metaPath, url, "utf8");
+
   const reader = response.body.getReader();
-  const fh = await fs.open(tmp, "w");
-  let received = 0;
+  const fh = await fs.open(tmp, appendMode ? "a" : "w");
+  let received = startBytes;
+  let streamError = null;
   try {
     // eslint-disable-next-line no-constant-condition
     while (true) {
@@ -318,14 +426,45 @@ async function downloadFile(url, destPath, onProgress) {
       received += value.byteLength;
       if (onProgress) onProgress({ received, total });
     }
+  } catch (e) {
+    streamError = e;
   } finally {
     await fh.close();
   }
+  if (streamError) {
+    // 保留 .part + meta, 下次续上
+    throw streamError;
+  }
+  if (total > 0 && received !== total) {
+    // 流提前结束但未抛错: 保留 .part 让下次续传
+    const mb = (n) => (n / 1024 / 1024).toFixed(1);
+    throw new Error(`下载不完整: 已收到 ${mb(received)} MB / 预期 ${mb(total)} MB (下次重试会续传)`);
+  }
   await fs.rename(tmp, destPath);
+  await fs.unlink(metaPath).catch(() => {});
   return { received, total };
 }
 
-async function ensureModel(modelKey, onProgress = () => {}) {
+// 同一 modelKey 重入复用老 promise, 避免并发 fetch 把 .part 字节流交错。
+// onProgress 通过 IPC channel 自然分发给 renderer 所有 listener, 第二个 caller 的
+// onProgress closure 虽不会被直接调用, 但事件流还是能在 renderer 上收到。
+const inflightEnsures = new Map();
+
+async function ensureModel(modelKey, onProgress = () => {}, options = {}) {
+  const existing = inflightEnsures.get(modelKey);
+  if (existing) return existing;
+  const promise = (async () => {
+    try {
+      return await doEnsureModel(modelKey, onProgress, options);
+    } finally {
+      inflightEnsures.delete(modelKey);
+    }
+  })();
+  inflightEnsures.set(modelKey, promise);
+  return promise;
+}
+
+async function doEnsureModel(modelKey, onProgress, options = {}) {
   const meta = MODELS[modelKey];
   if (!meta) throw new Error(`未知模型: ${modelKey}`);
   if (meta._manifest && meta._manifest.available === false) {
@@ -333,7 +472,7 @@ async function ensureModel(modelKey, onProgress = () => {}) {
   }
   const dir = modelDir(modelKey);
   await fs.mkdir(dir, { recursive: true });
-  const mirror = process.env.HF_MIRROR || HF_MIRROR_DEFAULT;
+  const mirror = options.mirror === "modelscope" ? "modelscope" : "hf-mirror";
   const targets = [
     { file: meta.llmFile, label: "模型权重" },
     { file: meta.mmprojFile, label: "视觉编码器" },
@@ -344,7 +483,7 @@ async function ensureModel(modelKey, onProgress = () => {}) {
       onProgress({ stage: "skip", file: t.file, label: t.label, message: `${t.label}已就绪` });
       continue;
     }
-    const url = `${mirror}/${meta.repo}/resolve/main/${t.file}`;
+    const url = buildDownloadUrl(mirror, meta.repo, t.file);
     onProgress({ stage: "start", file: t.file, label: t.label, message: `开始下载${t.label}` });
     await downloadFile(url, dest, (p) => {
       const pct = p.total > 0 ? Math.floor((p.received / p.total) * 100) : 0;
@@ -461,8 +600,30 @@ async function start(modelKey, { onLog } = {}) {
   const dir = modelDir(modelKey);
   const llmPath = path.join(dir, meta.llmFile);
   const mmprojPath = path.join(dir, meta.mmprojFile);
-  if (!fsSync.existsSync(llmPath)) throw new Error(`模型权重未下载: ${meta.llmFile}`);
-  if (!fsSync.existsSync(mmprojPath)) throw new Error(`视觉编码器未下载: ${meta.mmprojFile}`);
+
+  // 启动前校验: 拦住损坏 / 半截下载的 GGUF, 避免 llama-server 拿到坏文件再 exit code=1
+  // 不抛 raw "异常退出 (code=1)" 消息, 改成可操作的中文提示, 顺手清掉坏文件,
+  // 这样下一次 listModels 会把模型标记成"未下载", UI 回到下载按钮态。
+  const llmCheck = await validateGgufFile(llmPath);
+  const mmprojCheck = await validateGgufFile(mmprojPath);
+  if (!llmCheck.ok || !mmprojCheck.ok) {
+    let cleaned = false;
+    if (!llmCheck.ok && llmCheck.reason !== "missing") {
+      await fs.unlink(llmPath).catch(() => {});
+      cleaned = true;
+    }
+    if (!mmprojCheck.ok && mmprojCheck.reason !== "missing") {
+      await fs.unlink(mmprojPath).catch(() => {});
+      cleaned = true;
+    }
+    const issues = [];
+    if (!llmCheck.ok) issues.push(describeValidation(llmCheck, "模型权重"));
+    if (!mmprojCheck.ok) issues.push(describeValidation(mmprojCheck, "视觉编码器"));
+    const action = cleaned
+      ? "已自动清理损坏文件, 请重新点击下载"
+      : "请先在设置页下载该模型";
+    throw new Error(`${meta.name} 启动前校验未通过: ${issues.join("; ")}。${action}。`);
+  }
 
   const port = await findFreePort();
   const args = [

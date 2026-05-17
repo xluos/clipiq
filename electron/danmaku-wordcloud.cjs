@@ -42,7 +42,7 @@ function detectReactions(text) {
 
 function extractTerms(text) {
   // 把标点/数字/英文/空白都换成空格, 留下 CJK 串
-  const cleaned = String(text).replace(/[\s\p{P}\d\p{Latin}]+/gu, " ").trim();
+  const cleaned = String(text).replace(/[\s\p{P}\d\p{Script=Latin}]+/gu, " ").trim();
   if (!cleaned) return [];
   const cjkRegex = /[一-鿿]+/g;
   const segments = cleaned.match(cjkRegex) || [];

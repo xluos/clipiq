@@ -28,7 +28,19 @@ function pidFilePath() {
 }
 
 const HF_MIRROR_DEFAULT = "https://hf-mirror.com";
+const MODELSCOPE_BASE = "https://modelscope.cn";
 const GGERGANOV_WHISPER_REPO = "ggerganov/whisper.cpp";
+// 魔搭上 whisper.cpp 模型由 ggerganov 同名空间镜像; 路径结构和 HF 兼容。
+const MODELSCOPE_WHISPER_REPO = "ggerganov/whisper.cpp";
+
+function buildDownloadUrl(mirror, file) {
+  const envOverride = process.env.HF_MIRROR;
+  if (envOverride) return `${envOverride}/${GGERGANOV_WHISPER_REPO}/resolve/main/${file}`;
+  if (mirror === "modelscope") {
+    return `${MODELSCOPE_BASE}/models/${MODELSCOPE_WHISPER_REPO}/resolve/master/${file}`;
+  }
+  return `${HF_MIRROR_DEFAULT}/${GGERGANOV_WHISPER_REPO}/resolve/main/${file}`;
+}
 
 // 预设 ggml 模型清单。来源: https://huggingface.co/ggerganov/whisper.cpp
 // 命名沿用 whisper.cpp 上游惯例: ggml-<size>.bin
@@ -178,16 +190,54 @@ async function listModels() {
   return items;
 }
 
+// 断点续传: 同 llama-runtime.cjs 的实现。<dest>.part + <dest>.part.url 配对。
 async function downloadFile(url, destPath, onProgress) {
   const tmp = `${destPath}.part`;
-  const response = await fetch(url);
+  const metaPath = `${destPath}.part.url`;
+
+  let startBytes = 0;
+  try {
+    const recordedUrl = (await fs.readFile(metaPath, "utf8")).trim();
+    if (recordedUrl === url) {
+      const st = await fs.stat(tmp).catch(() => null);
+      if (st && st.size > 0) startBytes = st.size;
+    } else {
+      await fs.unlink(tmp).catch(() => {});
+      await fs.unlink(metaPath).catch(() => {});
+    }
+  } catch {
+    // first download or legacy .part without meta
+  }
+
+  let response = await fetch(url, startBytes > 0 ? { headers: { Range: `bytes=${startBytes}-` } } : undefined);
+  if (response.status === 416) {
+    await fs.unlink(tmp).catch(() => {});
+    await fs.unlink(metaPath).catch(() => {});
+    startBytes = 0;
+    response = await fetch(url);
+  }
   if (!response.ok || !response.body) {
     throw new Error(`下载失败 HTTP ${response.status} ${url}`);
   }
-  const total = Number(response.headers.get("content-length")) || 0;
+
+  let total = 0;
+  let appendMode = false;
+  if (response.status === 206 && startBytes > 0) {
+    const cr = response.headers.get("content-range") || "";
+    const m = cr.match(/\/(\d+)$/);
+    if (m) total = Number(m[1]);
+    appendMode = true;
+  } else {
+    total = Number(response.headers.get("content-length")) || 0;
+    startBytes = 0;
+  }
+
+  await fs.writeFile(metaPath, url, "utf8");
+
   const reader = response.body.getReader();
-  const fh = await fs.open(tmp, "w");
-  let received = 0;
+  const fh = await fs.open(tmp, appendMode ? "a" : "w");
+  let received = startBytes;
+  let streamError = null;
   try {
     // eslint-disable-next-line no-constant-condition
     while (true) {
@@ -197,14 +247,39 @@ async function downloadFile(url, destPath, onProgress) {
       received += value.byteLength;
       if (onProgress) onProgress({ received, total });
     }
+  } catch (e) {
+    streamError = e;
   } finally {
     await fh.close();
   }
+  if (streamError) throw streamError;
+  if (total > 0 && received !== total) {
+    const mb = (n) => (n / 1024 / 1024).toFixed(1);
+    throw new Error(`下载不完整: 已收到 ${mb(received)} MB / 预期 ${mb(total)} MB (下次重试会续传)`);
+  }
   await fs.rename(tmp, destPath);
+  await fs.unlink(metaPath).catch(() => {});
   return { received, total };
 }
 
-async function ensureModel(modelKey, onProgress = () => {}) {
+// 同一 modelKey 重入复用老 promise, 避免并发 fetch 把 .part 字节流交错。
+const inflightEnsures = new Map();
+
+async function ensureModel(modelKey, onProgress = () => {}, options = {}) {
+  const existing = inflightEnsures.get(modelKey);
+  if (existing) return existing;
+  const promise = (async () => {
+    try {
+      return await doEnsureModel(modelKey, onProgress, options);
+    } finally {
+      inflightEnsures.delete(modelKey);
+    }
+  })();
+  inflightEnsures.set(modelKey, promise);
+  return promise;
+}
+
+async function doEnsureModel(modelKey, onProgress, options = {}) {
   const meta = MODELS[modelKey];
   if (!meta) throw new Error(`未知模型: ${modelKey}`);
   const dir = modelsRootDir();
@@ -214,8 +289,8 @@ async function ensureModel(modelKey, onProgress = () => {}) {
     onProgress({ stage: "skip", file: meta.file, label: meta.name, message: `${meta.name} 已就绪` });
     return { ok: true, modelKey };
   }
-  const mirror = process.env.HF_MIRROR || HF_MIRROR_DEFAULT;
-  const url = `${mirror}/${GGERGANOV_WHISPER_REPO}/resolve/main/${meta.file}`;
+  const mirror = options.mirror === "modelscope" ? "modelscope" : "hf-mirror";
+  const url = buildDownloadUrl(mirror, meta.file);
   onProgress({ stage: "start", file: meta.file, label: meta.name, message: `开始下载 ${meta.name}` });
   await downloadFile(url, dest, (p) => {
     const pct = p.total > 0 ? Math.floor((p.received / p.total) * 100) : 0;

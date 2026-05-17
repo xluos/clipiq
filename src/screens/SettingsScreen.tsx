@@ -1762,6 +1762,124 @@ function LocalInferenceSection() {
   );
 }
 
+type ProgressButtonProps = {
+  progress: LlamaProgress | null;
+  busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
+};
+
+// 用 EMA 平滑两次 progress sample 的瞬时速度, 避免单点 byte 抖动 (网络 chunk 大小不均).
+// reset 条件: receivedBytes 缺失, 或 progress.file 切换 (llm → mmproj, 或 model → binary).
+function useDownloadSpeed(progress: LlamaProgress | null): number {
+  const last = useRef({ ts: 0, bytes: 0, ema: 0, file: "" });
+  const [speed, setSpeed] = useState(0);
+  const recv = progress?.receivedBytes ?? 0;
+  const file = progress?.file ?? "";
+  useEffect(() => {
+    if (!recv) {
+      last.current = { ts: 0, bytes: 0, ema: 0, file };
+      setSpeed(0);
+      return;
+    }
+    const now = Date.now();
+    if (last.current.ts === 0 || last.current.file !== file) {
+      last.current = { ts: now, bytes: recv, ema: 0, file };
+      setSpeed(0);
+      return;
+    }
+    const dt = (now - last.current.ts) / 1000;
+    if (dt < 0.2) return; // 采样太密就跳过, 防止抖
+    const inst = (recv - last.current.bytes) / dt;
+    const alpha = 0.3;
+    const ema = last.current.ema === 0 ? inst : alpha * inst + (1 - alpha) * last.current.ema;
+    last.current = { ts: now, bytes: recv, ema, file };
+    setSpeed(ema);
+  }, [recv, file]);
+  return speed;
+}
+
+function formatSpeed(bps: number): string {
+  if (!bps || bps <= 0) return "—";
+  if (bps >= 1024 * 1024) return `${(bps / 1024 / 1024).toFixed(1)} MB/s`;
+  if (bps >= 1024) return `${Math.round(bps / 1024)} KB/s`;
+  return `${Math.round(bps)} B/s`;
+}
+
+// 圆环进度按钮: 圆环 + 左侧常驻 speed 文字, hover 时上方浮 tooltip 显示完整进度.
+// percent 已知 → 画弧; 否则 (start / extract / 启动期) → indeterminate spin.
+const ProgressButton: FunctionComponent<ProgressButtonProps> = ({ progress, busyAction }) => {
+  const percent = progress?.percent;
+  const hasPercent = typeof percent === "number" && percent >= 0;
+  const clamped = hasPercent ? Math.min(100, Math.max(0, percent)) : 0;
+  const speed = useDownloadSpeed(progress);
+
+  const radius = 13;
+  const circumference = 2 * Math.PI * radius;
+  const dashOffset = circumference * (1 - clamped / 100);
+
+  const mb = (n?: number) => (n ? (n / 1024 / 1024).toFixed(0) : null);
+  const recvMB = mb(progress?.receivedBytes);
+  const totalMB = mb(progress?.totalBytes);
+  const stageLabel = progress?.label
+    || (busyAction === "binary" ? "推理引擎" : busyAction === "download" ? "下载中" : "启动中");
+  const speedLabel = formatSpeed(speed);
+  const tooltipBody = hasPercent && recvMB && totalMB
+    ? `${stageLabel} · ${recvMB} / ${totalMB} MB · ${speedLabel}`
+    : busyAction === "start"
+      ? "正在启动模型"
+      : `${stageLabel}…`;
+
+  return (
+    <div className="relative group shrink-0 flex items-center gap-1.5">
+      <span className="font-mono text-[10px] tabular-nums text-slate-500 dark:text-slate-400 min-w-[3.6rem] text-right leading-none">
+        {speedLabel}
+      </span>
+      <div
+        role="progressbar"
+        aria-valuenow={hasPercent ? clamped : undefined}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={tooltipBody}
+        className="h-7 w-7 grid place-items-center"
+      >
+        <svg viewBox="0 0 32 32" className="h-7 w-7 -rotate-90">
+          <circle
+            cx="16"
+            cy="16"
+            r={radius}
+            fill="none"
+            className="stroke-slate-200 dark:stroke-slate-700"
+            strokeWidth={2.5}
+          />
+          <circle
+            cx="16"
+            cy="16"
+            r={radius}
+            fill="none"
+            className={`stroke-indigo-600 dark:stroke-indigo-400 ${hasPercent ? "transition-[stroke-dashoffset] duration-300 ease-out" : "animate-[spin_1.2s_linear_infinite] origin-center"}`}
+            strokeWidth={2.5}
+            strokeDasharray={circumference}
+            strokeDashoffset={hasPercent ? dashOffset : circumference * 0.75}
+            strokeLinecap="round"
+          />
+        </svg>
+        <span className="absolute font-mono text-[9.5px] leading-none text-indigo-700 dark:text-indigo-300 tabular-nums">
+          {hasPercent ? Math.round(clamped) : "…"}
+        </span>
+      </div>
+      <div
+        className="pointer-events-none absolute bottom-full right-0 mb-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-10"
+        role="tooltip"
+      >
+        <div className="whitespace-nowrap rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 shadow-md">
+          <div className="font-mono text-[10.5px] text-slate-700 dark:text-slate-200 tabular-nums">
+            {tooltipBody}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 type ModelGroupProps = {
   title: string;
   subtitle: string;
@@ -1770,12 +1888,13 @@ type ModelGroupProps = {
   busyKey: string | null;
   busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
   isAnyBusy: boolean;
+  progress: LlamaProgress | null;
   onStart: (modelKey: string) => void;
   onStop: () => void;
 };
 
 const ModelGroup: FunctionComponent<ModelGroupProps> = ({
-  title, subtitle, models, runningKey, busyKey, busyAction, isAnyBusy, onStart, onStop,
+  title, subtitle, models, runningKey, busyKey, busyAction, isAnyBusy, progress, onStart, onStop,
 }) => {
   if (models.length === 0) return null;
   return (
@@ -1793,6 +1912,7 @@ const ModelGroup: FunctionComponent<ModelGroupProps> = ({
             busyKey={busyKey}
             busyAction={busyAction}
             isAnyBusy={isAnyBusy}
+            progress={progress}
             onStart={onStart}
             onStop={onStop}
           />
@@ -1808,12 +1928,13 @@ type ModelCardProps = {
   busyKey: string | null;
   busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
   isAnyBusy: boolean;
+  progress: LlamaProgress | null;
   onStart: (modelKey: string) => void;
   onStop: () => void;
 };
 
 const ModelCard: FunctionComponent<ModelCardProps> = ({
-  model, runningKey, busyKey, busyAction, isAnyBusy, onStart, onStop,
+  model, runningKey, busyKey, busyAction, isAnyBusy, progress, onStart, onStop,
 }) => {
   const isRunning = runningKey === model.id;
   const isDownloaded = !!model.local?.downloaded;
@@ -1821,20 +1942,24 @@ const ModelCard: FunctionComponent<ModelCardProps> = ({
   const defaultQuant = model.local?.quantizations?.[0];
   const isComingSoon = model.availability.state === "coming_soon";
 
-  let action: { label: string; variant: "default" | "outline" | "ghost"; onClick?: () => void; disabled?: boolean };
+  // 按钮态优先级: 即将上线 > 进度环 > 停止 > 下载 > 切换 > 启动
+  // 进度环放在最前 (除了 coming_soon) — 否则下载完成前会被错误地归到 "切换" / "启动" 分支
+  type Action =
+    | { kind: "progress" }
+    | { kind: "label"; label: string; variant: "default" | "outline" | "ghost"; onClick?: () => void; disabled?: boolean };
+  let action: Action;
   if (isComingSoon) {
-    action = { label: "即将上线", variant: "ghost", disabled: true };
+    action = { kind: "label", label: "即将上线", variant: "ghost", disabled: true };
   } else if (isBusy) {
-    const lbl = busyAction === "binary" ? "下载引擎…" : busyAction === "download" ? "下载…" : "启动…";
-    action = { label: lbl, variant: "outline", disabled: true };
+    action = { kind: "progress" };
   } else if (isRunning) {
-    action = { label: "停止", variant: "outline", onClick: onStop };
-  } else if (runningKey) {
-    action = { label: "切换", variant: "default", onClick: () => onStart(model.id) };
+    action = { kind: "label", label: "停止", variant: "outline", onClick: onStop };
   } else if (!isDownloaded) {
-    action = { label: "下载", variant: "default", onClick: () => onStart(model.id) };
+    action = { kind: "label", label: "下载", variant: "default", onClick: () => onStart(model.id) };
+  } else if (runningKey) {
+    action = { kind: "label", label: "切换", variant: "default", onClick: () => onStart(model.id) };
   } else {
-    action = { label: "启动", variant: "default", onClick: () => onStart(model.id) };
+    action = { kind: "label", label: "启动", variant: "default", onClick: () => onStart(model.id) };
   }
 
   const cardCls = isRunning
@@ -1857,20 +1982,24 @@ const ModelCard: FunctionComponent<ModelCardProps> = ({
         {statusPill}
         <span className="flex-1" />
         <FitChip fit={model.local?.fit} />
-        <button
-          type="button"
-          disabled={action.disabled}
-          onClick={action.onClick}
-          className={
-            action.variant === "default"
-              ? "px-2.5 py-1 text-[11.5px] rounded border border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium shrink-0"
-              : action.variant === "outline"
-                ? "px-2.5 py-1 text-[11.5px] rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-                : "px-2.5 py-1 text-[11.5px] rounded text-slate-400 disabled:cursor-not-allowed shrink-0"
-          }
-        >
-          {action.label}
-        </button>
+        {action.kind === "progress" ? (
+          <ProgressButton progress={progress} busyAction={busyAction} />
+        ) : (
+          <button
+            type="button"
+            disabled={action.disabled}
+            onClick={action.onClick}
+            className={
+              action.variant === "default"
+                ? "px-2.5 py-1 text-[11.5px] rounded border border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium shrink-0"
+                : action.variant === "outline"
+                  ? "px-2.5 py-1 text-[11.5px] rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                  : "px-2.5 py-1 text-[11.5px] rounded text-slate-400 disabled:cursor-not-allowed shrink-0"
+            }
+          >
+            {action.label}
+          </button>
+        )}
       </div>
 
       {/* row2 — 数字 meta */}
