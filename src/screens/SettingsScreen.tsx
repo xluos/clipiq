@@ -27,7 +27,7 @@ import {
   Trash2,
   XCircle,
 } from "lucide-react";
-import { Fragment, type FunctionComponent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, type FunctionComponent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   DefaultAnalysisPreset,
   ModelCapability,
@@ -1452,6 +1452,7 @@ function LocalInferenceSection() {
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<"binary" | "download" | "start" | "stop" | "selftest" | null>(null);
   const [error, setError] = useState<string>("");
+  const [mirror, setMirror] = useState<"hf-mirror" | "modelscope">("hf-mirror");
   const [selfTestImage, setSelfTestImage] = useState<{ name: string; dataUrl: string } | null>(null);
   const [selfTestResult, setSelfTestResult] = useState<{
     latencyMs: number;
@@ -1461,14 +1462,26 @@ function LocalInferenceSection() {
 
   const refresh = useCallback(async () => {
     if (!window.videoAnalyzer?.llama) return;
-    const [s, manifest] = await Promise.all([
+    const [s, manifest, mirrorState] = await Promise.all([
       window.videoAnalyzer.llama.getStatus(),
       window.videoAnalyzer.llama.listManifest(),
+      window.videoAnalyzer.mirror?.get?.() ?? Promise.resolve({ mirror: "hf-mirror" as const }),
     ]);
     setStatus(s);
     setMachine(manifest.machine as unknown as MachineInfo);
     setManifestModels(manifest.models);
+    setMirror(mirrorState.mirror);
   }, []);
+
+  const handleMirrorChange = async (next: "hf-mirror" | "modelscope") => {
+    if (next === mirror) return;
+    setMirror(next);
+    try {
+      await window.videoAnalyzer.mirror?.set?.(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   useEffect(() => {
     refresh();
@@ -1574,8 +1587,10 @@ function LocalInferenceSection() {
     !m.capabilities.includes("vision") && m.capabilities.includes("text")
   );
 
+  // model 阶段的进度由各卡片自己的圆环承担; 横条只在 binary 阶段显示, 因为
+  // binary 不挂在任何卡片上, 需要一个全局位置告诉用户"在下推理引擎"。
   const showProgress =
-    progress && (busyAction === "binary" || busyAction === "download") && progress.percent != null;
+    progress && busyAction === "binary" && progress.percent != null;
 
   const totalMemoryGB = machine ? machine.totalMemoryBytes / 1024 / 1024 / 1024 : 0;
   const availMemoryGB = machine ? machine.availableMemoryBytes / 1024 / 1024 / 1024 : 0;
@@ -1615,9 +1630,38 @@ function LocalInferenceSection() {
 
       {/* 模型库 */}
       <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-baseline justify-between bg-slate-50/60 dark:bg-slate-900/20">
-          <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">本地模型库</h3>
-          <span className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500">按能力分组 · 按适配度排序</span>
+        <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-4 bg-slate-50/60 dark:bg-slate-900/20">
+          <div className="flex items-baseline gap-3 min-w-0">
+            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">本地模型库</h3>
+            <span className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 truncate">按能力分组 · 按适配度排序</span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500">下载源</span>
+            <div className="inline-flex rounded-md border border-slate-200 dark:border-slate-700 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => handleMirrorChange("hf-mirror")}
+                className={`px-2.5 py-1 font-mono text-[11px] transition-colors ${
+                  mirror === "hf-mirror"
+                    ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300"
+                    : "bg-white text-slate-600 hover:bg-slate-100 dark:bg-transparent dark:text-slate-400 dark:hover:bg-slate-800"
+                }`}
+              >
+                hf-mirror
+              </button>
+              <button
+                type="button"
+                onClick={() => handleMirrorChange("modelscope")}
+                className={`px-2.5 py-1 font-mono text-[11px] transition-colors border-l border-slate-200 dark:border-slate-700 ${
+                  mirror === "modelscope"
+                    ? "bg-indigo-50 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300"
+                    : "bg-white text-slate-600 hover:bg-slate-100 dark:bg-transparent dark:text-slate-400 dark:hover:bg-slate-800"
+                }`}
+              >
+                modelscope
+              </button>
+            </div>
+          </div>
         </div>
 
         <div className="p-5 space-y-6">
@@ -1629,6 +1673,7 @@ function LocalInferenceSection() {
             busyKey={busyKey}
             busyAction={busyAction}
             isAnyBusy={isAnyBusy}
+            progress={progress}
             onStart={handleStart}
             onStop={handleStop}
           />
@@ -1640,6 +1685,7 @@ function LocalInferenceSection() {
             busyKey={busyKey}
             busyAction={busyAction}
             isAnyBusy={isAnyBusy}
+            progress={progress}
             onStart={handleStart}
             onStop={handleStop}
           />

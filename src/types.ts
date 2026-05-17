@@ -457,6 +457,8 @@ export type AppConfig = {
   lastLlamaModelKey?: string | null;
   // 全局默认分析参数; PrepareScreen 在新项目首次进入时读取
   defaultAnalysis?: DefaultAnalysis;
+  // 本地模型下载镜像选择: hf-mirror (默认) 或 modelscope (魔搭/国内 CDN)
+  localModelMirror?: "hf-mirror" | "modelscope";
   schemaVersion: 2;
   // v1 残留字段,仅在 migrateConfigV1ToV2 内读取,迁移后写回时不再产生
   /** @deprecated migrated to taskSlots.complex_vision */

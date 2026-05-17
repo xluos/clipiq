@@ -1,7 +1,8 @@
-const { app, BrowserWindow, Notification, dialog, ipcMain, nativeImage, protocol, shell } = require("electron");
+const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, protocol, shell } = require("electron");
 const { execFile } = require("node:child_process");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
+const os = require("node:os");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const { Readable } = require("node:stream");
@@ -2029,11 +2030,12 @@ async function transcribeLocalWhisperCpp(audioProvider, wavPath, handle, onProgr
   if (!target) throw new Error(`未知 whisper.cpp 模型: ${modelId}`);
   if (!target.downloaded) {
     if (onProgress) onProgress({ stage: "download", message: `${target.name} 首次使用,下载模型中` });
+    const mirror = await getLocalModelMirror();
     await whisperCppRuntime.ensureModel(modelId, (p) => {
       if (p.percent != null && onProgress) {
         onProgress({ stage: "download", message: p.message });
       }
-    });
+    }, { mirror });
   }
   const transcriber = getTranscriber("whisper_cpp");
   return transcriber.transcribe({
@@ -2060,7 +2062,8 @@ async function warmupLocalWhisperCpp(audioProvider) {
   const target = models.find((m) => m.key === modelId);
   if (!target) throw new Error(`未知 whisper.cpp 模型: ${modelId}`);
   if (!target.downloaded) {
-    await whisperCppRuntime.ensureModel(modelId);
+    const mirror = await getLocalModelMirror();
+    await whisperCppRuntime.ensureModel(modelId, undefined, { mirror });
   }
   await whisperCppRuntime.start(modelId);
   return { modelId, elapsedMs: Date.now() - t0 };
@@ -2106,7 +2109,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     const payload = { projectId: project.id, progress, stage, message };
     handle.lastProgress = payload;
     handle.lastProgressAt = Date.now();
-    event.sender.send("analysis:progress", payload);
+    // 广播到所有窗口:关窗后再开的 renderer (attach 模式) 也能收到进度。
+    broadcastToWindows("analysis:progress", payload);
   };
 
   // 心跳:某些阶段(本地 whisper 加载/推理)单次任务 30s+,
@@ -2121,7 +2125,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     // 已经带过 "已等待 Ns" 后缀,只更新数字
     const stripped = baseMsg.replace(/\s*·?\s*已等待 \d+s$/, "");
     const msg = stripped ? `${stripped} · 已等待 ${elapsed}s` : `已等待 ${elapsed}s`;
-    event.sender.send("analysis:progress", { ...base, message: msg });
+    broadcastToWindows("analysis:progress", { ...base, message: msg });
   }, 2000);
   handle.heartbeat = heartbeat;
 
@@ -2688,14 +2692,6 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       .filter((t) => t.durationMs > 0 && t.stage !== "完成")
       .sort((a, b) => b.durationMs - a.durationMs)[0];
     const topLabel = top ? ` · 最耗时 ${top.stage} ${(top.durationMs / 1000).toFixed(1)}s` : "";
-    if (!handle.cancelled) {
-      event.sender.send("analysis:progress", {
-        projectId: project.id,
-        progress: 100,
-        stage: "完成",
-        message: `总耗时 ${(totalDurationMs / 1000).toFixed(1)}s${topLabel}`,
-      });
-    }
     report = { ...report, timings: finalTimings, totalDurationMs };
     await writeJson(path.join(projectDir, "analysis-result.json"), { project: updatedProject, nodes, report });
     await writeJson(path.join(projectDir, "timings.json"), { totalDurationMs, timings: finalTimings });
@@ -2715,6 +2711,15 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     } catch (persistError) {
       // 不阻断返回:JSON 文件已经写了,renderer 路径仍可兜底
       console.warn("[clipiq] main 端 SQLite 持久化失败,renderer 路径会兜底:", persistError);
+    }
+    // 最终广播放在 DB 写盘之后:attach 模式的 renderer 收到这条后 fetch 可拿到完整结果。
+    if (!handle.cancelled) {
+      broadcastToWindows("analysis:progress", {
+        projectId: project.id,
+        progress: 100,
+        stage: "完成",
+        message: `总耗时 ${(totalDurationMs / 1000).toFixed(1)}s${topLabel}`,
+      });
     }
     return { project: updatedProject, nodes, report };
   } finally {
@@ -2801,8 +2806,88 @@ function getAppIcon() {
   return null;
 }
 
+// 系统栏托盘 + 真退出标志。
+// 关窗默认 = 隐藏到托盘,仅 isQuitting=true 时才真销毁;Cmd+Q / 托盘"退出" / before-quit 都会设这个标志。
+let trayInstance = null;
+let isQuitting = false;
+let mainWindowRef = null;
+
+function broadcastToWindows(channel, payload) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    const wc = win.webContents;
+    if (!wc || wc.isDestroyed()) continue;
+    try {
+      wc.send(channel, payload);
+    } catch {
+      // 渲染端可能正在销毁,忽略
+    }
+  }
+}
+
+function showMainWindow() {
+  const win = mainWindowRef && !mainWindowRef.isDestroyed() ? mainWindowRef : BrowserWindow.getAllWindows()[0];
+  if (!win || win.isDestroyed()) {
+    createWindow();
+    if (process.platform === "darwin" && app.dock?.show) app.dock.show();
+    return;
+  }
+  if (win.isMinimized()) win.restore();
+  if (!win.isVisible()) win.show();
+  win.focus();
+  if (process.platform === "darwin" && app.dock?.show) app.dock.show();
+  rebuildTrayMenu();
+}
+
+function toggleMainWindow() {
+  const win = mainWindowRef && !mainWindowRef.isDestroyed() ? mainWindowRef : null;
+  if (win && win.isVisible() && !win.isMinimized()) {
+    win.hide();
+    rebuildTrayMenu();
+  } else {
+    showMainWindow();
+  }
+}
+
+function rebuildTrayMenu() {
+  if (!trayInstance || trayInstance.isDestroyed?.()) return;
+  const win = mainWindowRef && !mainWindowRef.isDestroyed() ? mainWindowRef : null;
+  const visible = !!(win && win.isVisible() && !win.isMinimized());
+  const menu = Menu.buildFromTemplate([
+    {
+      label: visible ? "隐藏主窗口" : "显示主窗口",
+      click: () => toggleMainWindow(),
+    },
+    { type: "separator" },
+    {
+      label: "退出 ClipIQ",
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ]);
+  trayInstance.setContextMenu(menu);
+}
+
+function createTray() {
+  if (trayInstance) return;
+  const sourcePath = path.join(__dirname, "assets", "icon-256.png");
+  let trayImg = nativeImage.createFromPath(sourcePath);
+  if (trayImg.isEmpty()) {
+    console.warn("[tray] icon-256.png 不可用,跳过托盘创建");
+    return;
+  }
+  const size = process.platform === "darwin" ? 18 : 16;
+  trayImg = trayImg.resize({ width: size, height: size, quality: "best" });
+  trayInstance = new Tray(trayImg);
+  trayInstance.setToolTip("ClipIQ");
+  trayInstance.on("click", () => toggleMainWindow());
+  rebuildTrayMenu();
+}
+
 // "后台" 判定: 没有任何窗口处于聚焦+可见+未最小化状态。
-// 覆盖: macOS Cmd+H 隐藏 / minimize / 切到别的 app / 单显示器另一桌面。
+// 覆盖: macOS Cmd+H 隐藏 / minimize / 切到别的 app / 单显示器另一桌面 / 关窗后隐藏到托盘。
 function isAppInBackground() {
   const wins = BrowserWindow.getAllWindows();
   if (wins.length === 0) return true;
@@ -2851,6 +2936,27 @@ async function createWindow() {
       nodeIntegration: false,
       preload: path.join(__dirname, "preload.cjs"),
     },
+  });
+
+  mainWindowRef = mainWindow;
+
+  // 关窗 = 隐藏到托盘;真退出走 isQuitting 标志(托盘"退出" / Cmd+Q before-quit 会设)。
+  mainWindow.on("close", (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      mainWindow.hide();
+      if (process.platform === "darwin" && app.dock?.hide) app.dock.hide();
+      rebuildTrayMenu();
+    }
+  });
+
+  mainWindow.on("show", rebuildTrayMenu);
+  mainWindow.on("hide", rebuildTrayMenu);
+  mainWindow.on("minimize", rebuildTrayMenu);
+  mainWindow.on("restore", rebuildTrayMenu);
+  mainWindow.on("closed", () => {
+    if (mainWindowRef === mainWindow) mainWindowRef = null;
+    rebuildTrayMenu();
   });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;
@@ -3471,9 +3577,10 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("llama:ensureModel", async (event, modelKey) => {
+    const mirror = await getLocalModelMirror();
     return llamaRuntime.ensureModel(modelKey, (progress) => {
       event.sender.send("llama:progress", { scope: "model", modelKey, ...progress });
-    });
+    }, { mirror });
   });
 
   ipcMain.handle("llama:start", async (event, modelKey) => {
@@ -3506,9 +3613,19 @@ app.whenReady().then(async () => {
   ipcMain.handle("whisperCpp:getStatus", async () => whisperCppRuntime.getStatus());
 
   ipcMain.handle("whisperCpp:ensureModel", async (event, modelKey) => {
+    const mirror = await getLocalModelMirror();
     return whisperCppRuntime.ensureModel(modelKey, (progress) => {
       event.sender.send("whisperCpp:progress", { scope: "model", modelKey, ...progress });
-    });
+    }, { mirror });
+  });
+
+  ipcMain.handle("mirror:get", async () => {
+    return { mirror: await getLocalModelMirror() };
+  });
+
+  ipcMain.handle("mirror:set", async (_event, value) => {
+    const saved = await persistLocalModelMirror(value);
+    return { ok: true, mirror: saved };
   });
 
   ipcMain.handle("whisperCpp:start", async (event, modelKey) => {
@@ -3540,6 +3657,22 @@ async function persistLastLlamaModelKey(modelKey) {
     lastLlamaModelKey: modelKey || null,
     savedAt: new Date().toISOString(),
   });
+}
+
+async function getLocalModelMirror() {
+  const cfg = (await readJson(getConfigPath(), null)) || {};
+  return cfg.localModelMirror === "modelscope" ? "modelscope" : "hf-mirror";
+}
+
+async function persistLocalModelMirror(value) {
+  const next = value === "modelscope" ? "modelscope" : "hf-mirror";
+  const cur = (await readJson(getConfigPath(), null)) || {};
+  await writeJson(getConfigPath(), {
+    ...cur,
+    localModelMirror: next,
+    savedAt: new Date().toISOString(),
+  });
+  return next;
 }
 
 function scheduleLlamaAutoResume() {

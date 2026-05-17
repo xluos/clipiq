@@ -197,6 +197,10 @@ declare global {
       }>;
       openDataFolder: (which?: "projects" | "userData") => Promise<{ ok: boolean; path: string }>;
       purgeProjects: () => Promise<{ ok: boolean; message?: string }>;
+      mirror: {
+        get: () => Promise<{ mirror: "hf-mirror" | "modelscope" }>;
+        set: (value: "hf-mirror" | "modelscope") => Promise<{ ok: true; mirror: "hf-mirror" | "modelscope" }>;
+      };
       llama: {
         listModels: () => Promise<ModelDescriptor[]>;
         listManifest: () => Promise<{ machine: MachineSpecs; models: ModelDescriptor[] }>;

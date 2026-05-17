@@ -152,16 +152,33 @@ function fillBatchWithFallback(batch, result, baseIndex) {
 
 const GIVE_UP_AFTER_CONSECUTIVE_FAIL = 3;
 
-async function mergeShots({ shots, provider, batchSize, handle, onProgress }) {
+async function mergeShots({ shots, provider, batchSize, handle, onProgress, cache }) {
   const size = clampBatchSize(batchSize);
   const result = new Array(shots.length);
   let batchIndex = 0;
   let consecutiveFail = 0;
+  let cacheHits = 0;
   let givenUp = false; // 连续失败 N 次 → 视为 provider 不可用, 余下 batch 直接 fallback (节省长视频几分钟空转)
   for (let i = 0; i < shots.length; i += size) {
     if (handle?.cancelled) throw new Error("cancelled");
     batchIndex += 1;
     const batch = shots.slice(i, i + size);
+
+    // 缓存查询: batch 命中时直接铺到 result, 不调 LLM
+    if (cache) {
+      try {
+        const hit = await cache.lookup(batch);
+        if (Array.isArray(hit?.entries) && hit.entries.length === batch.length) {
+          for (let j = 0; j < batch.length; j++) result[i + j] = hit.entries[j];
+          cacheHits += batch.length;
+          if (onProgress) onProgress({ done: Math.min(i + size, shots.length), total: shots.length, batchIndex, mode: "cache-hit" });
+          continue;
+        }
+      } catch {
+        // 缓存读失败 → 走 LLM 路径
+      }
+    }
+
     if (givenUp) {
       fillBatchWithFallback(batch, result, i);
       if (onProgress) onProgress({ done: Math.min(i + size, shots.length), total: shots.length, batchIndex, mode: "fallback-shortcut" });
@@ -176,6 +193,7 @@ async function mergeShots({ shots, provider, batchSize, handle, onProgress }) {
         throw new Error("parsed JSON 缺少 shots 字段");
       }
       consecutiveFail = 0;
+      const batchEntries = [];
       for (let j = 0; j < batch.length; j++) {
         const local = batch[j];
         const match = out.find((s) => Number(s.shotIndex) === j) || out[j];
@@ -190,10 +208,16 @@ async function mergeShots({ shots, provider, batchSize, handle, onProgress }) {
           typeof match?.shotDescription === "string" && match.shotDescription.trim()
             ? match.shotDescription.trim().slice(0, 240)
             : fallbackShotDescription(local);
-        result[i + j] = {
+        const entry = {
           shotDescription: desc,
           representativeFrameIndex: repIdxs.length > 0 ? repIdxs : frameCount > 0 ? [0] : [],
         };
+        result[i + j] = entry;
+        batchEntries.push(entry);
+      }
+      if (cache) {
+        try { await cache.store(batch, { entries: batchEntries }, { batchIndex }); }
+        catch { /* 写缓存失败不阻塞 */ }
       }
     } catch (error) {
       if (handle?.cancelled) throw error;
@@ -215,6 +239,9 @@ async function mergeShots({ shots, provider, batchSize, handle, onProgress }) {
         mode: givenUp ? "fallback-after-give-up" : consecutiveFail > 0 ? "fallback-batch" : "ok",
       });
     }
+  }
+  if (typeof result.cacheHits === "undefined") {
+    Object.defineProperty(result, "cacheHits", { value: cacheHits, enumerable: false });
   }
   return result;
 }

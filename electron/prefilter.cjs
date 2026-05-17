@@ -147,38 +147,67 @@ async function tagOneFrame(port, imagePath, modelKey, signal) {
 // 逐帧串行调本地 server。
 // frames: [{ index, prefilterFramePath, ... }, ...]
 // onProgress(i, total, tag) 每帧完成时回调。
-async function tagFrames(frames, { port, modelKey, perFrameTimeoutMs = 30_000, onProgress } = {}) {
+// cache (可选): { lookup(frame): Promise<{ tag, meta } | null>, store(frame, tag, meta): Promise<void> }
+//   注入由 main.cjs 构造的缓存器, 命中时直接复用 tag, 不调 llama-server。
+async function tagFrames(frames, { port, modelKey, perFrameTimeoutMs = 30_000, onProgress, cache } = {}) {
   if (!port) throw new Error("prefilter: 缺少本地 server 端口");
   const out = [];
   let totalTokens = 0;
+  let cacheHits = 0;
   const startedAt = Date.now();
   for (let i = 0; i < frames.length; i++) {
     const f = frames[i];
     const t0 = Date.now();
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), perFrameTimeoutMs);
     let tag;
     let usage = null;
     let error = null;
-    try {
-      const result = await tagOneFrame(port, f.prefilterFramePath || f.framePath, modelKey, controller.signal);
-      tag = result.tag;
-      usage = result.usage;
-      if (usage?.total_tokens) totalTokens += usage.total_tokens;
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-      tag = neutralTag(error);
-    } finally {
-      clearTimeout(timer);
+    let fromCache = false;
+
+    if (cache) {
+      try {
+        const hit = await cache.lookup(f);
+        if (hit?.tag) {
+          tag = hit.tag;
+          fromCache = true;
+          cacheHits += 1;
+        }
+      } catch {
+        // 缓存读失败 → 静默走 LLM 路径
+      }
     }
+
+    if (!fromCache) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), perFrameTimeoutMs);
+      try {
+        const result = await tagOneFrame(port, f.prefilterFramePath || f.framePath, modelKey, controller.signal);
+        tag = result.tag;
+        usage = result.usage;
+        if (usage?.total_tokens) totalTokens += usage.total_tokens;
+      } catch (e) {
+        error = e instanceof Error ? e.message : String(e);
+        tag = neutralTag(error);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (cache && !error) {
+        try {
+          await cache.store(f, tag, { modelKey, tokensUsed: usage?.total_tokens || 0 });
+        } catch {
+          // 写缓存失败不阻塞
+        }
+      }
+    }
+
     const elapsedMs = Date.now() - t0;
-    out.push({ ...f, prefilterTag: tag, prefilterElapsedMs: elapsedMs, prefilterError: error });
-    if (onProgress) onProgress(i, frames.length, tag, elapsedMs);
+    out.push({ ...f, prefilterTag: tag, prefilterElapsedMs: elapsedMs, prefilterError: error, prefilterFromCache: fromCache });
+    if (onProgress) onProgress(i, frames.length, tag, elapsedMs, fromCache);
   }
   return {
     frames: out,
     totalElapsedMs: Date.now() - startedAt,
     totalTokens,
+    cacheHits,
   };
 }
 

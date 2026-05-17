@@ -167,6 +167,7 @@ async function aggregateEmotions({
   provider,
   handle,
   onProgress,
+  cache,
 }) {
   if (!Array.isArray(messages) || messages.length === 0) {
     return { windows: [], summary: "" };
@@ -197,8 +198,25 @@ async function aggregateEmotions({
       summaries: summarizeBucket(b),
     }));
 
+    // 缓存查询: 同一 batch (各桶的样本 + 时间) 之前评过就直接复用
+    let parsed = null;
+    let fromCache = false;
+    if (cache) {
+      try {
+        const hit = await cache.lookup(batch);
+        if (hit?.parsed) {
+          parsed = hit.parsed;
+          fromCache = true;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     try {
-      const parsed = await callBatch(provider, batch, handle?.abortController?.signal);
+      if (!parsed) {
+        parsed = await callBatch(provider, batch, handle?.abortController?.signal);
+      }
       const arr = Array.isArray(parsed?.windows) ? parsed.windows : [];
       for (const item of arr) {
         const idx = Number(item?.index);
@@ -221,6 +239,9 @@ async function aggregateEmotions({
         if (typeof item?.summary === "string" && item.summary.trim()) {
           target.summary = String(item.summary).trim().slice(0, 40);
         }
+      }
+      if (!fromCache && cache && Array.isArray(arr) && arr.length > 0) {
+        try { await cache.store(batch, { parsed }, {}); } catch { /* 写缓存失败不阻塞 */ }
       }
     } catch (err) {
       // 这一批失败保持 neutral, 继续下一批

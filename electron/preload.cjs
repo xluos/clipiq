@@ -47,6 +47,10 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   getDataInfo: () => ipcRenderer.invoke("data:getInfo"),
   openDataFolder: (which) => ipcRenderer.invoke("data:openFolder", which),
   purgeProjects: () => ipcRenderer.invoke("data:purgeProjects"),
+  mirror: {
+    get: () => ipcRenderer.invoke("mirror:get"),
+    set: (value) => ipcRenderer.invoke("mirror:set", value),
+  },
   llama: {
     listModels: () => ipcRenderer.invoke("llama:listModels"),
     listManifest: () => ipcRenderer.invoke("llama:listManifest"),
