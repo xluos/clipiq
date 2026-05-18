@@ -2,7 +2,7 @@ import { useApp } from "../AppContext";
 import {
   Plus, ArrowUp, ChevronDown, Link as LinkIcon, FileVideo,
   CheckCircle2, Clock, XCircle, Trash2, Film, Loader2, AlertTriangle, Sparkles,
-  Upload,
+  Upload, BarChart3, Folder, UserSquare, Wand2, ChevronRight,
 } from "lucide-react";
 import { type ChangeEvent, type DragEvent, type FunctionComponent, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { InspectedVideo } from "../electron-api";
@@ -118,7 +118,7 @@ function projectSourceLabel(source: ProjectSource): string {
 }
 
 export function HomeScreen() {
-  const { setCurrentScreen, projects, setActiveProjectId, setProjects, removeProject } = useApp();
+  const { setCurrentScreen, goModule, projects, setActiveProjectId, setProjects, removeProject } = useApp();
   const confirm = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -419,27 +419,45 @@ export function HomeScreen() {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      <div className="max-w-4xl mx-auto px-8 pt-12 pb-24 space-y-10">
+      <div className="max-w-4xl mx-auto px-14 pt-10 pb-16 space-y-7">
 
-        {/* Header */}
-        <header className="flex items-center gap-4 select-none">
-          <BrandLogo size={56} className="shrink-0" />
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">ClipIQ</h1>
-            <p className="text-xs font-mono text-slate-500 dark:text-slate-500 tracking-wider uppercase mt-1">视频内容洞察</p>
+        {/* Brand header — editorial */}
+        <header className="select-none">
+          <div className="text-[10.5px] font-mono tracking-[0.14em] uppercase text-slate-500 dark:text-slate-400 mb-2">
+            CLIPIQ · 创作者剪辑助手
           </div>
+          <h1 className="text-[28px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 leading-tight">
+            从哪里开始?
+          </h1>
+          <p className="text-[15px] text-slate-600 dark:text-slate-400 mt-2.5 max-w-xl">
+            分析一条视频,或者进其它三个模块继续上次的工作。
+          </p>
         </header>
 
-        {/* Hero block */}
+        {/* Featured — analysis launcher with embedded composer */}
         <section className="space-y-3">
-          <div>
-            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">新建项目</h2>
-            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">粘贴链接、拖入文件,或输入本地路径。</p>
-          </div>
+          <div className="rounded-[14px] border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-5">
+            <div className="flex items-start gap-4 mb-3.5">
+              <div className="w-[38px] h-[38px] rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 grid place-items-center shrink-0">
+                <BarChart3 className="w-[18px] h-[18px]" strokeWidth={1.5} />
+              </div>
+              <div className="flex-1">
+                <div className="flex items-baseline gap-2.5">
+                  <h2 className="text-[17px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">分析一条视频</h2>
+                  <span className="text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400">
+                    · {all.length} 条已有项目
+                    {inProgress.length > 0 ? ` · ${inProgress.length} 条正在跑` : ""}
+                  </span>
+                </div>
+                <p className="text-[12.5px] text-slate-600 dark:text-slate-400 mt-1">
+                  粘贴 B 站链接、拖入本地视频,或输入本地路径。Cmd + Enter 直接开跑。
+                </p>
+              </div>
+            </div>
 
           {/* Composer */}
           <div
-            className={`rounded-[18px] border bg-white dark:bg-[#14151a] p-1 transition-all ${composerStateClass}`}
+            className={`rounded-[14px] border bg-white dark:bg-[#14151a] p-1 transition-all ${composerStateClass}`}
           >
             <div className="flex items-center gap-2 px-3 pt-3 pb-1">
               <button
@@ -510,6 +528,7 @@ export function HomeScreen() {
               </button>
             </div>
           </div>
+          </div>{/* end hero card */}
 
           {!window.videoAnalyzer && (
             <div className="flex justify-end text-[11px] font-mono uppercase tracking-wider text-amber-600 dark:text-amber-400 px-1">
@@ -525,7 +544,29 @@ export function HomeScreen() {
           )}
         </section>
 
-        {/* Projects table */}
+        {/* Other 3 modules — equal launcher cards */}
+        <section className="grid grid-cols-3 gap-2.5">
+          <ModuleLaunchCard
+            icon={<Folder className="w-3.5 h-3.5" strokeWidth={1.5} />}
+            label="上传素材入库"
+            desc="把拍摄素材自动分镜,建可检索的镜头索引。"
+            onClick={() => goModule("library")}
+          />
+          <ModuleLaunchCard
+            icon={<UserSquare className="w-3.5 h-3.5" strokeWidth={1.5} />}
+            label="账号分析"
+            desc="输入 UP 主链接,批量分析热门视频,汇总方法论。"
+            onClick={() => goModule("account")}
+          />
+          <ModuleLaunchCard
+            icon={<Wand2 className="w-3.5 h-3.5" strokeWidth={1.5} />}
+            label="新建剪辑会话"
+            desc="从目标出发,结合素材库与方法论生成剪辑思路。"
+            onClick={() => goModule("studio")}
+          />
+        </section>
+
+        {/* Recent projects */}
         {projects.length > 0 ? (
           <section>
             <div className="flex items-center justify-between mb-3">
@@ -597,6 +638,29 @@ export function HomeScreen() {
     </main>
   );
 }
+
+const ModuleLaunchCard: FunctionComponent<{
+  icon: ReactNode;
+  label: string;
+  desc: string;
+  onClick: () => void;
+}> = ({ icon, label, desc, onClick }) => {
+  return (
+    <button
+      onClick={onClick}
+      className="text-left p-4 bg-white dark:bg-[#14151a] border border-slate-200 dark:border-slate-800 rounded-xl hover:border-slate-300 dark:hover:border-slate-700 transition-colors group"
+    >
+      <div className="flex items-center gap-2.5 mb-2.5">
+        <div className="w-7 h-7 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 grid place-items-center shrink-0">
+          {icon}
+        </div>
+        <h3 className="text-[13.5px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 flex-1">{label}</h3>
+        <ChevronRight className="w-3 h-3 text-slate-400 dark:text-slate-500 group-hover:text-slate-700 dark:group-hover:text-slate-300 transition-colors" strokeWidth={1.5} />
+      </div>
+      <p className="text-[12.5px] text-slate-600 dark:text-slate-400 leading-relaxed">{desc}</p>
+    </button>
+  );
+};
 
 function SegmentedTabs({
   tab, onChange, counts,
