@@ -1470,6 +1470,8 @@ async function fetchBilibiliVideoView(bvid, cookie) {
   const data = await res.json();
   if (data?.code !== 0) throw new Error(`view code=${data?.code} ${data?.message || ""}`);
   const v = data?.data || {};
+  // B 站封面有时返 http:// , renderer 阻止 mixed content, 强制 https
+  const pic = v.pic ? String(v.pic).replace(/^http:\/\//, "https://") : null;
   return {
     bvid: v.bvid || bvid,
     title: v.title || "",
@@ -1478,7 +1480,7 @@ async function fetchBilibiliVideoView(bvid, cookie) {
       ? new Date(Number(v.pubdate) * 1000).toISOString().slice(0, 10).replace(/-/g, "")
       : null,
     viewCount: Number(v.stat?.view) || 0,
-    thumbnailUrl: v.pic || null,
+    thumbnailUrl: pic,
   };
 }
 
@@ -1528,7 +1530,7 @@ async function fetchBilibiliSpaceVideos(mid, limit = 20) {
       : null,
     viewCount: Number(v.play) || 0,
     externalUrl: v.bvid ? `https://www.bilibili.com/video/${v.bvid}` : "",
-    thumbnailUrl: v.pic || null,
+    thumbnailUrl: v.pic ? String(v.pic).replace(/^http:\/\//, "https://") : null,
   })).filter((v) => v.id);
 
   // B 站匿名访客的 arc/search 只返 bvid 不返 title/duration. 用 view API 并发补全.
@@ -1582,7 +1584,7 @@ async function fetchBilibiliCard(mid) {
   return {
     mid: String(card.mid || mid),
     name: card.name || null,
-    face: card.face || null,
+    face: card.face ? String(card.face).replace(/^http:\/\//, "https://") : null,
     sign: card.sign || null,
     fansFormatted: formatFollowersCount(card.fans),
     archiveCount: Number(data?.data?.archive_count) || 0,
