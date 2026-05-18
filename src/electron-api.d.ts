@@ -228,8 +228,13 @@ declare global {
         ok: true;
         accountTitle?: string | null;
         accountUploader?: string | null;
+        accountAvatarUrl?: string | null;
+        accountFollowers?: string | null;
+        accountBio?: string | null;
+        accountExternalId?: string | null;
+        accountPlatform?: import("./types").AccountPlatform;
         totalVideoCount?: number;
-        videos: Array<{ id: string; title: string; durationSec: number; uploadDate: string | null; viewCount: number; externalUrl: string }>;
+        videos: Array<{ id: string; title: string; durationSec: number; uploadDate: string | null; viewCount: number; externalUrl: string; thumbnailUrl?: string | null }>;
       }>;
       generateAccountMethodology: (payload: {
         accountName: string;

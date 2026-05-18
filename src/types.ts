@@ -552,7 +552,9 @@ export type Account = {
   platform: AccountPlatform;
   externalId?: string;             // UP 主在该平台的 id (如 B 站 UID)
   externalUrl?: string;            // 账号主页 URL
-  avatarHint?: string;              // 用于头像 fallback 显示的 2-3 字简称
+  avatarUrl?: string;               // 真实头像 URL (B 站 face / yt-dlp thumbnails 最大尺寸)
+  avatarHint?: string;              // 头像 URL 加载失败时显示的 2-3 字 fallback
+  bio?: string;                     // 账号简介 / sign
   followers?: string;               // 格式化字符串 "1238万"
   tags?: string[];                  // ["科技", "影视"]
   // 关联视频 id 列表 (Project.kind === "account_video")

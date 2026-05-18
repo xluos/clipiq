@@ -1276,6 +1276,338 @@ async function loadComplexTextProvider() {
   }
 }
 
+// ─────────────────────────────────────────────────────────────
+// 账号 (UP 主) 信息抓取工具
+// 平台 native API 优先拿头像/粉丝/简介 (yt-dlp 的 flat-playlist 输出在不少
+// 平台缺这些字段或被反爬拦截), 视频列表用 yt-dlp (它内置 wbi 签名等反爬绕过).
+
+function detectAccountPlatform(url) {
+  const u = String(url || "").toLowerCase();
+  if (u.includes("bilibili.com") || u.includes("b23.tv")) return "bilibili";
+  if (u.includes("douyin.com")) return "douyin";
+  if (u.includes("xiaohongshu.com") || u.includes("xhslink.com")) return "xiaohongshu";
+  if (u.includes("youtube.com") || u.includes("youtu.be")) return "youtube";
+  if (u.includes("tiktok.com")) return "tiktok";
+  return "unknown";
+}
+
+// 从 https://space.bilibili.com/123456/... 提取 mid
+function parseBilibiliMid(url) {
+  const m = String(url || "").match(/space\.bilibili\.com\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+// 抖音用户主页 https://www.douyin.com/user/MS4w... 提取 sec_uid
+function parseDouyinSecUid(url) {
+  const m = String(url || "").match(/douyin\.com\/user\/([A-Za-z0-9_-]+)/);
+  return m ? m[1] : null;
+}
+
+// 中文/英文格式化粉丝数
+function formatFollowersCount(num) {
+  const n = Number(num);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (n >= 100_000_000) return `${(n / 100_000_000).toFixed(1).replace(/\.0$/, "")}亿`;
+  if (n >= 10_000) return `${(n / 10_000).toFixed(1).replace(/\.0$/, "")}万`;
+  return String(n);
+}
+
+// 从 yt-dlp thumbnails 列表里选最大尺寸
+function pickBestThumbnail(thumbnails) {
+  if (!Array.isArray(thumbnails) || thumbnails.length === 0) return null;
+  let best = null;
+  let bestSize = -1;
+  for (const t of thumbnails) {
+    const size = (Number(t?.width) || 0) + (Number(t?.height) || 0);
+    if (size > bestSize) { bestSize = size; best = t; }
+  }
+  return best?.url || null;
+}
+
+// B 站访客 cookie — 不带就是风控-352. 完整流程:
+//   1) GET bilibili.com 拿 b_lsid / _uuid 等基础 cookie
+//   2) GET /x/frontend/finger/spi 拿 b_3 (buvid3) / b_4 (buvid4) — 关键, 否则 -352
+//   3) 拼成完整 Cookie 字符串
+const BILI_BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
+const _bilibiliCookieCache = { value: null, fetchedAt: 0 };
+
+function parseSetCookies(res) {
+  let arr = [];
+  if (typeof res.headers.getSetCookie === "function") {
+    arr = res.headers.getSetCookie();
+  } else {
+    const raw = res.headers.get("set-cookie") || "";
+    arr = raw.split(/,(?=\s?[A-Za-z_]+=)/);
+  }
+  return arr
+    .map((c) => String(c).split(";")[0].trim())
+    .filter((c) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(c));
+}
+
+async function getBilibiliVisitorCookie() {
+  if (_bilibiliCookieCache.value && Date.now() - _bilibiliCookieCache.fetchedAt < 60 * 60_000) {
+    return _bilibiliCookieCache.value;
+  }
+  try {
+    // step 1: 主站拿基础 cookie
+    const homeRes = await fetch("https://www.bilibili.com/", {
+      method: "GET",
+      headers: {
+        "User-Agent": BILI_BROWSER_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+      },
+    });
+    const baseCookies = parseSetCookies(homeRes);
+
+    // step 2: /x/frontend/finger/spi 拿 b_3/b_4 = buvid3/buvid4
+    let buvid3 = "";
+    let buvid4 = "";
+    try {
+      const spiRes = await fetch("https://api.bilibili.com/x/frontend/finger/spi", {
+        method: "GET",
+        headers: {
+          "User-Agent": BILI_BROWSER_UA,
+          "Referer": "https://www.bilibili.com/",
+          "Accept": "application/json, text/plain, */*",
+          "Cookie": baseCookies.join("; "),
+        },
+      });
+      if (spiRes.ok) {
+        const spiData = await spiRes.json();
+        buvid3 = spiData?.data?.b_3 || "";
+        buvid4 = spiData?.data?.b_4 || "";
+      }
+    } catch { /* spi 拿不到也继续, 用 baseCookies 兜底 */ }
+
+    const merged = [...baseCookies];
+    if (buvid3) merged.push(`buvid3=${buvid3}`);
+    if (buvid4) merged.push(`buvid4=${buvid4}`);
+    const cookieStr = merged.join("; ");
+    if (cookieStr) {
+      _bilibiliCookieCache.value = cookieStr;
+      _bilibiliCookieCache.fetchedAt = Date.now();
+    }
+    return cookieStr;
+  } catch {
+    return "";
+  }
+}
+
+// B 站 wbi 签名 — Web 端从 2023-03 起所有受保护 API 都要带 wts + w_rid 否则 -403/412
+// 算法源: bilibili-API-collect/docs/misc/sign/wbi.md
+const WBI_MIXIN_KEY_ENC_TAB = [
+  46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+  27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+  37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
+  22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
+];
+const _wbiKeyCache = { mixinKey: null, fetchedAt: 0 };
+const _crypto = require("node:crypto");
+
+async function getBilibiliWbiMixinKey() {
+  // wbi keys 每天会换, 30 分钟 cache
+  if (_wbiKeyCache.mixinKey && Date.now() - _wbiKeyCache.fetchedAt < 30 * 60_000) {
+    return _wbiKeyCache.mixinKey;
+  }
+  const res = await fetch("https://api.bilibili.com/x/web-interface/nav", {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+      "Referer": "https://www.bilibili.com/",
+    },
+  });
+  if (!res.ok) throw new Error(`wbi nav HTTP ${res.status}`);
+  const data = await res.json();
+  const imgUrl = data?.data?.wbi_img?.img_url || "";
+  const subUrl = data?.data?.wbi_img?.sub_url || "";
+  const extractKey = (u) => {
+    const m = String(u).match(/\/([0-9a-f]+)\.png$/i);
+    return m ? m[1] : "";
+  };
+  const imgKey = extractKey(imgUrl);
+  const subKey = extractKey(subUrl);
+  if (!imgKey || !subKey) throw new Error("解析 wbi keys 失败");
+  const orig = imgKey + subKey;
+  const mixinKey = WBI_MIXIN_KEY_ENC_TAB.map((n) => orig[n] || "").join("").slice(0, 32);
+  _wbiKeyCache.mixinKey = mixinKey;
+  _wbiKeyCache.fetchedAt = Date.now();
+  return mixinKey;
+}
+
+function signWbiQuery(params, mixinKey) {
+  const cleaned = { ...params, wts: Math.round(Date.now() / 1000) };
+  const chrFilter = /[!'()*]/g;
+  const query = Object.keys(cleaned).sort().map((key) => {
+    const value = String(cleaned[key]).replace(chrFilter, "");
+    return `${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+  }).join("&");
+  const w_rid = _crypto.createHash("md5").update(query + mixinKey).digest("hex");
+  return `${query}&w_rid=${w_rid}`;
+}
+
+// "12:34" / "1:02:34" → 秒
+function parseBilibiliLengthToSec(len) {
+  if (!len || typeof len !== "string") return 0;
+  const parts = len.split(":").map(Number);
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return 0;
+}
+
+// 单条视频元数据 — /x/web-interface/view?bvid=BVxxx 对匿名访客开放
+// space/arc/search 在匿名模式下只返 bvid 不返 title/length, 所以用 view 单独补全
+async function fetchBilibiliVideoView(bvid, cookie) {
+  const url = `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`;
+  const headers = {
+    "User-Agent": BILI_BROWSER_UA,
+    "Referer": `https://www.bilibili.com/video/${bvid}`,
+    "Accept": "application/json, text/plain, */*",
+    "Origin": "https://www.bilibili.com",
+  };
+  if (cookie) headers["Cookie"] = cookie;
+  const res = await fetch(url, { headers });
+  if (!res.ok) throw new Error(`view HTTP ${res.status}`);
+  const data = await res.json();
+  if (data?.code !== 0) throw new Error(`view code=${data?.code} ${data?.message || ""}`);
+  const v = data?.data || {};
+  return {
+    bvid: v.bvid || bvid,
+    title: v.title || "",
+    durationSec: Number(v.duration) || 0,
+    uploadDate: v.pubdate
+      ? new Date(Number(v.pubdate) * 1000).toISOString().slice(0, 10).replace(/-/g, "")
+      : null,
+    viewCount: Number(v.stat?.view) || 0,
+    thumbnailUrl: v.pic || null,
+  };
+}
+
+// 投稿视频列表 — wbi 签名调 /x/space/wbi/arc/search, 带访客 cookie + dm fingerprint
+async function fetchBilibiliSpaceVideos(mid, limit = 20) {
+  const [mixinKey, cookie] = await Promise.all([
+    getBilibiliWbiMixinKey(),
+    getBilibiliVisitorCookie(),
+  ]);
+  const ps = Math.max(1, Math.min(50, limit));
+  // dm_img_* 是 B 站 web 端的 webgl/canvas 指纹参数, 不传会触发 -352
+  const qs = signWbiQuery({
+    mid: String(mid),
+    ps: String(ps),
+    tid: "0",
+    pn: "1",
+    order: "pubdate",
+    platform: "web",
+    web_location: "1550101",
+    order_avoided: "true",
+    dm_img_list: "[]",
+    dm_img_str: "V2ViR0wgMS4wIChPcGVuR0wgRVMgMi4wIENocm9taXVtKQ",
+    dm_cover_img_str: "QU5HTEUgKEFwcGxlLCBBcHBsZSBNMSBQcm8sIE9wZW5HTCA0LjEpR29vZ2xlIEluYy4gKEFwcGxlKQ",
+    dm_img_inter: '{"ds":[],"wh":[6611,6105,30],"of":[235,470,235]}',
+  }, mixinKey);
+  const url = `https://api.bilibili.com/x/space/wbi/arc/search?${qs}`;
+  const headers = {
+    "User-Agent": BILI_BROWSER_UA,
+    "Referer": `https://space.bilibili.com/${mid}/video`,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Origin": "https://space.bilibili.com",
+  };
+  if (cookie) headers["Cookie"] = cookie;
+  const res = await fetch(url, { headers });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (data?.code !== 0) throw new Error(`code=${data?.code} ${data?.message || ""}`);
+  const vlist = data?.data?.list?.vlist || [];
+  const total = Number(data?.data?.page?.count) || vlist.length;
+  let videos = vlist.map((v) => ({
+    id: v.bvid || "",
+    title: v.title || "",
+    durationSec: parseBilibiliLengthToSec(v.length),
+    uploadDate: v.created
+      ? new Date(Number(v.created) * 1000).toISOString().slice(0, 10).replace(/-/g, "")
+      : null,
+    viewCount: Number(v.play) || 0,
+    externalUrl: v.bvid ? `https://www.bilibili.com/video/${v.bvid}` : "",
+    thumbnailUrl: v.pic || null,
+  })).filter((v) => v.id);
+
+  // B 站匿名访客的 arc/search 只返 bvid 不返 title/duration. 用 view API 并发补全.
+  const incomplete = videos.filter((v) => !v.title || !v.durationSec);
+  if (incomplete.length > 0) {
+    const enriched = await Promise.all(
+      incomplete.map((v) => fetchBilibiliVideoView(v.id, cookie).catch((err) => {
+        console.warn(`[bili-view] ${v.id} failed:`, err?.message || String(err));
+        return null;
+      }))
+    );
+    const byBvid = new Map();
+    for (const e of enriched) {
+      if (e) byBvid.set(e.bvid, e);
+    }
+    videos = videos.map((v) => {
+      const e = byBvid.get(v.id);
+      if (!e) return v;
+      return {
+        ...v,
+        title: v.title || e.title || "(未命名视频)",
+        durationSec: v.durationSec || e.durationSec,
+        uploadDate: v.uploadDate || e.uploadDate,
+        viewCount: v.viewCount || e.viewCount,
+        thumbnailUrl: v.thumbnailUrl || e.thumbnailUrl,
+      };
+    });
+  }
+  // 保底 title
+  videos = videos.map((v) => ({ ...v, title: v.title || "(未命名视频)" }));
+  return { videos, total };
+}
+
+// B 站公开 card API — 不需要登录/签名, 但要 UA + Referer 否则容易 412
+// 文档: github.com/SocialSisterYi/bilibili-API-collect /docs/user/info.md
+async function fetchBilibiliCard(mid) {
+  if (!mid) throw new Error("missing mid");
+  const url = `https://api.bilibili.com/x/web-interface/card?mid=${mid}&photo=false`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      "User-Agent": BILI_BROWSER_UA,
+      "Referer": "https://www.bilibili.com/",
+      "Accept": "application/json, text/plain, */*",
+    },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (data?.code !== 0) throw new Error(`code=${data?.code} ${data?.message || ""}`);
+  const card = data?.data?.card || {};
+  return {
+    mid: String(card.mid || mid),
+    name: card.name || null,
+    face: card.face || null,
+    sign: card.sign || null,
+    fansFormatted: formatFollowersCount(card.fans),
+    archiveCount: Number(data?.data?.archive_count) || 0,
+  };
+}
+
+// yt-dlp 跑一次 flat-playlist + dump-single-json, 抽出账号元数据 + 视频列表
+async function fetchYtDlpAccountJson(url, safeLimit) {
+  const ytDlp = await commandPath("yt-dlp");
+  if (!ytDlp) throw new Error("未安装 yt-dlp");
+  const { stdout } = await new Promise((resolve, reject) => {
+    execFile(ytDlp, [
+      "--flat-playlist",
+      "--dump-single-json",
+      "--no-warnings",
+      "-I", `1:${safeLimit}`,
+      url,
+    ], { windowsHide: true, maxBuffer: 32 * 1024 * 1024 }, (err, stdoutBuf, stderrBuf) => {
+      if (err) return reject(new Error(stderrBuf?.toString().slice(0, 400) || err.message));
+      resolve({ stdout: stdoutBuf?.toString() || "" });
+    });
+  });
+  return JSON.parse(stdout);
+}
+
 function getRotation(videoStream) {
   const tagRotation = Number(videoStream?.tags?.rotate);
   if (Number.isFinite(tagRotation)) return tagRotation;
@@ -3858,49 +4190,151 @@ app.whenReady().then(async () => {
     return { ok: true };
   });
 
-  // v2: yt-dlp 拉取 UP 主视频列表 (只列元数据, 不下载)
-  // 输入: { url, limit }   输出: { videos: [{id, title, durationSec, uploadDate, viewCount, externalUrl}] }
+  // v2: 多策略拉取 UP 主账号信息 + 视频列表
+  // 策略: 平台 native API (头像/粉丝/简介) ∥ yt-dlp (视频列表 + 兜底元数据)
+  // 输入: { url, limit }
+  // 输出: { accountAvatarUrl, accountFollowers, accountBio, ..., videos: [{id, title, ...}] }
   ipcMain.handle("accounts:fetchVideos", async (_event, { url, limit = 20 } = {}) => {
-    if (!url) throw new Error("accounts:fetchVideos 需要 url");
-    const ytDlp = await commandPath("yt-dlp");
-    if (!ytDlp) throw new Error("未找到 yt-dlp,无法拉取账号视频列表");
-    // yt-dlp 的 -I 1:N 限制范围;flat-playlist 只列元数据不下载;dump-single-json 一次性 JSON
+    if (!url || typeof url !== "string") throw new Error("accounts:fetchVideos 需要 url");
+    const platform = detectAccountPlatform(url);
     const safeLimit = Math.max(1, Math.min(100, Number(limit) || 20));
-    try {
-      const { stdout } = await new Promise((resolve, reject) => {
-        execFile(ytDlp, [
-          "--flat-playlist",
-          "--dump-single-json",
-          "--no-warnings",
-          "-I", `1:${safeLimit}`,
-          url,
-        ], { windowsHide: true, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
-          if (err) return reject(new Error(stderr?.toString().slice(0, 400) || err.message));
-          resolve({ stdout: stdout?.toString() || "" });
+
+    let nativeCard = null;
+    let nativeCardError = null;
+    let nativeVideos = null;
+    let nativeVideosError = null;
+    let nativeMid = null;
+
+    // B 站走平台原生接口: card API (头像/粉丝/简介) + wbi 签名的 space arc/search (视频列表)
+    // space 接口经常被风控 (412/-352), 重试 2 次, 每次间隔 3s
+    if (platform === "bilibili") {
+      nativeMid = parseBilibiliMid(url);
+      if (nativeMid) {
+        const cardPromise = fetchBilibiliCard(nativeMid).catch((e) => {
+          nativeCardError = `bilibili card: ${e?.message || String(e)}`;
+          return null;
         });
-      });
-      const parsed = JSON.parse(stdout);
-      const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
-      const videos = entries.map((e) => ({
-        id: e.id || e.video_id || "",
+        const fetchWithRetry = async () => {
+          let lastErr = null;
+          for (let i = 0; i < 3; i++) {
+            try { return await fetchBilibiliSpaceVideos(nativeMid, safeLimit); }
+            catch (e) {
+              lastErr = e;
+              if (i < 2) await new Promise((r) => setTimeout(r, 3000));
+            }
+          }
+          throw lastErr;
+        };
+        const videosPromise = fetchWithRetry().catch((e) => {
+          nativeVideosError = `bilibili space: ${e?.message || String(e)}`;
+          return null;
+        });
+        [nativeCard, nativeVideos] = await Promise.all([cardPromise, videosPromise]);
+      } else {
+        nativeCardError = "无法从 B 站 URL 解析出 mid (期望格式: space.bilibili.com/<UID>)";
+      }
+    }
+
+    // yt-dlp: B 站如果原生通道都成功就跳过 (省一次 412); 其他平台必跑
+    let ytDlpParsed = null;
+    let ytDlpError = null;
+    const skipYtDlp = platform === "bilibili" && nativeCard && nativeVideos;
+    if (!skipYtDlp) {
+      try {
+        ytDlpParsed = await fetchYtDlpAccountJson(url, safeLimit);
+      } catch (e) {
+        ytDlpError = e?.message || String(e);
+      }
+    }
+
+    let videos = [];
+    let totalVideoCount = 0;
+    let accountTitle = null;
+    let accountUploader = null;
+    let accountAvatarUrl = null;
+    let accountFollowers = null;
+    let accountBio = null;
+    let accountExternalId = null;
+
+    // 1) yt-dlp 兜底元数据 + 视频列表
+    if (ytDlpParsed) {
+      const entries = Array.isArray(ytDlpParsed.entries) ? ytDlpParsed.entries : [];
+      videos = entries.map((e) => ({
+        id: String(e.id || e.video_id || ""),
         title: e.title || e.fulltitle || "(未命名视频)",
         durationSec: Math.round(Number(e.duration) || 0),
         uploadDate: e.upload_date || null,
         viewCount: Number(e.view_count) || 0,
-        externalUrl: e.url || (e.id && parsed.webpage_url_basename
-          ? `https://www.bilibili.com/video/${e.id}` : ""),
+        externalUrl: (typeof e.url === "string" && e.url.startsWith("http")
+          ? e.url
+          : platform === "bilibili" && e.id
+          ? `https://www.bilibili.com/video/${e.id}`
+          : platform === "youtube" && e.id
+          ? `https://www.youtube.com/watch?v=${e.id}`
+          : ""),
+        thumbnailUrl: e.thumbnail || pickBestThumbnail(e.thumbnails),
       })).filter((v) => v.id);
-      return {
-        ok: true,
-        accountTitle: parsed.title || parsed.uploader || null,
-        accountUploader: parsed.uploader || null,
-        totalVideoCount: parsed.playlist_count || videos.length,
-        videos,
-      };
-    } catch (err) {
-      const msg = err?.message || String(err);
-      throw new Error(`yt-dlp 拉取失败: ${msg.slice(0, 300)}`);
+      totalVideoCount = Number(ytDlpParsed.playlist_count) || videos.length;
+      accountTitle = ytDlpParsed.title || null;
+      accountUploader = ytDlpParsed.uploader || ytDlpParsed.channel || null;
+      accountAvatarUrl = pickBestThumbnail(ytDlpParsed.thumbnails);
+      if (Number(ytDlpParsed.channel_follower_count) > 0) {
+        accountFollowers = formatFollowersCount(ytDlpParsed.channel_follower_count);
+      }
+      if (typeof ytDlpParsed.description === "string" && ytDlpParsed.description.trim()) {
+        accountBio = ytDlpParsed.description.trim().slice(0, 200);
+      }
+      accountExternalId = ytDlpParsed.channel_id || ytDlpParsed.uploader_id || null;
     }
+
+    // 2) B 站 wbi space 投稿列表 (优先覆盖 yt-dlp 的视频列表 -- 它已经被 412 ban 了)
+    if (nativeVideos && nativeVideos.videos.length > 0) {
+      videos = nativeVideos.videos;
+      totalVideoCount = nativeVideos.total;
+    }
+
+    // 3) B 站 card 信息覆盖 (头像/粉丝/简介最准)
+    if (nativeCard) {
+      if (nativeCard.face) accountAvatarUrl = nativeCard.face;
+      if (nativeCard.fansFormatted) accountFollowers = nativeCard.fansFormatted;
+      if (nativeCard.sign) accountBio = nativeCard.sign;
+      if (nativeCard.name && !accountUploader) accountUploader = nativeCard.name;
+      if (nativeCard.mid) accountExternalId = nativeCard.mid;
+      if (nativeCard.archiveCount && nativeCard.archiveCount > totalVideoCount) {
+        totalVideoCount = nativeCard.archiveCount;
+      }
+    }
+
+    // 全空 → 抛出包含所有 channel 错误的诊断
+    const noVideos = videos.length === 0;
+    const noCard = !nativeCard && !accountUploader && !accountAvatarUrl;
+    if (noVideos && noCard) {
+      const msgs = [];
+      if (ytDlpError) msgs.push(`yt-dlp: ${ytDlpError.slice(0, 220)}`);
+      if (nativeVideosError) msgs.push(nativeVideosError.slice(0, 220));
+      if (nativeCardError) msgs.push(nativeCardError.slice(0, 220));
+      if (msgs.length === 0) msgs.push("所有抓取通道都返回空");
+      throw new Error(`账号拉取失败 [${platform}]\n${msgs.join("\n")}`);
+    }
+
+    // 部分通道失败的, 把警告 surface 到 UI (账号至少有 hero, 但视频列表可能不全)
+    const warnings = [];
+    if (noVideos && ytDlpError) warnings.push(`视频列表抓取失败 (${ytDlpError.slice(0, 120)})`);
+    if (noVideos && nativeVideosError) warnings.push(`B 站投稿接口被限速 (${nativeVideosError.slice(0, 120)})`);
+
+    return {
+      ok: true,
+      accountTitle,
+      accountUploader,
+      accountAvatarUrl,
+      accountFollowers,
+      accountBio,
+      accountExternalId,
+      accountPlatform: platform,
+      totalVideoCount,
+      videos,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    };
   });
 
   // v2: 跨视频 methodology LLM 汇总
