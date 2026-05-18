@@ -5,6 +5,7 @@
 import { type ReactNode } from "react";
 import { useApp } from "../AppContext";
 import { BrandLogo } from "./BrandLogo";
+import { TaskQueueButton } from "./TaskQueuePanel";
 import type { AppModule } from "../types";
 import {
   BarChart3,
@@ -12,7 +13,6 @@ import {
   UserSquare,
   Wand2,
   Settings,
-  Cpu,
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
@@ -36,9 +36,6 @@ export function Sidebar() {
     { id: "account",  label: "账号分析",  icon: <UserSquare className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },
     { id: "studio",   label: "剪辑助手",  icon: <Wand2 className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },
   ];
-
-  // 全局运行中任务 (后续接入 main 进程后从 IPC 拿,先 stub 0)
-  const runningTasks = 0;
 
   const width = collapsed ? 56 : 220;
 
@@ -97,27 +94,8 @@ export function Sidebar() {
 
       <div className="flex-1" />
 
-      {/* Task queue */}
-      <button
-        title={collapsed ? "任务队列" : undefined}
-        className={[
-          "flex items-center rounded-lg text-left text-[14px] text-slate-700 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800/60 transition-colors",
-          collapsed ? "gap-0 justify-center py-[9px]" : "gap-2.5 justify-start px-2.5 py-[9px]",
-        ].join(" ")}
-      >
-        <span className="relative flex shrink-0">
-          <Cpu className="w-4 h-4" strokeWidth={1.5} />
-          {runningTasks > 0 && (
-            <span
-              className="absolute -top-1 -right-1.5 min-w-[14px] h-[14px] px-1 rounded-full bg-indigo-600 text-white font-mono font-semibold flex items-center justify-center leading-none"
-              style={{ fontSize: 9 }}
-            >
-              {runningTasks}
-            </span>
-          )}
-        </span>
-        {!collapsed && <span className="flex-1">任务队列</span>}
-      </button>
+      {/* Task queue — 全局任务面板 (sidebar 徽章 + 浮层) */}
+      <TaskQueueButton collapsed={collapsed} />
 
       {/* Settings */}
       <button
