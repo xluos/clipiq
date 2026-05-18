@@ -800,6 +800,11 @@ function shutdownSync() {
   }
 }
 
+// 拿当前 sidecar PID: 本会话 spawn 的取 child.pid, 跨会话接管的取 borrowedPid。
+function getRuntimePid() {
+  return state.process?.pid || state.borrowedPid || null;
+}
+
 module.exports = {
   MODELS,
   LLAMA_CPP_RELEASE,
@@ -811,6 +816,7 @@ module.exports = {
   start,
   stop,
   getStatus,
+  getRuntimePid,
   selfTest,
   resolveLlamaServerPath,
   shutdownSync,

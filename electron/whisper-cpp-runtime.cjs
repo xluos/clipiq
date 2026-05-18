@@ -532,6 +532,10 @@ function shutdownSync() {
   }
 }
 
+function getRuntimePid() {
+  return state.process?.pid || state.borrowedPid || null;
+}
+
 module.exports = {
   MODELS,
   init,
@@ -540,6 +544,7 @@ module.exports = {
   start,
   stop,
   getStatus,
+  getRuntimePid,
   resolveBinaryPath,
   shutdownSync,
 };

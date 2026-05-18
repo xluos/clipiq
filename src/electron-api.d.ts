@@ -158,6 +158,15 @@ export type SystemStats = {
   platform: NodeJS.Platform;
 };
 
+export type ProcessEntry = {
+  pid: number;
+  kind: "main" | "renderer" | "gpu" | "utility" | "sidecar";
+  label: string;
+  detail?: string;
+  cpuPercent: number;
+  memoryBytes: number;
+};
+
 export type CacheScopeStats = {
   count: number;
   bytes: number;
@@ -192,6 +201,7 @@ declare global {
     videoAnalyzer?: {
       getRuntimeStatus: () => Promise<RuntimeStatus>;
       getSystemStats: () => Promise<SystemStats>;
+      getProcessList: () => Promise<ProcessEntry[]>;
       openVideoFile: () => Promise<InspectedVideo | null>;
       inspectVideoPath: (filePath: string) => Promise<InspectedVideo>;
       getPathForFile: (file: File) => string;

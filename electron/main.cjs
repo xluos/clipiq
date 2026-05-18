@@ -436,6 +436,60 @@ async function sampleDarwinMemory(totalMemBytes) {
   }
 }
 
+// 单进程 RSS + CPU 快照, macOS/Linux 通用。pcpu 在 ps 里是进程生命周期的均值,
+// 不是瞬时,但 sidecar 运行起来后基本稳定,看个量级够用。
+async function samplePsByPid(pid) {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "pcpu=,rss="], {
+      windowsHide: true,
+    });
+    const parts = stdout.trim().split(/\s+/);
+    const pcpu = Number(parts[0]);
+    const rssKB = Number(parts[1]);
+    return {
+      cpuPercent: Number.isFinite(pcpu) ? Math.round(pcpu * 10) / 10 : 0,
+      memoryBytes: Number.isFinite(rssKB) ? rssKB * 1024 : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function mapElectronProcKind(type) {
+  if (type === "Browser") return "main";
+  if (type === "Tab") return "renderer";
+  if (type === "GPU") return "gpu";
+  return "utility";
+}
+
+function electronProcLabel(m) {
+  if (m.type === "Browser") return "主进程";
+  if (m.type === "Tab") return m.name || "渲染进程";
+  if (m.type === "GPU") return "GPU";
+  if (m.type === "Utility") {
+    const svc = m.serviceName || "";
+    if (svc.includes("network")) return "网络服务";
+    if (svc.includes("storage")) return "存储服务";
+    if (svc.includes("audio")) return "音频服务";
+    if (svc.includes("video")) return "视频服务";
+    if (svc.includes("utility")) return "工具服务";
+    return m.name || "工具进程";
+  }
+  if (m.type === "Zygote") return "Zygote";
+  if (m.type === "Sandbox helper") return "沙盒辅助";
+  return m.type || "未知";
+}
+
+function electronProcDetail(m) {
+  if (m.type === "Utility" && m.serviceName) {
+    // chromium service name 形如 "network.mojom.NetworkService", 取最后一段简化展示
+    const segs = m.serviceName.split(".");
+    return segs[segs.length - 1];
+  }
+  if (m.name && m.type !== "Browser" && m.type !== "Tab") return m.name;
+  return undefined;
+}
+
 function run(command, args, options = {}, handle = null) {
   return new Promise((resolve, reject) => {
     const child = execFile(command, args, { windowsHide: true, ...options }, (error, stdout, stderr) => {
@@ -3550,6 +3604,54 @@ app.whenReady().then(async () => {
       swapUsedBytes,
       platform: process.platform,
     };
+  });
+
+  // 进程占用列表: electron 自身所有进程 (Browser/Renderer/GPU/Utility) + sidecar (llama/whisper)。
+  // electron 部分用 app.getAppMetrics() —— chromium 内置, percentCPUUsage 是上次调用以来的均值。
+  // sidecar 部分跑 ps 一次性快照拿 RSS 和 pcpu。
+  ipcMain.handle("system:listProcesses", async () => {
+    const metrics = app.getAppMetrics();
+    const electronProcs = metrics.map((m) => ({
+      pid: m.pid,
+      kind: mapElectronProcKind(m.type),
+      label: electronProcLabel(m),
+      detail: electronProcDetail(m),
+      cpuPercent: Math.round((m.cpu?.percentCPUUsage || 0) * 10) / 10,
+      memoryBytes: (m.memory?.workingSetSize || 0) * 1024, // workingSetSize 单位是 kB
+    }));
+
+    // ps 失败说明 PID 已死/runtime 还没清理掉,跳过避免显示 0/0 假条目
+    const sidecars = [];
+    const llamaPid = llamaRuntime.getRuntimePid?.();
+    if (llamaPid) {
+      const stats = await samplePsByPid(llamaPid);
+      if (stats) {
+        sidecars.push({
+          pid: llamaPid,
+          kind: "sidecar",
+          label: "llama-server",
+          detail: llamaRuntime.getStatus?.()?.modelKey || undefined,
+          cpuPercent: stats.cpuPercent,
+          memoryBytes: stats.memoryBytes,
+        });
+      }
+    }
+    const whisperPid = whisperCppRuntime.getRuntimePid?.();
+    if (whisperPid) {
+      const stats = await samplePsByPid(whisperPid);
+      if (stats) {
+        sidecars.push({
+          pid: whisperPid,
+          kind: "sidecar",
+          label: "whisper-server",
+          detail: whisperCppRuntime.getStatus?.()?.modelKey || undefined,
+          cpuPercent: stats.cpuPercent,
+          memoryBytes: stats.memoryBytes,
+        });
+      }
+    }
+
+    return [...electronProcs, ...sidecars];
   });
 
   ipcMain.handle("ytdlp:checkUpdate", async () => {

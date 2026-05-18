@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 contextBridge.exposeInMainWorld("videoAnalyzer", {
   getRuntimeStatus: () => ipcRenderer.invoke("runtime:getStatus"),
   getSystemStats: () => ipcRenderer.invoke("system:getStats"),
+  getProcessList: () => ipcRenderer.invoke("system:listProcesses"),
   openVideoFile: () => ipcRenderer.invoke("video:openFile"),
   inspectVideoPath: (path) => ipcRenderer.invoke("video:inspectPath", path),
   getPathForFile: (file) => {

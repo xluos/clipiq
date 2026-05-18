@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Activity } from "lucide-react";
 import { useApp } from "../AppContext";
-import type { LlamaStatus, SystemStats } from "../electron-api";
+import type { LlamaStatus, ProcessEntry, SystemStats } from "../electron-api";
 import type { ModelDescriptor } from "../types";
 
 export function RuntimeStatusIndicator() {
@@ -9,6 +9,7 @@ export function RuntimeStatusIndicator() {
   const [llamaStatus, setLlamaStatus] = useState<LlamaStatus | null>(null);
   const [llamaModels, setLlamaModels] = useState<ModelDescriptor[]>([]);
   const [sysStats, setSysStats] = useState<SystemStats | null>(null);
+  const [procList, setProcList] = useState<ProcessEntry[] | null>(null);
   const { providers, taskSlots, audioSlot, goModule } = useApp();
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -49,14 +50,19 @@ export function RuntimeStatusIndicator() {
     return () => document.removeEventListener("mousedown", onDocMouseDown);
   }, [open]);
 
-  // 仅弹层打开时采样系统资源,1.5s 一次。第一次返回 cpu=0 是采样基线,无碍。
+  // 仅弹层打开时采样系统资源 + 进程列表,1.5s 一次。第一次返回 cpu=0 是采样基线,无碍。
   useEffect(() => {
     if (!open || !window.videoAnalyzer?.getSystemStats) return;
     let cancelled = false;
     const tick = async () => {
       try {
-        const s = await window.videoAnalyzer!.getSystemStats();
-        if (!cancelled) setSysStats(s);
+        const [s, ps] = await Promise.all([
+          window.videoAnalyzer!.getSystemStats(),
+          window.videoAnalyzer!.getProcessList?.() ?? Promise.resolve(null),
+        ]);
+        if (cancelled) return;
+        setSysStats(s);
+        if (ps) setProcList(ps);
       } catch {
         // ignore
       }
@@ -204,6 +210,10 @@ export function RuntimeStatusIndicator() {
             )}
           </Section>
 
+          <Section title="进程占用 · ClipIQ 自身">
+            <ProcessTable list={procList} />
+          </Section>
+
           <button
             onClick={() => {
               setOpen(false);
@@ -347,4 +357,69 @@ function formatBytes(bytes: number): string {
   if (gb >= 1) return `${gb.toFixed(1)}G`;
   const mb = bytes / (1024 * 1024);
   return `${mb.toFixed(0)}M`;
+}
+
+const PROC_KIND_LABEL: Record<ProcessEntry["kind"], string> = {
+  main: "主",
+  renderer: "渲",
+  gpu: "GPU",
+  utility: "辅",
+  sidecar: "推",
+};
+
+const PROC_KIND_TONE: Record<ProcessEntry["kind"], string> = {
+  main: "bg-indigo-50 text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300",
+  renderer: "bg-sky-50 text-sky-700 dark:bg-sky-500/10 dark:text-sky-300",
+  gpu: "bg-fuchsia-50 text-fuchsia-700 dark:bg-fuchsia-500/10 dark:text-fuchsia-300",
+  utility: "bg-slate-100 text-slate-600 dark:bg-slate-700/40 dark:text-slate-300",
+  sidecar: "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
+};
+
+function ProcessTable({ list }: { list: ProcessEntry[] | null }) {
+  if (!list) return <Hint>加载中</Hint>;
+  if (list.length === 0) return <Hint>无可见进程</Hint>;
+  const sorted = [...list].sort((a, b) => b.memoryBytes - a.memoryBytes);
+  const totalCpu = list.reduce((s, p) => s + p.cpuPercent, 0);
+  const totalMem = list.reduce((s, p) => s + p.memoryBytes, 0);
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-baseline justify-between text-[10px] text-slate-400 dark:text-slate-500 font-mono tabular-nums">
+        <span>{list.length} 个进程</span>
+        <span>
+          CPU {totalCpu.toFixed(1)}% · 内存 {formatBytes(totalMem)}
+        </span>
+      </div>
+      <div className="max-h-56 overflow-y-auto -mx-1 divide-y divide-slate-100 dark:divide-slate-800">
+        {sorted.map((p) => (
+          <div key={p.pid} className="flex items-center gap-2 px-1 py-1.5">
+            <span
+              className={`text-[9px] font-mono rounded px-1 py-0.5 shrink-0 ${PROC_KIND_TONE[p.kind]}`}
+            >
+              {PROC_KIND_LABEL[p.kind]}
+            </span>
+            <div className="flex-1 min-w-0">
+              <div
+                className="text-[12px] text-slate-800 dark:text-slate-100 truncate"
+                title={p.detail ? `${p.label} · ${p.detail}` : p.label}
+              >
+                {p.label}
+                {p.detail && (
+                  <span className="text-slate-400 dark:text-slate-500"> · {p.detail}</span>
+                )}
+              </div>
+              <div className="text-[9px] font-mono text-slate-400 dark:text-slate-500 tabular-nums">
+                pid {p.pid}
+              </div>
+            </div>
+            <span className="text-[10px] font-mono tabular-nums text-slate-500 dark:text-slate-400 w-11 text-right shrink-0">
+              {p.cpuPercent.toFixed(1)}%
+            </span>
+            <span className="text-[10px] font-mono tabular-nums text-slate-600 dark:text-slate-300 w-12 text-right shrink-0">
+              {formatBytes(p.memoryBytes)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
