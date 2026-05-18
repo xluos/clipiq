@@ -38,10 +38,3 @@ export function BrandLogo({
   );
 }
 
-export function BrandWordmark({ className = "" }: { className?: string }) {
-  return (
-    <span className={`bg-gradient-to-r from-indigo-500 via-violet-500 to-cyan-500 bg-clip-text text-transparent font-bold tracking-tight ${className}`}>
-      ClipIQ
-    </span>
-  );
-}

@@ -1,8 +1,17 @@
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis } from "./types";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, legacyScreenToLocation, locationToLegacyScreen } from "./types";
 
 interface AppState {
+  // v2: 两层路由。新代码全部用 currentLocation/setLocation/goModule
+  currentLocation: AppLocation;
+  setLocation: (loc: AppLocation) => void;
+  goModule: (m: AppModule) => void;
+  sidebarCollapsed: boolean;
+  setSidebarCollapsed: (collapsed: boolean) => void;
+  // v1 兼容层: 旧调用点 (setCurrentScreen("home")) 仍可用,内部同步到 currentLocation
+  /** @deprecated v2 use setLocation */
   currentScreen: ScreenState;
+  /** @deprecated v2 use setLocation */
   setCurrentScreen: (screen: ScreenState) => void;
   projects: Project[];
   setProjects: React.Dispatch<React.SetStateAction<Project[]>>;
@@ -72,11 +81,44 @@ const DEFAULT_TASK_SLOTS: TaskSlots = {
 };
 
 const LOCAL_STORAGE_KEY = "video-analyzer-state";
+const SIDEBAR_COLLAPSED_KEY = "clipiq-sidebar-collapsed";
+
+// 模块切换时的默认子屏
+const MODULE_DEFAULT_SCREEN: Record<Exclude<AppModule, "settings">, AppLocation> = {
+  analysis: { module: "analysis", screen: "home" },
+  library: { module: "library", screen: "list" },
+  account: { module: "account", screen: "list" },
+  studio: { module: "studio", screen: "list" },
+};
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [hasHydrated, setHasHydrated] = useState(false);
   const previousProjectsRef = useRef<Map<string, Project>>(new Map());
-  const [currentScreen, setCurrentScreen] = useState<ScreenState>("home");
+  const [currentLocation, setCurrentLocation] = useState<AppLocation>({ module: "analysis", screen: "home" });
+  const [sidebarCollapsed, setSidebarCollapsedState] = useState<boolean>(() => {
+    try { return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1"; } catch { return false; }
+  });
+
+  const setSidebarCollapsed = useCallback((collapsed: boolean) => {
+    setSidebarCollapsedState(collapsed);
+    try { window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0"); } catch { /* noop */ }
+  }, []);
+
+  const setLocation = useCallback((loc: AppLocation) => {
+    setCurrentLocation(loc);
+  }, []);
+
+  const goModule = useCallback((m: AppModule) => {
+    if (m === "settings") setCurrentLocation({ module: "settings" });
+    else setCurrentLocation(MODULE_DEFAULT_SCREEN[m]);
+  }, []);
+
+  // v1 兼容: setCurrentScreen("home") → currentLocation 同步更新
+  const currentScreen = useMemo(() => locationToLegacyScreen(currentLocation), [currentLocation]);
+  const setCurrentScreen = useCallback((s: ScreenState) => {
+    setCurrentLocation(legacyScreenToLocation(s));
+  }, []);
+  // 旧 useState<ScreenState>("home") 已被上方 currentLocation/currentScreen useMemo 取代
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [providers, setProviders] = useState<ModelProvider[]>(DEFAULT_PROVIDERS);
@@ -275,6 +317,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   return (
     <AppContext.Provider
       value={{
+        currentLocation,
+        setLocation,
+        goModule,
+        sidebarCollapsed,
+        setSidebarCollapsed,
         currentScreen,
         setCurrentScreen,
         projects,

@@ -9,7 +9,7 @@ export function RuntimeStatusIndicator() {
   const [llamaStatus, setLlamaStatus] = useState<LlamaStatus | null>(null);
   const [llamaModels, setLlamaModels] = useState<ModelDescriptor[]>([]);
   const [sysStats, setSysStats] = useState<SystemStats | null>(null);
-  const { providers, taskSlots, audioSlot, setCurrentScreen } = useApp();
+  const { providers, taskSlots, audioSlot, goModule } = useApp();
   const wrapRef = useRef<HTMLDivElement>(null);
 
   // 轮询 + 事件刷新: 启动期间事件密集,空闲时 3s 一次拉一下兜底
@@ -199,7 +199,7 @@ export function RuntimeStatusIndicator() {
           <button
             onClick={() => {
               setOpen(false);
-              setCurrentScreen("settings");
+              goModule("settings");
             }}
             className="w-full text-center text-xs text-indigo-600 dark:text-indigo-400 hover:underline pt-3 cursor-pointer"
           >
