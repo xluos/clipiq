@@ -152,6 +152,10 @@ export type SystemStats = {
   memoryPercent: number;
   memoryUsedBytes: number;
   memoryTotalBytes: number;
+  memoryPressure: "normal" | "warn" | "critical";
+  memoryCompressedBytes?: number;
+  swapUsedBytes?: number;
+  platform: NodeJS.Platform;
 };
 
 export type CacheScopeStats = {

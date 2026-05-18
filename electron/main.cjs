@@ -1,5 +1,7 @@
 const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, protocol, shell } = require("electron");
 const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
+const execFileAsync = promisify(execFile);
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const os = require("node:os");
@@ -384,6 +386,54 @@ function cancelAnalysis(projectId) {
 
 function ensureNotCancelled(handle) {
   if (handle?.cancelled) throw new AnalysisCancelledError();
+}
+
+// macOS 内存采样: vm_stat 给页数, sysctl 给 swap。
+// usedBytes 对齐活动监视器 "Memory Used" = App(Anonymous-Purgeable) + Wired + Compressed,
+// 不含 File-backed / Speculative,因为这些是 OS 缓存,有压力时会自动让出。
+async function sampleDarwinMemory(totalMemBytes) {
+  try {
+    const [vmRes, swapRes] = await Promise.all([
+      execFileAsync("vm_stat", [], { windowsHide: true }),
+      execFileAsync("sysctl", ["-n", "vm.swapusage"], { windowsHide: true }).catch(() => ({ stdout: "" })),
+    ]);
+    const vmOut = vmRes.stdout || "";
+    const pageSize = Number(vmOut.match(/page size of (\d+) bytes/)?.[1]) || 4096;
+    const pages = (label) => {
+      const re = new RegExp(`${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s+(\\d+)\\.`);
+      return Number(vmOut.match(re)?.[1]) || 0;
+    };
+    const wired = pages("Pages wired down");
+    const compressed = pages("Pages occupied by compressor");
+    const purgeable = pages("Pages purgeable");
+    const anonymous = pages("Anonymous pages");
+
+    const appBytes = Math.max(0, anonymous - purgeable) * pageSize;
+    const wiredBytes = wired * pageSize;
+    const compressedBytes = compressed * pageSize;
+    const usedBytes = appBytes + wiredBytes + compressedBytes;
+
+    let swapUsedBytes = 0;
+    const swapMatch = (swapRes.stdout || "").match(/used\s*=\s*([\d.]+)([KMGT])/);
+    if (swapMatch) {
+      const n = Number(swapMatch[1]);
+      const mult = { K: 1024, M: 1024 ** 2, G: 1024 ** 3, T: 1024 ** 4 }[swapMatch[2]] || 1;
+      swapUsedBytes = Math.round(n * mult);
+    }
+
+    // 真正的 memory pressure 在内核里 (MEMORYSTATUS_VM_PRESSURE),CLI 拿不到实时值。
+    // 这里用 swap + compressed 占比做启发: 出现 swap 就是已经在挤了, compressed 占比高
+    // 说明系统开始大量压缩冷页。两个信号都不算"已经卡",所以阈值取得保守一点。
+    const compressedRatio = totalMemBytes > 0 ? compressedBytes / totalMemBytes : 0;
+    const swapGB = swapUsedBytes / (1024 ** 3);
+    let pressure = "normal";
+    if (swapGB >= 4 || compressedRatio >= 0.4) pressure = "critical";
+    else if (swapGB >= 1 || compressedRatio >= 0.2) pressure = "warn";
+
+    return { usedBytes, compressedBytes, swapUsedBytes, pressure };
+  } catch {
+    return null;
+  }
 }
 
 function run(command, args, options = {}, handle = null) {
@@ -3434,8 +3484,13 @@ app.whenReady().then(async () => {
     };
   });
 
-  // 系统资源采样: CPU% 需两次采样做差; freemem 在 macOS 偏低是 OS 缓存策略,
-  // 这里上报的"已用%" = 1 - free/total,作为粗略可视化指标,够看出"是否吃紧"。
+  // 系统资源采样。
+  //
+  // 内存口径: macOS 上 os.freemem() 只算 Pages free,完全忽略 Inactive/Cached/Compressed,
+  // 长期接近 0,1-free/total 会长期吊 100% 而无意义。这里在 darwin 上改走 vm_stat,
+  // 对齐活动监视器的 "Memory Used" = App(Anonymous - Purgeable) + Wired + Compressed,
+  // 再用 sysctl vm.swapusage 拿 swap, 综合启发出 normal/warn/critical 压力档位。
+  // 其他平台 fallback 回 Node os 原口径。
   let lastCpuSample = null;
   ipcMain.handle("system:getStats", async () => {
     const cpus = os.cpus();
@@ -3458,16 +3513,42 @@ app.whenReady().then(async () => {
     lastCpuSample = { idle, total };
 
     const totalMem = os.totalmem();
-    const freeMem = os.freemem();
-    const usedMem = Math.max(0, totalMem - freeMem);
-    const memoryPercent = totalMem > 0 ? Math.round((usedMem / totalMem) * 100) : 0;
+    let memoryUsedBytes;
+    let memoryCompressedBytes;
+    let swapUsedBytes;
+    let memoryPressure = "normal";
+
+    if (process.platform === "darwin") {
+      const mac = await sampleDarwinMemory(totalMem);
+      if (mac) {
+        memoryUsedBytes = mac.usedBytes;
+        memoryCompressedBytes = mac.compressedBytes;
+        swapUsedBytes = mac.swapUsedBytes;
+        memoryPressure = mac.pressure;
+      } else {
+        memoryUsedBytes = Math.max(0, totalMem - os.freemem());
+      }
+    } else {
+      memoryUsedBytes = Math.max(0, totalMem - os.freemem());
+      const ratio = totalMem > 0 ? memoryUsedBytes / totalMem : 0;
+      if (ratio >= 0.92) memoryPressure = "critical";
+      else if (ratio >= 0.8) memoryPressure = "warn";
+    }
+
+    const memoryPercent = totalMem > 0
+      ? Math.max(0, Math.min(100, Math.round((memoryUsedBytes / totalMem) * 100)))
+      : 0;
 
     return {
       cpuPercent,
       cpuCount: cpus.length,
       memoryPercent,
-      memoryUsedBytes: usedMem,
+      memoryUsedBytes,
       memoryTotalBytes: totalMem,
+      memoryPressure,
+      memoryCompressedBytes,
+      swapUsedBytes,
+      platform: process.platform,
     };
   });
 

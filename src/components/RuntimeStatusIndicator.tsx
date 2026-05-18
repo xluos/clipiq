@@ -163,7 +163,15 @@ export function RuntimeStatusIndicator() {
                   <MiniGauge
                     label="内存"
                     percent={sysStats.memoryPercent}
+                    tone={
+                      sysStats.memoryPressure === "critical"
+                        ? "critical"
+                        : sysStats.memoryPressure === "warn"
+                        ? "warn"
+                        : "ok"
+                    }
                     sub={`${formatBytes(sysStats.memoryUsedBytes)} / ${formatBytes(sysStats.memoryTotalBytes)}`}
+                    hint={memoryHint(sysStats)}
                   />
                 </div>
               )}
@@ -262,14 +270,36 @@ function StatusPill({ children, tone }: { children: ReactNode; tone: "ok" | "bus
   return <span className={`text-sm font-medium ${cls}`}>{children}</span>;
 }
 
-function MiniGauge({ label, percent, sub }: { label: string; percent: number; sub?: string }) {
+function MiniGauge({
+  label,
+  percent,
+  tone,
+  sub,
+  hint,
+}: {
+  label: string;
+  percent: number;
+  tone?: "ok" | "warn" | "critical";
+  sub?: string;
+  hint?: string;
+}) {
   const clamped = Math.max(0, Math.min(100, Math.round(percent)));
-  const tone =
-    clamped >= 85
-      ? "bg-red-500 dark:bg-red-400"
-      : clamped >= 60
-      ? "bg-amber-500 dark:bg-amber-400"
-      : "bg-emerald-500 dark:bg-emerald-400";
+  // 显式传 tone 时由 tone 决定颜色 (内存这种"百分比≠紧张程度"的指标);
+  // 没传 tone 就按 percent 阈值估 (CPU 这种"高即紧张")。
+  const barClass = (() => {
+    if (tone === "critical") return "bg-red-500 dark:bg-red-400";
+    if (tone === "warn") return "bg-amber-500 dark:bg-amber-400";
+    if (tone === "ok") return "bg-emerald-500 dark:bg-emerald-400";
+    if (clamped >= 85) return "bg-red-500 dark:bg-red-400";
+    if (clamped >= 60) return "bg-amber-500 dark:bg-amber-400";
+    return "bg-emerald-500 dark:bg-emerald-400";
+  })();
+  const hintClass =
+    tone === "critical"
+      ? "text-red-500 dark:text-red-400"
+      : tone === "warn"
+      ? "text-amber-600 dark:text-amber-400"
+      : "text-slate-400 dark:text-slate-500";
   return (
     <div className="space-y-1">
       <div className="flex items-baseline justify-between gap-2">
@@ -282,7 +312,7 @@ function MiniGauge({ label, percent, sub }: { label: string; percent: number; su
       </div>
       <div className="h-1.5 w-full rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
         <div
-          className={`h-full rounded-full transition-[width] duration-500 ease-out ${tone}`}
+          className={`h-full rounded-full transition-[width] duration-500 ease-out ${barClass}`}
           style={{ width: `${clamped}%` }}
         />
       </div>
@@ -294,8 +324,21 @@ function MiniGauge({ label, percent, sub }: { label: string; percent: number; su
           {sub}
         </div>
       )}
+      {hint && (
+        <div className={`text-[10px] ${hintClass} truncate`} title={hint}>
+          {hint}
+        </div>
+      )}
     </div>
   );
+}
+
+function memoryHint(s: SystemStats): string | undefined {
+  const swap = s.swapUsedBytes ?? 0;
+  if (swap > 100 * 1024 * 1024) return `已交换 ${formatBytes(swap)}`;
+  if (s.memoryPressure === "critical") return "压力告警";
+  if (s.memoryPressure === "warn") return "压力偏高";
+  return undefined;
 }
 
 function formatBytes(bytes: number): string {
