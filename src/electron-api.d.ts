@@ -1,4 +1,5 @@
 import type {
+  Account,
   AnalysisNode,
   AnalysisOptions,
   AnalysisProgressEvent,
@@ -9,6 +10,8 @@ import type {
   ModelProvider,
   Project,
   ProjectSource,
+  Shot,
+  StudioSession,
 } from "./types";
 
 export type RuntimeStatus = {
@@ -211,6 +214,15 @@ declare global {
       listProjects: () => Promise<Project[]>;
       upsertProject: (project: Project) => Promise<{ ok: true }>;
       deleteProject: (projectId: string) => Promise<{ ok: true }>;
+      // v2: accounts / sessions / shots
+      listAccounts: () => Promise<Account[]>;
+      upsertAccount: (account: Account) => Promise<{ ok: true }>;
+      deleteAccount: (accountId: string) => Promise<{ ok: true; message?: string }>;
+      listSessions: () => Promise<StudioSession[]>;
+      upsertSession: (session: StudioSession) => Promise<{ ok: true }>;
+      deleteSession: (sessionId: string) => Promise<{ ok: true; message?: string }>;
+      listShots: (assetProjectId?: string) => Promise<Shot[]>;
+      setShotsForAsset: (assetProjectId: string, shots: Shot[]) => Promise<{ ok: true }>;
       getNodes: (projectId: string) => Promise<AnalysisNode[]>;
       setNodes: (projectId: string, nodes: AnalysisNode[]) => Promise<{ ok: true }>;
       getReport: (projectId: string) => Promise<AnalysisReport | null>;

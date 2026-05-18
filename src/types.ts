@@ -533,3 +533,70 @@ export type Shot = {
   subtitleText?: string;
   createdAt?: string;
 };
+
+// 对标账号 (UP 主)
+export type AccountPlatform = "bilibili" | "douyin" | "xiaohongshu" | "youtube" | "tiktok" | "unknown";
+
+// 跨视频汇总产物 — 一份 manifest 描述该 UP 主的方法论
+export type AccountMethodology = {
+  hooks?: { summary: string; sampleVideoIds?: string[] };
+  pacing?: { summary: string; sampleVideoIds?: string[] };
+  structure?: { summary: string; sampleVideoIds?: string[] };
+  visual?: { summary: string; sampleVideoIds?: string[] };
+  generatedAt?: string;
+};
+
+export type Account = {
+  id: string;
+  name: string;
+  platform: AccountPlatform;
+  externalId?: string;             // UP 主在该平台的 id (如 B 站 UID)
+  externalUrl?: string;            // 账号主页 URL
+  avatarHint?: string;              // 用于头像 fallback 显示的 2-3 字简称
+  followers?: string;               // 格式化字符串 "1238万"
+  tags?: string[];                  // ["科技", "影视"]
+  // 关联视频 id 列表 (Project.kind === "account_video")
+  videoIds?: string[];
+  totalVideoCount?: number;         // 该账号下的视频总数 (含未分析的)
+  methodology?: AccountMethodology; // 跨视频汇总产物;null 表示还未生成
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+// 剪辑会话 — 用户输入目标 + 应用方法论 + 引用素材,产出剪辑思路 / 缺失镜头 / 脚本
+export type StudioSessionOutput =
+  | { kind: "draft" }
+  | { kind: "cut-list" }
+  | { kind: "idea" };
+
+export type StudioStep = {
+  index: number;
+  label: string;                // "开场钩子 · 0:00 - 0:30"
+  startSec?: number;
+  endSec?: number;
+  body: string;                 // 文案 / 旁白建议
+  shotRefs: Array<{
+    assetProjectId: string;     // 引用 Project.id (kind=asset)
+    shotId?: string;
+    rangeStart?: number;
+    rangeEnd?: number;
+    note?: string;              // 显示 "IMG_2104.MOV · 主播半身 0:00-0:08"
+  }>;
+  missing?: string;             // 缺失镜头描述
+};
+
+export type StudioSession = {
+  id: string;
+  goal: string;
+  targetPlatform?: string;       // "B 站知识区"
+  targetDurationSec?: number;
+  mainShotRatio?: number;        // 0-1
+  appliedMethodologies?: string[]; // Account.id[]
+  usedAssetIds?: string[];        // Project.id (kind=asset)[]
+  steps?: StudioStep[];
+  scriptDraft?: string;
+  missingShots?: string[];
+  output?: StudioSessionOutput;
+  createdAt?: string;
+  updatedAt?: string;
+};

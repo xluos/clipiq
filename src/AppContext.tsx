@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, legacyScreenToLocation, locationToLegacyScreen } from "./types";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, legacyScreenToLocation, locationToLegacyScreen, Account, StudioSession, Shot } from "./types";
 
 interface AppState {
   // v2: 两层路由。新代码全部用 currentLocation/setLocation/goModule
@@ -38,6 +38,15 @@ interface AppState {
   reportByProject: Record<string, AnalysisReport>;
   setReportForProject: (projectId: string, report: AnalysisReport) => void;
   removeProject: (projectId: string) => void;
+  // v2: accounts / sessions / shots
+  accounts: Account[];
+  upsertAccount: (a: Account) => void;
+  removeAccount: (id: string) => void;
+  sessions: StudioSession[];
+  upsertSession: (s: StudioSession) => void;
+  removeSession: (id: string) => void;
+  shotsByAsset: Record<string, Shot[]>;
+  setShotsForAsset: (assetProjectId: string, shots: Shot[]) => void;
 }
 
 const AppContext = createContext<AppState | undefined>(undefined);
@@ -172,6 +181,43 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
   const [nodesByProject, setNodesByProject] = useState<Record<string, AnalysisNode[]>>({});
   const [reportByProject, setReportByProject] = useState<Record<string, AnalysisReport>>({});
+  // v2 状态
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [sessions, setSessions] = useState<StudioSession[]>([]);
+  const [shotsByAsset, setShotsByAsset] = useState<Record<string, Shot[]>>({});
+
+  const upsertAccount = useCallback((a: Account) => {
+    setAccounts((prev) => {
+      const next = prev.filter((x) => x.id !== a.id);
+      next.unshift(a);
+      return next;
+    });
+    window.videoAnalyzer?.upsertAccount(a).catch((err) => console.warn("upsertAccount failed", err));
+  }, []);
+
+  const removeAccount = useCallback((id: string) => {
+    setAccounts((prev) => prev.filter((x) => x.id !== id));
+    window.videoAnalyzer?.deleteAccount(id).catch((err) => console.warn("deleteAccount failed", err));
+  }, []);
+
+  const upsertSession = useCallback((s: StudioSession) => {
+    setSessions((prev) => {
+      const next = prev.filter((x) => x.id !== s.id);
+      next.unshift(s);
+      return next;
+    });
+    window.videoAnalyzer?.upsertSession(s).catch((err) => console.warn("upsertSession failed", err));
+  }, []);
+
+  const removeSession = useCallback((id: string) => {
+    setSessions((prev) => prev.filter((x) => x.id !== id));
+    window.videoAnalyzer?.deleteSession(id).catch((err) => console.warn("deleteSession failed", err));
+  }, []);
+
+  const setShotsForAsset = useCallback((assetProjectId: string, shots: Shot[]) => {
+    setShotsByAsset((prev) => ({ ...prev, [assetProjectId]: shots }));
+    window.videoAnalyzer?.setShotsForAsset(assetProjectId, shots).catch((err) => console.warn("setShotsForAsset failed", err));
+  }, []);
 
   const setNodesForProject = useCallback((projectId: string, nodes: AnalysisNode[]) => {
     setNodesByProject((prev) => ({ ...prev, [projectId]: nodes }));
@@ -243,6 +289,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
           setReportByProject(
             Object.fromEntries(reportEntries.filter(([, report]) => report)) as Record<string, AnalysisReport>
           );
+          // v2: 加载 accounts / sessions / shots
+          if (window.videoAnalyzer.listAccounts) {
+            const [accs, sess, allShots] = await Promise.all([
+              window.videoAnalyzer.listAccounts().catch(() => []),
+              window.videoAnalyzer.listSessions().catch(() => []),
+              window.videoAnalyzer.listShots(undefined).catch(() => [] as Shot[]),
+            ]);
+            setAccounts(accs);
+            setSessions(sess);
+            const byAsset: Record<string, Shot[]> = {};
+            for (const s of allShots) {
+              (byAsset[s.assetProjectId] ||= []).push(s);
+            }
+            setShotsByAsset(byAsset);
+          }
         } else {
           const raw = window.localStorage.getItem(LOCAL_STORAGE_KEY);
           if (raw) {
@@ -345,6 +406,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         reportByProject,
         setReportForProject,
         removeProject,
+        accounts,
+        upsertAccount,
+        removeAccount,
+        sessions,
+        upsertSession,
+        removeSession,
+        shotsByAsset,
+        setShotsForAsset,
       }}
     >
       {children}

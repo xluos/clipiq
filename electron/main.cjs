@@ -736,6 +736,27 @@ function getDb() {
       project_id TEXT PRIMARY KEY,
       data TEXT NOT NULL
     );
+    -- v2: 对标账号 (UP 主) 元数据 + 跨视频汇总出的 methodology manifest
+    CREATE TABLE IF NOT EXISTS accounts (
+      id TEXT PRIMARY KEY,
+      data TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    -- v2: 剪辑助手会话
+    CREATE TABLE IF NOT EXISTS studio_sessions (
+      id TEXT PRIMARY KEY,
+      data TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    -- v2: 素材库的镜头索引 (一条 asset 对应多条 shot)
+    CREATE TABLE IF NOT EXISTS shots (
+      id TEXT PRIMARY KEY,
+      asset_project_id TEXT NOT NULL,
+      shot_index INTEGER NOT NULL,
+      data TEXT NOT NULL,
+      FOREIGN KEY (asset_project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_shots_asset ON shots(asset_project_id);
   `);
   _db = db;
   return db;
@@ -3774,6 +3795,76 @@ app.whenReady().then(async () => {
       db.prepare(
         "INSERT INTO analysis_reports (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
       ).run(projectId, JSON.stringify(report));
+    }
+    return { ok: true };
+  });
+
+  // v2: accounts (对标账号)
+  ipcMain.handle("accounts:list", async () => {
+    const db = getDb();
+    const rows = db.prepare("SELECT data FROM accounts ORDER BY updated_at DESC").all();
+    return rows.map((row) => JSON.parse(row.data));
+  });
+
+  ipcMain.handle("accounts:upsert", async (_event, account) => {
+    if (!account?.id) throw new Error("accounts:upsert 需要 account.id");
+    const db = getDb();
+    const updatedAt = account.updatedAt ? Date.parse(account.updatedAt) || Date.now() : Date.now();
+    db.prepare(
+      "INSERT INTO accounts (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
+    ).run(account.id, JSON.stringify(account), updatedAt);
+    return { ok: true };
+  });
+
+  ipcMain.handle("accounts:delete", async (_event, accountId) => {
+    if (!accountId) return { ok: false, message: "缺少 accountId" };
+    const db = getDb();
+    db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
+    return { ok: true };
+  });
+
+  // v2: studio sessions (剪辑会话)
+  ipcMain.handle("sessions:list", async () => {
+    const db = getDb();
+    const rows = db.prepare("SELECT data FROM studio_sessions ORDER BY updated_at DESC").all();
+    return rows.map((row) => JSON.parse(row.data));
+  });
+
+  ipcMain.handle("sessions:upsert", async (_event, session) => {
+    if (!session?.id) throw new Error("sessions:upsert 需要 session.id");
+    const db = getDb();
+    const updatedAt = session.updatedAt ? Date.parse(session.updatedAt) || Date.now() : Date.now();
+    db.prepare(
+      "INSERT INTO studio_sessions (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
+    ).run(session.id, JSON.stringify(session), updatedAt);
+    return { ok: true };
+  });
+
+  ipcMain.handle("sessions:delete", async (_event, sessionId) => {
+    if (!sessionId) return { ok: false, message: "缺少 sessionId" };
+    const db = getDb();
+    db.prepare("DELETE FROM studio_sessions WHERE id = ?").run(sessionId);
+    return { ok: true };
+  });
+
+  // v2: shots (素材分镜索引)
+  ipcMain.handle("shots:list", async (_event, assetProjectId) => {
+    const db = getDb();
+    const rows = assetProjectId
+      ? db.prepare("SELECT data FROM shots WHERE asset_project_id = ? ORDER BY shot_index").all(assetProjectId)
+      : db.prepare("SELECT data FROM shots ORDER BY asset_project_id, shot_index").all();
+    return rows.map((row) => JSON.parse(row.data));
+  });
+
+  ipcMain.handle("shots:setForAsset", async (_event, assetProjectId, shots) => {
+    if (!assetProjectId) throw new Error("shots:setForAsset 需要 assetProjectId");
+    const db = getDb();
+    const tx = db.prepare("DELETE FROM shots WHERE asset_project_id = ?");
+    const ins = db.prepare("INSERT INTO shots (id, asset_project_id, shot_index, data) VALUES (?, ?, ?, ?)");
+    tx.run(assetProjectId);
+    for (const s of Array.isArray(shots) ? shots : []) {
+      if (!s?.id) continue;
+      ins.run(s.id, assetProjectId, Number(s.shotIndex) || 0, JSON.stringify(s));
     }
     return { ok: true };
   });
