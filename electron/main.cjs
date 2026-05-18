@@ -1265,6 +1265,17 @@ async function loadMediumTextProvider() {
   }
 }
 
+async function loadComplexTextProvider() {
+  try {
+    const cfg = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+    // v2 任务槽位: complex_text 用于复杂文本(方法论汇总 / Studio steps);
+    // 没配的话 fallback 到 medium_text
+    return resolveSlotProvider(cfg, "complex_text") || resolveSlotProvider(cfg, "medium_text");
+  } catch {
+    return null;
+  }
+}
+
 function getRotation(videoStream) {
   const tagRotation = Number(videoStream?.tags?.rotate);
   if (Number.isFinite(tagRotation)) return tagRotation;
@@ -3846,6 +3857,242 @@ app.whenReady().then(async () => {
     db.prepare("DELETE FROM studio_sessions WHERE id = ?").run(sessionId);
     return { ok: true };
   });
+
+  // v2: yt-dlp 拉取 UP 主视频列表 (只列元数据, 不下载)
+  // 输入: { url, limit }   输出: { videos: [{id, title, durationSec, uploadDate, viewCount, externalUrl}] }
+  ipcMain.handle("accounts:fetchVideos", async (_event, { url, limit = 20 } = {}) => {
+    if (!url) throw new Error("accounts:fetchVideos 需要 url");
+    const ytDlp = await commandPath("yt-dlp");
+    if (!ytDlp) throw new Error("未找到 yt-dlp,无法拉取账号视频列表");
+    // yt-dlp 的 -I 1:N 限制范围;flat-playlist 只列元数据不下载;dump-single-json 一次性 JSON
+    const safeLimit = Math.max(1, Math.min(100, Number(limit) || 20));
+    try {
+      const { stdout } = await new Promise((resolve, reject) => {
+        execFile(ytDlp, [
+          "--flat-playlist",
+          "--dump-single-json",
+          "--no-warnings",
+          "-I", `1:${safeLimit}`,
+          url,
+        ], { windowsHide: true, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
+          if (err) return reject(new Error(stderr?.toString().slice(0, 400) || err.message));
+          resolve({ stdout: stdout?.toString() || "" });
+        });
+      });
+      const parsed = JSON.parse(stdout);
+      const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
+      const videos = entries.map((e) => ({
+        id: e.id || e.video_id || "",
+        title: e.title || e.fulltitle || "(未命名视频)",
+        durationSec: Math.round(Number(e.duration) || 0),
+        uploadDate: e.upload_date || null,
+        viewCount: Number(e.view_count) || 0,
+        externalUrl: e.url || (e.id && parsed.webpage_url_basename
+          ? `https://www.bilibili.com/video/${e.id}` : ""),
+      })).filter((v) => v.id);
+      return {
+        ok: true,
+        accountTitle: parsed.title || parsed.uploader || null,
+        accountUploader: parsed.uploader || null,
+        totalVideoCount: parsed.playlist_count || videos.length,
+        videos,
+      };
+    } catch (err) {
+      const msg = err?.message || String(err);
+      throw new Error(`yt-dlp 拉取失败: ${msg.slice(0, 300)}`);
+    }
+  });
+
+  // v2: 跨视频 methodology LLM 汇总
+  // 输入: { accountId, videoSummaries: [{title, summary, structure, pacing, editingStyle, composition}] }
+  // 输出: AccountMethodology
+  ipcMain.handle("accounts:generateMethodology", async (_event, { accountName, videoSummaries } = {}) => {
+    const provider = await loadComplexTextProvider();
+    if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) {
+      throw new Error("未配置 complex_text 任务槽位的 LLM 供应商");
+    }
+    if (!Array.isArray(videoSummaries) || videoSummaries.length === 0) {
+      throw new Error("methodology 汇总至少需要 1 条已分析视频");
+    }
+    const lines = [`# 账号: ${accountName || "未知"}`, `# 已分析视频数: ${videoSummaries.length}`, ""];
+    videoSummaries.slice(0, 12).forEach((v, i) => {
+      lines.push(`## 视频 ${i + 1} · ${v.title || "未命名"}`);
+      if (v.summary) lines.push(`摘要: ${String(v.summary).slice(0, 400)}`);
+      if (v.structure) lines.push(`结构: ${typeof v.structure === "string" ? v.structure.slice(0, 200) : JSON.stringify(v.structure).slice(0, 300)}`);
+      if (v.pacing) lines.push(`节奏: ${String(v.pacing).slice(0, 200)}`);
+      if (v.editingStyle) lines.push(`剪辑: ${String(v.editingStyle).slice(0, 200)}`);
+      if (v.composition) lines.push(`构图: ${String(v.composition).slice(0, 200)}`);
+      lines.push("");
+    });
+    lines.push("请汇总该账号的视频方法论,输出 JSON:");
+    lines.push('{"hooks":{"summary":"开场风格画像 (1-2 句)","sampleVideoIds":[]},');
+    lines.push(' "pacing":{"summary":"节奏画像 (1-2 句)","sampleVideoIds":[]},');
+    lines.push(' "structure":{"summary":"结构模板 (1-2 句)","sampleVideoIds":[]},');
+    lines.push(' "visual":{"summary":"视觉风格 (1-2 句)","sampleVideoIds":[]}}');
+    try {
+      const parsed = await openaiClient.callJsonCompletion(provider, {
+        systemText:
+          "你是视频方法论分析师。给定一位 UP 主的若干视频分析摘要,请跨视频汇总出可复用的方法论 manifest。\n" +
+          "规则:\n" +
+          "- 4 个维度都要给(hooks/pacing/structure/visual),每个维度 summary 1-2 句中文,具体可操作\n" +
+          "- sampleVideoIds 留空数组即可\n" +
+          "- 直接返回 JSON,不要 markdown 围栏,不要思考过程",
+        userText: lines.join("\n"),
+        temperature: 0.4,
+        maxTokens: 800,
+        maxOutputTokens: 800,
+      });
+      const methodology = {
+        hooks: parsed?.hooks?.summary ? { summary: String(parsed.hooks.summary), sampleVideoIds: [] } : undefined,
+        pacing: parsed?.pacing?.summary ? { summary: String(parsed.pacing.summary), sampleVideoIds: [] } : undefined,
+        structure: parsed?.structure?.summary ? { summary: String(parsed.structure.summary), sampleVideoIds: [] } : undefined,
+        visual: parsed?.visual?.summary ? { summary: String(parsed.visual.summary), sampleVideoIds: [] } : undefined,
+        generatedAt: new Date().toISOString(),
+      };
+      return { ok: true, methodology };
+    } catch (err) {
+      throw new Error(`methodology LLM 失败: ${err?.message || String(err)}`);
+    }
+  });
+
+  // v2: Studio steps LLM 生成
+  // 输入: { goal, targetDurationSec, methodologies: [{name, summary}], assets: [{name, durationSec, shotCount}] }
+  // 输出: StudioStep[]
+  ipcMain.handle("sessions:generateSteps", async (_event, { goal, targetDurationSec, methodologies, assets } = {}) => {
+    const provider = await loadComplexTextProvider();
+    if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) {
+      throw new Error("未配置 complex_text 任务槽位的 LLM 供应商");
+    }
+    if (!goal || !String(goal).trim()) throw new Error("缺少剪辑目标");
+    const totalSec = Number(targetDurationSec) || 600;
+    const lines = [];
+    lines.push(`# 剪辑目标`); lines.push(String(goal).trim()); lines.push("");
+    lines.push(`# 目标时长 (秒): ${totalSec}`); lines.push("");
+    if (Array.isArray(methodologies) && methodologies.length > 0) {
+      lines.push("# 应用的对标账号方法论");
+      methodologies.forEach((m) => lines.push(`- ${m.name}: ${m.summary || "(无摘要)"}`));
+      lines.push("");
+    }
+    if (Array.isArray(assets) && assets.length > 0) {
+      lines.push("# 可用素材池");
+      assets.forEach((a, i) => lines.push(`- 素材 ${i + 1}: ${a.name} · ${a.durationSec || 0}s · ${a.shotCount || 0} 个镜头`));
+      lines.push("");
+    }
+    lines.push("请输出 JSON,steps 数组按时间顺序排列,总时长加起来等于目标时长:");
+    lines.push('{"steps":[{"index":1,"label":"开场钩子 · 0:00-0:30","startSec":0,"endSec":30,"body":"具体剪辑指令","shotRefs":[{"assetIndex":0,"rangeStart":0,"rangeEnd":30,"note":"素材1·主播半身"}],"missing":"如果缺关键镜头描述,否则省略"}]}');
+    try {
+      const parsed = await openaiClient.callJsonCompletion(provider, {
+        systemText:
+          "你是视频剪辑师助理。基于剪辑目标 + 对标账号方法论 + 可用素材池,给出叙事骨架 (4-7 段)。\n" +
+          "规则:\n" +
+          "- 每段 label 形如 '开场钩子 · 0:00-0:30',包含名字 + 时间范围\n" +
+          "- startSec/endSec 必填,所有段时间连续不重叠,合计=目标时长\n" +
+          "- body 是给剪辑师的具体指令 (1-2 句),引用方法论时直接说要点\n" +
+          "- shotRefs 用 assetIndex 引用素材池序号(从 0 开始),note 形如 '素材1 · 主播半身 0:00-0:08'\n" +
+          "- 没有可用素材时 shotRefs=[],并在 missing 里描述需要补什么镜头\n" +
+          "- 直接返回 JSON,不要 markdown 围栏,不要思考过程",
+        userText: lines.join("\n"),
+        temperature: 0.5,
+        maxTokens: 2000,
+        maxOutputTokens: 2000,
+      });
+      const rawSteps = Array.isArray(parsed?.steps) ? parsed.steps : [];
+      const steps = rawSteps.map((s, i) => ({
+        index: Number(s.index) || i + 1,
+        label: String(s.label || `段 ${i + 1}`),
+        startSec: Math.round(Number(s.startSec) || 0),
+        endSec: Math.round(Number(s.endSec) || 0),
+        body: String(s.body || ""),
+        shotRefs: Array.isArray(s.shotRefs) ? s.shotRefs.map((r) => {
+          const idx = Number(r.assetIndex);
+          const asset = Array.isArray(assets) && Number.isInteger(idx) ? assets[idx] : null;
+          return {
+            assetProjectId: asset?.id || "",
+            rangeStart: Math.round(Number(r.rangeStart) || 0),
+            rangeEnd: Math.round(Number(r.rangeEnd) || 0),
+            note: String(r.note || (asset?.name ? `${asset.name}` : "")),
+          };
+        }) : [],
+        missing: s.missing ? String(s.missing) : undefined,
+      }));
+      return { ok: true, steps };
+    } catch (err) {
+      throw new Error(`Studio steps LLM 失败: ${err?.message || String(err)}`);
+    }
+  });
+
+  // v2: 素材自动分镜 (复用 ffprobe + ffmpeg scenedetect,不需要 LLM)
+  // 输入: { assetProjectId, filePath, durationSec }
+  // 输出: Shot[] 写入 shots 表
+  ipcMain.handle("assets:analyzeShots", async (_event, { assetProjectId, filePath, durationSec } = {}) => {
+    if (!assetProjectId || !filePath) throw new Error("assets:analyzeShots 需要 assetProjectId + filePath");
+    const ffmpeg = await commandPath("ffmpeg");
+    if (!ffmpeg) throw new Error("未找到 ffmpeg");
+    // 用 ffmpeg scenedetect filter 输出场景切换帧时间戳
+    const total = Math.max(1, Number(durationSec) || 0);
+    let boundaries = [];
+    try {
+      const { stderr } = await new Promise((resolve) => {
+        execFile(ffmpeg, [
+          "-i", filePath,
+          "-filter:v", "select='gt(scene,0.3)',showinfo",
+          "-f", "null", "-",
+        ], { windowsHide: true, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
+          resolve({ stderr: stderr?.toString() || "" });
+        });
+      });
+      const re = /pts_time:([\d.]+)/g;
+      let m;
+      while ((m = re.exec(stderr)) !== null) {
+        const t = Number(m[1]);
+        if (Number.isFinite(t) && t > 0.5) boundaries.push(t);
+      }
+    } catch {
+      boundaries = [];
+    }
+    // 没拿到场景切换 / 太少 → fallback 按 8 秒等分
+    if (boundaries.length === 0 || total / Math.max(boundaries.length, 1) > 20) {
+      const segSec = 8;
+      const n = Math.max(1, Math.min(20, Math.ceil(total / segSec)));
+      boundaries = Array.from({ length: n - 1 }, (_, i) => (i + 1) * (total / n));
+    }
+    const cuts = [0, ...boundaries.filter((t) => t < total - 0.5), total];
+    const shots = [];
+    for (let i = 0; i < cuts.length - 1; i++) {
+      const startSec = Math.round(cuts[i] * 10) / 10;
+      const endSec = Math.round(cuts[i + 1] * 10) / 10;
+      const dur = endSec - startSec;
+      const shotType = dur < 2 ? "close" : dur < 6 ? "medium" : "wide";
+      shots.push({
+        id: `${assetProjectId}-shot-${i + 1}`,
+        assetProjectId,
+        shotIndex: i + 1,
+        startSec,
+        endSec,
+        description: `镜头 ${i + 1} · ${formatTime(startSec)}-${formatTime(endSec)} · ${dur.toFixed(1)}s`,
+        shotType,
+        usageTags: i === 0 ? ["开场"] : i === cuts.length - 2 ? ["收束"] : ["B-roll"],
+        createdAt: new Date().toISOString(),
+      });
+    }
+    // 落库
+    const db = getDb();
+    const tx = db.prepare("DELETE FROM shots WHERE asset_project_id = ?");
+    const ins = db.prepare("INSERT INTO shots (id, asset_project_id, shot_index, data) VALUES (?, ?, ?, ?)");
+    tx.run(assetProjectId);
+    for (const s of shots) {
+      ins.run(s.id, assetProjectId, s.shotIndex, JSON.stringify(s));
+    }
+    return { ok: true, shots };
+  });
+
+  function formatTime(sec) {
+    const s = Math.max(0, Math.round(sec));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, "0")}`;
+  }
+
 
   // v2: shots (素材分镜索引)
   ipcMain.handle("shots:list", async (_event, assetProjectId) => {

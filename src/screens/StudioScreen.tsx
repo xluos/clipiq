@@ -171,6 +171,8 @@ function StudioEditorScreen() {
   const [duration, setDuration] = useState(formatDuration(session?.targetDurationSec) || DURATION_OPTIONS[1]);
   const [appliedMethodologies, setAppliedMethodologies] = useState<string[]>(session?.appliedMethodologies || []);
   const [usedAssetIds, setUsedAssetIds] = useState<string[]>(session?.usedAssetIds || []);
+  const [generating, setGenerating] = useState(false);
+  const [genError, setGenError] = useState("");
 
   const assetProjects = useMemo(() => projects.filter((p) => p.kind === "asset"), [projects]);
 
@@ -189,20 +191,68 @@ function StudioEditorScreen() {
     });
   };
 
-  const regenerateSteps = () => {
+  const regenerateSteps = async () => {
     if (!session) return;
-    const steps = generateDraftSteps(goalDraft, parseDuration(duration), accounts, assetProjects, appliedMethodologies, usedAssetIds);
-    upsertSession({
-      ...session,
-      goal: goalDraft,
-      targetPlatform: platform,
-      targetDurationSec: parseDuration(duration),
-      appliedMethodologies,
-      usedAssetIds,
-      steps,
-      output: { kind: "draft" },
-      updatedAt: new Date().toISOString(),
-    });
+    if (!goalDraft.trim()) {
+      setGenError("先填剪辑目标");
+      return;
+    }
+    setGenError("");
+    setGenerating(true);
+    const totalSec = parseDuration(duration);
+    const usedAssets = assetProjects.filter((p) => usedAssetIds.includes(p.id));
+    const selectedMethods = accounts.filter((a) => appliedMethodologies.includes(a.id));
+    try {
+      let steps;
+      // 优先调 LLM,失败 fallback 到本地启发式
+      if (window.videoAnalyzer?.generateStudioSteps) {
+        const result = await window.videoAnalyzer.generateStudioSteps({
+          goal: goalDraft,
+          targetDurationSec: totalSec,
+          methodologies: selectedMethods.map((a) => ({
+            name: a.name,
+            summary: [a.methodology?.hooks?.summary, a.methodology?.pacing?.summary, a.methodology?.structure?.summary, a.methodology?.visual?.summary]
+              .filter(Boolean).join(" / ") || "(该账号尚未生成方法论)",
+          })),
+          assets: usedAssets.map((p) => ({
+            id: p.id,
+            name: p.videoName,
+            durationSec: p.durationSec,
+            shotCount: p.shots?.length ?? 0,
+          })),
+        });
+        steps = result.steps;
+      } else {
+        steps = generateDraftSteps(goalDraft, totalSec, accounts, assetProjects, appliedMethodologies, usedAssetIds);
+      }
+      upsertSession({
+        ...session,
+        goal: goalDraft,
+        targetPlatform: platform,
+        targetDurationSec: totalSec,
+        appliedMethodologies,
+        usedAssetIds,
+        steps,
+        output: { kind: "draft" },
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      // LLM 失败 → fallback 启发式
+      const fallbackSteps = generateDraftSteps(goalDraft, totalSec, accounts, assetProjects, appliedMethodologies, usedAssetIds);
+      upsertSession({
+        ...session,
+        goal: goalDraft,
+        targetPlatform: platform,
+        targetDurationSec: totalSec,
+        appliedMethodologies,
+        usedAssetIds,
+        steps: fallbackSteps,
+        output: { kind: "idea" },
+        updatedAt: new Date().toISOString(),
+      });
+      setGenError(`LLM 失败,使用启发式 fallback: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    setGenerating(false);
   };
 
   if (!session) {
@@ -241,10 +291,11 @@ function StudioEditorScreen() {
         <div className="flex-1" />
         <button
           onClick={regenerateSteps}
-          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+          disabled={generating}
+          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
         >
-          <RefreshCw className="w-3 h-3" strokeWidth={1.5} />
-          重新生成
+          <RefreshCw className={`w-3 h-3 ${generating ? "animate-spin" : ""}`} strokeWidth={1.5} />
+          {generating ? "LLM 生成中…" : "重新生成"}
         </button>
         <button className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] bg-indigo-600 hover:bg-indigo-700 text-white">
           <Download className="w-3 h-3" strokeWidth={1.5} />
@@ -343,9 +394,14 @@ function StudioEditorScreen() {
         {/* 中栏 推荐输出 */}
         <main className="overflow-y-auto px-7 py-6">
           <div className="text-[10.5px] font-mono tracking-[0.14em] uppercase text-slate-500 mb-2">推荐输出</div>
-          <h2 className="text-[18px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 mb-5">
+          <h2 className="text-[18px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 mb-2">
             剪辑思路 {steps.length > 0 ? `· ${steps.length} 段叙事骨架` : "· 尚未生成"}
           </h2>
+          {genError && (
+            <div className="mb-3 rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-[12px] text-amber-700 dark:text-amber-300">
+              {genError}
+            </div>
+          )}
 
           {steps.length === 0 ? (
             <div className="border border-dashed border-slate-300 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-900/30 px-8 py-12 text-center">

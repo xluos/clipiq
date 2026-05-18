@@ -223,6 +223,28 @@ declare global {
       deleteSession: (sessionId: string) => Promise<{ ok: true; message?: string }>;
       listShots: (assetProjectId?: string) => Promise<Shot[]>;
       setShotsForAsset: (assetProjectId: string, shots: Shot[]) => Promise<{ ok: true }>;
+      // v2 业务路径
+      fetchAccountVideos: (payload: { url: string; limit?: number }) => Promise<{
+        ok: true;
+        accountTitle?: string | null;
+        accountUploader?: string | null;
+        totalVideoCount?: number;
+        videos: Array<{ id: string; title: string; durationSec: number; uploadDate: string | null; viewCount: number; externalUrl: string }>;
+      }>;
+      generateAccountMethodology: (payload: {
+        accountName: string;
+        videoSummaries: Array<{ title: string; summary?: string; structure?: unknown; pacing?: string; editingStyle?: string; composition?: string }>;
+      }) => Promise<{ ok: true; methodology: import("./types").AccountMethodology }>;
+      generateStudioSteps: (payload: {
+        goal: string;
+        targetDurationSec: number;
+        methodologies?: Array<{ name: string; summary: string }>;
+        assets?: Array<{ id: string; name: string; durationSec: number; shotCount: number }>;
+      }) => Promise<{ ok: true; steps: import("./types").StudioStep[] }>;
+      analyzeAssetShots: (payload: { assetProjectId: string; filePath: string; durationSec: number }) => Promise<{
+        ok: true;
+        shots: Shot[];
+      }>;
       getNodes: (projectId: string) => Promise<AnalysisNode[]>;
       setNodes: (projectId: string, nodes: AnalysisNode[]) => Promise<{ ok: true }>;
       getReport: (projectId: string) => Promise<AnalysisReport | null>;

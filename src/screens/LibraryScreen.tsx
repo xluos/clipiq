@@ -220,9 +220,10 @@ const AssetCard: FunctionComponent<{ asset: Project; shots: Shot[]; onClick: () 
 // upload (composer 简化版,接入主进程后会复用 HomeScreen 的 inspectVideoPath / openVideoFile)
 
 function LibraryUploadScreen() {
-  const { setLocation, setProjects, setActiveProjectId } = useApp();
+  const { setLocation, setProjects, setActiveProjectId, setShotsForAsset } = useApp();
   const backToList: AppLocation = { module: "library", screen: "list" };
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState<string>("");
 
   const handlePickFile = async () => {
     setError("");
@@ -231,11 +232,12 @@ function LibraryUploadScreen() {
       return;
     }
     try {
+      setBusy("打开视频文件...");
       const video = await window.videoAnalyzer.openVideoFile();
-      if (!video) return;
+      if (!video) { setBusy(""); return; }
       const id = `asset-${Date.now()}`;
       const now = new Date().toISOString();
-      setProjects((prev) => [{
+      const project = {
         id,
         source: { type: "local_file" as const, originalPath: video.filePath },
         localVideoPath: video.mediaUrl,
@@ -250,12 +252,33 @@ function LibraryUploadScreen() {
         assetTags: [],
         createdAt: now,
         updatedAt: now,
-      }, ...prev]);
+      };
+      setProjects((prev) => [project, ...prev]);
+      // 立刻落库 — analyzeAssetShots 需要从 DB 拿到 asset 元数据
+      await window.videoAnalyzer.upsertProject(project);
       setActiveProjectId(id);
       setActiveAssetId(id);
+
+      // 真分镜: ffmpeg scenedetect 切镜头边界,落库
+      setBusy("ffmpeg 分镜中...");
+      try {
+        const result = await window.videoAnalyzer.analyzeAssetShots?.({
+          assetProjectId: id,
+          filePath: video.filePath,
+          durationSec: video.durationSec,
+        });
+        if (result?.shots) {
+          setShotsForAsset(id, result.shots);
+        }
+      } catch (e) {
+        // 分镜失败不阻塞,用户可以在 ShotList 里点 "重新分镜"
+        console.warn("analyzeAssetShots failed:", e);
+      }
+      setBusy("");
       setLocation({ module: "library", screen: "shot-list" });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      setBusy("");
     }
   };
 
@@ -275,13 +298,14 @@ function LibraryUploadScreen() {
         <div className="max-w-3xl mx-auto px-8 py-12">
           <button
             onClick={handlePickFile}
-            className="w-full border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-900/30 px-8 py-16 text-center hover:border-indigo-400 dark:hover:border-indigo-700 hover:bg-indigo-50/30 dark:hover:bg-indigo-950/20 transition-colors"
+            disabled={!!busy}
+            className="w-full border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-900/30 px-8 py-16 text-center hover:border-indigo-400 dark:hover:border-indigo-700 hover:bg-indigo-50/30 dark:hover:bg-indigo-950/20 transition-colors disabled:opacity-60"
           >
             <UploadIcon className="w-8 h-8 mx-auto text-slate-400 dark:text-slate-500 mb-3" strokeWidth={1.5} />
-            <p className="text-[14px] font-medium text-slate-700 dark:text-slate-200">点击选择视频文件</p>
+            <p className="text-[14px] font-medium text-slate-700 dark:text-slate-200">{busy || "点击选择视频文件"}</p>
             <p className="mt-1.5 text-[12.5px] text-slate-500 dark:text-slate-400">MP4 · MOV · MKV · WEBM · AVI · M4V</p>
             <p className="mt-6 text-[10.5px] font-mono tracking-wider uppercase text-slate-400 dark:text-slate-500">
-              入库后会自动分镜并打用途标签
+              入库后会用 ffmpeg scenedetect 自动分镜
             </p>
           </button>
           {error && (
@@ -312,6 +336,7 @@ function ShotListScreen() {
   const asset = projects.find((p) => p.id === id && p.kind === "asset");
   const shots = (id && shotsByAsset[id]) || asset?.shots || [];
   const [selectedIdx, setSelectedIdx] = useState(0);
+  const [reanalyzing, setReanalyzing] = useState(false);
 
   const backToList: AppLocation = { module: "library", screen: "list" };
 
@@ -329,24 +354,24 @@ function ShotListScreen() {
     );
   }
 
-  // 还没分镜 → 提供一键生成 demo shots (mock,等真分镜管线接入)
-  const generateDemoShots = () => {
-    const total = asset.durationSec || 60;
-    const count = Math.max(1, Math.min(12, Math.round(total / 8)));
-    const seg = total / count;
-    const newShots: Shot[] = Array.from({ length: count }, (_, i) => ({
-      id: `${asset.id}-shot-${i}`,
-      assetProjectId: asset.id,
-      shotIndex: i + 1,
-      startSec: Math.round(i * seg),
-      endSec: Math.round((i + 1) * seg),
-      description: i === 0 ? "镜头 1 · 待 LLM 自动描述" : `镜头 ${i + 1} · 待 LLM 自动描述`,
-      shotType: (["wide", "medium", "close"] as const)[i % 3],
-      usageTags: i === 0 ? ["开场"] : i === count - 1 ? ["收束"] : ["B-roll"],
-      createdAt: new Date().toISOString(),
-    }));
-    setShotsForAsset(asset.id, newShots);
-    setSelectedIdx(0);
+  // 真分镜 — ffmpeg scenedetect
+  const reanalyzeShots = async () => {
+    if (!asset.localFilePath) return;
+    setReanalyzing(true);
+    try {
+      const result = await window.videoAnalyzer?.analyzeAssetShots?.({
+        assetProjectId: asset.id,
+        filePath: asset.localFilePath,
+        durationSec: asset.durationSec,
+      });
+      if (result?.shots) {
+        setShotsForAsset(asset.id, result.shots);
+        setSelectedIdx(0);
+      }
+    } catch (e) {
+      console.warn("reanalyzeShots failed:", e);
+    }
+    setReanalyzing(false);
   };
 
   const sel = shots[selectedIdx];
@@ -423,14 +448,15 @@ function ShotListScreen() {
               <p className="text-[12.5px] text-slate-600 dark:text-slate-400 leading-relaxed">
                 这条素材还没分镜。
                 <br />
-                <span className="text-[10.5px] font-mono tracking-wider uppercase">分镜管线接入中</span>
+                <span className="text-[10.5px] font-mono tracking-wider uppercase">ffmpeg scenedetect 切镜头边界</span>
               </p>
               <button
-                onClick={generateDemoShots}
-                className="mt-3 inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                onClick={reanalyzeShots}
+                disabled={reanalyzing || !asset.localFilePath}
+                className="mt-3 inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
               >
                 <Sparkles className="w-3 h-3" strokeWidth={1.5} />
-                生成 demo 分镜
+                {reanalyzing ? "分镜中..." : "重新分镜"}
               </button>
             </div>
           ) : (

@@ -28,6 +28,11 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   deleteSession: (sessionId) => ipcRenderer.invoke("sessions:delete", sessionId),
   listShots: (assetProjectId) => ipcRenderer.invoke("shots:list", assetProjectId),
   setShotsForAsset: (assetProjectId, shots) => ipcRenderer.invoke("shots:setForAsset", assetProjectId, shots),
+  // v2 业务路径
+  fetchAccountVideos: (payload) => ipcRenderer.invoke("accounts:fetchVideos", payload),
+  generateAccountMethodology: (payload) => ipcRenderer.invoke("accounts:generateMethodology", payload),
+  generateStudioSteps: (payload) => ipcRenderer.invoke("sessions:generateSteps", payload),
+  analyzeAssetShots: (payload) => ipcRenderer.invoke("assets:analyzeShots", payload),
   getNodes: (projectId) => ipcRenderer.invoke("nodes:get", projectId),
   setNodes: (projectId, nodes) => ipcRenderer.invoke("nodes:set", projectId, nodes),
   getReport: (projectId) => ipcRenderer.invoke("report:get", projectId),
