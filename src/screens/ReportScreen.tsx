@@ -233,13 +233,24 @@ export function ReportScreen() {
     boundaries.push(next);
   }
 
+  // v2: 结构段从 5 装饰色改成命中/非命中两态。
+  // 命中 = 该段时间区间内有高光节点 → accent-soft。非命中 → muted。
+  // 这样和方法论审计结果呼应,装饰色不再和情绪用色撞车 (chat 建议 + DESIGN.md "no decorative palette spam")
+  const segmentHasHighlight = (segStart: number, segEnd: number) =>
+    nodes.some((n) => n.isHighlight && n.startSec >= segStart && n.startSec < segEnd);
+
   const segmentDefs = [
-    { key: "hook", label: "开头引子", detail: report.structure?.hook, tone: "bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700" },
-    { key: "development", label: "发展", detail: report.structure?.development, tone: "bg-indigo-50 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 border-indigo-100 dark:border-indigo-800/50" },
-    { key: "turn", label: "转折", detail: report.structure?.turn, tone: "bg-amber-50 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 border-amber-100 dark:border-amber-800/50" },
-    { key: "climax", label: "高潮", detail: report.structure?.climax, tone: "bg-purple-50 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 border-purple-100 dark:border-purple-800/50" },
-    { key: "ending", label: "结尾", detail: report.structure?.ending, tone: "bg-emerald-50 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 border-emerald-100 dark:border-emerald-800/50" },
-  ] as const;
+    { key: "hook",        label: "开头引子", detail: report.structure?.hook,        highlighted: segmentHasHighlight(boundaries[0], boundaries[1]) },
+    { key: "development", label: "发展",     detail: report.structure?.development, highlighted: segmentHasHighlight(boundaries[1], boundaries[2]) },
+    { key: "turn",        label: "转折",     detail: report.structure?.turn,        highlighted: segmentHasHighlight(boundaries[2], boundaries[3]) },
+    { key: "climax",      label: "高潮",     detail: report.structure?.climax,      highlighted: segmentHasHighlight(boundaries[3], boundaries[4]) },
+    { key: "ending",      label: "结尾",     detail: report.structure?.ending,      highlighted: segmentHasHighlight(boundaries[4], boundaries[5]) },
+  ].map((d) => ({
+    ...d,
+    tone: d.highlighted
+      ? "bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border-indigo-100 dark:border-indigo-800/50"
+      : "bg-slate-50 dark:bg-slate-800/40 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700",
+  })) as ReadonlyArray<{ key: string; label: string; detail?: string; highlighted: boolean; tone: string }>;
 
   const rawSegments = segmentDefs.map((def, index) => {
     const start = boundaries[index];
@@ -822,8 +833,9 @@ const MethodologyTagItem: FC<MethodologyTagItemProps> = ({ tag, tone, compact = 
 type MethodologyMissItemProps = { miss: MethodologyMiss };
 
 const MethodologyMissItem: FC<MethodologyMissItemProps> = ({ miss }) => {
+  // 虚线边框: miss 是"应有未有",没有挂在具体节点上,用虚线和 hit/violation 的实线两态视觉分离 (chat 建议)
   return (
-    <li className="rounded-lg border border-rose-200 dark:border-rose-500/30 bg-rose-50/40 dark:bg-rose-500/5 px-3 py-2">
+    <li className="rounded-lg border border-dashed border-rose-300/70 dark:border-rose-500/40 bg-rose-50/40 dark:bg-rose-500/5 px-3 py-2">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{miss.ruleName}</span>
         <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800/60 text-slate-500">
