@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, protocol, shell } = require("electron");
+const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, protocol, session, shell } = require("electron");
 const { execFile } = require("node:child_process");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
@@ -3217,6 +3217,28 @@ app.whenReady().then(async () => {
     if (icon) app.dock.setIcon(icon);
   }
   app.setName("ClipIQ");
+
+  // 生产环境注入严格 CSP — dev 下 Vite HMR 需要 unsafe-eval,跳过。
+  // packaged app 加载 file:// 的 dist/index.html,React 已编译为静态 JS,不需要 eval。
+  if (app.isPackaged) {
+    const csp = [
+      "default-src 'self'",
+      "img-src 'self' data: blob: media:",
+      "media-src 'self' blob: media:",
+      "style-src 'self' 'unsafe-inline'",
+      "script-src 'self'",
+      "font-src 'self' data:",
+      "connect-src 'self' https:",
+    ].join("; ");
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          "Content-Security-Policy": [csp],
+        },
+      });
+    });
+  }
 
   try {
     await initializeCacheStore();
