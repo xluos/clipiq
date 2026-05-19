@@ -1176,6 +1176,7 @@ function shapeEffectiveProvider(provider, model) {
     baseUrl,
     apiKeyRef,
     model: model.id,
+    contextSize: model.contextSize ?? provider.contextSize,
     maxOutputTokens: model.maxOutputTokens ?? provider.maxOutputTokens,
     temperature: model.temperature ?? provider.temperature,
     localWhisperModel: model.localWhisperModel || provider.localWhisperModel,
@@ -2268,6 +2269,54 @@ function localNodeForSegment(segment, project, frameUrl, transcriptSegments) {
   };
 }
 
+// 主分析 throw 后, 把场景骨架节点重写成"分析失败"形态: 时间区间 / 字幕 / 缩略图 / prefilterTag 这些
+// 是切镜头阶段的真实产物, 保留; 但 title / shotDescription / editIntent / cameraMovement / emotionLabel /
+// narrativeFunction 这些需要模型才能填的字段, 一律改为"—"。避免让人误以为 "等待模型生成镜头描述。"
+// 是还在跑的中间态。
+function markFallbackNodesAsFailed(fallbackNodes) {
+  return fallbackNodes.map((n) => {
+    const idStr = String(n.id || "").replace(/^node-/, "");
+    return {
+      ...n,
+      title: idStr ? `节点 ${idStr}` : (n.title || "未分析节点"),
+      shotDescription: "—",
+      editIntent: "—",
+      cameraMovement: "—",
+      emotionLabel: "—",
+      narrativeFunction: "—",
+      confidence: 0,
+    };
+  });
+}
+
+// 主分析 throw 后, 覆盖 fallbackReport 里那些"等待模型分析"占位文案, 改写明确的失败原因。
+// report.analysisError 是新加字段, UI 可以根据它显示一个明确的失败 banner。
+function markFallbackReportAsFailed(fallbackReport, errorMessage, provider) {
+  const reason = String(errorMessage || "未知错误").slice(0, 500);
+  return {
+    ...fallbackReport,
+    analysisError: {
+      stage: "main-analysis",
+      message: reason,
+      providerId: provider?.id || null,
+      model: provider?.model || null,
+      occurredAt: new Date().toISOString(),
+    },
+    summary: `主模型分析失败：${reason}。下面的节点只是镜头切分骨架,没有模型语义分析。`,
+    structure: {
+      hook: "—",
+      development: "—",
+      turn: "—",
+      climax: "—",
+      ending: "—",
+    },
+    pacing: "—",
+    editingStyle: "—",
+    composition: "—",
+    takeaways: [`主模型分析失败：${reason}`],
+  };
+}
+
 function buildLocalReport(project, nodes, provider, audioProvider, transcriptSummary, options) {
   const transcriptHint = transcriptSummary
     ? `音轨已转录 ${transcriptSummary.segmentCount ?? 0} 段（${transcriptSummary.language || "auto"}），但视觉模型未配置或失败，没有生成完整语义分析。`
@@ -2698,25 +2747,50 @@ async function buildAnalysisPrompt(project, frames, transcript, scenes, options)
   return { userText, methodology };
 }
 
+// 每帧 vision token 的保守估算。Qwen-VL / 大多数开源 VLM 在 480-720p 范围
+// mmproj 编码下实际 600-1200 token/帧, 取 800 作中位数。云端模型 (GPT-4o 等) 实际
+// 更低 (~250), 但用 800 估算只会少送几张图, 不会把 ctx 撑爆 -> 安全方向。
+const VISION_TOKENS_PER_FRAME = 800;
+const HARD_FRAME_CAP = 12;
+const HARD_FRAME_MIN = 1;
+
 async function callOpenAICompatible(provider, project, frames, transcript, scenes, fallbackNodes, fallbackReport, options, handle = null) {
   if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
     return { nodes: fallbackNodes, report: fallbackReport, usedModel: false };
   }
 
-  // Token budget: 估计开销 + 截 transcript
-  const maxBudget = 8000;
+  // 按 model contextSize 动态算可用空间。manifest 没标 -> 兜底 8192 (llama-server 默认)
+  const ctxSize = Number(provider?.contextSize) > 0 ? Number(provider.contextSize) : 8192;
+  // 输出 reserve: 拍片报告 JSON 一般 1.5-3k token, 取 ctx 的 25% 但不少于 1500
+  const reserveForOutput = Math.max(1500, Math.floor(ctxSize * 0.25));
+  // 系统 prompt + 镜头列表 + methodology 规则 + 字段说明等模板成本
+  const reserveForPrompt = 1500;
+  // transcript 字符上限。中文 ~0.5 token/字, 给 transcript 留可用预算的 40%, 但不超过 4000
+  const transcriptCap = Math.max(
+    0,
+    Math.min(4000, Math.floor((ctxSize - reserveForOutput - reserveForPrompt) * 0.4 * 2)),
+  );
   let visibleTranscript = transcript;
-  if (transcript?.text) {
-    const trimmed = trimTranscriptForBudget(transcript.text, transcript.segments, 4000);
+  if (transcript?.text && transcriptCap > 0) {
+    const trimmed = trimTranscriptForBudget(transcript.text, transcript.segments, transcriptCap);
     visibleTranscript = { ...transcript, text: trimmed.text, segments: trimmed.segments };
+  } else if (transcript?.text && transcriptCap === 0) {
+    visibleTranscript = { ...transcript, text: "", segments: [] };
   }
-  const estimated = estimateTokenCost(Math.min(frames.length, 12), visibleTranscript?.text || "");
-  if (estimated > maxBudget) {
-    const maxImages = Math.max(4, Math.floor((maxBudget - (visibleTranscript?.text || "").length * 0.5) / 250));
-    frames = frames.slice(0, maxImages);
-  } else {
-    frames = frames.slice(0, 12);
-  }
+  const transcriptTokens = Math.ceil((visibleTranscript?.text || "").length * 0.5);
+  const remainingForFrames = ctxSize - reserveForOutput - reserveForPrompt - transcriptTokens;
+  const maxImages = Math.max(
+    HARD_FRAME_MIN,
+    Math.min(HARD_FRAME_CAP, Math.floor(remainingForFrames / VISION_TOKENS_PER_FRAME)),
+  );
+  const requestedFrames = frames.length;
+  frames = frames.slice(0, maxImages);
+
+  console.log(
+    `[analyze:main] provider=${provider.id} model=${provider.model} ctx=${ctxSize} ` +
+    `reserve(out/sys)=${reserveForOutput}/${reserveForPrompt} transcript=${visibleTranscript?.text?.length || 0}字(${transcriptTokens}tok) ` +
+    `frames=${frames.length}/${requestedFrames}(cap=${maxImages})`,
+  );
 
   const imageDataUrls = [];
   for (const frame of frames) {
@@ -2732,6 +2806,17 @@ async function callOpenAICompatible(provider, project, frames, transcript, scene
   const parsed = useResponses
     ? await callOpenAIResponses(provider, systemText, userText, imageDataUrls, handle)
     : await callOpenAIChatCompletions(provider, systemText, userText, imageDataUrls, handle);
+
+  // 即便 HTTP 200, 模型也可能返回空 / 无法解析。常见场景:
+  //  - reasoning 模型 (Qwen3.5/3.6 等) stream 把内容放到 delta.reasoning_content,
+  //    client 只取 delta.content 导致拼出空 text -> tryParseJsonFromText 返 null
+  //  - 模型回了非 JSON (markdown / 自然语言) -> tryParseJsonFromText 也返 null
+  // 这两种情况让上层走"分析失败"路径, 而不是 normalizeModelResult 静默兜底成假节点。
+  if (!parsed || (!Array.isArray(parsed.nodes) && !parsed.report)) {
+    throw new Error(
+      "模型未返回可解析的 JSON (响应为空或非 JSON)。reasoning 模型可能把内容放在 reasoning_content 字段, 当前 client 不解析; 或模型超 ctx / 没有视觉能力 / 输出被截断。",
+    );
+  }
 
   return { ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, provider, methodology), usedModel: true };
 }
@@ -3480,7 +3565,22 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         if (shotContexts) report.shotContexts = shotContexts;
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
-        send(85, "分析失败", `${error.message || error}。已回退到本地基础结果。`);
+        const stackOrMsg = error?.stack || error?.message || String(error);
+        const shortMsg = error?.message || String(error);
+        console.error(
+          `[analyze:main] provider=${provider?.id} model=${provider?.model} 主分析失败:\n${stackOrMsg}`,
+        );
+        try {
+          await fs.appendFile(
+            path.join(projectDir, "analysis-error.log"),
+            `[${new Date().toISOString()}] [main-analysis] provider=${provider?.id} model=${provider?.model}\n${stackOrMsg}\n\n`,
+          );
+        } catch (writeErr) {
+          console.warn("[analyze:main] 写 analysis-error.log 失败:", writeErr?.message || writeErr);
+        }
+        nodes = markFallbackNodesAsFailed(fallbackNodes);
+        report = markFallbackReportAsFailed(fallbackReport, shortMsg, provider);
+        send(85, "分析失败", `${shortMsg}。已保留镜头骨架,节点字段标记为分析失败。`);
       }
     } else if (globalContext || shotContexts) {
       // 视觉主分析未配置, 但中间层有产物, 让 fallback report 至少能带上 globalSummary
