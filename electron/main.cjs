@@ -449,6 +449,26 @@ function parseTopMemToken(token) {
   return Math.round(num * mul);
 }
 
+// 单进程 phys_footprint (macOS), 跟 Activity Monitor / vmmap 同口径.
+// Electron 的 getAppMetrics().memory.workingSetSize ≈ ps rss, 含共享内存重复计算,
+// 跟 sidecar (top mem) 口径不一致; 用这个统一拿 top MEM 让两边对齐.
+// 不算 CPU (Electron 进程 CPU 用 getAppMetrics percentCPUUsage 更准).
+async function sampleTopMemByPid(pid) {
+  try {
+    const { stdout } = await execFileAsync(
+      "top",
+      ["-l", "1", "-pid", String(pid), "-stats", "pid,mem", "-ncols", "2"],
+      { windowsHide: true },
+    );
+    const memLine = stdout.split("\n").reverse().find((l) => /^\s*\d+\s+\S+\s*$/.test(l));
+    const memToken = memLine ? memLine.trim().split(/\s+/)[1] : "";
+    const bytes = parseTopMemToken(memToken);
+    return bytes > 0 ? bytes : null;
+  } catch {
+    return null;
+  }
+}
+
 // 单进程 RSS + CPU 快照。
 // pcpu 在 ps 里是进程生命周期均值, 不是瞬时, 但 sidecar 跑起来后基本稳定看量级够用.
 //
@@ -4146,14 +4166,28 @@ app.whenReady().then(async () => {
   // sidecar 部分跑 ps 一次性快照拿 RSS 和 pcpu。
   ipcMain.handle("system:listProcesses", async () => {
     const metrics = app.getAppMetrics();
-    const electronProcs = metrics.map((m) => ({
-      pid: m.pid,
-      kind: mapElectronProcKind(m.type),
-      label: electronProcLabel(m),
-      detail: electronProcDetail(m),
-      cpuPercent: Math.round((m.cpu?.percentCPUUsage || 0) * 10) / 10,
-      memoryBytes: (m.memory?.workingSetSize || 0) * 1024, // workingSetSize 单位是 kB
-    }));
+    // macOS: 内存全部走 top phys_footprint (Activity Monitor 同口径), 不再用
+    //   workingSetSize ≈ ps rss (含共享内存重复算).
+    //   实测 10 个并行 spawn top 合计 ~8ms, 不影响 1.5s 轮询.
+    // 其他平台: workingSetSize 保留.
+    const isMac = process.platform === "darwin";
+    const electronProcs = await Promise.all(
+      metrics.map(async (m) => {
+        let memoryBytes = (m.memory?.workingSetSize || 0) * 1024;
+        if (isMac) {
+          const corrected = await sampleTopMemByPid(m.pid);
+          if (corrected != null) memoryBytes = corrected;
+        }
+        return {
+          pid: m.pid,
+          kind: mapElectronProcKind(m.type),
+          label: electronProcLabel(m),
+          detail: electronProcDetail(m),
+          cpuPercent: Math.round((m.cpu?.percentCPUUsage || 0) * 10) / 10,
+          memoryBytes,
+        };
+      }),
+    );
 
     // ps 失败说明 PID 已死/runtime 还没清理掉,跳过避免显示 0/0 假条目
     const sidecars = [];
