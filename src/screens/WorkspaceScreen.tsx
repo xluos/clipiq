@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
-import { FileText, Play, Pause, ArrowLeft, Folder, Search, Star, ExternalLink, Copy, Check } from "lucide-react";
+import { FileText, Play, Pause, ArrowLeft, Folder, Search, Star, ExternalLink, Copy, Check, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { AnalysisNode, AnalysisNodeType, DanmakuEmotionAxis, Project } from "../types";
 import { formatTime } from "@/lib/utils";
@@ -258,6 +258,29 @@ export function WorkspaceScreen() {
               <span className="text-xs font-medium text-emerald-700 dark:text-emerald-400 tracking-widest">已完成</span>
             </div>
           ) : null}
+          {project.status === "completed" && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setCurrentScreen("prepare")}
+                className="hidden md:flex h-9 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
+                title="重新分析"
+              >
+                <RefreshCw className="w-4 h-4 mr-2" />
+                重新分析
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setCurrentScreen("prepare")}
+                className="flex md:hidden text-slate-600 dark:text-slate-300"
+                title="重新分析"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </Button>
+            </>
+          )}
           <Button variant="secondary" size="sm" onClick={() => setCurrentScreen("report")} className="bg-indigo-600 hover:bg-indigo-700 text-white border-0 hidden md:flex h-9 shadow-sm hover:shadow">
             <FileText className="w-4 h-4 mr-2" />
             查看报告
