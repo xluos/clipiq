@@ -110,7 +110,7 @@ function formatDuration(ms: number) {
 }
 
 export function ReportScreen() {
-  const { setCurrentScreen, reportByProject, activeProjectId, projects, setProjects, nodesByProject, providers } = useApp();
+  const { setCurrentScreen, reportByProject, activeProjectId, projects, setProjects, nodesByProject, providers, startAnalysisForProject } = useApp();
   const [exportStatus, setExportStatus] = useState("");
   const [activeSection, setActiveSection] = useState<string>("summary");
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -263,21 +263,11 @@ export function ReportScreen() {
 
   const handleReanalyzeWithGenre = (genre: VideoGenre | "auto") => {
     if (!project) return;
-    setProjects((prev) =>
-      prev.map((p) =>
-        p.id === project.id
-          ? {
-              ...p,
-              analysisOptions: {
-                ...(p.analysisOptions || { mode: "standard", density: "standard", focus: "all" }),
-                manualGenre: genre,
-              },
-              updatedAt: new Date().toISOString(),
-            }
-          : p
-      )
-    );
-    setCurrentScreen("prepare");
+    const nextOptions = {
+      ...(project.analysisOptions || { mode: "standard" as const, density: "standard" as const, focus: "all" as const }),
+      manualGenre: genre,
+    };
+    startAnalysisForProject(project.id, nextOptions);
   };
 
   const audit = report.methodologyAudit;

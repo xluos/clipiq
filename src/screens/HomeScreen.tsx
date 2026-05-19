@@ -118,7 +118,7 @@ function projectSourceLabel(source: ProjectSource): string {
 }
 
 export function HomeScreen() {
-  const { setCurrentScreen, goModule, projects, setActiveProjectId, setProjects, removeProject } = useApp();
+  const { setCurrentScreen, goModule, projects, setActiveProjectId, setProjects, removeProject, startAnalysisForProject } = useApp();
   const confirm = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -191,10 +191,18 @@ export function HomeScreen() {
   };
 
   const goToProject = (proj: Project) => {
-    setActiveProjectId(proj.id);
-    if (proj.status === "completed") setCurrentScreen("workspace");
-    else if (proj.status === "analyzing" || proj.status === "downloading") setCurrentScreen("progress");
-    else setCurrentScreen("prepare");
+    if (proj.status === "completed") {
+      setActiveProjectId(proj.id);
+      setCurrentScreen("workspace");
+      return;
+    }
+    if (proj.status === "analyzing" || proj.status === "downloading") {
+      setActiveProjectId(proj.id);
+      setCurrentScreen("progress");
+      return;
+    }
+    // not_analyzed / failed / download_failed: 用项目自带或全局默认参数直跑
+    startAnalysisForProject(proj.id);
   };
 
   const addInspectedProject = (video: InspectedVideo) => {

@@ -439,17 +439,27 @@ export type AnalysisOptions = {
   mode: "quick" | "standard" | "detailed";
   density: "sparse" | "standard" | "dense";
   focus: "all" | "narrative" | "rhythm" | "emotion";
-  // Hybrid: 用户可在 PrepareScreen 预指定类型；不指定（"auto"）则让 LLM 识别。
+  // Hybrid: 用户可在主入口 composer 预指定类型；不指定（"auto"）则让 LLM 识别。
   // 分析完成后用户也可在 ReportScreen 改类型并重新分析。
   manualGenre?: VideoGenre | "auto";
 };
 
-// 全局默认分析参数: PrepareScreen 在 project.analysisOptions 缺省时读取
+// 全局默认分析参数: 起分析时若 project.analysisOptions 缺省则用它推导
 export type DefaultAnalysisPreset = "quick" | "standard" | "deep";
 export type DefaultAnalysis = {
   preset: DefaultAnalysisPreset;
   manualGenre: VideoGenre | "auto";
 };
+
+// 把全局默认 preset 折算成 AnalysisOptions
+// quick → mode:quick / density:sparse; standard → standard; deep → detailed+dense
+export function defaultPresetToAnalysisOptions(d: DefaultAnalysis): AnalysisOptions {
+  const base: Pick<AnalysisOptions, "mode" | "density" | "focus"> =
+    d.preset === "quick" ? { mode: "quick", density: "sparse", focus: "all" }
+    : d.preset === "deep" ? { mode: "detailed", density: "dense", focus: "all" }
+    : { mode: "standard", density: "standard", focus: "all" };
+  return { ...base, manualGenre: d.manualGenre };
+}
 
 export type AnalysisProgressEvent = {
   projectId: string;
@@ -464,7 +474,7 @@ export type AppConfig = {
   audioSlot: SlotAssignment;
   // 上次启动过的本地推理模型(key)。下次应用启动时自动恢复。
   lastLlamaModelKey?: string | null;
-  // 全局默认分析参数; PrepareScreen 在新项目首次进入时读取
+  // 全局默认分析参数; 起分析时若 project.analysisOptions 缺省则用它推导
   defaultAnalysis?: DefaultAnalysis;
   // 本地模型下载镜像选择: hf-mirror (默认) 或 modelscope (魔搭/国内 CDN)
   localModelMirror?: "hf-mirror" | "modelscope";
@@ -486,7 +496,7 @@ export type AppConfig = {
 export type AppModule = "analysis" | "library" | "account" | "studio" | "settings";
 
 export type AppLocation =
-  | { module: "analysis";  screen: "home" | "prepare" | "progress" | "workspace" | "report" | "url_pull" }
+  | { module: "analysis";  screen: "home" | "progress" | "workspace" | "report" | "url_pull" }
   | { module: "library";   screen: "list" | "upload" | "shot-list" | "shot-detail" }
   | { module: "account";   screen: "list" | "detail" | "methodology" }
   | { module: "studio";    screen: "list" | "editor" }
@@ -497,7 +507,6 @@ export type ScreenState =
   | "home"
   | "settings"
   | "url_pull"
-  | "prepare"
   | "progress"
   | "workspace"
   | "report";

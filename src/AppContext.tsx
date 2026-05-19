@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, legacyScreenToLocation, locationToLegacyScreen, Account, AccountVideo, StudioSession, Shot } from "./types";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
 
 export type AccountFetchUiState = {
   stage: string;
@@ -44,6 +44,10 @@ interface AppState {
   reportByProject: Record<string, AnalysisReport>;
   setReportForProject: (projectId: string, report: AnalysisReport) => void;
   removeProject: (projectId: string) => void;
+  // 把已存在的 project 切到 analyzing 状态并跳进度屏。
+  // analysisOptions 来源优先级: override > 项目自带 > defaultAnalysis 推导。
+  // providerId / model 始终用当前 active video provider 覆盖。
+  startAnalysisForProject: (projectId: string, optionsOverride?: AnalysisOptions) => void;
   // v2: accounts / sessions / shots
   accounts: Account[];
   upsertAccount: (a: Account) => void;
@@ -271,6 +275,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
       });
     }
   }, []);
+
+  const startAnalysisForProject = useCallback(
+    (projectId: string, optionsOverride?: AnalysisOptions) => {
+      const provider = providersRef.current.find((pr) => pr.id === activeVideoProviderId)
+        ?? providersRef.current.find((pr) => pr.kind === "video");
+      setProjects((prev) =>
+        prev.map((p) => {
+          if (p.id !== projectId) return p;
+          const analysisOptions = optionsOverride
+            ?? p.analysisOptions
+            ?? defaultPresetToAnalysisOptions(defaultAnalysis);
+          return {
+            ...p,
+            status: "analyzing",
+            providerId: provider?.id,
+            model: provider?.model,
+            analysisOptions,
+            updatedAt: new Date().toISOString(),
+          };
+        }),
+      );
+      setActiveProjectId(projectId);
+      setCurrentLocation({ module: "analysis", screen: "progress" });
+    },
+    [defaultAnalysis, activeVideoProviderId],
+  );
 
   const removeProject = useCallback((projectId: string) => {
     setProjects((prev) => prev.filter((p) => p.id !== projectId));
@@ -505,6 +535,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         reportByProject,
         setReportForProject,
         removeProject,
+        startAnalysisForProject,
         accounts,
         upsertAccount,
         removeAccount,
