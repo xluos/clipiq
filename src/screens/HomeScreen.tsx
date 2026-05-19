@@ -1,7 +1,7 @@
 import { useApp } from "../AppContext";
 import {
   Plus, ArrowUp, ChevronDown, Link as LinkIcon, FileVideo,
-  CheckCircle2, Clock, XCircle, Trash2, Film, Loader2, AlertTriangle, Sparkles,
+  CheckCircle2, Clock, XCircle, Trash2, Film, Loader2, AlertTriangle, Sparkles, RefreshCw,
   Upload, BarChart3, Folder, UserSquare, Wand2, ChevronRight,
 } from "lucide-react";
 import { type ChangeEvent, type DragEvent, type FunctionComponent, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
@@ -584,7 +584,7 @@ export function HomeScreen() {
             </div>
             <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] overflow-hidden">
               {/* Header row */}
-              <div className="hidden md:grid grid-cols-[80px_1fr_72px_120px_88px_36px] gap-4 items-center px-3 py-2 border-b border-slate-200 dark:border-slate-800 text-[10.5px] font-mono uppercase tracking-wider text-slate-400 dark:text-slate-500">
+              <div className="hidden md:grid grid-cols-[80px_1fr_72px_120px_88px_72px] gap-4 items-center px-3 py-2 border-b border-slate-200 dark:border-slate-800 text-[10.5px] font-mono uppercase tracking-wider text-slate-400 dark:text-slate-500">
                 <span />
                 <span>项目</span>
                 <span>时长</span>
@@ -607,6 +607,11 @@ export function HomeScreen() {
                       project={proj}
                       onOpen={() => goToProject(proj)}
                       onDelete={(e) => handleDelete(e, proj.id)}
+                      onReanalyze={(e) => {
+                        e.stopPropagation();
+                        setActiveProjectId(proj.id);
+                        setCurrentScreen("prepare");
+                      }}
                       onThumbnailReady={(dataUrl) => setThumbnail(proj.id, dataUrl)}
                     />
                   ))}
@@ -743,10 +748,11 @@ type ProjectRowProps = {
   project: Project;
   onOpen: () => void;
   onDelete: (e: MouseEvent<HTMLButtonElement>) => void;
+  onReanalyze: (e: MouseEvent<HTMLButtonElement>) => void;
   onThumbnailReady: (dataUrl: string) => void;
 };
 
-const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDelete, onThumbnailReady }) => {
+const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDelete, onReanalyze, onThumbnailReady }) => {
   const platformLabel = projectSourceLabel(project.source);
   const resolution = formatResolution(project.width, project.height);
   const [thumb, setThumb] = useState<string | null>(project.thumbnailUrl ?? null);
@@ -801,7 +807,7 @@ const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDel
   return (
     <div
       onClick={onOpen}
-      className="group grid grid-cols-[80px_1fr_72px_120px_88px_36px] gap-4 items-center px-3 py-2.5 cursor-pointer transition-colors hover:bg-slate-50 dark:hover:bg-[#1c1e24]"
+      className="group grid grid-cols-[80px_1fr_72px_120px_88px_72px] gap-4 items-center px-3 py-2.5 cursor-pointer transition-colors hover:bg-slate-50 dark:hover:bg-[#1c1e24]"
     >
       <div className="w-[80px] h-[48px] rounded-md relative overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-[#1c1e24]">
         {thumb ? (
@@ -829,14 +835,26 @@ const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDel
       <div>
         <StatusBadge status={project.status} />
       </div>
-      <button
-        type="button"
-        onClick={onDelete}
-        title="删除项目"
-        className="h-7 w-7 grid place-items-center rounded-md text-slate-400 opacity-0 group-hover:opacity-100 hover:bg-rose-50 hover:text-rose-500 dark:hover:bg-rose-950/40 dark:hover:text-rose-400 transition-all"
-      >
-        <Trash2 className="h-3.5 w-3.5" />
-      </button>
+      <div className="flex items-center justify-end gap-1">
+        {project.status === "completed" && (
+          <button
+            type="button"
+            onClick={onReanalyze}
+            title="重新分析"
+            className="h-7 w-7 grid place-items-center rounded-md text-slate-400 opacity-0 group-hover:opacity-100 hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-indigo-950/40 dark:hover:text-indigo-300 transition-all"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onDelete}
+          title="删除项目"
+          className="h-7 w-7 grid place-items-center rounded-md text-slate-400 opacity-0 group-hover:opacity-100 hover:bg-rose-50 hover:text-rose-500 dark:hover:bg-rose-950/40 dark:hover:text-rose-400 transition-all"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
     </div>
   );
 };
