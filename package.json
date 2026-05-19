@@ -14,7 +14,8 @@
     "lint": "tsc --noEmit",
     "dist": "npm run build && electron-builder",
     "dist:mac": "npm run build && electron-builder --mac",
-    "dist:win": "npm run build && electron-builder --win"
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:extension": "node scripts/pack-extension.cjs"
   },
   "build": {
     "appId": "com.clipiq.app",

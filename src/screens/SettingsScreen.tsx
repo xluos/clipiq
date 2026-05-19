@@ -2426,8 +2426,11 @@ function ExtensionBridgeSection() {
       <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-3">
         <h3 className="font-medium text-slate-900 dark:text-slate-100">安装步骤</h3>
         <ol className="text-[13px] text-slate-600 dark:text-slate-400 leading-relaxed space-y-1.5 list-decimal pl-5">
+          <li>
+            从 GitHub Release 下载 <code className="font-mono text-[11.5px] text-indigo-600 dark:text-indigo-400">clipiq-bridge-v{"<version>"}.zip</code> 并解压(开发者也可以直接用仓库下 <code className="font-mono text-[11.5px]">chrome-extension/</code>)
+          </li>
           <li>Chrome 打开 <code className="font-mono text-[11.5px] text-indigo-600 dark:text-indigo-400">chrome://extensions</code>,右上角开「开发者模式」</li>
-          <li>点「加载已解压的扩展程序」,选 ClipIQ 仓库下的 <code className="font-mono text-[11.5px]">chrome-extension/</code> 目录</li>
+          <li>点「加载已解压的扩展程序」,选解压后的目录</li>
           <li>点 Chrome 工具栏的「ClipIQ Bridge」图标,把上方 token 粘贴进去并保存</li>
           <li>状态指示灯变绿 → 回桌面端拉账号视频列表</li>
         </ol>

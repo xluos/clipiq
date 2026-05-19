@@ -4,6 +4,7 @@ build/*
 !build/icon.png
 !build/icon-mac.svg
 dist/
+release/
 coverage/
 .DS_Store
 *.log
