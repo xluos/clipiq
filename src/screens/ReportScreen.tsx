@@ -1117,6 +1117,31 @@ function TimingBar({ timings, totalMs }: { timings: AnalysisTiming[]; totalMs?: 
   }
   const aggregated = Array.from(buckets.values()).sort((a, b) => b.durationMs - a.durationMs);
 
+  // 合并 < 3% 的小项到「其他」, 避免色块过细 / 图例过散.
+  // 只有 ≥ 2 个小项时才合并 (1 个小项合并意义不大, 直接展示)
+  const SMALL_THRESHOLD = 0.03;
+  const major: Aggregated[] = [];
+  const minor: Aggregated[] = [];
+  for (const item of aggregated) {
+    if (item.durationMs / total < SMALL_THRESHOLD) minor.push(item);
+    else major.push(item);
+  }
+  const displayed: Aggregated[] = [...major];
+  if (minor.length >= 2) {
+    displayed.push({
+      label: `其他 (${minor.length} 项)`,
+      durationMs: minor.reduce((acc, x) => acc + x.durationMs, 0),
+      stages: minor.flatMap((x) => x.stages),
+      notes: [
+        ...minor.flatMap((x) => x.notes),
+        ...minor.map((x) => `${x.label}: ${formatDuration(x.durationMs)}`),
+      ],
+      color: "from-slate-400 to-slate-300 dark:from-slate-600 dark:to-slate-700",
+    });
+  } else {
+    displayed.push(...minor);
+  }
+
   return (
     <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] p-3">
       <div className="flex items-baseline justify-between mb-2">
@@ -1124,23 +1149,31 @@ function TimingBar({ timings, totalMs }: { timings: AnalysisTiming[]; totalMs?: 
         <span className="font-mono text-xs text-slate-700 dark:text-slate-200">总计 {formatDuration(total)}</span>
       </div>
       <div className="flex h-3 rounded-full overflow-hidden bg-slate-100 dark:bg-slate-800">
-        {aggregated.map((a) => {
+        {displayed.map((a) => {
           const pct = (a.durationMs / total) * 100;
+          const tooltip = a.notes.length > 0
+            ? `${a.label} · ${formatDuration(a.durationMs)} · ${pct.toFixed(1)}%\n${a.notes.join("\n")}`
+            : `${a.label} · ${formatDuration(a.durationMs)} · ${pct.toFixed(1)}%`;
           return (
             <div
               key={a.label}
               style={{ width: `${pct}%` }}
-              title={`${a.label} · ${formatDuration(a.durationMs)} · ${pct.toFixed(1)}%`}
+              title={tooltip}
               className={`bg-gradient-to-r ${a.color}`}
             />
           );
         })}
       </div>
       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
-        {aggregated.map((a) => {
+        {displayed.map((a) => {
           const pct = (a.durationMs / total) * 100;
+          const tooltip = a.notes.length > 0 ? a.notes.join("\n") : undefined;
           return (
-            <div key={a.label} className="flex items-center gap-1.5 text-[11px]">
+            <div
+              key={a.label}
+              className="flex items-center gap-1.5 text-[11px]"
+              title={tooltip}
+            >
               <span className={`inline-block w-2 h-2 rounded-full bg-gradient-to-r ${a.color}`} />
               <span className="text-slate-600 dark:text-slate-300">{a.label}</span>
               <span className="font-mono text-slate-400 dark:text-slate-500">{formatDuration(a.durationMs)} · {pct.toFixed(0)}%</span>

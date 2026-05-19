@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { Activity } from "lucide-react";
+import { Activity, ChevronRight } from "lucide-react";
 import { useApp } from "../AppContext";
 import type { ExtensionBridgeStatus, LlamaStatus, ProcessEntry, SystemStats } from "../electron-api";
 import type { ModelDescriptor } from "../types";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 export function RuntimeStatusIndicator() {
   const [open, setOpen] = useState(false);
@@ -11,6 +12,7 @@ export function RuntimeStatusIndicator() {
   const [sysStats, setSysStats] = useState<SystemStats | null>(null);
   const [procList, setProcList] = useState<ProcessEntry[] | null>(null);
   const [bridgeStatus, setBridgeStatus] = useState<ExtensionBridgeStatus | null>(null);
+  const [procDialogOpen, setProcDialogOpen] = useState(false);
   const { providers, taskSlots, audioSlot, goModule } = useApp();
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -61,9 +63,10 @@ export function RuntimeStatusIndicator() {
     return () => document.removeEventListener("mousedown", onDocMouseDown);
   }, [open]);
 
-  // 仅弹层打开时采样系统资源 + 进程列表,1.5s 一次。第一次返回 cpu=0 是采样基线,无碍。
+  // 仅弹层 (popup) 或进程详情 dialog 打开时采样系统资源 + 进程列表,1.5s 一次。
+  // 第一次返回 cpu=0 是采样基线,无碍。
   useEffect(() => {
-    if (!open || !window.videoAnalyzer?.getSystemStats) return;
+    if ((!open && !procDialogOpen) || !window.videoAnalyzer?.getSystemStats) return;
     let cancelled = false;
     const tick = async () => {
       try {
@@ -84,7 +87,7 @@ export function RuntimeStatusIndicator() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [open]);
+  }, [open, procDialogOpen]);
 
   // 主分析: complex_vision 槽 → provider + model label
   const visionSlot = taskSlots.complex_vision;
@@ -264,7 +267,7 @@ export function RuntimeStatusIndicator() {
           </Section>
 
           <Section title="进程占用 · ClipIQ 自身">
-            <ProcessTable list={procList} />
+            <ProcessSummary list={procList} onOpenDetail={() => setProcDialogOpen(true)} />
           </Section>
 
           <button
@@ -278,6 +281,17 @@ export function RuntimeStatusIndicator() {
           </button>
         </div>
       )}
+
+      <Dialog open={procDialogOpen} onOpenChange={setProcDialogOpen}>
+        <DialogContent className="sm:max-w-lg max-h-[80vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="text-sm font-semibold">进程占用 · ClipIQ 自身</DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto -mx-4 px-4">
+            <ProcessTable list={procList} />
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -428,6 +442,35 @@ const PROC_KIND_TONE: Record<ProcessEntry["kind"], string> = {
   sidecar: "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
 };
 
+// 一级总览: 只 N 个进程 / CPU 总 / 内存总 + 详情按钮, 不展开列表
+function ProcessSummary({
+  list,
+  onOpenDetail,
+}: {
+  list: ProcessEntry[] | null;
+  onOpenDetail: () => void;
+}) {
+  if (!list) return <Hint>加载中</Hint>;
+  if (list.length === 0) return <Hint>无可见进程</Hint>;
+  const totalCpu = list.reduce((s, p) => s + p.cpuPercent, 0);
+  const totalMem = list.reduce((s, p) => s + p.memoryBytes, 0);
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-[11px] font-mono tabular-nums text-slate-600 dark:text-slate-300">
+        {list.length} 个 · CPU {totalCpu.toFixed(1)}% · 内存 {formatBytes(totalMem)}
+      </span>
+      <button
+        onClick={onOpenDetail}
+        className="inline-flex items-center gap-0.5 text-[11px] text-indigo-600 dark:text-indigo-400 hover:underline"
+      >
+        详情
+        <ChevronRight className="w-3 h-3" strokeWidth={1.5} />
+      </button>
+    </div>
+  );
+}
+
+// 二级 Dialog 内的完整列表
 function ProcessTable({ list }: { list: ProcessEntry[] | null }) {
   if (!list) return <Hint>加载中</Hint>;
   if (list.length === 0) return <Hint>无可见进程</Hint>;
@@ -442,9 +485,9 @@ function ProcessTable({ list }: { list: ProcessEntry[] | null }) {
           CPU {totalCpu.toFixed(1)}% · 内存 {formatBytes(totalMem)}
         </span>
       </div>
-      <div className="max-h-56 overflow-y-auto -mx-1 divide-y divide-slate-100 dark:divide-slate-800">
+      <div className="divide-y divide-slate-100 dark:divide-slate-800">
         {sorted.map((p) => (
-          <div key={p.pid} className="flex items-center gap-2 px-1 py-1.5">
+          <div key={p.pid} className="flex items-center gap-2 py-1.5">
             <span
               className={`text-[9px] font-mono rounded px-1 py-0.5 shrink-0 ${PROC_KIND_TONE[p.kind]}`}
             >
