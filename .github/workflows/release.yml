@@ -33,15 +33,47 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - name: Upgrade npm (avoid 10.9.7 "Exit handler never called" bug)
-        run: npm install -g npm@11
-
-      - name: Install dependencies
+      - name: Install dependencies (skip postinstall scripts)
         env:
           npm_config_fetch_retries: '5'
           npm_config_fetch_retry_mintimeout: '20000'
           npm_config_fetch_retry_maxtimeout: '120000'
-        run: npm install --no-audit --no-fund --prefer-offline
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Fetch ffmpeg-static binary (timeout + retry)
+        shell: bash
+        run: |
+          cd node_modules/ffmpeg-static
+          for i in 1 2 3; do
+            echo "::group::ffmpeg-static install attempt $i"
+            if node -e "
+              const { fork } = require('child_process');
+              const child = fork('install.js', { stdio: 'inherit' });
+              const timer = setTimeout(() => {
+                console.error('ffmpeg-static install timed out after 180s, killing');
+                try { child.kill('SIGKILL'); } catch (e) {}
+                process.exit(124);
+              }, 180000);
+              child.on('exit', (code) => {
+                clearTimeout(timer);
+                process.exit(code == null ? 1 : code);
+              });
+              child.on('error', (err) => {
+                clearTimeout(timer);
+                console.error(err);
+                process.exit(1);
+              });
+            "; then
+              echo "::endgroup::"
+              echo "ffmpeg-static binary ready"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "Attempt $i failed/timed out, retrying in 20s"
+            sleep 20
+          done
+          echo "ffmpeg-static install failed after 3 attempts"
+          exit 1
 
       - name: Build renderer
         run: npm run build
