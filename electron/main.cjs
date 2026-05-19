@@ -303,8 +303,9 @@ const YT_DLP_LATEST_DOWNLOAD = "https://github.com/yt-dlp/yt-dlp/releases/latest
 
 function bundledFfmpegPath() {
   try {
-    const ffmpegStatic = require("ffmpeg-static");
-    if (typeof ffmpegStatic === "string" && ffmpegStatic) return ffmpegStatic;
+    const ffmpegInstaller = require("@ffmpeg-installer/ffmpeg");
+    const filePath = ffmpegInstaller?.path;
+    if (typeof filePath === "string" && filePath) return filePath;
   } catch {
     // package not installed; fall through
   }
