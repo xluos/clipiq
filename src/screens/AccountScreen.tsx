@@ -247,15 +247,17 @@ const AccountCard: FunctionComponent<{
         </span>
       </div>
 
-      {(account.tags?.length ?? 0) > 0 && (
-        <div className="flex gap-1 mt-3">
-          {account.tags!.map((t) => (
+      <div className="flex gap-1 mt-3">
+        {(account.tags?.length ?? 0) > 0 ? (
+          account.tags!.map((t) => (
             <span key={t} className="text-[10.5px] font-mono px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
               {t}
             </span>
-          ))}
-        </div>
-      )}
+          ))
+        ) : (
+          <span aria-hidden className="text-[10.5px] font-mono px-1.5 py-0.5 rounded invisible">·</span>
+        )}
+      </div>
 
       {fetching ? (
         <div className="mt-3.5 px-3 py-2.5 bg-indigo-50/50 dark:bg-indigo-950/30 rounded-md">

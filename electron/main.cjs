@@ -3800,15 +3800,27 @@ function rebuildTrayMenu() {
 
 function createTray() {
   if (trayInstance) return;
-  const sourcePath = path.join(__dirname, "assets", "icon-256.png");
-  let trayImg = nativeImage.createFromPath(sourcePath);
-  if (trayImg.isEmpty()) {
-    console.warn("[tray] icon-256.png 不可用,跳过托盘创建");
-    return;
+  // macOS 用模板图像(纯黑 + 镂空 alpha),系统按 menubar 主题反色,自动加载 @2x。
+  // 其他平台沿用彩色 app 图标。
+  if (process.platform === "darwin") {
+    const tplPath = path.join(__dirname, "assets", "tray-iconTemplate.png");
+    const tplImg = nativeImage.createFromPath(tplPath);
+    if (tplImg.isEmpty()) {
+      console.warn("[tray] tray-iconTemplate.png 不可用,跳过托盘创建");
+      return;
+    }
+    tplImg.setTemplateImage(true);
+    trayInstance = new Tray(tplImg);
+  } else {
+    const sourcePath = path.join(__dirname, "assets", "icon-256.png");
+    let trayImg = nativeImage.createFromPath(sourcePath);
+    if (trayImg.isEmpty()) {
+      console.warn("[tray] icon-256.png 不可用,跳过托盘创建");
+      return;
+    }
+    trayImg = trayImg.resize({ width: 16, height: 16, quality: "best" });
+    trayInstance = new Tray(trayImg);
   }
-  const size = process.platform === "darwin" ? 18 : 16;
-  trayImg = trayImg.resize({ width: size, height: size, quality: "best" });
-  trayInstance = new Tray(trayImg);
   trayInstance.setToolTip("ClipIQ");
   trayInstance.on("click", () => toggleMainWindow());
   rebuildTrayMenu();
