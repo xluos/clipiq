@@ -214,15 +214,17 @@ const AccountCard: FunctionComponent<{ account: Account; onClick: () => void }> 
         </span>
       </div>
 
-      {(account.tags?.length ?? 0) > 0 && (
-        <div className="flex gap-1 mt-3">
-          {account.tags!.map((t) => (
+      <div className="flex gap-1 mt-3">
+        {(account.tags?.length ?? 0) > 0 ? (
+          account.tags!.map((t) => (
             <span key={t} className="text-[10.5px] font-mono px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
               {t}
             </span>
-          ))}
-        </div>
-      )}
+          ))
+        ) : (
+          <span aria-hidden className="text-[10.5px] font-mono px-1.5 py-0.5 rounded invisible">·</span>
+        )}
+      </div>
 
       <div className="mt-3.5 px-3 py-2.5 bg-slate-50 dark:bg-slate-800/40 rounded-md">
         <div className="text-[10.5px] font-mono tracking-wider uppercase text-slate-500 dark:text-slate-400">方法论摘要</div>
