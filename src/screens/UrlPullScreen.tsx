@@ -25,7 +25,7 @@ function platformLabel(p: Extract<ProjectSource, { type: "url" }>["platform"]): 
 }
 
 export function UrlPullScreen() {
-  const { setCurrentScreen, setProjects, setActiveProjectId } = useApp();
+  const { setCurrentScreen, setProjects, startAnalysisForProject } = useApp();
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<"idle" | "downloading" | "failed">("idle");
   const [logs, setLogs] = useState<string[]>([
@@ -51,8 +51,7 @@ export function UrlPullScreen() {
       createdAt: now,
       updatedAt: now
     }, ...prev]);
-    setActiveProjectId(newProjectId);
-    setCurrentScreen("prepare");
+    startAnalysisForProject(newProjectId);
   };
 
   const handleStartPull = async () => {
@@ -105,8 +104,7 @@ export function UrlPullScreen() {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       }, ...prev]);
-      setActiveProjectId(video.projectId);
-      window.setTimeout(() => setCurrentScreen("prepare"), 500);
+      window.setTimeout(() => startAnalysisForProject(video.projectId), 500);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error("[clipiq] url pull failed", err);

@@ -154,15 +154,16 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
 };
 
 const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: number }> = ({ onClose, sidebarWidth }) => {
-  const { setLocation, setActiveProjectId } = useApp();
+  const { setLocation, setActiveProjectId, startAnalysisForProject } = useApp();
   const { running, failed, accountFetches } = useTaskQueueData();
 
   const openProject = (projectId: string, kind: "running" | "failed") => {
-    setActiveProjectId(projectId);
     if (kind === "running") {
+      setActiveProjectId(projectId);
       setLocation({ module: "analysis", screen: "progress" });
     } else {
-      setLocation({ module: "analysis", screen: "prepare" });
+      // 失败重试: 直接用项目自带或全局默认参数重跑
+      startAnalysisForProject(projectId);
     }
     onClose();
   };

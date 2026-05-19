@@ -2,7 +2,6 @@ import { useApp } from './AppContext';
 import { HomeScreen } from './screens/HomeScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { UrlPullScreen } from './screens/UrlPullScreen';
-import { PrepareScreen } from './screens/PrepareScreen';
 import { ProgressScreen } from './screens/ProgressScreen';
 import { WorkspaceScreen } from './screens/WorkspaceScreen';
 import { ReportScreen } from './screens/ReportScreen';
@@ -40,7 +39,6 @@ export default function App() {
               >
                 {currentLocation.module === 'analysis' && currentLocation.screen === 'home' && <HomeScreen />}
                 {currentLocation.module === 'analysis' && currentLocation.screen === 'url_pull' && <UrlPullScreen />}
-                {currentLocation.module === 'analysis' && currentLocation.screen === 'prepare' && <PrepareScreen />}
                 {currentLocation.module === 'analysis' && currentLocation.screen === 'progress' && <ProgressScreen />}
                 {currentLocation.module === 'analysis' && currentLocation.screen === 'workspace' && <WorkspaceScreen />}
                 {currentLocation.module === 'analysis' && currentLocation.screen === 'report' && <ReportScreen />}
