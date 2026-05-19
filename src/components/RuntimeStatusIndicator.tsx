@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Activity } from "lucide-react";
 import { useApp } from "../AppContext";
-import type { LlamaStatus, ProcessEntry, SystemStats } from "../electron-api";
+import type { ExtensionBridgeStatus, LlamaStatus, ProcessEntry, SystemStats } from "../electron-api";
 import type { ModelDescriptor } from "../types";
 
 export function RuntimeStatusIndicator() {
@@ -10,6 +10,7 @@ export function RuntimeStatusIndicator() {
   const [llamaModels, setLlamaModels] = useState<ModelDescriptor[]>([]);
   const [sysStats, setSysStats] = useState<SystemStats | null>(null);
   const [procList, setProcList] = useState<ProcessEntry[] | null>(null);
+  const [bridgeStatus, setBridgeStatus] = useState<ExtensionBridgeStatus | null>(null);
   const { providers, taskSlots, audioSlot, goModule } = useApp();
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -38,6 +39,16 @@ export function RuntimeStatusIndicator() {
       clearInterval(timer);
       unsubProgress();
     };
+  }, []);
+
+  // 浏览器插件桥状态: 启动时拉一次, 之后走事件订阅 (main 进程在连接/断开时主动推送)
+  useEffect(() => {
+    if (!window.videoAnalyzer?.extensionBridge) return;
+    window.videoAnalyzer.extensionBridge.getStatus()
+      .then(setBridgeStatus)
+      .catch(() => setBridgeStatus(null));
+    const off = window.videoAnalyzer.extensionBridge.onStatus(setBridgeStatus);
+    return off;
   }, []);
 
   // 点击外部关闭
@@ -114,12 +125,17 @@ export function RuntimeStatusIndicator() {
   })();
 
   const summary = (() => {
-    if (!llamaStatus) return "加载中";
-    if (llamaStatus.status === "ready") return `本地推理 · ${llamaModelLabel || llamaStatus.modelKey || ""}`;
-    if (llamaStatus.status === "starting") return "本地推理启动中";
-    if (llamaStatus.status === "error") return "本地推理出错";
-    if (llamaStatus.status === "stopping") return "停止中";
-    return "本地推理未启用";
+    const parts: string[] = [];
+    if (!llamaStatus) parts.push("加载中");
+    else if (llamaStatus.status === "ready") parts.push(`本地推理 · ${llamaModelLabel || llamaStatus.modelKey || ""}`);
+    else if (llamaStatus.status === "starting") parts.push("本地推理启动中");
+    else if (llamaStatus.status === "error") parts.push("本地推理出错");
+    else if (llamaStatus.status === "stopping") parts.push("停止中");
+    else parts.push("本地推理未启用");
+    if (bridgeStatus) {
+      parts.push(bridgeStatus.connected ? "浏览器插件已连接" : "浏览器插件未连接");
+    }
+    return parts.join(" · ");
   })();
 
   return (
@@ -182,6 +198,43 @@ export function RuntimeStatusIndicator() {
                 </div>
               )}
             </div>
+          </Section>
+
+          <Section title="浏览器插件桥 · 账号视频拉取">
+            {!window.videoAnalyzer?.extensionBridge ? (
+              <Hint>浏览器预览环境</Hint>
+            ) : bridgeStatus?.connected ? (
+              <>
+                <Row label="状态" value={<StatusPill tone="ok">已连接</StatusPill>} />
+                <Row
+                  label="端点"
+                  value={`${bridgeStatus.host}:${bridgeStatus.port}`}
+                  mono
+                  small
+                />
+                {bridgeStatus.connectedAt && (
+                  <Row
+                    label="自"
+                    value={new Date(bridgeStatus.connectedAt).toLocaleTimeString()}
+                    mono
+                    small
+                  />
+                )}
+              </>
+            ) : bridgeStatus ? (
+              <>
+                <Row label="状态" value={<StatusPill tone="busy">未连接</StatusPill>} />
+                <Row
+                  label="端点"
+                  value={`${bridgeStatus.host}:${bridgeStatus.port}`}
+                  mono
+                  small
+                />
+                <Hint>用于借浏览器登录态拉 B 站 / 抖音视频列表,装上插件能绕开 wbi 风控</Hint>
+              </>
+            ) : (
+              <Hint>加载中</Hint>
+            )}
           </Section>
 
           <Section title="主分析 · 视觉理解">
