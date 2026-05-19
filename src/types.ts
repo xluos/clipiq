@@ -537,6 +537,36 @@ export type Shot = {
 // 对标账号 (UP 主)
 export type AccountPlatform = "bilibili" | "douyin" | "xiaohongshu" | "youtube" | "tiktok" | "unknown";
 
+// 首次拉取范围
+export type AccountFetchRange = "top10" | "recent20" | "all";
+
+// 账号下挂的"原始视频"。只存元数据,真正分析时再派生 Project。
+export type AccountVideo = {
+  id: string;                       // 内部 id: `av-${accountId}-${externalId}`
+  accountId: string;
+  externalId: string;               // 平台视频 id (BV / aweme_id / yt watch id)
+  externalUrl: string;
+  title: string;
+  durationSec: number;
+  thumbnailUrl?: string;
+  uploadDate?: string | null;       // YYYYMMDD or ISO
+  viewCount?: number;
+  platform: AccountPlatform;
+  addedAt: string;                  // ISO 入库时间
+  // 派生的分析项目 id;有值表示已经"开始分析"过。
+  analysisProjectId?: string;
+};
+
+// 账号当前拉取状态
+export type AccountFetchPhase = "idle" | "fetching" | "ready" | "failed";
+
+export type AccountFetchProgress = {
+  accountId: string;
+  stage: string;
+  progress: number;                 // 0-100
+  message?: string;
+};
+
 // 跨视频汇总产物 — 一份 manifest 描述该 UP 主的方法论
 export type AccountMethodology = {
   hooks?: { summary: string; sampleVideoIds?: string[] };
@@ -557,10 +587,16 @@ export type Account = {
   bio?: string;                     // 账号简介 / sign
   followers?: string;               // 格式化字符串 "1238万"
   tags?: string[];                  // ["科技", "影视"]
-  // 关联视频 id 列表 (Project.kind === "account_video")
+  // legacy v2.0: 关联视频 Project id 列表;新数据用 account_videos 表存储,不再写这个字段
   videoIds?: string[];
   totalVideoCount?: number;         // 该账号下的视频总数 (含未分析的)
   methodology?: AccountMethodology; // 跨视频汇总产物;null 表示还未生成
+  // 首次/上次拉取的范围设置;详情页 dropdown 可改
+  fetchRange?: AccountFetchRange;
+  // 后台拉取阶段。fetching → ready/failed,UI 用来挂"拉取中"角标
+  fetchPhase?: AccountFetchPhase;
+  fetchError?: string;              // failed 时的最后错误信息
+  lastFetchedAt?: string;           // 上次成功拉取时间
   createdAt?: string;
   updatedAt?: string;
 };

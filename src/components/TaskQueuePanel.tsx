@@ -5,7 +5,7 @@
 import { type FunctionComponent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../AppContext";
 import type { AnalysisProgressEvent, Project } from "../types";
-import { Cpu, X, ChevronRight, AlertTriangle } from "lucide-react";
+import { Cpu, X, ChevronRight, AlertTriangle, UserSquare2 } from "lucide-react";
 
 type RunningTask = {
   projectId: string;
@@ -15,8 +15,16 @@ type RunningTask = {
   message?: string;
 };
 
+type RunningAccountFetch = {
+  accountId: string;
+  accountName: string;
+  progress: number;
+  stage: string;
+  message?: string;
+};
+
 export function useTaskQueueData() {
-  const { projects } = useApp();
+  const { projects, accounts, accountFetchUi } = useApp();
   const [progressByProject, setProgressByProject] = useState<Record<string, AnalysisProgressEvent>>({});
 
   useEffect(() => {
@@ -27,7 +35,7 @@ export function useTaskQueueData() {
     return unsub;
   }, []);
 
-  const { running, queued, failed } = useMemo(() => {
+  const { running, queued, failed, accountFetches } = useMemo(() => {
     const running: RunningTask[] = [];
     const queued: Project[] = [];
     const failed: Project[] = [];
@@ -47,18 +55,31 @@ export function useTaskQueueData() {
         // 不算队列(用户没主动 start),跳过
       }
     }
-    return { running, queued, failed };
-  }, [projects, progressByProject]);
+    const accountFetches: RunningAccountFetch[] = [];
+    for (const accountId of Object.keys(accountFetchUi)) {
+      const ui = accountFetchUi[accountId];
+      const acc = accounts.find((a) => a.id === accountId);
+      accountFetches.push({
+        accountId,
+        accountName: acc?.name || accountId,
+        progress: Math.round(ui.progress || 0),
+        stage: ui.stage,
+        message: ui.message,
+      });
+    }
+    return { running, queued, failed, accountFetches };
+  }, [projects, progressByProject, accounts, accountFetchUi]);
 
-  return { running, queued, failed };
+  return { running, queued, failed, accountFetches };
 }
 
 // Sidebar 上的按钮 — 显示运行中数字徽章,点击切换浮层
 export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ collapsed }) => {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const { running, failed } = useTaskQueueData();
+  const { running, failed, accountFetches } = useTaskQueueData();
   const sidebarWidth = collapsed ? 56 : 220;
+  const totalRunning = running.length + accountFetches.length;
 
   // 点击外部关闭 — 用 mouseup + 下一帧 attach,避免和触发的 click 同一帧自杀
   useEffect(() => {
@@ -98,15 +119,15 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
       >
         <span className="relative flex shrink-0">
           <Cpu className="w-4 h-4" strokeWidth={1.5} />
-          {running.length > 0 && (
+          {totalRunning > 0 && (
             <span
               className="absolute -top-1 -right-1.5 min-w-[14px] h-[14px] px-1 rounded-full bg-indigo-600 text-white font-mono font-semibold flex items-center justify-center leading-none"
               style={{ fontSize: 9 }}
             >
-              {running.length}
+              {totalRunning}
             </span>
           )}
-          {running.length === 0 && failed.length > 0 && (
+          {totalRunning === 0 && failed.length > 0 && (
             <span
               className="absolute -top-1 -right-1.5 min-w-[14px] h-[14px] px-1 rounded-full bg-rose-500 text-white font-mono font-semibold flex items-center justify-center leading-none"
               style={{ fontSize: 9 }}
@@ -118,9 +139,9 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
         {!collapsed && (
           <span className="flex-1 flex items-center gap-2">
             任务队列
-            {running.length > 0 && (
+            {totalRunning > 0 && (
               <span className="text-[10.5px] font-mono text-slate-500 dark:text-slate-400">
-                · {running.length} 运行中
+                · {totalRunning} 运行中
               </span>
             )}
           </span>
@@ -134,7 +155,7 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
 
 const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: number }> = ({ onClose, sidebarWidth }) => {
   const { setLocation, setActiveProjectId } = useApp();
-  const { running, failed } = useTaskQueueData();
+  const { running, failed, accountFetches } = useTaskQueueData();
 
   const openProject = (projectId: string, kind: "running" | "failed") => {
     setActiveProjectId(projectId);
@@ -145,6 +166,14 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
     }
     onClose();
   };
+
+  const openAccount = (accountId: string) => {
+    try { window.sessionStorage.setItem("clipiq-active-account-id", accountId); } catch { /* noop */ }
+    setLocation({ module: "account", screen: "detail" });
+    onClose();
+  };
+
+  const totalRunning = running.length + accountFetches.length;
 
   return (
     <div
@@ -160,12 +189,10 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
       </div>
 
       <div className="max-h-[460px] overflow-y-auto">
-        {/* 运行中 */}
-        <Section title="运行中" count={running.length}>
-          {running.length === 0 ? (
-            <EmptyHint>暂无运行中任务</EmptyHint>
-          ) : (
-            running.map((t) => (
+        {/* 视频任务 (下载 + 分析) */}
+        {running.length > 0 && (
+          <Section title="视频任务" count={running.length}>
+            {running.map((t) => (
               <button
                 key={t.projectId}
                 onClick={() => openProject(t.projectId, "running")}
@@ -183,9 +210,35 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
                   {t.message && <span className="truncate flex-1">· {t.message}</span>}
                 </div>
               </button>
-            ))
-          )}
-        </Section>
+            ))}
+          </Section>
+        )}
+
+        {/* 账号拉取 */}
+        {accountFetches.length > 0 && (
+          <Section title="账号拉取" count={accountFetches.length}>
+            {accountFetches.map((t) => (
+              <button
+                key={t.accountId}
+                onClick={() => openAccount(t.accountId)}
+                className="w-full text-left px-4 py-2.5 hover:bg-slate-50 dark:hover:bg-slate-800/40 border-b border-slate-100 dark:border-slate-800/60 last:border-b-0"
+              >
+                <div className="flex items-center gap-2">
+                  <UserSquare2 className="w-3.5 h-3.5 text-slate-500 shrink-0" strokeWidth={1.5} />
+                  <div className="text-[12.5px] font-medium text-slate-900 dark:text-slate-100 truncate flex-1">{t.accountName}</div>
+                  <span className="text-[10.5px] font-mono text-indigo-700 dark:text-indigo-400">{t.progress}%</span>
+                </div>
+                <div className="mt-1.5 h-1 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                  <div className="h-full bg-indigo-600 dark:bg-indigo-500 rounded-full transition-all duration-300" style={{ width: `${t.progress}%` }} />
+                </div>
+                <div className="mt-1 text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-2">
+                  <span>{t.stage}</span>
+                  {t.message && <span className="truncate flex-1">· {t.message}</span>}
+                </div>
+              </button>
+            ))}
+          </Section>
+        )}
 
         {/* 失败 */}
         {failed.length > 0 && (
@@ -204,7 +257,7 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
           </Section>
         )}
 
-        {running.length === 0 && failed.length === 0 && (
+        {totalRunning === 0 && failed.length === 0 && (
           <div className="px-4 py-8 text-center">
             <p className="text-[12.5px] text-slate-500 dark:text-slate-400 leading-relaxed">
               当前没有任务在运行
@@ -244,6 +297,3 @@ const Section: FunctionComponent<{
   );
 };
 
-const EmptyHint: FunctionComponent<{ children: ReactNode }> = ({ children }) => (
-  <div className="px-4 py-3 text-[12px] text-slate-500 dark:text-slate-400">{children}</div>
-);

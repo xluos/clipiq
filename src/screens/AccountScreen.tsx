@@ -1,11 +1,26 @@
-// 账号分析模块 — v2 Phase 2
+// 账号分析模块 — v2.1
 // list: UP 主卡片网格 (头像 / 平台 / 粉丝 / 已分析 / 方法论摘要 / 标签)
 // detail: hero + 3 tabs (方法论 / 视频 / 开场样本)
-// add-account: 添加账号 dialog (粘贴链接 → 自动识别平台)
+// add-account: 添加账号 dialog (粘贴链接 → 立即关闭, 后台拉取)
+//
+// v2.1 变化:
+// - 账号下的视频不再做 Project; 单独存到 AccountVideo 表
+// - 添加账号点确认后立即关闭 dialog, 后台拉视频列表; 进度走 TaskQueuePanel
+// - 详情页 hero 加 fetchRange dropdown, 切换后自动重拉
+// - 视频列表行: 已分析 → 跳 workspace; 未分析 → 行内"开始分析"按钮 (先下载再 analyzeProject)
 
 import { type FunctionComponent, type ReactNode, useEffect, useMemo, useState } from "react";
 import { useApp } from "../AppContext";
-import type { AppLocation, Account, AccountPlatform, AccountMethodology } from "../types";
+import type {
+  AppLocation,
+  Account,
+  AccountPlatform,
+  AccountMethodology,
+  AccountFetchRange,
+  AccountVideo,
+  AnalysisOptions,
+  Project,
+} from "../types";
 import {
   UserSquare2,
   ArrowLeft,
@@ -13,11 +28,15 @@ import {
   RefreshCw,
   Sparkles,
   ChevronRight,
+  ChevronDown,
   X,
+  Play,
+  Loader2,
+  AlertTriangle,
 } from "lucide-react";
 
 export function AccountScreen() {
-  const { currentLocation, setLocation } = useApp();
+  const { currentLocation } = useApp();
   if (currentLocation.module !== "account") return null;
   const screen = currentLocation.screen;
   if (screen === "detail") return <AccountDetailScreen />;
@@ -37,7 +56,12 @@ const PLATFORM_LABEL: Record<AccountPlatform, string> = {
   unknown: "其他",
 };
 
-// Avatar fallback: 头像 hint 没值时取名字前 2-3 字
+const RANGE_LABEL: Record<AccountFetchRange, string> = {
+  top10: "热门 Top 10",
+  recent20: "最近 20 条",
+  all: "全部",
+};
+
 function avatarText(a: Account): string {
   if (a.avatarHint) return a.avatarHint;
   return a.name.slice(0, 2);
@@ -50,12 +74,10 @@ function gradientFromId(id: string): string {
   return `linear-gradient(135deg, hsl(${hue} 25% 32%), hsl(${(hue + 28) % 360} 25% 20%))`;
 }
 
-// 真头像优先 + onError fallback 到字母占位 (B 站头像 referer 防盗链, img 标签会自动带 page referer,
-// renderer 跑在 file:// / vite dev 起来后跨域请求图片需要 crossOrigin=anonymous 才不带 Origin)
 const AccountAvatar: FunctionComponent<{
   account: Account;
-  size: number; // px
-  fontSize: number; // px
+  size: number;
+  fontSize: number;
 }> = ({ account, size, fontSize }) => {
   const [imgError, setImgError] = useState(false);
   const showImg = !!account.avatarUrl && !imgError;
@@ -85,13 +107,14 @@ const AccountAvatar: FunctionComponent<{
 };
 
 function AccountListScreen() {
-  const { accounts, setLocation, setActiveAccountId } = useAccountNav();
+  const ctx = useApp();
+  const { accounts, accountVideosByAccountId, accountFetchUi, setLocation, setActiveAccountId } = useAccountNav();
   const [addOpen, setAddOpen] = useState(false);
 
-  const detailLoc = (id: string): AppLocation => ({ module: "account", screen: "detail" });
+  const detailLoc: AppLocation = { module: "account", screen: "detail" };
   const totalVideos = useMemo(
-    () => accounts.reduce((sum, a) => sum + (a.videoIds?.length ?? 0), 0),
-    [accounts],
+    () => accounts.reduce((sum, a) => sum + (accountVideosByAccountId[a.id]?.length ?? 0), 0),
+    [accounts, accountVideosByAccountId],
   );
 
   return (
@@ -128,9 +151,11 @@ function AccountListScreen() {
                 <AccountCard
                   key={a.id}
                   account={a}
+                  videos={accountVideosByAccountId[a.id] || []}
+                  fetchUi={accountFetchUi[a.id]}
                   onClick={() => {
                     setActiveAccountId(a.id);
-                    setLocation(detailLoc(a.id));
+                    setLocation(detailLoc);
                   }}
                 />
               ))}
@@ -139,12 +164,11 @@ function AccountListScreen() {
         </div>
       </main>
 
-      {addOpen && <AddAccountDialog onClose={() => setAddOpen(false)} />}
+      {addOpen && <AddAccountDialog onClose={() => setAddOpen(false)} ctx={ctx} />}
     </div>
   );
 }
 
-// 子组件 — AppContext + 本地 setActiveAccountId 通过 sessionStorage 跨屏共享
 function useAccountNav() {
   const ctx = useApp();
   const setActiveAccountId = (id: string | null) => {
@@ -179,15 +203,22 @@ function EmptyAccounts({ onAdd }: { onAdd: () => void }) {
   );
 }
 
-const AccountCard: FunctionComponent<{ account: Account; onClick: () => void }> = ({ account, onClick }) => {
-  const analyzed = account.videoIds?.length ?? 0;
-  const total = account.totalVideoCount ?? analyzed;
+const AccountCard: FunctionComponent<{
+  account: Account;
+  videos: AccountVideo[];
+  fetchUi?: { stage: string; progress: number; message?: string };
+  onClick: () => void;
+}> = ({ account, videos, fetchUi, onClick }) => {
+  const fetching = !!fetchUi || account.fetchPhase === "fetching";
+  const analyzed = videos.filter((v) => !!v.analysisProjectId).length;
+  const total = videos.length || account.totalVideoCount || 0;
   const ratioComplete = total > 0 && analyzed === total;
   const methodologySummary = (() => {
     const m = account.methodology;
     if (!m) return null;
     return [m.hooks?.summary, m.pacing?.summary, m.structure?.summary, m.visual?.summary].filter(Boolean).join(" ");
   })();
+  const failed = account.fetchPhase === "failed";
 
   return (
     <button
@@ -205,12 +236,14 @@ const AccountCard: FunctionComponent<{ account: Account; onClick: () => void }> 
         </div>
         <span
           className={`text-[10.5px] font-mono px-1.5 py-0.5 rounded ${
-            ratioComplete
+            fetching
+              ? "bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300"
+              : ratioComplete
               ? "bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300"
-              : "bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300"
+              : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400"
           }`}
         >
-          {analyzed}/{total || "?"}
+          {fetching ? "拉取中…" : `${analyzed}/${total || "?"}`}
         </span>
       </div>
 
@@ -224,17 +257,35 @@ const AccountCard: FunctionComponent<{ account: Account; onClick: () => void }> 
         </div>
       )}
 
-      <div className="mt-3.5 px-3 py-2.5 bg-slate-50 dark:bg-slate-800/40 rounded-md">
-        <div className="text-[10.5px] font-mono tracking-wider uppercase text-slate-500 dark:text-slate-400">方法论摘要</div>
-        <p className="text-[12.5px] text-slate-700 dark:text-slate-300 leading-relaxed mt-1 line-clamp-2">
-          {methodologySummary || "还未生成 — 拉取视频并分析后会自动汇总"}
-        </p>
-      </div>
+      {fetching ? (
+        <div className="mt-3.5 px-3 py-2.5 bg-indigo-50/50 dark:bg-indigo-950/30 rounded-md">
+          <div className="text-[10.5px] font-mono tracking-wider uppercase text-indigo-700 dark:text-indigo-400">
+            {fetchUi?.stage || "拉取中"} · {fetchUi?.progress ?? 0}%
+          </div>
+          <div className="mt-1.5 h-1 rounded-full bg-indigo-100 dark:bg-indigo-900/40 overflow-hidden">
+            <div className="h-full bg-indigo-600 dark:bg-indigo-500 rounded-full transition-all" style={{ width: `${fetchUi?.progress ?? 0}%` }} />
+          </div>
+        </div>
+      ) : failed ? (
+        <div className="mt-3.5 px-3 py-2.5 bg-rose-50 dark:bg-rose-950/30 rounded-md flex items-start gap-1.5">
+          <AlertTriangle className="w-3 h-3 mt-0.5 text-rose-500 shrink-0" strokeWidth={1.5} />
+          <p className="text-[12px] text-rose-700 dark:text-rose-300 leading-relaxed line-clamp-2">
+            {account.fetchError || "拉取失败,点击进入详情重试"}
+          </p>
+        </div>
+      ) : (
+        <div className="mt-3.5 px-3 py-2.5 bg-slate-50 dark:bg-slate-800/40 rounded-md">
+          <div className="text-[10.5px] font-mono tracking-wider uppercase text-slate-500 dark:text-slate-400">方法论摘要</div>
+          <p className="text-[12.5px] text-slate-700 dark:text-slate-300 leading-relaxed mt-1 line-clamp-2">
+            {methodologySummary || "还未生成 — 拉取视频并分析后会自动汇总"}
+          </p>
+        </div>
+      )}
 
       <div className="mt-3 flex items-center gap-2 text-[10.5px] font-mono tracking-wider uppercase text-slate-500 dark:text-slate-400">
         {account.updatedAt ? `更新于 ${formatRelative(account.updatedAt)}` : "刚创建"}
         <div className="flex-1" />
-        <RefreshCw className="w-3 h-3 text-slate-400 dark:text-slate-500" strokeWidth={1.5} />
+        {account.fetchRange && <span>{RANGE_LABEL[account.fetchRange]}</span>}
       </div>
     </button>
   );
@@ -250,7 +301,7 @@ function formatRelative(iso: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 添加账号 dialog
+// 添加账号 dialog (后台拉取版)
 
 function detectPlatform(url: string): AccountPlatform {
   const u = url.toLowerCase();
@@ -262,12 +313,12 @@ function detectPlatform(url: string): AccountPlatform {
   return "unknown";
 }
 
-function AddAccountDialog({ onClose }: { onClose: () => void }) {
-  const { upsertAccount, setProjects, setLocation } = useApp();
+function AddAccountDialog({ onClose, ctx }: { onClose: () => void; ctx: ReturnType<typeof useApp> }) {
+  const { upsertAccount, setLocation } = ctx;
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
-  const [range, setRange] = useState<"top10" | "recent20" | "all">("top10");
-  const [fetching, setFetching] = useState(false);
+  const [range, setRange] = useState<AccountFetchRange>("top10");
+  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [bridgeConnected, setBridgeConnected] = useState<boolean | null>(null);
 
@@ -284,103 +335,55 @@ function AddAccountDialog({ onClose }: { onClose: () => void }) {
   }, []);
 
   const platform = useMemo(() => detectPlatform(url), [url]);
-  // 抖音 / B 站没桥时给提示 (B 站 wbi 偶发 412, 抖音几乎必失败)
   const showBridgeHint =
     (platform === "douyin" || platform === "bilibili") && bridgeConnected === false;
-  // 账号名可以不填,fetch 后用平台拉到的 uploader/title 自动补
-  const canSubmit = url.trim().length > 0 && !fetching;
-
-  const limitOf = (r: typeof range) => (r === "top10" ? 10 : r === "recent20" ? 20 : 50);
+  const canSubmit = url.trim().length > 0 && !submitting;
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
     setError("");
+    setSubmitting(true);
     const now = new Date().toISOString();
     const accId = `acc-${Date.now()}`;
-    let videoIds: string[] = [];
-    let totalVideoCount = 0;
-    let resolvedName = name.trim();
-    let resolvedAvatarUrl: string | undefined;
-    let resolvedFollowers: string | undefined;
-    let resolvedBio: string | undefined;
-    let resolvedExternalId: string | undefined;
-    let resolvedPlatform = platform;
+    const resolvedName = name.trim() || "(拉取中…)";
 
-    if (!window.videoAnalyzer?.fetchAccountVideos) {
-      setError("浏览器预览模式不支持账号拉取,请在 Electron 应用内操作");
-      return;
-    }
-
-    setFetching(true);
-    try {
-      const result = await window.videoAnalyzer.fetchAccountVideos({ url: url.trim(), limit: limitOf(range) });
-      totalVideoCount = result.totalVideoCount ?? result.videos.length;
-      resolvedAvatarUrl = result.accountAvatarUrl ?? undefined;
-      resolvedFollowers = result.accountFollowers ?? undefined;
-      resolvedBio = result.accountBio ?? undefined;
-      resolvedExternalId = result.accountExternalId ?? undefined;
-      if (result.accountPlatform) resolvedPlatform = result.accountPlatform;
-      if (!resolvedName) {
-        resolvedName = result.accountUploader || result.accountTitle || "(未命名账号)";
-      }
-
-      // 把每条视频创建成 kind=account_video 的 Project (status=not_analyzed)
-      const newProjects = result.videos.map((v) => {
-        const projectId = `acvid-${accId}-${v.id}`;
-        videoIds.push(projectId);
-        return {
-          id: projectId,
-          source: {
-            type: "url" as const,
-            url: v.externalUrl,
-            platform:
-              resolvedPlatform === "bilibili" || resolvedPlatform === "douyin" ||
-              resolvedPlatform === "xiaohongshu" || resolvedPlatform === "tiktok"
-                ? resolvedPlatform
-                : ("unknown" as const),
-          },
-          localVideoPath: "",
-          videoName: v.title,
-          durationSec: v.durationSec,
-          width: 0,
-          height: 0,
-          orientation: "landscape" as const,
-          status: "not_analyzed" as const,
-          kind: "account_video" as const,
-          accountId: accId,
-          titleAutoGenerated: true,
-          createdAt: now,
-          updatedAt: now,
-        };
-      });
-      setProjects((prev) => [...newProjects, ...prev]);
-      for (const p of newProjects) {
-        window.videoAnalyzer?.upsertProject(p).catch(() => { /* noop */ });
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setFetching(false);
-      return;
-    }
-    setFetching(false);
-
-    const acc: Account = {
+    // 1) 创建占位 Account — 必须先 await 把 stub 落到 main 进程 DB,
+    //    否则下面 startAccountFetch 在 main lookup account 时找不到, 导致 done event 里
+    //    accountPatch={} 没 id,renderer 不会把 fetchPhase 切回 ready,UI 永远停在"拉取中".
+    const stub: Account = {
       id: accId,
-      name: resolvedName || "(未命名账号)",
-      platform: resolvedPlatform,
+      name: resolvedName,
+      platform,
       externalUrl: url.trim(),
-      externalId: resolvedExternalId,
-      avatarUrl: resolvedAvatarUrl,
-      avatarHint: (resolvedName || "?").slice(0, 2),
-      bio: resolvedBio,
-      followers: resolvedFollowers,
-      tags: [],
-      videoIds,
-      totalVideoCount,
+      avatarHint: resolvedName.slice(0, 2),
+      fetchRange: range,
+      fetchPhase: "fetching",
       createdAt: now,
       updatedAt: now,
     };
-    upsertAccount(acc);
+    upsertAccount(stub);
+    if (window.videoAnalyzer?.upsertAccount) {
+      try {
+        await window.videoAnalyzer.upsertAccount(stub);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        setSubmitting(false);
+        return;
+      }
+    }
+
+    // 2) 触发后台拉取
+    try {
+      if (window.videoAnalyzer?.startAccountFetch) {
+        await window.videoAnalyzer.startAccountFetch({ accountId: accId, url: url.trim(), range });
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setSubmitting(false);
+      return;
+    }
+
+    setSubmitting(false);
     onClose();
   };
 
@@ -418,11 +421,7 @@ function AddAccountDialog({ onClose }: { onClose: () => void }) {
           </Field>
           <Field label="首次拉取范围">
             <div className="flex gap-1.5">
-              {([
-                ["top10", "热门 Top 10"],
-                ["recent20", "最近 20 条"],
-                ["all", "全部"],
-              ] as const).map(([k, l]) => (
+              {(["top10", "recent20", "all"] as AccountFetchRange[]).map((k) => (
                 <button
                   key={k}
                   onClick={() => setRange(k)}
@@ -432,7 +431,7 @@ function AddAccountDialog({ onClose }: { onClose: () => void }) {
                       : "bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800"
                   }`}
                 >
-                  {l}
+                  {RANGE_LABEL[k]}
                 </button>
               ))}
             </div>
@@ -447,7 +446,7 @@ function AddAccountDialog({ onClose }: { onClose: () => void }) {
             </span>
             <button
               type="button"
-              onClick={() => setLocation({ module: "settings" })}
+              onClick={() => { setLocation({ module: "settings" }); onClose(); }}
               className="shrink-0 text-[11.5px] underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-100"
             >
               去设置
@@ -461,9 +460,9 @@ function AddAccountDialog({ onClose }: { onClose: () => void }) {
         )}
         <div className="flex items-center gap-2 px-5 py-3 border-t border-slate-200 dark:border-slate-800">
           <span className="text-[11px] font-mono uppercase tracking-wider text-slate-500 flex-1">
-            {fetching ? "拉取头像 / 视频列表..." : "确认后拉取头像、粉丝、视频列表"}
+            点击后立即关闭, 后台拉取
           </span>
-          <button onClick={onClose} disabled={fetching} className="h-8 px-3 rounded-md text-[12.5px] text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50">
+          <button onClick={onClose} disabled={submitting} className="h-8 px-3 rounded-md text-[12.5px] text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50">
             取消
           </button>
           <button
@@ -471,7 +470,7 @@ function AddAccountDialog({ onClose }: { onClose: () => void }) {
             disabled={!canSubmit}
             className="h-8 px-3 rounded-md text-[12.5px] font-medium bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 text-white"
           >
-            {fetching ? "拉取中…" : "添加"}
+            添加
           </button>
         </div>
       </div>
@@ -487,97 +486,49 @@ const Field: FunctionComponent<{ label: string; children: ReactNode }> = ({ labe
 );
 
 // ─────────────────────────────────────────────────────────────
-// 账号详情屏 — hero + 3 tabs
+// 账号详情屏
 
 function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "methodology" | "videos" | "hooks" }) {
-  const { accounts, setLocation, projects, setProjects, reportByProject, upsertAccount } = useApp();
+  const ctx = useApp();
+  const {
+    accounts, setLocation, projects, setProjects, reportByProject, upsertAccount,
+    accountVideosByAccountId, accountFetchUi, refreshAccountVideos,
+    setActiveProjectId,
+  } = ctx;
   const id = activeAccountId();
   const account = accounts.find((a) => a.id === id);
   const [tab, setTab] = useState<"methodology" | "videos" | "hooks">(initialTab);
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState("");
-  const [reloading, setReloading] = useState(false);
-  const [reloadError, setReloadError] = useState("");
-  const [reloadWarnings, setReloadWarnings] = useState<string[]>([]);
 
-  const accountVideos = useMemo(
-    () => projects.filter((p) => p.kind === "account_video" && p.accountId === id),
-    [projects, id],
-  );
+  const accountVideos = useMemo(() => (id ? accountVideosByAccountId[id] || [] : []), [accountVideosByAccountId, id]);
+
+  // 进入详情时刷一次 (兜底,事件流之外的迟滞情况)
+  useEffect(() => {
+    if (id) refreshAccountVideos(id);
+  }, [id, refreshAccountVideos]);
+
+  const fetchingUi = id ? accountFetchUi[id] : undefined;
+  const fetching = !!fetchingUi || account?.fetchPhase === "fetching";
 
   const completedVideos = useMemo(
-    () => accountVideos.filter((v) => v.status === "completed" && reportByProject[v.id]),
-    [accountVideos, reportByProject],
+    () => accountVideos.filter((v) => v.analysisProjectId && projects.find((p) => p.id === v.analysisProjectId && p.status === "completed")),
+    [accountVideos, projects],
   );
 
-  const reloadVideos = async () => {
-    if (!account || !account.externalUrl) {
-      setReloadError("账号缺少主页 URL,无法重新拉取");
-      return;
-    }
-    if (!window.videoAnalyzer?.fetchAccountVideos) {
-      setReloadError("浏览器预览环境不支持账号拉取");
-      return;
-    }
-    setReloading(true);
-    setReloadError("");
-    setReloadWarnings([]);
+  const triggerFetch = async (range: AccountFetchRange) => {
+    if (!account || !account.externalUrl) return;
+    if (!window.videoAnalyzer?.startAccountFetch) return;
+    if (tab !== "videos") setTab("videos");
+    const patched = { ...account, fetchRange: range, fetchPhase: "fetching" as const, updatedAt: new Date().toISOString() };
+    upsertAccount(patched);
+    // 先把 fetchRange/fetchPhase 落到 main 进程 DB,再启动后台拉取;
+    // 避免 main 端读到的还是上一次的 range 或 stale fetchPhase.
     try {
-      const result = await window.videoAnalyzer.fetchAccountVideos({ url: account.externalUrl, limit: 20 });
-      const now = new Date().toISOString();
-      const existingUrls = new Set(
-        accountVideos
-          .map((p) => (p.source && p.source.type === "url" ? p.source.url : ""))
-          .filter(Boolean),
-      );
-      const newProjects = result.videos
-        .filter((v) => !existingUrls.has(v.externalUrl))
-        .map((v) => ({
-          id: `acvid-${account.id}-${v.id}`,
-          source: {
-            type: "url" as const,
-            url: v.externalUrl,
-            platform:
-              account.platform === "bilibili" || account.platform === "douyin" ||
-              account.platform === "xiaohongshu" || account.platform === "tiktok"
-                ? account.platform
-                : ("unknown" as const),
-          },
-          localVideoPath: "",
-          videoName: v.title,
-          durationSec: v.durationSec,
-          width: 0,
-          height: 0,
-          orientation: "landscape" as const,
-          status: "not_analyzed" as const,
-          kind: "account_video" as const,
-          accountId: account.id,
-          titleAutoGenerated: true,
-          createdAt: now,
-          updatedAt: now,
-        }));
-      if (newProjects.length > 0) {
-        setProjects((prev) => [...newProjects, ...prev]);
-        for (const p of newProjects) {
-          window.videoAnalyzer?.upsertProject(p).catch(() => { /* noop */ });
-        }
-      }
-      const mergedIds = Array.from(new Set([...(account.videoIds ?? []), ...newProjects.map((p) => p.id)]));
-      upsertAccount({
-        ...account,
-        avatarUrl: result.accountAvatarUrl ?? account.avatarUrl,
-        followers: result.accountFollowers ?? account.followers,
-        bio: result.accountBio ?? account.bio,
-        totalVideoCount: result.totalVideoCount ?? account.totalVideoCount,
-        videoIds: mergedIds,
-        updatedAt: now,
-      });
-      const warnings = (result as { warnings?: string[] }).warnings;
-      if (warnings && warnings.length > 0) setReloadWarnings(warnings);
-    } catch (e) {
-      setReloadError(e instanceof Error ? e.message : String(e));
-    }
-    setReloading(false);
+      if (window.videoAnalyzer.upsertAccount) await window.videoAnalyzer.upsertAccount(patched);
+    } catch (err) { console.warn("upsertAccount before fetch failed", err); }
+    window.videoAnalyzer.startAccountFetch({ accountId: account.id, url: account.externalUrl, range })
+      .catch((err) => console.warn("startAccountFetch failed", err));
   };
 
   const generateMethodology = async () => {
@@ -590,9 +541,10 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
     setGenerating(true);
     try {
       const videoSummaries = completedVideos.map((v) => {
-        const r = reportByProject[v.id];
+        const proj = projects.find((p) => p.id === v.analysisProjectId);
+        const r = proj ? reportByProject[proj.id] : undefined;
         return {
-          title: v.videoName,
+          title: v.title,
           summary: r?.globalSummary || r?.summary || "",
           structure: r?.structure,
           pacing: r?.pacing,
@@ -645,14 +597,15 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
           {PLATFORM_LABEL[account.platform]}
         </span>
         <div className="flex-1" />
+        <RangeDropdown current={account.fetchRange || "top10"} disabled={fetching} onPick={triggerFetch} />
         <button
-          onClick={reloadVideos}
-          disabled={reloading}
+          onClick={() => triggerFetch(account.fetchRange || "top10")}
+          disabled={fetching}
           title="重新拉取头像 / 粉丝 / 视频列表"
           className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
         >
-          <RefreshCw className={`w-3 h-3 ${reloading ? "animate-spin" : ""}`} strokeWidth={1.5} />
-          {reloading ? "拉取中…" : "刷新拉取"}
+          <RefreshCw className={`w-3 h-3 ${fetching ? "animate-spin" : ""}`} strokeWidth={1.5} />
+          {fetching ? "拉取中…" : "刷新拉取"}
         </button>
         <button
           onClick={generateMethodology}
@@ -669,20 +622,21 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
           {genError}
         </div>
       )}
-      {reloadError && (
-        <div className="mx-6 mt-2 rounded-md border border-rose-200 dark:border-rose-900/50 bg-rose-50 dark:bg-rose-950/30 px-3 py-2 text-[12.5px] text-rose-700 dark:text-rose-300 whitespace-pre-wrap">
-          {reloadError}
+      {fetchingUi && (
+        <div className="mx-6 mt-2 rounded-md border border-indigo-200 dark:border-indigo-900/50 bg-indigo-50 dark:bg-indigo-950/30 px-3 py-2 text-[12.5px] text-indigo-700 dark:text-indigo-300 flex items-center gap-2">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} />
+          <span className="font-mono uppercase tracking-wider">{fetchingUi.stage} · {fetchingUi.progress}%</span>
+          {fetchingUi.message && <span className="truncate">— {fetchingUi.message}</span>}
         </div>
       )}
-      {reloadWarnings.length > 0 && (
-        <div className="mx-6 mt-2 rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-[12.5px] text-amber-800 dark:text-amber-300 space-y-1">
-          {reloadWarnings.map((w, i) => <div key={i}>· {w}</div>)}
+      {account.fetchPhase === "failed" && !fetchingUi && (
+        <div className="mx-6 mt-2 rounded-md border border-rose-200 dark:border-rose-900/50 bg-rose-50 dark:bg-rose-950/30 px-3 py-2 text-[12.5px] text-rose-700 dark:text-rose-300 whitespace-pre-wrap">
+          拉取失败 · {account.fetchError}
         </div>
       )}
 
       <main className="flex-1 overflow-y-auto">
         <div className="max-w-5xl mx-auto px-9 py-8">
-          {/* hero */}
           <div className="flex items-start gap-5 mb-8">
             <AccountAvatar account={account} size={64} fontSize={14} />
             <div className="flex-1 min-w-0">
@@ -690,7 +644,7 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
               <div className="text-[12.5px] font-mono tracking-wider text-slate-600 dark:text-slate-400 mt-1">
                 {PLATFORM_LABEL[account.platform]}
                 {account.followers && <span> · {account.followers} 粉丝</span>}
-                {accountVideos.length > 0 && <span> · 已分析 {accountVideos.length} 条</span>}
+                {accountVideos.length > 0 && <span> · {accountVideos.length} 条视频</span>}
               </div>
               {account.bio && (
                 <p className="text-[12.5px] text-slate-600 dark:text-slate-400 mt-2 leading-relaxed line-clamp-2 max-w-xl">
@@ -700,7 +654,6 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
             </div>
           </div>
 
-          {/* tabs */}
           <div className="flex border-b border-slate-200 dark:border-slate-800 mb-6">
             {([
               ["methodology", "方法论"],
@@ -722,13 +675,61 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
           </div>
 
           {tab === "methodology" && <MethodologyTab methodology={account.methodology} />}
-          {tab === "videos" && <VideosTab videos={accountVideos} onReload={reloadVideos} reloading={reloading} />}
-          {tab === "hooks" && <HooksTab account={account} videos={accountVideos} />}
+          {tab === "videos" && (
+            <VideosTab
+              account={account}
+              videos={accountVideos}
+              projects={projects}
+              onReload={() => triggerFetch(account.fetchRange || "top10")}
+              fetching={fetching}
+              ctx={ctx}
+              setProjects={setProjects}
+              setActiveProjectId={setActiveProjectId}
+              setLocation={setLocation}
+            />
+          )}
+          {tab === "hooks" && <HooksTab videos={accountVideos} />}
         </div>
       </main>
     </div>
   );
 }
+
+const RangeDropdown: FunctionComponent<{
+  current: AccountFetchRange;
+  disabled?: boolean;
+  onPick: (r: AccountFetchRange) => void;
+}> = ({ current, disabled, onPick }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative">
+      <button
+        onClick={() => !disabled && setOpen((o) => !o)}
+        disabled={disabled}
+        className="inline-flex items-center gap-1 h-8 px-2.5 rounded-md text-[12.5px] text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
+      >
+        <span className="font-mono uppercase tracking-wider text-[10.5px] text-slate-500">范围</span>
+        <span>{RANGE_LABEL[current]}</span>
+        <ChevronDown className="w-3 h-3 text-slate-400" strokeWidth={1.5} />
+      </button>
+      {open && (
+        <div className="absolute right-0 mt-1 w-36 z-30 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg overflow-hidden">
+          {(["top10", "recent20", "all"] as AccountFetchRange[]).map((k) => (
+            <button
+              key={k}
+              onClick={() => { setOpen(false); if (k !== current) onPick(k); }}
+              className={`w-full text-left px-3 py-2 text-[12.5px] ${
+                k === current ? "bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300" : "text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+              }`}
+            >
+              {RANGE_LABEL[k]}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 function MethodologyTab({ methodology }: { methodology?: AccountMethodology }) {
   if (!methodology || !(methodology.hooks || methodology.pacing || methodology.structure || methodology.visual)) {
@@ -781,68 +782,225 @@ function formatVideoDuration(sec: number): string {
 }
 
 function VideosTab({
+  account,
   videos,
+  projects,
   onReload,
-  reloading,
+  fetching,
+  ctx,
+  setProjects,
+  setActiveProjectId,
+  setLocation,
 }: {
-  videos: ReturnType<typeof useApp>["projects"];
-  onReload: () => void | Promise<void>;
-  reloading: boolean;
+  account: Account;
+  videos: AccountVideo[];
+  projects: Project[];
+  onReload: () => void;
+  fetching: boolean;
+  ctx: ReturnType<typeof useApp>;
+  setProjects: ReturnType<typeof useApp>["setProjects"];
+  setActiveProjectId: ReturnType<typeof useApp>["setActiveProjectId"];
+  setLocation: ReturnType<typeof useApp>["setLocation"];
 }) {
+  const [busy, setBusy] = useState<Record<string, string>>({}); // accountVideoId → stage label
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [rowError, setRowError] = useState<Record<string, string>>({});
+
+  const startAnalyzeOne = async (av: AccountVideo) => {
+    if (busy[av.id]) return;
+    setRowError((m) => { const n = { ...m }; delete n[av.id]; return n; });
+    setBusy((m) => ({ ...m, [av.id]: "下载中" }));
+    try {
+      if (!window.videoAnalyzer) throw new Error("浏览器预览环境不支持分析");
+      // 1) yt-dlp 下载 (复用 downloadVideo, 命中 url-cache 时直接复用)
+      const dl = await window.videoAnalyzer.downloadVideo(av.externalUrl);
+      // 2) 创建分析 Project (kind=analysis), 关联回 AccountVideo
+      const projectId = dl.projectId || `proj-${Date.now()}-${av.id}`;
+      const now = new Date().toISOString();
+      const newProject: Project = {
+        id: projectId,
+        source: { type: "url", url: av.externalUrl, platform: (av.platform === "bilibili" || av.platform === "douyin" || av.platform === "xiaohongshu" || av.platform === "tiktok") ? av.platform : "unknown" },
+        localVideoPath: dl.mediaUrl,
+        localFilePath: dl.filePath,
+        videoName: dl.title || av.title,
+        durationSec: dl.durationSec || av.durationSec,
+        width: dl.width || 0,
+        height: dl.height || 0,
+        orientation: dl.orientation || "landscape",
+        status: "not_analyzed",
+        kind: "analysis",
+        accountId: account.id,
+        thumbnailUrl: av.thumbnailUrl,
+        titleAutoGenerated: !!dl.title,
+        createdAt: now,
+        updatedAt: now,
+      };
+      setProjects((prev) => {
+        const filtered = prev.filter((p) => p.id !== projectId);
+        return [newProject, ...filtered];
+      });
+      await window.videoAnalyzer.upsertProject(newProject).catch(() => { /* noop */ });
+
+      // 3) 回写 AccountVideo.analysisProjectId
+      const avPatched: AccountVideo = { ...av, analysisProjectId: projectId };
+      ctx.upsertAccountVideoLocal(avPatched);
+
+      // 4) 跳到 Prepare 屏让用户挑 preset (analyzeProject 由 PrepareScreen → ProgressScreen 启动)
+      setActiveProjectId(projectId);
+      setLocation({ module: "analysis", screen: "prepare" });
+    } catch (e) {
+      setRowError((m) => ({ ...m, [av.id]: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setBusy((m) => { const n = { ...m }; delete n[av.id]; return n; });
+    }
+  };
+
+  const startAnalyzeBatch = async () => {
+    if (batchBusy) return;
+    const pending = videos.filter((v) => !v.analysisProjectId);
+    if (pending.length === 0) return;
+    setBatchBusy(true);
+    // 串行下载,避免并发把 yt-dlp 打爆
+    for (const av of pending) {
+      try {
+        await startAnalyzeOne(av);
+      } catch { /* swallow, 已在 rowError 里 */ }
+    }
+    setBatchBusy(false);
+  };
+
+  const openVideoDetail = (av: AccountVideo) => {
+    if (!av.analysisProjectId) {
+      // 未分析: 直接走开始分析路径
+      startAnalyzeOne(av);
+      return;
+    }
+    const proj = projects.find((p) => p.id === av.analysisProjectId);
+    if (!proj) {
+      startAnalyzeOne(av);
+      return;
+    }
+    setActiveProjectId(proj.id);
+    if (proj.status === "completed") setLocation({ module: "analysis", screen: "workspace" });
+    else if (proj.status === "analyzing" || proj.status === "downloading") setLocation({ module: "analysis", screen: "progress" });
+    else setLocation({ module: "analysis", screen: "prepare" });
+  };
+
   if (videos.length === 0) {
     return (
       <div className="border border-dashed border-slate-300 dark:border-slate-700 rounded-xl bg-white/50 dark:bg-slate-900/30 px-8 py-12 text-center">
-        <p className="text-[13.5px] text-slate-600 dark:text-slate-400">还没拉取该账号的视频。</p>
+        <p className="text-[13.5px] text-slate-600 dark:text-slate-400">
+          {fetching ? "正在拉取视频列表…" : "还没拉取该账号的视频。"}
+        </p>
         <button
           onClick={onReload}
-          disabled={reloading}
+          disabled={fetching}
           className="mt-5 inline-flex items-center gap-1.5 h-9 px-4 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-[13px] font-medium disabled:opacity-50"
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${reloading ? "animate-spin" : ""}`} strokeWidth={2} />
-          {reloading ? "拉取中…" : "立即拉取视频列表"}
+          <RefreshCw className={`w-3.5 h-3.5 ${fetching ? "animate-spin" : ""}`} strokeWidth={2} />
+          {fetching ? "拉取中…" : "立即拉取"}
         </button>
       </div>
     );
   }
+
+  const pendingCount = videos.filter((v) => !v.analysisProjectId).length;
+
   return (
-    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 overflow-hidden divide-y divide-slate-100 dark:divide-slate-800/80">
-      {videos.map((v) => {
-        return (
-          <div
-            key={v.id}
-            className="w-full flex items-center gap-3.5 px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/40"
+    <div className="space-y-3">
+      <div className="flex items-center gap-3">
+        <span className="text-[11px] font-mono uppercase tracking-wider text-slate-500">
+          共 {videos.length} 条 · 待分析 {pendingCount}
+        </span>
+        <div className="flex-1" />
+        {pendingCount > 0 && (
+          <button
+            onClick={startAnalyzeBatch}
+            disabled={batchBusy}
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200 disabled:opacity-50"
           >
-            <div className="w-[94px] h-[54px] rounded bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden flex items-center justify-center">
-              {v.thumbnailUrl
-                ? <img src={v.thumbnailUrl} alt={v.videoName} referrerPolicy="no-referrer" className="w-full h-full object-cover" />
-                : <span className="text-[10.5px] font-mono text-slate-400">无封面</span>}
+            {batchBusy ? <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} /> : <Play className="w-3 h-3" strokeWidth={2} />}
+            {batchBusy ? "全部分析中…" : `全部分析 (${pendingCount})`}
+          </button>
+        )}
+      </div>
+      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 overflow-hidden divide-y divide-slate-100 dark:divide-slate-800/80">
+        {videos.map((v) => {
+          const proj = v.analysisProjectId ? projects.find((p) => p.id === v.analysisProjectId) : undefined;
+          const rawStatus = proj?.status || "not_analyzed";
+          const status: "completed" | "analyzing" | "downloading" | "failed" | "not_analyzed" =
+            rawStatus === "download_failed" ? "failed" : rawStatus;
+          const rowBusy = !!busy[v.id];
+          const err = rowError[v.id];
+          return (
+            <div key={v.id} className="w-full">
+              <button
+                onClick={() => openVideoDetail(v)}
+                className="w-full flex items-center gap-3.5 px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/40 text-left"
+              >
+                <div className="w-[94px] h-[54px] rounded bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden flex items-center justify-center">
+                  {v.thumbnailUrl
+                    ? <img src={v.thumbnailUrl} alt={v.title} referrerPolicy="no-referrer" className="w-full h-full object-cover" />
+                    : <span className="text-[10.5px] font-mono text-slate-400">无封面</span>}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[14px] font-medium text-slate-900 dark:text-slate-100 truncate">{v.title}</div>
+                  <div className="text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400 mt-1 flex items-center gap-2 flex-wrap">
+                    <span>{formatVideoDuration(v.durationSec)}</span>
+                    {v.viewCount ? <span>· {formatViews(v.viewCount)}</span> : null}
+                    <span className={`px-1.5 py-0.5 rounded ${statusChipClass(status)}`}>{statusLabel(status)}</span>
+                  </div>
+                </div>
+                {status === "not_analyzed" && (
+                  <span
+                    role="button"
+                    aria-label="开始分析"
+                    onClick={(e) => { e.stopPropagation(); startAnalyzeOne(v); }}
+                    className={`inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium ${
+                      rowBusy
+                        ? "bg-slate-100 dark:bg-slate-800 text-slate-500"
+                        : "bg-indigo-600 hover:bg-indigo-700 text-white"
+                    }`}
+                  >
+                    {rowBusy ? <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} /> : <Play className="w-3 h-3" strokeWidth={2} />}
+                    {rowBusy ? (busy[v.id] || "运行中") : "开始分析"}
+                  </span>
+                )}
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" strokeWidth={1.5} />
+              </button>
+              {err && (
+                <div className="px-4 pb-2 -mt-1 text-[11.5px] text-rose-600 dark:text-rose-400">{err}</div>
+              )}
             </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-[14px] font-medium text-slate-900 dark:text-slate-100 truncate">{v.videoName}</div>
-              <div className="text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400 mt-1 flex items-center gap-2">
-                <span>{formatVideoDuration(v.durationSec)}</span>
-                <span
-                  className={`px-1.5 py-0.5 rounded ${
-                    v.status === "completed"
-                      ? "bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300"
-                      : v.status === "analyzing"
-                      ? "bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300"
-                      : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400"
-                  }`}
-                >
-                  {v.status === "completed" ? "已分析" : v.status === "analyzing" ? "分析中" : "未分析"}
-                </span>
-              </div>
-            </div>
-            <ChevronRight className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" strokeWidth={1.5} />
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-function HooksTab({ account, videos }: { account: Account; videos: ReturnType<typeof useApp>["projects"] }) {
+function statusChipClass(status: "completed" | "analyzing" | "downloading" | "failed" | "not_analyzed"): string {
+  if (status === "completed") return "bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300";
+  if (status === "analyzing") return "bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300";
+  if (status === "downloading") return "bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300";
+  if (status === "failed") return "bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300";
+  return "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400";
+}
+
+function statusLabel(status: "completed" | "analyzing" | "downloading" | "failed" | "not_analyzed"): string {
+  if (status === "completed") return "已分析";
+  if (status === "analyzing") return "分析中";
+  if (status === "downloading") return "下载中";
+  if (status === "failed") return "失败";
+  return "未分析";
+}
+
+function formatViews(n: number): string {
+  if (n >= 1_0000) return `${(n / 1_0000).toFixed(1).replace(/\.0$/, "")}万播放`;
+  return `${n} 播放`;
+}
+
+function HooksTab({ videos }: { videos: AccountVideo[] }) {
   if (videos.length === 0) {
     return (
       <div className="border border-dashed border-slate-300 dark:border-slate-700 rounded-xl bg-white/50 dark:bg-slate-900/30 px-8 py-12 text-center">
@@ -857,10 +1015,10 @@ function HooksTab({ account, videos }: { account: Account; videos: ReturnType<ty
       {videos.slice(0, 5).map((v) => (
         <div key={v.id} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 p-4 flex gap-3.5">
           <div className="w-[120px] h-[68px] rounded bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden">
-            {v.thumbnailUrl && <img src={v.thumbnailUrl} alt={v.videoName} className="w-full h-full object-cover" />}
+            {v.thumbnailUrl && <img src={v.thumbnailUrl} alt={v.title} className="w-full h-full object-cover" />}
           </div>
           <div className="flex-1 min-w-0">
-            <div className="text-[14px] font-medium text-slate-900 dark:text-slate-100 truncate">{v.videoName}</div>
+            <div className="text-[14px] font-medium text-slate-900 dark:text-slate-100 truncate">{v.title}</div>
             <div className="text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400 mt-1">开场 00:00–00:08</div>
             <p className="text-[13.5px] text-slate-700 dark:text-slate-300 mt-2">
               <span className="text-slate-500">「</span>开场样本将在视频分析完成后自动抽取并展示<span className="text-slate-500">」</span>

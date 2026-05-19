@@ -1,5 +1,8 @@
 import type {
   Account,
+  AccountFetchProgress,
+  AccountFetchRange,
+  AccountVideo,
   AnalysisNode,
   AnalysisOptions,
   AnalysisProgressEvent,
@@ -233,19 +236,18 @@ declare global {
       deleteSession: (sessionId: string) => Promise<{ ok: true; message?: string }>;
       listShots: (assetProjectId?: string) => Promise<Shot[]>;
       setShotsForAsset: (assetProjectId: string, shots: Shot[]) => Promise<{ ok: true }>;
-      // v2 业务路径
-      fetchAccountVideos: (payload: { url: string; limit?: number }) => Promise<{
-        ok: true;
-        accountTitle?: string | null;
-        accountUploader?: string | null;
-        accountAvatarUrl?: string | null;
-        accountFollowers?: string | null;
-        accountBio?: string | null;
-        accountExternalId?: string | null;
-        accountPlatform?: import("./types").AccountPlatform;
-        totalVideoCount?: number;
-        videos: Array<{ id: string; title: string; durationSec: number; uploadDate: string | null; viewCount: number; externalUrl: string; thumbnailUrl?: string | null }>;
-      }>;
+      // v2 业务路径 — account videos 独立表 + 后台拉取
+      listAccountVideos: (accountId: string) => Promise<AccountVideo[]>;
+      upsertAccountVideo: (video: AccountVideo) => Promise<{ ok: true }>;
+      deleteAccountVideo: (videoId: string) => Promise<{ ok: true }>;
+      // 触发后台拉取 — 立即返回 { ok, accepted }; 进度通过 onAccountFetchProgress 推送
+      startAccountFetch: (payload: { accountId: string; url: string; range: AccountFetchRange }) => Promise<{ ok: true; accepted: boolean; reason?: string }>;
+      cancelAccountFetch: (accountId: string) => Promise<{ ok: true; cancelled: boolean }>;
+      // 启动时获取尚在跑的 fetch 列表 (renderer 重连用)
+      listAccountFetchInFlight: () => Promise<Array<{ accountId: string; stage: string; progress: number; message?: string }>>;
+      onAccountFetchProgress: (callback: (event: AccountFetchProgress) => void) => () => void;
+      onAccountFetchDone: (callback: (event: { accountId: string; videos: AccountVideo[]; account: Partial<Account>; warnings?: string[] }) => void) => () => void;
+      onAccountFetchFailed: (callback: (event: { accountId: string; error: string }) => void) => () => void;
       generateAccountMethodology: (payload: {
         accountName: string;
         videoSummaries: Array<{ title: string; summary?: string; structure?: unknown; pacing?: string; editingStyle?: string; composition?: string }>;

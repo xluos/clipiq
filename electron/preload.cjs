@@ -28,8 +28,29 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   deleteSession: (sessionId) => ipcRenderer.invoke("sessions:delete", sessionId),
   listShots: (assetProjectId) => ipcRenderer.invoke("shots:list", assetProjectId),
   setShotsForAsset: (assetProjectId, shots) => ipcRenderer.invoke("shots:setForAsset", assetProjectId, shots),
-  // v2 业务路径
-  fetchAccountVideos: (payload) => ipcRenderer.invoke("accounts:fetchVideos", payload),
+  // v2 业务路径 — 账号视频独立表
+  listAccountVideos: (accountId) => ipcRenderer.invoke("accountVideos:list", accountId),
+  upsertAccountVideo: (video) => ipcRenderer.invoke("accountVideos:upsert", video),
+  deleteAccountVideo: (videoId) => ipcRenderer.invoke("accountVideos:delete", videoId),
+  // 后台拉取
+  startAccountFetch: (payload) => ipcRenderer.invoke("accounts:startFetch", payload),
+  cancelAccountFetch: (accountId) => ipcRenderer.invoke("accounts:cancelFetch", accountId),
+  listAccountFetchInFlight: () => ipcRenderer.invoke("accounts:listFetchInFlight"),
+  onAccountFetchProgress: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("account:fetch:progress", listener);
+    return () => ipcRenderer.removeListener("account:fetch:progress", listener);
+  },
+  onAccountFetchDone: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("account:fetch:done", listener);
+    return () => ipcRenderer.removeListener("account:fetch:done", listener);
+  },
+  onAccountFetchFailed: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("account:fetch:failed", listener);
+    return () => ipcRenderer.removeListener("account:fetch:failed", listener);
+  },
   generateAccountMethodology: (payload) => ipcRenderer.invoke("accounts:generateMethodology", payload),
   generateStudioSteps: (payload) => ipcRenderer.invoke("sessions:generateSteps", payload),
   analyzeAssetShots: (payload) => ipcRenderer.invoke("assets:analyzeShots", payload),

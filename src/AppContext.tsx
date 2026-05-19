@@ -1,5 +1,11 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, legacyScreenToLocation, locationToLegacyScreen, Account, StudioSession, Shot } from "./types";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, legacyScreenToLocation, locationToLegacyScreen, Account, AccountVideo, StudioSession, Shot } from "./types";
+
+export type AccountFetchUiState = {
+  stage: string;
+  progress: number;
+  message?: string;
+};
 
 interface AppState {
   // v2: 两层路由。新代码全部用 currentLocation/setLocation/goModule
@@ -47,6 +53,12 @@ interface AppState {
   removeSession: (id: string) => void;
   shotsByAsset: Record<string, Shot[]>;
   setShotsForAsset: (assetProjectId: string, shots: Shot[]) => void;
+  // v2.1: 账号视频独立表
+  accountVideosByAccountId: Record<string, AccountVideo[]>;
+  refreshAccountVideos: (accountId: string) => Promise<void>;
+  upsertAccountVideoLocal: (av: AccountVideo) => void;
+  // 后台拉取进度,渲染端订阅 main 进程事件汇总到这里
+  accountFetchUi: Record<string, AccountFetchUiState>;
 }
 
 const AppContext = createContext<AppState | undefined>(undefined);
@@ -185,6 +197,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [sessions, setSessions] = useState<StudioSession[]>([]);
   const [shotsByAsset, setShotsByAsset] = useState<Record<string, Shot[]>>({});
+  // v2.1: 账号视频独立表
+  const [accountVideosByAccountId, setAccountVideosByAccountId] = useState<Record<string, AccountVideo[]>>({});
+  const [accountFetchUi, setAccountFetchUi] = useState<Record<string, AccountFetchUiState>>({});
 
   const upsertAccount = useCallback((a: Account) => {
     setAccounts((prev) => {
@@ -217,6 +232,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const setShotsForAsset = useCallback((assetProjectId: string, shots: Shot[]) => {
     setShotsByAsset((prev) => ({ ...prev, [assetProjectId]: shots }));
     window.videoAnalyzer?.setShotsForAsset(assetProjectId, shots).catch((err) => console.warn("setShotsForAsset failed", err));
+  }, []);
+
+  const refreshAccountVideos = useCallback(async (accountId: string) => {
+    if (!window.videoAnalyzer?.listAccountVideos) return;
+    try {
+      const list = await window.videoAnalyzer.listAccountVideos(accountId);
+      setAccountVideosByAccountId((prev) => ({ ...prev, [accountId]: list }));
+    } catch (err) {
+      console.warn("refreshAccountVideos failed", err);
+    }
+  }, []);
+
+  const upsertAccountVideoLocal = useCallback((av: AccountVideo) => {
+    setAccountVideosByAccountId((prev) => {
+      const list = prev[av.accountId] || [];
+      const next = list.filter((x) => x.id !== av.id);
+      next.unshift(av);
+      return { ...prev, [av.accountId]: next };
+    });
+    window.videoAnalyzer?.upsertAccountVideo(av).catch((err) => console.warn("upsertAccountVideo failed", err));
   }, []);
 
   const setNodesForProject = useCallback((projectId: string, nodes: AnalysisNode[]) => {
@@ -303,6 +338,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
               (byAsset[s.assetProjectId] ||= []).push(s);
             }
             setShotsByAsset(byAsset);
+            // 每个账号一次性拉视频列表
+            if (window.videoAnalyzer.listAccountVideos) {
+              const avEntries = await Promise.all(
+                accs.map(async (a) => [a.id, await window.videoAnalyzer!.listAccountVideos!(a.id).catch(() => [] as AccountVideo[])] as const),
+              );
+              setAccountVideosByAccountId(Object.fromEntries(avEntries));
+            }
+            // 重连 in-flight fetch 进度
+            if (window.videoAnalyzer.listAccountFetchInFlight) {
+              try {
+                const inflight = await window.videoAnalyzer.listAccountFetchInFlight();
+                setAccountFetchUi((prev) => {
+                  const next = { ...prev };
+                  for (const it of inflight) {
+                    next[it.accountId] = { stage: it.stage, progress: it.progress, message: it.message };
+                  }
+                  return next;
+                });
+              } catch { /* noop */ }
+            }
           }
         } else {
           const raw = window.localStorage.getItem(LOCAL_STORAGE_KEY);
@@ -353,6 +408,50 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }, 250);
     return () => window.clearTimeout(timer);
   }, [providers, taskSlots, audioSlot, defaultAnalysis, hasHydrated]);
+
+  // 订阅后台账号拉取事件 (progress / done / failed) — 全局只挂一次
+  useEffect(() => {
+    if (!window.videoAnalyzer?.onAccountFetchProgress) return;
+    const offProgress = window.videoAnalyzer.onAccountFetchProgress((evt) => {
+      setAccountFetchUi((prev) => ({
+        ...prev,
+        [evt.accountId]: { stage: evt.stage, progress: evt.progress, message: evt.message },
+      }));
+    });
+    const offDone = window.videoAnalyzer.onAccountFetchDone?.((evt) => {
+      setAccountFetchUi((prev) => {
+        if (!(evt.accountId in prev)) return prev;
+        const next = { ...prev };
+        delete next[evt.accountId];
+        return next;
+      });
+      // 合入视频列表
+      setAccountVideosByAccountId((prev) => ({ ...prev, [evt.accountId]: evt.videos || [] }));
+      // 合入 Account 元数据
+      if (evt.account && evt.account.id) {
+        setAccounts((prev) => {
+          const merged = { ...(prev.find((a) => a.id === evt.account.id) || {}), ...evt.account } as Account;
+          const filtered = prev.filter((a) => a.id !== merged.id);
+          filtered.unshift(merged);
+          return filtered;
+        });
+      }
+    });
+    const offFailed = window.videoAnalyzer.onAccountFetchFailed?.((evt) => {
+      setAccountFetchUi((prev) => {
+        if (!(evt.accountId in prev)) return prev;
+        const next = { ...prev };
+        delete next[evt.accountId];
+        return next;
+      });
+      setAccounts((prev) => prev.map((a) => a.id === evt.accountId ? { ...a, fetchPhase: "failed", fetchError: evt.error, updatedAt: new Date().toISOString() } : a));
+    });
+    return () => {
+      offProgress?.();
+      offDone?.();
+      offFailed?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (!hasHydrated) return;
@@ -414,6 +513,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         removeSession,
         shotsByAsset,
         setShotsForAsset,
+        accountVideosByAccountId,
+        refreshAccountVideos,
+        upsertAccountVideoLocal,
+        accountFetchUi,
       }}
     >
       {children}

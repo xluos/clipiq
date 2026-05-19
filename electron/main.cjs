@@ -822,7 +822,79 @@ function getDb() {
       FOREIGN KEY (asset_project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_shots_asset ON shots(asset_project_id);
+    -- v2.1: 账号下挂的视频元数据 (拉取产物). 真正分析时才派生 Project。
+    CREATE TABLE IF NOT EXISTS account_videos (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL,
+      data TEXT NOT NULL,
+      added_at INTEGER NOT NULL,
+      FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_account_videos_account ON account_videos(account_id);
   `);
+
+  // v2.1 迁移: 旧的 projects(kind='account_video', status='not_analyzed', localVideoPath='')
+  // 全部转到 account_videos 表;有 status=completed/analyzing 的保留 project (会被 analysisProjectId 链回去)。
+  try {
+    const candidates = db.prepare("SELECT id, data FROM projects").all();
+    for (const row of candidates) {
+      let proj = null;
+      try { proj = JSON.parse(row.data); } catch { continue; }
+      if (!proj || proj.kind !== "account_video") continue;
+      if (!proj.accountId) continue;
+      const externalUrl = proj.source && proj.source.type === "url" ? proj.source.url : "";
+      const externalId = (proj.id || "").replace(/^acvid-[^-]+-/, "") || externalUrl;
+      const avId = `av-${proj.accountId}-${externalId}`;
+      const platform = (proj.source && proj.source.type === "url" && proj.source.platform) || "unknown";
+      const completed = proj.status === "completed" || proj.status === "analyzing";
+      const av = {
+        id: avId,
+        accountId: proj.accountId,
+        externalId,
+        externalUrl,
+        title: proj.videoName || "(未命名视频)",
+        durationSec: proj.durationSec || 0,
+        thumbnailUrl: proj.thumbnailUrl,
+        uploadDate: null,
+        viewCount: 0,
+        platform,
+        addedAt: proj.createdAt || new Date().toISOString(),
+        analysisProjectId: completed ? proj.id : undefined,
+      };
+      const existing = db.prepare("SELECT id FROM account_videos WHERE id = ?").get(avId);
+      if (!existing) {
+        db.prepare(
+          "INSERT INTO account_videos (id, account_id, data, added_at) VALUES (?, ?, ?, ?)"
+        ).run(avId, proj.accountId, JSON.stringify(av), Date.parse(av.addedAt) || Date.now());
+      }
+      if (!completed) {
+        // 删空壳 project (没本地视频、还没分析)
+        db.prepare("DELETE FROM projects WHERE id = ?").run(proj.id);
+      } else {
+        // 把已分析的 project 改成 kind=analysis,保留 accountId 反向引用
+        const proj2 = { ...proj, kind: "analysis" };
+        db.prepare("UPDATE projects SET data = ? WHERE id = ?")
+          .run(JSON.stringify(proj2), proj.id);
+      }
+    }
+  } catch (e) {
+    console.warn("[migration] account_video → account_videos 失败:", e?.message || e);
+  }
+
+  // 上次进程退出时还停在 fetchPhase=fetching 的账号 → 改 idle (避免 UI 一直转)
+  try {
+    const rows = db.prepare("SELECT id, data FROM accounts").all();
+    for (const row of rows) {
+      let acc = null;
+      try { acc = JSON.parse(row.data); } catch { continue; }
+      if (!acc || acc.fetchPhase !== "fetching") continue;
+      const patched = { ...acc, fetchPhase: "idle", fetchError: undefined };
+      db.prepare("UPDATE accounts SET data = ? WHERE id = ?").run(JSON.stringify(patched), row.id);
+    }
+  } catch (e) {
+    console.warn("[boot] reset fetching → idle 失败:", e?.message || e);
+  }
+
   _db = db;
   return db;
 }
@@ -4397,12 +4469,15 @@ app.whenReady().then(async () => {
 
   // v2: 多策略拉取 UP 主账号信息 + 视频列表
   // 策略: 平台 native API (头像/粉丝/简介) ∥ yt-dlp (视频列表 + 兜底元数据)
-  // 输入: { url, limit }
-  // 输出: { accountAvatarUrl, accountFollowers, accountBio, ..., videos: [{id, title, ...}] }
-  ipcMain.handle("accounts:fetchVideos", async (_event, { url, limit = 20 } = {}) => {
-    if (!url || typeof url !== "string") throw new Error("accounts:fetchVideos 需要 url");
+  const fetchAccountVideosCore = async ({ url, limit = 20, onProgress, cancelled }) => {
+    if (!url || typeof url !== "string") throw new Error("fetchAccountVideosCore 需要 url");
     const platform = detectAccountPlatform(url);
-    const safeLimit = Math.max(1, Math.min(100, Number(limit) || 20));
+    const safeLimit = Math.max(1, Math.min(200, Number(limit) || 20));
+    const report = (progress, stage, message) => {
+      if (cancelled && cancelled()) return;
+      if (onProgress) try { onProgress({ progress, stage, message }); } catch { /* noop */ }
+    };
+    const checkCancelled = () => { if (cancelled && cancelled()) throw new Error("__cancelled__"); };
 
     let nativeCard = null;
     let nativeCardError = null;
@@ -4410,11 +4485,13 @@ app.whenReady().then(async () => {
     let nativeVideosError = null;
     let nativeMid = null;
 
-    // B 站: card API (头像/粉丝/简介) + wbi 签名的 space arc/search (视频列表)
-    // 内部函数会自动优先走 Chrome 插件桥 (借浏览器登录态绕 412), 桥未连时回落到 node fetch.
+    report(8, "解析账号", `平台 · ${platform}`);
+    checkCancelled();
+
     if (platform === "bilibili") {
       nativeMid = parseBilibiliMid(url);
       if (nativeMid) {
+        report(15, "请求 B 站接口", `card + space arc/search · mid ${nativeMid}`);
         const cardPromise = fetchBilibiliCard(nativeMid).catch((e) => {
           nativeCardError = `bilibili card: ${e?.message || String(e)}`;
           return null;
@@ -4422,10 +4499,14 @@ app.whenReady().then(async () => {
         const fetchWithRetry = async () => {
           let lastErr = null;
           for (let i = 0; i < 3; i++) {
+            checkCancelled();
             try { return await fetchBilibiliSpaceVideos(nativeMid, safeLimit); }
             catch (e) {
               lastErr = e;
-              if (i < 2) await new Promise((r) => setTimeout(r, 3000));
+              if (i < 2) {
+                report(20 + i * 5, "B 站接口重试", `第 ${i + 2} 次, 等待 3s`);
+                await new Promise((r) => setTimeout(r, 3000));
+              }
             }
           }
           throw lastErr;
@@ -4440,16 +4521,13 @@ app.whenReady().then(async () => {
       }
     }
 
-    // 抖音: 桥连时优先借 douyin.com tab 上下文调 fetch (借 webmssdk 自动 a_bogus),
-    // 桥未连 → 下面走 yt-dlp 兜底
     if (platform === "douyin") {
       const secUid = parseDouyinSecUid(url);
       if (secUid && extensionBridge.isConnected()) {
+        report(20, "请求抖音接口", "经 Chrome 插件 douyin.com tab 调 fetch");
         try {
           const result = await fetchDouyinUserPosts(secUid, safeLimit);
-          if (result && result.videos.length > 0) {
-            nativeVideos = result;
-          }
+          if (result && result.videos.length > 0) nativeVideos = result;
         } catch (e) {
           nativeVideosError = `douyin user posts: ${e?.message || String(e)}`;
         }
@@ -4458,16 +4536,14 @@ app.whenReady().then(async () => {
       }
     }
 
-    // yt-dlp:
-    //   - B 站: native 全成功就跳过 (省一次 412)
-    //   - 抖音: 桥连且 native 拿到视频就跳过, 否则跑兜底
-    //   - 其他: 必跑
+    checkCancelled();
     let ytDlpParsed = null;
     let ytDlpError = null;
     const skipYtDlp =
       (platform === "bilibili" && nativeCard && nativeVideos) ||
       (platform === "douyin" && nativeVideos && nativeVideos.videos.length > 0);
     if (!skipYtDlp) {
+      report(45, "yt-dlp 兜底", "调 yt-dlp --flat-playlist 拉视频清单");
       try {
         ytDlpParsed = await fetchYtDlpAccountJson(url, safeLimit);
       } catch (e) {
@@ -4484,7 +4560,6 @@ app.whenReady().then(async () => {
     let accountBio = null;
     let accountExternalId = null;
 
-    // 1) yt-dlp 兜底元数据 + 视频列表
     if (ytDlpParsed) {
       const entries = Array.isArray(ytDlpParsed.entries) ? ytDlpParsed.entries : [];
       videos = entries.map((e) => ({
@@ -4517,13 +4592,11 @@ app.whenReady().then(async () => {
       accountExternalId = ytDlpParsed.channel_id || ytDlpParsed.uploader_id || null;
     }
 
-    // 2) B 站 wbi space 投稿列表 (优先覆盖 yt-dlp 的视频列表 -- 它已经被 412 ban 了)
     if (nativeVideos && nativeVideos.videos.length > 0) {
       videos = nativeVideos.videos;
       totalVideoCount = nativeVideos.total;
     }
 
-    // 3) B 站 card 信息覆盖 (头像/粉丝/简介最准)
     if (nativeCard) {
       if (nativeCard.face) accountAvatarUrl = nativeCard.face;
       if (nativeCard.fansFormatted) accountFollowers = nativeCard.fansFormatted;
@@ -4535,7 +4608,43 @@ app.whenReady().then(async () => {
       }
     }
 
-    // 全空 → 抛出包含所有 channel 错误的诊断
+    // B 站: 如果走的是 yt-dlp --flat-playlist (因 wbi 接口 412), entry 只有 id 没 title/thumbnail.
+    // 用 view API 并发补全 (匿名访客开放, 通常稳).
+    if (platform === "bilibili" && videos.length > 0) {
+      const cookie = await getBilibiliVisitorCookie().catch(() => null);
+      const needFill = videos.filter((v) => v.id && (!v.title || !v.thumbnailUrl || !v.durationSec));
+      if (needFill.length > 0) {
+        const totalNeed = needFill.length;
+        report(70, "补全 B 站元数据", `view API ×${totalNeed}`);
+        const batchSize = 8;
+        const byBvid = new Map();
+        for (let i = 0; i < needFill.length; i += batchSize) {
+          if (cancelled && cancelled()) break;
+          const slice = needFill.slice(i, i + batchSize);
+          const enriched = await Promise.all(slice.map((v) =>
+            fetchBilibiliVideoView(v.id, cookie).catch(() => null),
+          ));
+          for (const e of enriched) if (e) byBvid.set(e.bvid, e);
+          report(70 + Math.round(20 * Math.min(1, (i + batchSize) / Math.max(1, totalNeed))),
+                 "补全 B 站元数据", `${Math.min(i + batchSize, totalNeed)} / ${totalNeed}`);
+        }
+        videos = videos.map((v) => {
+          const e = byBvid.get(v.id);
+          if (!e) return v;
+          return {
+            ...v,
+            title: v.title || e.title || "(未命名视频)",
+            durationSec: v.durationSec || e.durationSec,
+            uploadDate: v.uploadDate || e.uploadDate,
+            viewCount: v.viewCount || e.viewCount,
+            thumbnailUrl: v.thumbnailUrl || e.thumbnailUrl,
+          };
+        });
+      }
+      // 保底 title
+      videos = videos.map((v) => ({ ...v, title: v.title || "(未命名视频)" }));
+    }
+
     const noVideos = videos.length === 0;
     const noCard = !nativeCard && !accountUploader && !accountAvatarUrl;
     if (noVideos && noCard) {
@@ -4547,17 +4656,17 @@ app.whenReady().then(async () => {
       throw new Error(`账号拉取失败 [${platform}]\n${msgs.join("\n")}`);
     }
 
-    // 部分通道失败的, 把警告 surface 到 UI (账号至少有 hero, 但视频列表可能不全)
     const warnings = [];
     if (noVideos && ytDlpError) warnings.push(`视频列表抓取失败 (${ytDlpError.slice(0, 120)})`);
     if (noVideos && nativeVideosError) {
       const label = platform === "douyin" ? "抖音用户投稿接口" : "B 站投稿接口";
       warnings.push(`${label}失败 (${nativeVideosError.slice(0, 120)})`);
     }
-    // 抖音没桥时给装插件的提示 (yt-dlp 抖音也常常 -8 频控)
     if (platform === "douyin" && noVideos && !extensionBridge.isConnected()) {
       warnings.push("抖音风控较严, 装上 Chrome 插件后大幅更稳 (设置 → 浏览器插件桥)");
     }
+
+    report(90, "整理元数据", `视频 ${videos.length} 条`);
 
     return {
       ok: true,
@@ -4572,6 +4681,224 @@ app.whenReady().then(async () => {
       videos,
       warnings: warnings.length > 0 ? warnings : undefined,
     };
+  };
+
+  // 旧入口 (内部 still 兼容; renderer 已迁到 accounts:startFetch)
+  ipcMain.handle("accounts:fetchVideos", async (_event, { url, limit = 20 } = {}) => {
+    return fetchAccountVideosCore({ url, limit });
+  });
+
+  // ── 账号下挂的视频 (account_videos 表) ──
+  ipcMain.handle("accountVideos:list", async (_event, accountId) => {
+    if (!accountId) return [];
+    const db = getDb();
+    const rows = db.prepare(
+      "SELECT data FROM account_videos WHERE account_id = ? ORDER BY added_at DESC"
+    ).all(accountId);
+    return rows.map((r) => JSON.parse(r.data));
+  });
+
+  ipcMain.handle("accountVideos:upsert", async (_event, video) => {
+    if (!video?.id || !video?.accountId) throw new Error("accountVideos:upsert 需要 id + accountId");
+    const db = getDb();
+    const addedAt = video.addedAt ? Date.parse(video.addedAt) || Date.now() : Date.now();
+    db.prepare(
+      "INSERT INTO account_videos (id, account_id, data, added_at) VALUES (?, ?, ?, ?) " +
+      "ON CONFLICT(id) DO UPDATE SET data = excluded.data, added_at = excluded.added_at"
+    ).run(video.id, video.accountId, JSON.stringify(video), addedAt);
+    return { ok: true };
+  });
+
+  ipcMain.handle("accountVideos:delete", async (_event, videoId) => {
+    if (!videoId) return { ok: true };
+    const db = getDb();
+    db.prepare("DELETE FROM account_videos WHERE id = ?").run(videoId);
+    return { ok: true };
+  });
+
+  // ── 后台拉取驱动 ──
+  // in-flight: accountId → { url, range, stage, progress, message, cancelled, startedAt }
+  if (!global.__accountFetchInFlight) global.__accountFetchInFlight = new Map();
+  const accountFetchInFlight = global.__accountFetchInFlight;
+
+  const limitOfRange = (range) => (range === "top10" ? 10 : range === "recent20" ? 20 : 80);
+
+  const runAccountFetch = async ({ accountId, url, range }) => {
+    const state = { url, range, stage: "排队", progress: 0, message: "", cancelled: false, startedAt: Date.now() };
+    accountFetchInFlight.set(accountId, state);
+    const broadcast = (channel, payload) => broadcastToWindows(channel, payload);
+    const sendProgress = (p, stage, message) => {
+      state.stage = stage;
+      state.progress = p;
+      state.message = message || "";
+      broadcast("account:fetch:progress", { accountId, stage, progress: p, message });
+    };
+    sendProgress(0, "排队", "");
+    try {
+      const result = await fetchAccountVideosCore({
+        url,
+        limit: limitOfRange(range),
+        onProgress: ({ progress, stage, message }) => sendProgress(progress, stage, message),
+        cancelled: () => state.cancelled,
+      });
+      sendProgress(95, "落库", `${result.videos.length} 条视频`);
+
+      // 把视频写入 account_videos 表 (按 externalUrl/externalId 去重)
+      // 先清理: 该账号下没被分析过的旧 av 行删除, 已分析过的保留 (analysisProjectId 链回报告)
+      // 这样接口变更 / 范围切换不会留下"上次拉到但这次没拉到"的尸位
+      const db = getDb();
+      try {
+        const oldRows = db.prepare("SELECT id, data FROM account_videos WHERE account_id = ?").all(accountId);
+        const stmtDel = db.prepare("DELETE FROM account_videos WHERE id = ?");
+        for (const row of oldRows) {
+          try {
+            const old = JSON.parse(row.data);
+            if (!old?.analysisProjectId) stmtDel.run(row.id);
+          } catch { stmtDel.run(row.id); }
+        }
+      } catch (e) {
+        console.warn("[accounts:fetch] 清理旧 av 失败:", e?.message || e);
+      }
+      const existsStmt = db.prepare("SELECT id FROM account_videos WHERE id = ?");
+      const insertStmt = db.prepare(
+        "INSERT INTO account_videos (id, account_id, data, added_at) VALUES (?, ?, ?, ?) " +
+        "ON CONFLICT(id) DO UPDATE SET data = excluded.data"
+      );
+      const now = Date.now();
+      const platform = result.accountPlatform;
+      const newAccountVideos = [];
+      for (const v of result.videos) {
+        const avId = `av-${accountId}-${v.id}`;
+        const av = {
+          id: avId,
+          accountId,
+          externalId: v.id,
+          externalUrl: v.externalUrl,
+          title: v.title,
+          durationSec: v.durationSec,
+          thumbnailUrl: v.thumbnailUrl || undefined,
+          uploadDate: v.uploadDate || null,
+          viewCount: v.viewCount || 0,
+          platform,
+          addedAt: new Date(now).toISOString(),
+        };
+        // 保留已有 analysisProjectId
+        const existing = existsStmt.get(avId);
+        if (existing) {
+          const oldRow = db.prepare("SELECT data FROM account_videos WHERE id = ?").get(avId);
+          if (oldRow) {
+            try {
+              const old = JSON.parse(oldRow.data);
+              if (old.analysisProjectId) av.analysisProjectId = old.analysisProjectId;
+              av.addedAt = old.addedAt || av.addedAt;
+            } catch { /* noop */ }
+          }
+        }
+        insertStmt.run(avId, accountId, JSON.stringify(av), Date.parse(av.addedAt) || now);
+        newAccountVideos.push(av);
+      }
+
+      // 更新 Account 元数据
+      const accRow = db.prepare("SELECT data FROM accounts WHERE id = ?").get(accountId);
+      let accountPatch = {};
+      if (accRow) {
+        try {
+          const acc = JSON.parse(accRow.data);
+          const patched = {
+            ...acc,
+            name: acc.name || result.accountUploader || result.accountTitle || acc.name,
+            avatarUrl: result.accountAvatarUrl || acc.avatarUrl,
+            followers: result.accountFollowers || acc.followers,
+            bio: result.accountBio || acc.bio,
+            externalId: result.accountExternalId || acc.externalId,
+            platform: result.accountPlatform || acc.platform,
+            totalVideoCount: result.totalVideoCount || acc.totalVideoCount,
+            fetchPhase: "ready",
+            fetchError: undefined,
+            lastFetchedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+          accountPatch = patched;
+          db.prepare(
+            "INSERT INTO accounts (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
+          ).run(accountId, JSON.stringify(patched), Date.now());
+        } catch (e) {
+          console.warn("[accounts:fetch] update Account 失败", e?.message || e);
+        }
+      }
+
+      sendProgress(100, "完成", `${newAccountVideos.length} 条视频`);
+      broadcast("account:fetch:done", {
+        accountId,
+        videos: newAccountVideos,
+        account: accountPatch,
+        warnings: result.warnings,
+      });
+    } catch (err) {
+      const msg = err?.message || String(err);
+      const isCancel = msg === "__cancelled__" || state.cancelled;
+      const finalMsg = isCancel ? "已取消" : msg;
+      // 写 fetchPhase=failed 到 Account
+      try {
+        const db = getDb();
+        const accRow = db.prepare("SELECT data FROM accounts WHERE id = ?").get(accountId);
+        if (accRow) {
+          const acc = JSON.parse(accRow.data);
+          const patched = {
+            ...acc,
+            fetchPhase: isCancel ? "idle" : "failed",
+            fetchError: isCancel ? undefined : finalMsg,
+            updatedAt: new Date().toISOString(),
+          };
+          db.prepare(
+            "INSERT INTO accounts (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
+          ).run(accountId, JSON.stringify(patched), Date.now());
+        }
+      } catch { /* noop */ }
+      broadcast("account:fetch:failed", { accountId, error: finalMsg });
+    } finally {
+      accountFetchInFlight.delete(accountId);
+    }
+  };
+
+  ipcMain.handle("accounts:startFetch", async (_event, { accountId, url, range = "top10" } = {}) => {
+    if (!accountId) throw new Error("accounts:startFetch 需要 accountId");
+    if (!url) throw new Error("accounts:startFetch 需要 url");
+    if (accountFetchInFlight.has(accountId)) {
+      return { ok: true, accepted: false, reason: "already in flight" };
+    }
+    // 把 Account.fetchPhase 立即标 fetching
+    try {
+      const db = getDb();
+      const accRow = db.prepare("SELECT data FROM accounts WHERE id = ?").get(accountId);
+      if (accRow) {
+        const acc = JSON.parse(accRow.data);
+        const patched = { ...acc, fetchPhase: "fetching", fetchError: undefined, updatedAt: new Date().toISOString() };
+        db.prepare(
+          "INSERT INTO accounts (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
+        ).run(accountId, JSON.stringify(patched), Date.now());
+      }
+    } catch { /* noop */ }
+    // fire-and-forget
+    runAccountFetch({ accountId, url, range }).catch((err) => {
+      console.warn("[accounts:startFetch] runAccountFetch unhandled", err?.message || err);
+    });
+    return { ok: true, accepted: true };
+  });
+
+  ipcMain.handle("accounts:cancelFetch", async (_event, accountId) => {
+    const state = accountFetchInFlight.get(accountId);
+    if (!state) return { ok: true, cancelled: false };
+    state.cancelled = true;
+    return { ok: true, cancelled: true };
+  });
+
+  ipcMain.handle("accounts:listFetchInFlight", async () => {
+    const out = [];
+    for (const [accountId, state] of accountFetchInFlight) {
+      out.push({ accountId, stage: state.stage, progress: state.progress, message: state.message });
+    }
+    return out;
   });
 
   // v2: 跨视频 methodology LLM 汇总
