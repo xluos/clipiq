@@ -74,6 +74,16 @@ export type AnalysisResult = {
 
 export type ExportFormat = "markdown" | "json" | "csv";
 
+export type ExtensionBridgeStatus = {
+  port: number;
+  host: string;
+  token: string | null;
+  connected: boolean;
+  clientVersion: number | null;
+  clientUserAgent: string | null;
+  connectedAt: string | null;
+};
+
 export type ProviderTestResult = {
   ok: boolean;
   message: string;
@@ -288,6 +298,11 @@ declare global {
       }>;
       openDataFolder: (which?: "projects" | "userData") => Promise<{ ok: boolean; path: string }>;
       purgeProjects: () => Promise<{ ok: boolean; message?: string }>;
+      extensionBridge: {
+        getStatus: () => Promise<ExtensionBridgeStatus>;
+        rotateToken: () => Promise<{ token: string }>;
+        onStatus: (callback: (status: ExtensionBridgeStatus) => void) => () => void;
+      };
       mirror: {
         get: () => Promise<{ mirror: "hf-mirror" | "modelscope" }>;
         set: (value: "hf-mirror" | "modelscope") => Promise<{ ok: true; mirror: "hf-mirror" | "modelscope" }>;

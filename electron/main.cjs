@@ -18,6 +18,7 @@ const danmakuEmotion = require("./danmaku-emotion.cjs");
 const danmakuWordcloud = require("./danmaku-wordcloud.cjs");
 const openaiClient = require("./openai-client.cjs");
 const cacheStore = require("./cache-store.cjs");
+const extensionBridge = require("./extension-bridge.cjs");
 const { getTranscriber } = require("./transcribe/index.cjs");
 const OpenCC = require("opencc-js");
 
@@ -1458,16 +1459,10 @@ function parseBilibiliLengthToSec(len) {
 // space/arc/search 在匿名模式下只返 bvid 不返 title/length, 所以用 view 单独补全
 async function fetchBilibiliVideoView(bvid, cookie) {
   const url = `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`;
-  const headers = {
-    "User-Agent": BILI_BROWSER_UA,
-    "Referer": `https://www.bilibili.com/video/${bvid}`,
-    "Accept": "application/json, text/plain, */*",
-    "Origin": "https://www.bilibili.com",
-  };
-  if (cookie) headers["Cookie"] = cookie;
-  const res = await fetch(url, { headers });
-  if (!res.ok) throw new Error(`view HTTP ${res.status}`);
-  const data = await res.json();
+  const data = await biliFetchJson(url, {
+    referer: `https://www.bilibili.com/video/${bvid}`,
+    cookie,
+  });
   if (data?.code !== 0) throw new Error(`view code=${data?.code} ${data?.message || ""}`);
   const v = data?.data || {};
   // B 站封面有时返 http:// , renderer 阻止 mixed content, 强制 https
@@ -1484,6 +1479,39 @@ async function fetchBilibiliVideoView(bvid, cookie) {
   };
 }
 
+// 统一 B 站 fetch — 优先借 Chrome 插件桥 (浏览器登录态 + 真实 buvid, 绕 412/-352),
+// 桥未连时回落到 node fetch (带 main 进程的 visitor cookie + UA)
+async function biliFetchJson(url, { referer, cookie } = {}) {
+  const baseHeaders = {
+    "User-Agent": BILI_BROWSER_UA,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Origin": "https://space.bilibili.com",
+  };
+  if (referer) baseHeaders["Referer"] = referer;
+
+  if (extensionBridge.isConnected()) {
+    // 走插件代理: 不传 Cookie header, 让 Chrome 自动带 (含 buvid3 / SESSDATA / b_nut)
+    const result = await extensionBridge.request("fetch", {
+      url,
+      method: "GET",
+      headers: baseHeaders,
+      parse: "json",
+    });
+    if (!result || typeof result !== "object") throw new Error("插件返回格式错误");
+    if (!result.ok) throw new Error(`HTTP ${result.status}`);
+    if (result.body?.__parseError) throw new Error(`JSON 解析失败: ${result.body.raw?.slice(0, 200)}`);
+    return result.body;
+  }
+
+  // 兜底: node fetch (带 visitor cookie)
+  const headers = { ...baseHeaders };
+  if (cookie) headers["Cookie"] = cookie;
+  const res = await fetch(url, { headers });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+}
+
 // 投稿视频列表 — wbi 签名调 /x/space/wbi/arc/search, 带访客 cookie + dm fingerprint
 async function fetchBilibiliSpaceVideos(mid, limit = 20) {
   const [mixinKey, cookie] = await Promise.all([
@@ -1491,7 +1519,29 @@ async function fetchBilibiliSpaceVideos(mid, limit = 20) {
     getBilibiliVisitorCookie(),
   ]);
   const ps = Math.max(1, Math.min(50, limit));
-  // dm_img_* 是 B 站 web 端的 webgl/canvas 指纹参数, 不传会触发 -352
+  // dm_img_* 是 B 站 web 端的 webgl/canvas 指纹参数, 不传会触发 -352.
+  // 用固定值容易被 B 站签名指纹库拉黑, 参考 yt-dlp BilibiliSpaceVideoIE 每次随机.
+  const randAlnum = (len) => {
+    const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let out = "";
+    for (let i = 0; i < len; i++) out += charset[Math.floor(Math.random() * charset.length)];
+    return out;
+  };
+  const dmImgStr = randAlnum(16 + Math.floor(Math.random() * 48));
+  const dmCoverImgStr = randAlnum(32 + Math.floor(Math.random() * 96));
+  const dmImgInter = JSON.stringify({
+    ds: [],
+    wh: [
+      5000 + Math.floor(Math.random() * 4000),
+      5000 + Math.floor(Math.random() * 4000),
+      30 + Math.floor(Math.random() * 10),
+    ],
+    of: [
+      200 + Math.floor(Math.random() * 200),
+      400 + Math.floor(Math.random() * 400),
+      200 + Math.floor(Math.random() * 200),
+    ],
+  });
   const qs = signWbiQuery({
     mid: String(mid),
     ps: String(ps),
@@ -1502,22 +1552,15 @@ async function fetchBilibiliSpaceVideos(mid, limit = 20) {
     web_location: "1550101",
     order_avoided: "true",
     dm_img_list: "[]",
-    dm_img_str: "V2ViR0wgMS4wIChPcGVuR0wgRVMgMi4wIENocm9taXVtKQ",
-    dm_cover_img_str: "QU5HTEUgKEFwcGxlLCBBcHBsZSBNMSBQcm8sIE9wZW5HTCA0LjEpR29vZ2xlIEluYy4gKEFwcGxlKQ",
-    dm_img_inter: '{"ds":[],"wh":[6611,6105,30],"of":[235,470,235]}',
+    dm_img_str: dmImgStr,
+    dm_cover_img_str: dmCoverImgStr,
+    dm_img_inter: dmImgInter,
   }, mixinKey);
   const url = `https://api.bilibili.com/x/space/wbi/arc/search?${qs}`;
-  const headers = {
-    "User-Agent": BILI_BROWSER_UA,
-    "Referer": `https://space.bilibili.com/${mid}/video`,
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    "Origin": "https://space.bilibili.com",
-  };
-  if (cookie) headers["Cookie"] = cookie;
-  const res = await fetch(url, { headers });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
+  const data = await biliFetchJson(url, {
+    referer: `https://space.bilibili.com/${mid}/video`,
+    cookie,
+  });
   if (data?.code !== 0) throw new Error(`code=${data?.code} ${data?.message || ""}`);
   const vlist = data?.data?.list?.vlist || [];
   const total = Number(data?.data?.page?.count) || vlist.length;
@@ -1569,16 +1612,7 @@ async function fetchBilibiliSpaceVideos(mid, limit = 20) {
 async function fetchBilibiliCard(mid) {
   if (!mid) throw new Error("missing mid");
   const url = `https://api.bilibili.com/x/web-interface/card?mid=${mid}&photo=false`;
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      "User-Agent": BILI_BROWSER_UA,
-      "Referer": "https://www.bilibili.com/",
-      "Accept": "application/json, text/plain, */*",
-    },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
+  const data = await biliFetchJson(url, { referer: "https://www.bilibili.com/" });
   if (data?.code !== 0) throw new Error(`code=${data?.code} ${data?.message || ""}`);
   const card = data?.data?.card || {};
   return {
@@ -1589,6 +1623,54 @@ async function fetchBilibiliCard(mid) {
     fansFormatted: formatFollowersCount(card.fans),
     archiveCount: Number(data?.data?.archive_count) || 0,
   };
+}
+
+// 抖音用户投稿 — 必须经 Chrome 插件桥 (在 douyin.com tab 里调 fetch, 借 webmssdk 自动签 a_bogus).
+// main 进程没有 webmssdk, 自己签 a_bogus 工作量大且抖音常变签名, 不在 node 里实现.
+async function fetchDouyinUserPosts(secUid, count = 18) {
+  if (!extensionBridge.isConnected()) return null;
+  try {
+    const result = await extensionBridge.request(
+      "douyin.userPosts",
+      { secUid, count, maxCursor: 0 },
+      { timeoutMs: 25_000 },
+    );
+    if (!result || !result.ok) {
+      throw new Error(`HTTP ${result?.status ?? "?"}`);
+    }
+    const body = result.body;
+    if (body?.__parseError) throw new Error(`JSON 解析失败: ${body.raw?.slice(0, 200)}`);
+    if (body?.__error) throw new Error(body.__error);
+    if (Number(body?.status_code) !== 0 && body?.status_code != null) {
+      // 抖音业务码; status_code 0 是 OK
+      throw new Error(`status_code=${body.status_code} ${body?.status_msg || ""}`);
+    }
+    const list = Array.isArray(body?.aweme_list) ? body.aweme_list : [];
+    const videos = list.map((a) => {
+      const id = String(a?.aweme_id || "");
+      const cover =
+        a?.video?.cover?.url_list?.[0] ||
+        a?.video?.origin_cover?.url_list?.[0] ||
+        null;
+      const dur = Number(a?.video?.duration) || 0; // 抖音 duration 单位是 ms
+      const createTs = Number(a?.create_time) || 0; // 秒
+      return {
+        id,
+        title: a?.desc || "(未命名视频)",
+        durationSec: Math.round(dur / 1000),
+        uploadDate: createTs
+          ? new Date(createTs * 1000).toISOString().slice(0, 10).replace(/-/g, "")
+          : null,
+        viewCount: Number(a?.statistics?.play_count) || 0,
+        externalUrl: id ? `https://www.douyin.com/video/${id}` : "",
+        thumbnailUrl: cover ? String(cover).replace(/^http:\/\//, "https://") : null,
+      };
+    }).filter((v) => v.id);
+    return { videos, total: videos.length };
+  } catch (e) {
+    // 让上层把错误 surface 到 warnings, 别在这里吞
+    throw e;
+  }
 }
 
 // yt-dlp 跑一次 flat-playlist + dump-single-json, 抽出账号元数据 + 视频列表
@@ -3693,6 +3775,19 @@ app.whenReady().then(async () => {
     console.warn("[cache-store] 初始化失败:", err?.message || err);
   }
 
+  try {
+    await extensionBridge.start(app.getPath("userData"));
+    extensionBridge.onStatusChange((s) => {
+      // 广播给所有 renderer 窗口
+      for (const win of BrowserWindow.getAllWindows()) {
+        try { win.webContents.send("extensionBridge:status", s); } catch { /* noop */ }
+      }
+    });
+    console.log("[extension-bridge] 已启动 ws://127.0.0.1:58713/agent");
+  } catch (err) {
+    console.warn("[extension-bridge] 启动失败:", err?.message || err);
+  }
+
   protocol.handle("media", async (request) => {
     const url = new URL(request.url);
     let filePath;
@@ -3789,6 +3884,14 @@ app.whenReady().then(async () => {
       totalBytes,
       dbBytes,
     };
+  });
+
+  ipcMain.handle("extensionBridge:getStatus", async () => {
+    return extensionBridge.getStatus();
+  });
+
+  ipcMain.handle("extensionBridge:rotateToken", async () => {
+    return { token: extensionBridge.rotateToken() };
   });
 
   ipcMain.handle("data:openFolder", async (_event, which) => {
@@ -4207,8 +4310,8 @@ app.whenReady().then(async () => {
     let nativeVideosError = null;
     let nativeMid = null;
 
-    // B 站走平台原生接口: card API (头像/粉丝/简介) + wbi 签名的 space arc/search (视频列表)
-    // space 接口经常被风控 (412/-352), 重试 2 次, 每次间隔 3s
+    // B 站: card API (头像/粉丝/简介) + wbi 签名的 space arc/search (视频列表)
+    // 内部函数会自动优先走 Chrome 插件桥 (借浏览器登录态绕 412), 桥未连时回落到 node fetch.
     if (platform === "bilibili") {
       nativeMid = parseBilibiliMid(url);
       if (nativeMid) {
@@ -4237,10 +4340,33 @@ app.whenReady().then(async () => {
       }
     }
 
-    // yt-dlp: B 站如果原生通道都成功就跳过 (省一次 412); 其他平台必跑
+    // 抖音: 桥连时优先借 douyin.com tab 上下文调 fetch (借 webmssdk 自动 a_bogus),
+    // 桥未连 → 下面走 yt-dlp 兜底
+    if (platform === "douyin") {
+      const secUid = parseDouyinSecUid(url);
+      if (secUid && extensionBridge.isConnected()) {
+        try {
+          const result = await fetchDouyinUserPosts(secUid, safeLimit);
+          if (result && result.videos.length > 0) {
+            nativeVideos = result;
+          }
+        } catch (e) {
+          nativeVideosError = `douyin user posts: ${e?.message || String(e)}`;
+        }
+      } else if (!secUid) {
+        nativeCardError = "无法从抖音 URL 解析出 sec_user_id (期望格式: douyin.com/user/MS4w...)";
+      }
+    }
+
+    // yt-dlp:
+    //   - B 站: native 全成功就跳过 (省一次 412)
+    //   - 抖音: 桥连且 native 拿到视频就跳过, 否则跑兜底
+    //   - 其他: 必跑
     let ytDlpParsed = null;
     let ytDlpError = null;
-    const skipYtDlp = platform === "bilibili" && nativeCard && nativeVideos;
+    const skipYtDlp =
+      (platform === "bilibili" && nativeCard && nativeVideos) ||
+      (platform === "douyin" && nativeVideos && nativeVideos.videos.length > 0);
     if (!skipYtDlp) {
       try {
         ytDlpParsed = await fetchYtDlpAccountJson(url, safeLimit);
@@ -4273,6 +4399,8 @@ app.whenReady().then(async () => {
           ? `https://www.bilibili.com/video/${e.id}`
           : platform === "youtube" && e.id
           ? `https://www.youtube.com/watch?v=${e.id}`
+          : platform === "douyin" && e.id
+          ? `https://www.douyin.com/video/${e.id}`
           : ""),
         thumbnailUrl: e.thumbnail || pickBestThumbnail(e.thumbnails),
       })).filter((v) => v.id);
@@ -4322,7 +4450,14 @@ app.whenReady().then(async () => {
     // 部分通道失败的, 把警告 surface 到 UI (账号至少有 hero, 但视频列表可能不全)
     const warnings = [];
     if (noVideos && ytDlpError) warnings.push(`视频列表抓取失败 (${ytDlpError.slice(0, 120)})`);
-    if (noVideos && nativeVideosError) warnings.push(`B 站投稿接口被限速 (${nativeVideosError.slice(0, 120)})`);
+    if (noVideos && nativeVideosError) {
+      const label = platform === "douyin" ? "抖音用户投稿接口" : "B 站投稿接口";
+      warnings.push(`${label}失败 (${nativeVideosError.slice(0, 120)})`);
+    }
+    // 抖音没桥时给装插件的提示 (yt-dlp 抖音也常常 -8 频控)
+    if (platform === "douyin" && noVideos && !extensionBridge.isConnected()) {
+      warnings.push("抖音风控较严, 装上 Chrome 插件后大幅更稳 (设置 → 浏览器插件桥)");
+    }
 
     return {
       ok: true,

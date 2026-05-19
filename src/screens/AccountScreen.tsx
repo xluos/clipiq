@@ -3,7 +3,7 @@
 // detail: hero + 3 tabs (方法论 / 视频 / 开场样本)
 // add-account: 添加账号 dialog (粘贴链接 → 自动识别平台)
 
-import { type FunctionComponent, type ReactNode, useMemo, useState } from "react";
+import { type FunctionComponent, type ReactNode, useEffect, useMemo, useState } from "react";
 import { useApp } from "../AppContext";
 import type { AppLocation, Account, AccountPlatform, AccountMethodology } from "../types";
 import {
@@ -263,14 +263,30 @@ function detectPlatform(url: string): AccountPlatform {
 }
 
 function AddAccountDialog({ onClose }: { onClose: () => void }) {
-  const { upsertAccount, setProjects } = useApp();
+  const { upsertAccount, setProjects, setLocation } = useApp();
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
   const [range, setRange] = useState<"top10" | "recent20" | "all">("top10");
   const [fetching, setFetching] = useState(false);
   const [error, setError] = useState("");
+  const [bridgeConnected, setBridgeConnected] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (!window.videoAnalyzer?.extensionBridge) {
+      setBridgeConnected(null);
+      return;
+    }
+    window.videoAnalyzer.extensionBridge.getStatus()
+      .then((s) => setBridgeConnected(s.connected))
+      .catch(() => setBridgeConnected(null));
+    const off = window.videoAnalyzer.extensionBridge.onStatus((s) => setBridgeConnected(s.connected));
+    return off;
+  }, []);
 
   const platform = useMemo(() => detectPlatform(url), [url]);
+  // 抖音 / B 站没桥时给提示 (B 站 wbi 偶发 412, 抖音几乎必失败)
+  const showBridgeHint =
+    (platform === "douyin" || platform === "bilibili") && bridgeConnected === false;
   // 账号名可以不填,fetch 后用平台拉到的 uploader/title 自动补
   const canSubmit = url.trim().length > 0 && !fetching;
 
@@ -422,6 +438,22 @@ function AddAccountDialog({ onClose }: { onClose: () => void }) {
             </div>
           </Field>
         </div>
+        {showBridgeHint && (
+          <div className="mx-5 mb-3 rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-[12px] text-amber-800 dark:text-amber-200 flex items-start gap-2">
+            <span className="leading-relaxed flex-1">
+              {platform === "douyin"
+                ? "抖音风控较严, 没装 Chrome 插件大概率拉不到视频。"
+                : "B 站投稿接口偶发 412 风控, 装 Chrome 插件后稳定很多。"}
+            </span>
+            <button
+              type="button"
+              onClick={() => setLocation({ module: "settings" })}
+              className="shrink-0 text-[11.5px] underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-100"
+            >
+              去设置
+            </button>
+          </div>
+        )}
         {error && (
           <div className="mx-5 mb-3 rounded-md border border-rose-200 dark:border-rose-900/50 bg-rose-50 dark:bg-rose-950/30 px-3 py-2 text-[12px] text-rose-700 dark:text-rose-300">
             {error}

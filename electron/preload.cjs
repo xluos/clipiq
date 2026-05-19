@@ -63,6 +63,15 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   getDataInfo: () => ipcRenderer.invoke("data:getInfo"),
   openDataFolder: (which) => ipcRenderer.invoke("data:openFolder", which),
   purgeProjects: () => ipcRenderer.invoke("data:purgeProjects"),
+  extensionBridge: {
+    getStatus: () => ipcRenderer.invoke("extensionBridge:getStatus"),
+    rotateToken: () => ipcRenderer.invoke("extensionBridge:rotateToken"),
+    onStatus: (callback) => {
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on("extensionBridge:status", listener);
+      return () => ipcRenderer.removeListener("extensionBridge:status", listener);
+    },
+  },
   mirror: {
     get: () => ipcRenderer.invoke("mirror:get"),
     set: (value) => ipcRenderer.invoke("mirror:set", value),

@@ -16,9 +16,11 @@ import {
 import {
   ArrowLeft,
   CheckCircle2,
+  Copy,
   DownloadCloud,
   FolderOpen,
   Loader2,
+  Plug,
   Plus,
   RefreshCw,
   Settings2,
@@ -41,9 +43,9 @@ import {
   TaskSlotKey,
   VideoGenre,
 } from "../types";
-import type { CacheScopeStats, CacheStats, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
+import type { CacheScopeStats, CacheStats, ExtensionBridgeStatus, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
 
-type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "cache" | "data";
+type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "cache" | "bridge" | "data";
 
 const NONE = "__none__";
 
@@ -54,6 +56,7 @@ const SECTIONS: { key: Section; label: string }[] = [
   { key: "deps", label: "本地依赖" },
   { key: "analysis", label: "默认分析" },
   { key: "cache", label: "分析缓存" },
+  { key: "bridge", label: "浏览器插件桥" },
   { key: "data", label: "项目数据" },
 ];
 
@@ -146,6 +149,7 @@ export function SettingsScreen() {
             {section === "local" && <LocalInferenceSection />}
             {section === "analysis" && <AnalysisDefaultsSection />}
             {section === "cache" && <CacheSection />}
+            {section === "bridge" && <ExtensionBridgeSection />}
             {section === "data" && <DataSection />}
           </div>
         </div>
@@ -2321,6 +2325,112 @@ function CacheSection() {
           <p className="text-xs text-slate-500">还没有缓存数据。下次跑分析时会自动写入。</p>
         )}
         {statusMessage && <p className="text-xs text-slate-500">{statusMessage}</p>}
+      </section>
+    </>
+  );
+}
+
+function ExtensionBridgeSection() {
+  const [status, setStatus] = useState<ExtensionBridgeStatus | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [rotating, setRotating] = useState(false);
+
+  const refresh = useCallback(() => {
+    if (!window.videoAnalyzer?.extensionBridge) return;
+    window.videoAnalyzer.extensionBridge.getStatus().then(setStatus).catch(() => setStatus(null));
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    if (!window.videoAnalyzer?.extensionBridge?.onStatus) return;
+    const off = window.videoAnalyzer.extensionBridge.onStatus(setStatus);
+    return off;
+  }, [refresh]);
+
+  const handleCopy = async () => {
+    if (!status?.token) return;
+    try {
+      await navigator.clipboard.writeText(status.token);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard 不可用时静默 */ }
+  };
+
+  const handleRotate = async () => {
+    if (!window.videoAnalyzer?.extensionBridge) return;
+    setRotating(true);
+    try {
+      await window.videoAnalyzer.extensionBridge.rotateToken();
+      refresh();
+    } finally {
+      setRotating(false);
+    }
+  };
+
+  const indicatorColor =
+    status?.connected ? "bg-emerald-500" :
+    status ? "bg-slate-300 dark:bg-slate-700" :
+    "bg-amber-400";
+
+  return (
+    <>
+      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100 flex items-center gap-2">
+        <Plug className="w-5 h-5 text-slate-500" strokeWidth={1.5} />
+        浏览器插件桥
+      </h2>
+      <p className="text-[13px] text-slate-500 dark:text-slate-400 leading-relaxed -mt-4">
+        装上 Chrome 插件后,桌面端会借用浏览器登录态调 B 站 / 抖音 API,绕开 wbi 风控 (412 / -352)。
+      </p>
+
+      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4 text-sm">
+        <div className="flex items-center gap-3">
+          <span className={`w-2.5 h-2.5 rounded-full ${indicatorColor}`} />
+          <div className="flex-1">
+            <div className="font-medium text-slate-900 dark:text-slate-100">
+              {status?.connected ? "插件已连接" : "插件未连接"}
+            </div>
+            <div className="text-[11.5px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
+              ws://{status?.host ?? "127.0.0.1"}:{status?.port ?? 58713}/agent
+            </div>
+          </div>
+          {status?.connected && status.connectedAt && (
+            <span className="text-[11px] font-mono text-slate-500">
+              {new Date(status.connectedAt).toLocaleTimeString()}
+            </span>
+          )}
+        </div>
+
+        <div>
+          <label className="block text-[10.5px] font-mono tracking-wider uppercase text-slate-500 mb-1.5">Token</label>
+          <div className="flex gap-2">
+            <input
+              readOnly
+              value={status?.token ?? "—"}
+              className="flex-1 h-9 px-3 rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 font-mono text-[11.5px] text-slate-700 dark:text-slate-300"
+            />
+            <Button variant="outline" size="sm" onClick={handleCopy} disabled={!status?.token} className="border-slate-200 dark:border-slate-800">
+              <Copy className="w-3.5 h-3.5 mr-1.5" />
+              {copied ? "已复制" : "复制"}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={handleRotate} disabled={rotating} className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-100">
+              <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${rotating ? "animate-spin" : ""}`} />
+              重置
+            </Button>
+          </div>
+          <p className="text-[11.5px] text-slate-500 mt-1.5">
+            重置 token 会让现有插件连接断开,需要在 popup 里重新粘贴。
+          </p>
+        </div>
+      </section>
+
+      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-3">
+        <h3 className="font-medium text-slate-900 dark:text-slate-100">安装步骤</h3>
+        <ol className="text-[13px] text-slate-600 dark:text-slate-400 leading-relaxed space-y-1.5 list-decimal pl-5">
+          <li>Chrome 打开 <code className="font-mono text-[11.5px] text-indigo-600 dark:text-indigo-400">chrome://extensions</code>,右上角开「开发者模式」</li>
+          <li>点「加载已解压的扩展程序」,选 ClipIQ 仓库下的 <code className="font-mono text-[11.5px]">chrome-extension/</code> 目录</li>
+          <li>点 Chrome 工具栏的「ClipIQ Bridge」图标,把上方 token 粘贴进去并保存</li>
+          <li>状态指示灯变绿 → 回桌面端拉账号视频列表</li>
+        </ol>
       </section>
     </>
   );

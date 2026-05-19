@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>ClipIQ Bridge</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <h1>ClipIQ Bridge</h1>
+    <span class="endpoint">ws://127.0.0.1:58713</span>
+  </header>
+
+  <section class="status">
+    <div class="indicator" id="indicator"></div>
+    <div class="status-text">
+      <div class="primary" id="status-primary">未连接</div>
+      <div class="secondary" id="status-secondary">检查桌面端是否已启动</div>
+    </div>
+  </section>
+
+  <section class="token-section">
+    <label for="token">Token</label>
+    <textarea id="token" rows="3" placeholder="从桌面端「设置 → 浏览器插件桥」复制"></textarea>
+    <div class="actions">
+      <button id="save" type="button">保存并重连</button>
+      <button id="reconnect" type="button" class="secondary">重连</button>
+    </div>
+  </section>
+
+  <footer>
+    <a href="https://github.com/" target="_blank" rel="noopener">使用说明</a>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>
