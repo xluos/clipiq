@@ -33,8 +33,15 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
+      - name: Upgrade npm (avoid 10.9.7 "Exit handler never called" bug)
+        run: npm install -g npm@11
+
       - name: Install dependencies
-        run: npm ci
+        env:
+          npm_config_fetch_retries: '5'
+          npm_config_fetch_retry_mintimeout: '20000'
+          npm_config_fetch_retry_maxtimeout: '120000'
+        run: npm install --no-audit --no-fund --prefer-offline
 
       - name: Build renderer
         run: npm run build
