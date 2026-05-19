@@ -438,10 +438,53 @@ async function sampleDarwinMemory(totalMemBytes) {
   }
 }
 
-// 单进程 RSS + CPU 快照, macOS/Linux 通用。pcpu 在 ps 里是进程生命周期的均值,
-// 不是瞬时,但 sidecar 运行起来后基本稳定,看个量级够用。
+// 解析 macOS top 的 MEM 字段 (形如 "506M" / "1.2G" / "8192K" / 裸数字默认 KB)
+function parseTopMemToken(token) {
+  if (!token) return 0;
+  const m = String(token).match(/^([\d.]+)([KMGT])?\+?$/i);
+  if (!m) return 0;
+  const num = Number(m[1]);
+  const unit = (m[2] || "K").toUpperCase();
+  const mul = { K: 1024, M: 1024 * 1024, G: 1024 ** 3, T: 1024 ** 4 }[unit] || 1024;
+  return Math.round(num * mul);
+}
+
+// 单进程 RSS + CPU 快照。
+// pcpu 在 ps 里是进程生命周期均值, 不是瞬时, 但 sidecar 跑起来后基本稳定看量级够用.
+//
+// 内存:
+//   - macOS 上 ps rss 对 mmap 文件 (llama.cpp 用 mmap 加载 GGUF) 统计不准, 只算已 touched
+//     的 dirty 页; 同一进程 Activity Monitor 显示 500MB 时 ps rss 可能只有 8MB.
+//     用 top 拿 MEM 字段 (= phys_footprint, 跟 Activity Monitor 同口径).
+//   - Linux 上 ps rss 已是准的, 保留.
 async function samplePsByPid(pid) {
   try {
+    if (process.platform === "darwin") {
+      const [psResult, topResult] = await Promise.all([
+        execFileAsync("ps", ["-p", String(pid), "-o", "pcpu="], { windowsHide: true }),
+        execFileAsync(
+          "top",
+          ["-l", "1", "-pid", String(pid), "-stats", "pid,mem", "-ncols", "2"],
+          { windowsHide: true },
+        ),
+      ]);
+      const pcpu = Number(psResult.stdout.trim());
+      // top 输出形如:
+      //   PID    MEM
+      //   23610  506M
+      // 倒序找第一条 "<pid> <mem>" 模式的行
+      const memLine = topResult.stdout
+        .split("\n")
+        .reverse()
+        .find((l) => /^\s*\d+\s+\S+\s*$/.test(l));
+      const memToken = memLine ? memLine.trim().split(/\s+/)[1] : "";
+      return {
+        cpuPercent: Number.isFinite(pcpu) ? Math.round(pcpu * 10) / 10 : 0,
+        memoryBytes: parseTopMemToken(memToken),
+      };
+    }
+
+    // Linux / 其他 unix: ps rss 够准
     const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "pcpu=,rss="], {
       windowsHide: true,
     });
