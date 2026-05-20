@@ -3138,12 +3138,12 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     if (handle.cancelled || !handle.lastProgress) return;
     const idle = Date.now() - (handle.lastProgressAt || 0);
     if (idle < 1500) return;
-    const elapsed = Math.floor(idle / 1000);
+    const elapsed = formatDuration(idle);
     const base = handle.lastProgress;
     const baseMsg = base.message || "";
-    // 已经带过 "已等待 Ns" 后缀,只更新数字
-    const stripped = baseMsg.replace(/\s*·?\s*已等待 \d+s$/, "");
-    const msg = stripped ? `${stripped} · 已等待 ${elapsed}s` : `已等待 ${elapsed}s`;
+    // 已经带过 "已等待 ..." 后缀,只更新时长 (匹配 23s / 23.6s / 3分05秒 三种格式)
+    const stripped = baseMsg.replace(/\s*·?\s*已等待 (?:\d+(?:\.\d+)?s|\d+ms|\d+分\d+秒)$/, "");
+    const msg = stripped ? `${stripped} · 已等待 ${elapsed}` : `已等待 ${elapsed}`;
     broadcastToWindows("analysis:progress", { ...base, message: msg });
   }, 2000);
   handle.heartbeat = heartbeat;
@@ -3446,7 +3446,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             ensureNotCancelled(handle);
             const pct = 67 + Math.round((done / total) * 4);
             const tail = mode === "cache-hit" ? " · 命中缓存" : "";
-            send(pct, "镜头合并", `已合并 ${done}/${total} (batch ${batchIndex}, 平均 ${Math.round((Date.now()-mergeStart)/done)}ms/镜头)${tail}`);
+            send(pct, "镜头合并", `已合并 ${done}/${total} (batch ${batchIndex}, 平均 ${formatDuration((Date.now()-mergeStart)/done)}/镜头)${tail}`);
           },
         });
         if (mergeResults.usage && mergeResults.usage.callCount > 0) {
@@ -3550,7 +3550,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             framesInShot: framesCtx.length,
           };
         });
-        send(71, "镜头合并完成", `${shots.length} 个镜头描述就绪 · ${((Date.now()-mergeStart)/1000).toFixed(1)}s`);
+        send(71, "镜头合并完成", `${shots.length} 个镜头描述就绪 · ${formatDuration(Date.now()-mergeStart)}`);
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
         send(71, "镜头合并失败", `${error.message || error}。降级到旧的逐帧路径。`);
@@ -3967,6 +3967,20 @@ function formatTime(sec) {
   const m = Math.floor(safe / 60);
   const s = Math.floor(safe % 60);
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// 进度消息里"耗时/平均/已等待"的统一格式化:
+// - 小于 1s → "950ms" (毫秒, 用于很快的批次)
+// - 小于 60s → "23.6s" (一位小数, 跟现有 (ms/1000).toFixed(1) 风格一致)
+// - 大于等于 60s → "3分05秒" (中文 m分ss秒, 比 m:ss 更易读)
+function formatDuration(ms) {
+  const n = Math.max(0, Number(ms) || 0);
+  if (n < 1000) return `${Math.round(n)}ms`;
+  if (n < 60_000) return `${(n / 1000).toFixed(1)}s`;
+  const totalSec = Math.round(n / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}分${String(s).padStart(2, "0")}秒`;
 }
 
 function exportMarkdown(project, nodes, report, provider) {
