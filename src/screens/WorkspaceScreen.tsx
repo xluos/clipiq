@@ -28,7 +28,7 @@ const EMOTION_ZH: Record<DanmakuEmotionAxis | "neutral", string> = {
 };
 
 export function WorkspaceScreen() {
-  const { setCurrentScreen, projects, activeProjectId, nodesByProject, setNodesForProject, reportByProject } = useApp();
+  const { setCurrentScreen, projects, activeProjectId, nodesByProject, setNodesForProject, reportByProject, startAnalysisForProject } = useApp();
 
   const project = projects.find(p => p.id === activeProjectId);
   const nodes = nodesByProject[activeProjectId || ""] || [];
@@ -263,7 +263,7 @@ export function WorkspaceScreen() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setCurrentScreen("prepare")}
+                onClick={() => startAnalysisForProject(project.id)}
                 className="hidden md:flex h-9 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
                 title="重新分析"
               >
@@ -273,7 +273,7 @@ export function WorkspaceScreen() {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => setCurrentScreen("prepare")}
+                onClick={() => startAnalysisForProject(project.id)}
                 className="flex md:hidden text-slate-600 dark:text-slate-300"
                 title="重新分析"
               >

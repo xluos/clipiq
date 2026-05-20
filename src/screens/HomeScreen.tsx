@@ -616,8 +616,7 @@ export function HomeScreen() {
                       onDelete={(e) => handleDelete(e, proj.id)}
                       onReanalyze={(e) => {
                         e.stopPropagation();
-                        setActiveProjectId(proj.id);
-                        setCurrentScreen("prepare");
+                        startAnalysisForProject(proj.id);
                       }}
                       onThumbnailReady={(dataUrl) => setThumbnail(proj.id, dataUrl)}
                     />
