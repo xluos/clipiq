@@ -50,14 +50,18 @@ export function ProgressScreen() {
   const {
     setCurrentScreen, activeProjectId, projects, setProjects,
     providers, activeVideoProviderId, activeAudioProviderId,
-    setNodesForProject, setReportForProject,
+    setNodesForProject, setReportForProject, progressByProject,
   } = useApp();
 
   const project = projects.find(p => p.id === activeProjectId);
 
-  const [progress, setProgress] = useState(0);
-  const [stageLabel, setStageLabel] = useState(STAGES[0]);
-  const [detail, setDetail] = useState("");
+  // 全局快照: AppContext 一直在订阅 analysis:progress, 这里读最新值做初始 / 切换 reset。
+  // 不再依赖组件 mount 后才订阅, 避免"打开屏 → 看到 0% 读取视频信息 → 几百 ms 后突跳到真实阶段"。
+  const liveSnapshot = project ? progressByProject[project.id] : undefined;
+
+  const [progress, setProgress] = useState(liveSnapshot?.progress ?? 0);
+  const [stageLabel, setStageLabel] = useState(liveSnapshot?.stage ?? STAGES[0]);
+  const [detail, setDetail] = useState(liveSnapshot?.message ?? "");
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [error, setError] = useState("");
   const [isCancelling, setIsCancelling] = useState(false);
@@ -78,6 +82,26 @@ export function ProgressScreen() {
   const inAttachMode = useRef(false);
   const completionHandledRef = useRef(false);
   const failureHandledRef = useRef(false);
+
+  // 切换 project 时 reset 所有本地 state (避免显示上一个 project 的 stale stage / progress / logs)。
+  // 同步把全局快照作为新 project 的初始值, 让画面立刻反映真实进度。
+  useEffect(() => {
+    if (!project) return;
+    const snap = progressByProject[project.id];
+    setProgress(snap?.progress ?? 0);
+    setStageLabel(snap?.stage ?? STAGES[0]);
+    setDetail(snap?.message ?? "");
+    setLogs([]);
+    setError("");
+    setIsCancelling(false);
+    lastLoggedStage.current = "";
+    completionHandledRef.current = false;
+    failureHandledRef.current = false;
+    hasStarted.current = false;
+    cancelledRef.current = false;
+    inAttachMode.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id]);
 
   useEffect(() => {
     if (progress >= 100) return;

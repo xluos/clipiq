@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
 
 export type AccountFetchUiState = {
   stage: string;
@@ -63,6 +63,11 @@ interface AppState {
   upsertAccountVideoLocal: (av: AccountVideo) => void;
   // 后台拉取进度,渲染端订阅 main 进程事件汇总到这里
   accountFetchUi: Record<string, AccountFetchUiState>;
+  // 分析 / 下载进度的全局快照, 按 projectId 索引。
+  // 应用启动时全局订阅一次 onAnalysisProgress, 把每个 event 累加到这里;
+  // TaskQueueDrawer / ProgressScreen 都直接读, 避免各自挂 listener 导致 drawer
+  // 在打开瞬间订阅 → 错过之前事件 → 显示停留在很旧的 stage。
+  progressByProject: Record<string, AnalysisProgressEvent>;
 }
 
 const AppContext = createContext<AppState | undefined>(undefined);
@@ -204,6 +209,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // v2.1: 账号视频独立表
   const [accountVideosByAccountId, setAccountVideosByAccountId] = useState<Record<string, AccountVideo[]>>({});
   const [accountFetchUi, setAccountFetchUi] = useState<Record<string, AccountFetchUiState>>({});
+  const [progressByProject, setProgressByProject] = useState<Record<string, AnalysisProgressEvent>>({});
 
   const upsertAccount = useCallback((a: Account) => {
     setAccounts((prev) => {
@@ -485,6 +491,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // 订阅 main 进程的分析 / 下载进度事件 — 全局只挂一次, 写到 progressByProject。
+  // 任何屏 (ProgressScreen / TaskQueueDrawer / 首屏卡片) 都从这个全局 map 读最新进度,
+  // 避免组件 mount 才订阅导致漏掉之前的 events。
+  useEffect(() => {
+    if (!window.videoAnalyzer?.onAnalysisProgress) return;
+    const off = window.videoAnalyzer.onAnalysisProgress((evt) => {
+      setProgressByProject((prev) => ({ ...prev, [evt.projectId]: evt }));
+    });
+    return off;
+  }, []);
+
   // 订阅异步下载完成事件 — 把 yt-dlp 拿到的真实元数据回填进 downloading 项目,
   // 把 status 切到 analyzing 让 ProgressScreen 起分析;失败则切到 download_failed。
   useEffect(() => {
@@ -587,6 +604,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         refreshAccountVideos,
         upsertAccountVideoLocal,
         accountFetchUi,
+        progressByProject,
       }}
     >
       {children}
