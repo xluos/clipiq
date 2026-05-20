@@ -2761,8 +2761,643 @@ const VISION_TOKENS_PER_FRAME = 800;
 const HARD_FRAME_CAP = 12;
 const HARD_FRAME_MIN = 1;
 
+const CHUNK_SYSTEM_PROMPT =
+  "你是一名视频拉片分析师, 当前正在处理整段视频的某一片段。基于本片段的镜头描述 / 关键帧 / 字幕产出本片段的节点列表。" +
+  "**只产 nodes, 不要做方法论打标 (后续步骤会单独做)**。所有回答必须是合法 JSON, 不要 markdown 围栏, 不要解释。";
 
-async function callOpenAICompatible(provider, project, frames, transcript, scenes, fallbackNodes, fallbackReport, options, handle = null) {
+const AUDIT_SYSTEM_PROMPT =
+  "你是一名剪辑方法论审计师。已经有完整的节点列表 + 全局摘要, 你的工作是: " +
+  "(1) 对照规则集为每个节点打方法论标签 (命中 / 违反, 缺失放在 report 里), " +
+  "(2) 产出全局剪辑报告 (summary / structure / pacing / takeaways / methodologyAudit)。" +
+  "所有回答必须是合法 JSON, 不要 markdown 围栏, 不要解释。";
+
+function buildGlobalContextBlock(project, methodology, globalContext) {
+  const lines = [];
+  lines.push("# 整体上下文 (帮助你理解本片段在全片中的位置)");
+  lines.push(
+    `视频《${project.videoName}》总时长 ${Math.round(project.durationSec)}s (lengthBucket=${methodology.lengthBucket}), 画幅 ${project.width}x${project.height} (${project.orientation === "portrait" ? "竖屏" : project.orientation === "square" ? "方形" : "横屏"})。`,
+  );
+  if (methodology.forcedGenre) lines.push(`类型: ${methodology.forcedGenre} (用户/前序识别已锁定)`);
+  if (globalContext?.detectedGenre) lines.push(`类型: ${globalContext.detectedGenre} (置信度 ${(globalContext.genreConfidence || 0).toFixed(2)})`);
+  if (globalContext?.globalSummary) {
+    lines.push("");
+    lines.push("全局摘要:");
+    lines.push(globalContext.globalSummary);
+  }
+  if (globalContext?.structureHint) {
+    const sh = globalContext.structureHint;
+    lines.push("");
+    lines.push("结构线索 (供参考, 不一定准):");
+    if (sh.hook) lines.push(`  开场 hook: ${sh.hook}`);
+    if (sh.climax) lines.push(`  高潮: ${sh.climax}`);
+    if (sh.ending) lines.push(`  结尾: ${sh.ending}`);
+  }
+  return lines.join("\n");
+}
+
+function buildChunkShotsBlock(chunkShots) {
+  if (!Array.isArray(chunkShots) || chunkShots.length === 0) return "";
+  const lines = ["# 本片段镜头 (主 evidence; 已综合画面+字幕)"];
+  chunkShots.forEach((sc, i) => {
+    lines.push(`S${i + 1} [${sc.startSec.toFixed(1)}-${sc.endSec.toFixed(1)}s] 帧数=${sc.framesInShot || (sc.frames?.length || 0)}`);
+    lines.push(`  画面: ${sc.shotDescription || "(空)"}`);
+    if (sc.subtitleText) lines.push(`  字幕: ${sc.subtitleText}`);
+  });
+  return lines.join("\n");
+}
+
+function buildChunkFramesBlock(chunkFrames) {
+  if (!Array.isArray(chunkFrames) || chunkFrames.length === 0) {
+    return "# 本片段关键帧\n(无)";
+  }
+  const lines = ["# 本片段关键帧 (与下方图片顺序一一对应)"];
+  chunkFrames.forEach((f, i) => {
+    const cap = f.prefilterTag?.caption?.trim();
+    const tag = f.prefilterTag?.signature?.trim();
+    const meta = cap ? `\n  画面: ${cap}` : tag ? `\n  签名: ${tag}` : "";
+    lines.push(`#${i + 1}  t=${(f.midSec || 0).toFixed(1)}s  范围 ${(f.startSec || 0).toFixed(1)}-${(f.endSec || 0).toFixed(1)}s${meta}`);
+  });
+  return lines.join("\n");
+}
+
+function buildChunkTranscriptBlock(segs) {
+  if (!Array.isArray(segs) || segs.length === 0) {
+    return "# 本片段字幕\n(无)";
+  }
+  const lines = segs.map((s) =>
+    `[${Number(s.start || 0).toFixed(1)}-${Number(s.end || 0).toFixed(1)}] ${String(s.text || "").trim()}`,
+  );
+  return `# 本片段字幕 (带时间戳, 共 ${segs.length} 段)\n${lines.join("\n")}`;
+}
+
+function buildChunkPrompt(project, methodology, globalContext, chunk, totalChunks, options) {
+  const focusHint =
+    options?.focus === "rhythm" ? "重点关注剪辑节奏、镜头切换密度、停顿停滞。" :
+    options?.focus === "emotion" ? "重点关注情绪曲线、表达强度和观众共鸣点。" :
+    options?.focus === "narrative" ? "重点关注叙事结构、信息递进、转折设置。" :
+    "综合关注叙事结构、剪辑节奏、情绪曲线和画面信息。";
+  const modeHint = options?.mode === "detailed" ? "拆解到尽可能细的镜头级。" : options?.mode === "quick" ? "只覆盖关键节点, 不要面面俱到。" : "覆盖主要剪辑节点。";
+
+  const parts = [
+    `请分析视频的第 ${chunk.index + 1}/${totalChunks} 片段, 时间区间 [${chunk.startSec.toFixed(1)}, ${chunk.endSec.toFixed(1)}]s。`,
+    `${focusHint} ${modeHint}`,
+    "",
+    buildGlobalContextBlock(project, methodology, globalContext),
+    "",
+    buildChunkShotsBlock(chunk.shots),
+    "",
+    buildChunkFramesBlock(chunk.frames),
+    "",
+    buildChunkTranscriptBlock(chunk.transcriptSegments),
+    "",
+    "# 输出格式 (必须严格遵守)",
+    "只返回 JSON (不要 markdown 围栏), 结构:",
+    `{
+  "nodes":[
+    {
+      "id":"chunk-${chunk.index + 1}-node-1",
+      "startSec":0,
+      "endSec":3,
+      "title":"...",
+      "nodeTypes":["shot_change"],
+      "shotDescription":"...",
+      "shotType":"近景",
+      "cameraMovement":"固定",
+      "visualElements":[],
+      "audioElements":[],
+      "editIntent":"...",
+      "emotionLabel":"...",
+      "emotionIntensity":7,
+      "narrativeFunction":"Hook|Setup|Development|Turn|Climax|Ending|Other",
+      "confidence":0.9,
+      "isHighlight":true
+    }
+  ]
+}`,
+    "",
+    "硬性要求:",
+    `- nodes 时间戳 startSec/endSec 必须严格落在本片段 [${chunk.startSec.toFixed(1)}, ${chunk.endSec.toFixed(1)}]s 内, 不要跨段。`,
+    "- nodes 按时间升序。",
+    "- 不要返回 methodologyTags 字段 (后续步骤做)。",
+    "- 不要返回 report 字段 (后续步骤做)。",
+    "- evidence 要引用具体画面/字幕/时间, 不要写「看起来」「可能」等含糊词。",
+  ];
+
+  return parts.filter((x) => x !== null && x !== undefined).join("\n");
+}
+
+// audit pass 需要把每个 node 序列化成一行精简描述喂给模型
+function serializeNodeForAudit(node, compact = false) {
+  const parts = [
+    `${node.id || ""} [${(node.startSec || 0).toFixed(1)}-${(node.endSec || 0).toFixed(1)}s]`,
+    node.title ? `「${node.title}」` : "",
+    node.narrativeFunction ? `narrative=${node.narrativeFunction}` : "",
+    node.emotionLabel ? `emotion=${node.emotionLabel}/${node.emotionIntensity || 0}` : "",
+  ];
+  if (!compact) {
+    if (node.shotType) parts.push(`shot=${node.shotType}`);
+    if (node.editIntent) parts.push(`editIntent=${node.editIntent}`);
+  }
+  if (node.shotDescription) {
+    const desc = compact && node.shotDescription.length > 60
+      ? node.shotDescription.slice(0, 60) + "…"
+      : node.shotDescription;
+    parts.push(`画面=${desc}`);
+  }
+  return parts.filter(Boolean).join(" ");
+}
+
+function buildAuditPrompt(project, methodology, globalContext, nodes, transcript, options, { compactNodes = false } = {}) {
+  const nodeLines = nodes.map((n) => serializeNodeForAudit(n, compactNodes)).join("\n");
+  const transcriptBlock = formatTranscriptBlock(transcript);
+  const focusHint =
+    options?.focus === "rhythm" ? "重点关注剪辑节奏、镜头切换密度、停顿停滞。" :
+    options?.focus === "emotion" ? "重点关注情绪曲线、表达强度和观众共鸣点。" :
+    options?.focus === "narrative" ? "重点关注叙事结构、信息递进、转折设置。" :
+    "综合关注叙事结构、剪辑节奏、情绪曲线和画面信息。";
+
+  return [
+    `请对视频《${project.videoName}》做剪辑方法论审计。`,
+    `总时长 ${Math.round(project.durationSec)}s (lengthBucket=${methodology.lengthBucket})。`,
+    focusHint,
+    "",
+    buildGlobalContextBlock(project, methodology, globalContext),
+    "",
+    "# 全部节点 (来自前序分段拉片)",
+    nodeLines || "(无节点)",
+    "",
+    transcriptBlock,
+    "",
+    "# 剪辑方法论规则集 (必读, 严格对照)",
+    "下面是当前视频所属的时长档位 + 类型对应的剪辑方法论。每条规则有唯一 ruleId, 例如 R-HOOK-001。",
+    "你要做的事: ",
+    "- 对每个 node, 给出它命中 (hit) 或违反 (violation) 的规则, 写到 nodeTags 数组里。",
+    "- 视频里完全缺失的规则 (应有未有) 写到 report.methodologyAudit.misses 数组。",
+    "- 同时产出全局报告 (summary/structure/pacing/editingStyle/composition/takeaways/methodologyAudit)。",
+    "",
+    methodology.text,
+    "",
+    "# 输出格式 (必须严格遵守)",
+    "只返回 JSON (不要 markdown 围栏), 结构:",
+    `{
+  "nodeTags":[
+    {
+      "id":"node-1",
+      "methodologyTags":[
+        {"ruleId":"R-HOOK-001","ruleName":"...","category":"hook","status":"hit","evidence":"开头特写 + 字幕 'XX'","confidence":0.9},
+        {"ruleId":"R-HOOK-002","ruleName":"...","category":"hook","status":"violation","evidence":"...","confidence":0.8,"fixSuggestion":"..."}
+      ]
+    }
+  ],
+  "report":{
+    "summary":"...",
+    "structure":{"hook":"...","development":"...","turn":"...","climax":"...","ending":"..."},
+    "pacing":"...",
+    "editingStyle":"...",
+    "composition":"...",
+    "takeaways":[],
+    "methodologyAudit":{
+      "detectedGenre":"vlog | review | travel | tutorial | knowledge | documentary | short-drama | other",
+      "genreConfidence":0.9,
+      "misses":[
+        {"ruleId":"R-STRUCT-001","ruleName":"...","category":"structure","expectedAt":"视频中后段","reason":"...","fixSuggestion":"..."}
+      ],
+      "overallScore":78
+    }
+  }
+}`,
+    "",
+    "硬性要求:",
+    "- nodeTags 数组里的 id 必须来自上面的节点列表; 不要新增/删除/重命名节点。",
+    "- methodologyTags 的 ruleId 必须来自上述方法论规则集, 不要编造。",
+    "- 每条 violation 必须给 fixSuggestion; 每条 miss 必须给 fixSuggestion + reason。",
+    "- evidence 必须引用具体节点 id 或时间区间。",
+    "- detectedGenre 必须从清单中选一个。",
+    "- overallScore 0-100。",
+    "",
+    "软约束 (避免误报):",
+    "- 如果一条规则的 when 触发条件在本视频里前提不成立 (例如规则只适用 8 分钟以上但本视频只有 6 分钟), 跳过这条规则。",
+    "- 如果规则需要听到 BGM beat sync 等你无法判断的信号, 不要硬给 miss; 在 takeaways 里温和提示。",
+  ].filter(Boolean).join("\n");
+}
+
+// 估算 token: 中文 ~0.5 token/字, 英文 ~0.25 token/字。粗估按 0.4 平均偏保守。
+// 偏保守 (估高) → 提前触发裁剪, 避免实际请求超 ctx; 这是安全方向。
+function estimatePromptTokens(text) {
+  if (!text) return 0;
+  return Math.ceil(text.length * 0.4);
+}
+
+// 估算单个 shotContext 在 prompt 里占多少 token
+function estimateShotContextTokens(sc) {
+  if (!sc) return 0;
+  const desc = sc.shotDescription || "";
+  const sub = sc.subtitleText || (Array.isArray(sc.subtitleSegments)
+    ? sc.subtitleSegments.map((s) => s.text || "").join(" ")
+    : "");
+  // 元信息 (时间/帧数) 大约 30 char + 描述 + 字幕
+  return estimatePromptTokens(`${desc} ${sub}`) + 20;
+}
+
+function estimateTranscriptSegmentTokens(segs) {
+  if (!Array.isArray(segs) || segs.length === 0) return 0;
+  const text = segs.map((s) => `[${(s.start || 0).toFixed(1)}-${(s.end || 0).toFixed(1)}] ${s.text || ""}`).join("\n");
+  return estimatePromptTokens(text);
+}
+
+// 取落在 [start, end] 内的 frames / transcript segments
+function pickFramesInRange(frames, startSec, endSec) {
+  if (!Array.isArray(frames)) return [];
+  return frames.filter((f) => {
+    const mid = Number(f.midSec) || 0;
+    return mid >= startSec && mid < endSec;
+  });
+}
+
+function pickTranscriptSegmentsInRange(transcript, startSec, endSec) {
+  if (!transcript || !Array.isArray(transcript.segments)) return [];
+  return transcript.segments.filter((s) => {
+    const segStart = Number(s.start) || 0;
+    const segEnd = Number(s.end) || segStart;
+    // 段与 chunk 时间区间有交集即算
+    return segEnd >= startSec && segStart <= endSec;
+  });
+}
+
+// 按 ctx 预算把 shotContexts 切成 N 段, 每段附带其时间区间内的 frames + transcript segments。
+//
+// 输入:
+//   ctxSize, reserveOutput, overheadTokens (每段固定占用: system + 全局上下文 + schema 模板)
+//   shotContexts (有序), frames (按 midSec 升序), transcript
+//
+// 输出:
+//   [{ index, startSec, endSec, shots, frames, transcriptSegments, estTokens }]
+//
+// 算法:
+//   逐 shot 累加, 加上该 shot 范围内的 frames(*800) 和 transcript segments(估算字符)。
+//   超 budgetPerChunk 就把当前累计切出去, 开新段。
+//   边界: 单个 shot 已超 budget 时, 单独占一段并降级 (砍其 frames 数)。
+function planAnalysisChunks({
+  ctxSize,
+  reserveOutput,
+  overheadTokens,
+  safetyMargin,
+  shotContexts,
+  frames,
+  transcript,
+  durationSec,
+}) {
+  const budget = ctxSize - reserveOutput - overheadTokens - safetyMargin;
+  if (budget <= 0) {
+    throw new Error(`模型 ctx ${ctxSize} 太小, 扣掉输出 reserve / 全局上下文 / safety margin 后预算 ${budget} token, 无法分段。`);
+  }
+
+  const chunks = [];
+  // 没有 shotContexts: 退化按时间等分。先估总 token, 算需要多少段。
+  if (!Array.isArray(shotContexts) || shotContexts.length === 0) {
+    const totalFrameTokens = frames.length * VISION_TOKENS_PER_FRAME;
+    const totalTranscriptTokens = estimateTranscriptSegmentTokens(transcript?.segments || []);
+    const total = totalFrameTokens + totalTranscriptTokens;
+    const numChunks = Math.max(1, Math.ceil(total / budget));
+    const chunkDuration = (durationSec || 0) / numChunks;
+    for (let i = 0; i < numChunks; i++) {
+      const start = i * chunkDuration;
+      const end = i === numChunks - 1 ? (durationSec || start + chunkDuration) : (i + 1) * chunkDuration;
+      const chunkFrames = pickFramesInRange(frames, start, end);
+      const chunkSegs = pickTranscriptSegmentsInRange(transcript, start, end);
+      const est = chunkFrames.length * VISION_TOKENS_PER_FRAME + estimateTranscriptSegmentTokens(chunkSegs);
+      chunks.push({
+        index: i,
+        startSec: start,
+        endSec: end,
+        shots: [],
+        frames: chunkFrames.slice(0, HARD_FRAME_CAP),
+        transcriptSegments: chunkSegs,
+        estTokens: est,
+      });
+    }
+    return chunks;
+  }
+
+  // 有 shotContexts: 逐 shot 累加
+  let current = null;
+  const flush = () => {
+    if (current && current.shots.length > 0) chunks.push(current);
+    current = null;
+  };
+  for (const sc of shotContexts) {
+    const scTokens = estimateShotContextTokens(sc);
+    const scFrames = pickFramesInRange(frames, sc.startSec, sc.endSec);
+    const scSegs = pickTranscriptSegmentsInRange(transcript, sc.startSec, sc.endSec);
+    const scFrameTokens = scFrames.length * VISION_TOKENS_PER_FRAME;
+    const scSegTokens = estimateTranscriptSegmentTokens(scSegs);
+    const scTotal = scTokens + scFrameTokens + scSegTokens;
+
+    // 单 shot 就超 budget → 单独成段, 降级砍 frames
+    if (scTotal > budget) {
+      flush();
+      const maxFrames = Math.max(HARD_FRAME_MIN, Math.floor((budget - scTokens - scSegTokens) / VISION_TOKENS_PER_FRAME));
+      const trimmedFrames = scFrames.slice(0, Math.max(HARD_FRAME_MIN, maxFrames));
+      chunks.push({
+        index: chunks.length,
+        startSec: sc.startSec,
+        endSec: sc.endSec,
+        shots: [sc],
+        frames: trimmedFrames,
+        transcriptSegments: scSegs,
+        estTokens: scTokens + trimmedFrames.length * VISION_TOKENS_PER_FRAME + scSegTokens,
+        degraded: true,
+      });
+      continue;
+    }
+
+    if (!current) {
+      current = {
+        index: chunks.length,
+        startSec: sc.startSec,
+        endSec: sc.endSec,
+        shots: [],
+        frames: [],
+        transcriptSegments: [],
+        estTokens: 0,
+      };
+    }
+
+    // 加上该 shot 后超 budget → 先 flush 当前, 开新段
+    if (current.estTokens + scTotal > budget && current.shots.length > 0) {
+      flush();
+      current = {
+        index: chunks.length,
+        startSec: sc.startSec,
+        endSec: sc.endSec,
+        shots: [],
+        frames: [],
+        transcriptSegments: [],
+        estTokens: 0,
+      };
+    }
+
+    current.shots.push(sc);
+    current.frames.push(...scFrames);
+    // transcript segments 可能跨 shot 边界, 用 Set 去重
+    for (const seg of scSegs) {
+      if (!current.transcriptSegments.some((x) => x.start === seg.start && x.end === seg.end)) {
+        current.transcriptSegments.push(seg);
+      }
+    }
+    current.endSec = sc.endSec;
+    current.estTokens += scTotal;
+  }
+  flush();
+
+  // frames 在每个 chunk 内也限制总数, 避免单段 frames 暴涨
+  for (const c of chunks) {
+    if (c.frames.length > HARD_FRAME_CAP) {
+      c.frames = c.frames.slice(0, HARD_FRAME_CAP);
+    }
+  }
+
+  return chunks;
+}
+
+// 估算"每段固定 overhead"。chunk pass 每段都要带:
+//   - system prompt
+//   - 全局上下文 (类型/lengthBucket/globalSummary/structureHint)
+//   - 输出 schema 模板
+//   - hard 要求 + 软约束文本
+// 不带 methodology, 不带帧描述/字幕(那部分按 chunk 数据动态算)
+function estimateChunkOverheadTokens(globalContext) {
+  // 系统 prompt + schema 模板 + 硬性要求 文本约 800 token
+  const FIXED_PROMPT_FOOTPRINT = 800;
+  let dynamic = 0;
+  if (globalContext) {
+    if (globalContext.globalSummary) dynamic += estimatePromptTokens(globalContext.globalSummary);
+    if (globalContext.structureHint) {
+      const sh = globalContext.structureHint;
+      dynamic += estimatePromptTokens([sh.hook, sh.climax, sh.ending].filter(Boolean).join(" "));
+    }
+    if (globalContext.detectedGenre) dynamic += 20;
+  }
+  return FIXED_PROMPT_FOOTPRINT + dynamic;
+}
+
+// 一次性 pass: 把所有内容(含 methodology + frames + transcript + shotContexts)
+// 塞进单个 chat/completions 请求, 模型一次出 { nodes, report }。
+// 适合短视频 / 信息量小、能装进 ctx 的场景。
+async function runSinglePassAnalysis({
+  effectiveProvider, project, frames, transcript, scenes, options, methodology,
+  handle, fallbackNodes, fallbackReport,
+}) {
+  const { userText } = await buildAnalysisPrompt(project, frames, transcript, scenes, options);
+  const systemText =
+    "你是一名严谨的视频拉片分析师。你既要描述视频内容，又要严格按照提供的剪辑方法论规则集对视频打标（命中 / 违反 / 缺失）。所有回答必须是合法 JSON，不要使用 Markdown 围栏，不要解释。";
+
+  const imageDataUrls = [];
+  for (const frame of frames) {
+    const base64 = await fs.readFile(frame.framePath, "base64");
+    imageDataUrls.push(`data:image/jpeg;base64,${base64}`);
+  }
+
+  const useResponses = effectiveProvider.endpointType === "openai_responses";
+  const parsed = useResponses
+    ? await callOpenAIResponses(effectiveProvider, systemText, userText, imageDataUrls, handle)
+    : await callOpenAIChatCompletions(effectiveProvider, systemText, userText, imageDataUrls, handle);
+
+  if (!parsed || (!Array.isArray(parsed.nodes) && !parsed.report)) {
+    throw new Error(
+      "模型未返回可解析的 JSON (响应为空或非 JSON)。reasoning 模型可能把内容放在 reasoning_content 字段, 当前 client 不解析; 或模型超 ctx / 没有视觉能力 / 输出被截断。",
+    );
+  }
+  return { ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, effectiveProvider, methodology), usedModel: true };
+}
+
+// 跑单个 chunk: 只产 nodes, 不带 methodology
+async function runChunkPass({ effectiveProvider, project, methodology, globalContext, chunk, totalChunks, options, handle }) {
+  const userText = buildChunkPrompt(project, methodology, globalContext, chunk, totalChunks, options);
+  const imageDataUrls = [];
+  for (const frame of chunk.frames) {
+    const base64 = await fs.readFile(frame.framePath, "base64");
+    imageDataUrls.push(`data:image/jpeg;base64,${base64}`);
+  }
+  const useResponses = effectiveProvider.endpointType === "openai_responses";
+  const parsed = useResponses
+    ? await callOpenAIResponses(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle)
+    : await callOpenAIChatCompletions(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle);
+  if (!parsed || !Array.isArray(parsed.nodes)) {
+    throw new Error(`chunk ${chunk.index + 1} 返回不是合法 JSON 或缺少 nodes 字段`);
+  }
+  return parsed.nodes;
+}
+
+// 跑 audit pass: 不带 frames, 只读 nodes + methodology + transcript + 全局
+async function runAuditPass({ effectiveProvider, project, methodology, globalContext, nodes, transcript, options, ctxSize, reserveOutput, safetyMargin, handle }) {
+  const auditSystemTokens = estimatePromptTokens(AUDIT_SYSTEM_PROMPT);
+  const budget = ctxSize - reserveOutput - auditSystemTokens - safetyMargin;
+  if (budget <= 0) {
+    throw new Error(`audit pass: 模型 ctx ${ctxSize} 不够装 audit prompt`);
+  }
+
+  // 先尝试完整 nodes; 装不下就 compactNodes (砍冗余字段); 还不下就截短 shotDescription
+  let compactNodes = false;
+  let workingTranscript = transcript;
+  let userText;
+  let promptTokens;
+  let attempt = 0;
+  let lastDecision = "";
+  while (true) {
+    attempt += 1;
+    if (attempt > 20) {
+      throw new Error(`audit pass 裁剪 ${attempt - 1} 轮仍无法装入 ctx=${ctxSize}; 最后: ${lastDecision}`);
+    }
+    userText = buildAuditPrompt(project, methodology, globalContext, nodes, workingTranscript, options, { compactNodes });
+    promptTokens = estimatePromptTokens(userText);
+    lastDecision = `prompt=${promptTokens}tok budget=${budget} compactNodes=${compactNodes} transcript=${workingTranscript?.text?.length || 0}字`;
+    if (promptTokens <= budget) break;
+
+    // 1) 先 compactNodes
+    if (!compactNodes) {
+      compactNodes = true;
+      continue;
+    }
+    // 2) 再砍 transcript
+    if (workingTranscript?.text && workingTranscript.text.length > 200) {
+      const next = Math.max(0, Math.floor(workingTranscript.text.length / 2));
+      const trimmed = trimTranscriptForBudget(
+        workingTranscript.text, workingTranscript.segments, Math.ceil(next),
+      );
+      workingTranscript = { ...workingTranscript, text: trimmed.text, segments: trimmed.segments };
+      continue;
+    }
+    throw new Error(`audit pass 无法装入 ctx=${ctxSize}: ${lastDecision}`);
+  }
+
+  console.log(`[analyze:main] audit pass prompt=${promptTokens}tok budget=${budget} compactNodes=${compactNodes} attempts=${attempt}`);
+
+  const useResponses = effectiveProvider.endpointType === "openai_responses";
+  const parsed = useResponses
+    ? await callOpenAIResponses(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle)
+    : await callOpenAIChatCompletions(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle);
+  if (!parsed) {
+    throw new Error("audit pass 返回不是合法 JSON");
+  }
+  return parsed; // { nodeTags?: [...], report?: {...} }
+}
+
+// 把 chunk pass 出来的 nodes + audit pass 的 nodeTags 和 report 合并成最终 result。
+function mergeChunkedResult({ chunkNodes, auditResult, project, effectiveProvider, methodology, fallbackNodes, fallbackReport }) {
+  // 1) chunkNodes 已经按时间排序, 重新编号 id
+  const allNodes = [...chunkNodes].sort((a, b) => (a.startSec || 0) - (b.startSec || 0));
+  allNodes.forEach((n, i) => {
+    n.id = `node-${i + 1}`;
+  });
+
+  // 2) 把 audit 的 methodologyTags 按"原 chunk-level id 或时间近邻" 合回去
+  const tagsByOriginalId = new Map();
+  const tagsByTime = []; // fallback: 时间最近匹配
+  if (Array.isArray(auditResult?.nodeTags)) {
+    for (const nt of auditResult.nodeTags) {
+      if (!nt?.id) continue;
+      tagsByOriginalId.set(nt.id, nt.methodologyTags || []);
+      tagsByTime.push(nt);
+    }
+  }
+
+  // 3) audit 用的是重编号后的 id (node-1..N), 也可能用 chunk 原 id (chunk-1-node-1)
+  //    优先 node-1..N 匹配, 否则尝试原 id
+  allNodes.forEach((n, i) => {
+    const finalId = `node-${i + 1}`;
+    const tagsFromFinalId = tagsByOriginalId.get(finalId);
+    const tagsFromOriginal = n._originalId ? tagsByOriginalId.get(n._originalId) : null;
+    n.methodologyTags = tagsFromFinalId || tagsFromOriginal || [];
+    delete n._originalId;
+  });
+
+  // 4) 拼最终 payload, 跑现有的 normalizeModelResult 把字段规整
+  const payload = {
+    nodes: allNodes,
+    report: auditResult?.report || {},
+  };
+  return {
+    ...normalizeModelResult(payload, fallbackNodes, fallbackReport, project, effectiveProvider, methodology),
+    usedModel: true,
+  };
+}
+
+// 分段拉片: chunk pass × N + audit pass × 1。
+async function runChunkedAnalysis({
+  effectiveProvider, project, frames, transcript, scenes, options, methodology, globalContext,
+  ctxSize, reserveOutput, safetyMargin,
+  handle, fallbackNodes, fallbackReport, sendProgress,
+}) {
+  const overheadTokens = estimateChunkOverheadTokens(globalContext);
+  const chunks = planAnalysisChunks({
+    ctxSize,
+    reserveOutput,
+    overheadTokens,
+    safetyMargin,
+    shotContexts: options?.shotContexts,
+    frames,
+    transcript,
+    durationSec: project.durationSec,
+  });
+  if (chunks.length === 0) {
+    throw new Error("planAnalysisChunks 切出 0 段, 检查 shotContexts/frames 是否为空。");
+  }
+
+  console.log(
+    `[analyze:main] chunked: ctx=${ctxSize} overhead=${overheadTokens}tok 切 ${chunks.length} 段; ` +
+    chunks.map((c, i) => `#${i + 1}[${c.startSec.toFixed(0)}-${c.endSec.toFixed(0)}s shots=${c.shots.length} frames=${c.frames.length} ~${c.estTokens}tok]`).join(" "),
+  );
+
+  // chunk pass 串行跑(保留每段在管理器内的 model 一致性)
+  const allChunkNodes = [];
+  for (let i = 0; i < chunks.length; i++) {
+    if (handle?.cancelled) throw new AnalysisCancelledError();
+    const chunk = chunks[i];
+    sendProgress?.(i, chunks.length, "chunk", chunk);
+    try {
+      const nodes = await runChunkPass({
+        effectiveProvider, project, methodology, globalContext, chunk,
+        totalChunks: chunks.length, options, handle,
+      });
+      // 给每个 node 标记来源 chunk + 临时 id, 后面合并
+      nodes.forEach((n, j) => {
+        n._originalId = n.id || `chunk-${i + 1}-node-${j + 1}`;
+      });
+      allChunkNodes.push(...nodes);
+    } catch (err) {
+      if (err instanceof AnalysisCancelledError) throw err;
+      console.warn(`[analyze:main] chunk ${i + 1}/${chunks.length} 失败: ${err?.message || err}`);
+      // 单段失败标记一个占位 node, 不阻断
+      allChunkNodes.push({
+        _originalId: `chunk-${i + 1}-failed`,
+        startSec: chunk.startSec,
+        endSec: chunk.endSec,
+        title: `第 ${i + 1} 段分析失败`,
+        nodeTypes: ["shot_change"],
+        shotDescription: `本段 ${chunks.length} 段分析失败: ${err?.message || err}`,
+        narrativeFunction: "Other",
+      });
+    }
+  }
+
+  sendProgress?.(chunks.length, chunks.length, "audit", null);
+
+  // audit pass
+  const auditResult = await runAuditPass({
+    effectiveProvider, project, methodology, globalContext,
+    nodes: allChunkNodes, transcript, options,
+    ctxSize, reserveOutput, safetyMargin,
+    handle,
+  });
+
+  return mergeChunkedResult({
+    chunkNodes: allChunkNodes, auditResult,
+    project, effectiveProvider, methodology, fallbackNodes, fallbackReport,
+  });
+}
+
+async function callOpenAICompatible(provider, project, frames, transcript, scenes, fallbackNodes, fallbackReport, options, handle = null, sendProgress = null) {
   if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
     return { nodes: fallbackNodes, report: fallbackReport, usedModel: false };
   }
@@ -2785,66 +3420,47 @@ async function callOpenAICompatible(provider, project, frames, transcript, scene
   }
 
   try {
-    // 按 model contextSize 动态算可用空间。manifest 没标 -> 兜底 8192 (llama-server 默认)
     const ctxSize = Number(effectiveProvider?.contextSize) > 0 ? Number(effectiveProvider.contextSize) : 8192;
-    // 输出 reserve: 拍片报告 JSON 一般 1.5-3k token, 取 ctx 的 25% 但不少于 1500
-    const reserveForOutput = Math.max(1500, Math.floor(ctxSize * 0.25));
-    // 系统 prompt + 镜头列表 + methodology 规则 + 字段说明等模板成本
-    const reserveForPrompt = 1500;
-    // transcript 字符上限。中文 ~0.5 token/字, 给 transcript 留可用预算的 40%, 但不超过 4000
-    const transcriptCap = Math.max(
-      0,
-      Math.min(4000, Math.floor((ctxSize - reserveForOutput - reserveForPrompt) * 0.4 * 2)),
+    const reserveForOutput = Math.max(1500, Math.min(4000, Math.floor(ctxSize * 0.25)));
+    const safetyMargin = Math.max(256, Math.floor(ctxSize * 0.05));
+    const globalContext = {
+      globalSummary: options?.globalSummary || null,
+      structureHint: options?.structureHint || null,
+      detectedGenre: options?.detectedGenre || options?.manualGenre || null,
+      genreConfidence: options?.genreConfidence || 0,
+    };
+
+    // 先估算"一次性 pass"需要多少 token (含 methodology), 看 ctx 是否能装下。
+    const { userText: singleUserText, methodology } = await buildAnalysisPrompt(
+      project, frames, transcript, scenes, options,
     );
-    let visibleTranscript = transcript;
-    if (transcript?.text && transcriptCap > 0) {
-      const trimmed = trimTranscriptForBudget(transcript.text, transcript.segments, transcriptCap);
-      visibleTranscript = { ...transcript, text: trimmed.text, segments: trimmed.segments };
-    } else if (transcript?.text && transcriptCap === 0) {
-      visibleTranscript = { ...transcript, text: "", segments: [] };
-    }
-    const transcriptTokens = Math.ceil((visibleTranscript?.text || "").length * 0.5);
-    const remainingForFrames = ctxSize - reserveForOutput - reserveForPrompt - transcriptTokens;
-    const maxImages = Math.max(
-      HARD_FRAME_MIN,
-      Math.min(HARD_FRAME_CAP, Math.floor(remainingForFrames / VISION_TOKENS_PER_FRAME)),
-    );
-    const requestedFrames = frames.length;
-    frames = frames.slice(0, maxImages);
+    const singleSystemText =
+      "你是一名严谨的视频拉片分析师。你既要描述视频内容，又要严格按照提供的剪辑方法论规则集对视频打标（命中 / 违反 / 缺失）。所有回答必须是合法 JSON，不要使用 Markdown 围栏，不要解释。";
+    const singleSystemTokens = estimatePromptTokens(singleSystemText);
+    const singlePromptTokens = estimatePromptTokens(singleUserText);
+    const singleImageTokens = frames.length * VISION_TOKENS_PER_FRAME;
+    const singleTotal = singleSystemTokens + singlePromptTokens + singleImageTokens;
+    const singleBudget = ctxSize - reserveForOutput - safetyMargin;
 
     console.log(
       `[analyze:main] provider=${effectiveProvider.id} model=${effectiveProvider.model} ctx=${ctxSize} ` +
-      `reserve(out/sys)=${reserveForOutput}/${reserveForPrompt} transcript=${visibleTranscript?.text?.length || 0}字(${transcriptTokens}tok) ` +
-      `frames=${frames.length}/${requestedFrames}(cap=${maxImages})`,
+      `single-pass=${singleTotal}tok (sys=${singleSystemTokens} user=${singlePromptTokens} images=${frames.length}*${VISION_TOKENS_PER_FRAME}=${singleImageTokens}) ` +
+      `budget=${singleBudget} → ${singleTotal <= singleBudget ? "走单次" : "走分段"}`,
     );
 
-    const imageDataUrls = [];
-    for (const frame of frames) {
-      const base64 = await fs.readFile(frame.framePath, "base64");
-      imageDataUrls.push(`data:image/jpeg;base64,${base64}`);
+    if (singleTotal <= singleBudget) {
+      return await runSinglePassAnalysis({
+        effectiveProvider, project, frames, transcript, scenes, options, methodology,
+        handle, fallbackNodes, fallbackReport,
+      });
     }
 
-    const { userText, methodology } = await buildAnalysisPrompt(project, frames, visibleTranscript, scenes, options);
-    const systemText =
-      "你是一名严谨的视频拉片分析师。你既要描述视频内容，又要严格按照提供的剪辑方法论规则集对视频打标（命中 / 违反 / 缺失）。所有回答必须是合法 JSON，不要使用 Markdown 围栏，不要解释。";
-
-    const useResponses = effectiveProvider.endpointType === "openai_responses";
-    const parsed = useResponses
-      ? await callOpenAIResponses(effectiveProvider, systemText, userText, imageDataUrls, handle)
-      : await callOpenAIChatCompletions(effectiveProvider, systemText, userText, imageDataUrls, handle);
-
-    // 即便 HTTP 200, 模型也可能返回空 / 无法解析。常见场景:
-    //  - reasoning 模型 (Qwen3.5/3.6 等) stream 把内容放到 delta.reasoning_content,
-    //    client 只取 delta.content 导致拼出空 text -> tryParseJsonFromText 返 null
-    //  - 模型回了非 JSON (markdown / 自然语言) -> tryParseJsonFromText 也返 null
-    // 这两种情况让上层走"分析失败"路径, 而不是 normalizeModelResult 静默兜底成假节点。
-    if (!parsed || (!Array.isArray(parsed.nodes) && !parsed.report)) {
-      throw new Error(
-        "模型未返回可解析的 JSON (响应为空或非 JSON)。reasoning 模型可能把内容放在 reasoning_content 字段, 当前 client 不解析; 或模型超 ctx / 没有视觉能力 / 输出被截断。",
-      );
-    }
-
-    return { ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, effectiveProvider, methodology), usedModel: true };
+    // 装不下 → 分段
+    return await runChunkedAnalysis({
+      effectiveProvider, project, frames, transcript, scenes, options, methodology, globalContext,
+      ctxSize, reserveOutput: reserveForOutput, safetyMargin,
+      handle, fallbackNodes, fallbackReport, sendProgress,
+    });
   } finally {
     preacquiredSlot?.release();
   }
@@ -3560,7 +4176,23 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           } catch { /* 算 key 失败 → 不缓存 */ }
         }
         const modelResult = await runWithCache("main-analysis", mainAnalysisCacheKey,
-          () => callOpenAICompatible(provider, projectMeta, frames, transcript, scenes, fallbackNodes, fallbackReport, effectiveOptions, handle),
+          () => callOpenAICompatible(
+            provider, projectMeta, frames, transcript, scenes, fallbackNodes, fallbackReport,
+            effectiveOptions, handle,
+            // 分段进度回调: chunk 阶段用 78-83 进度区间, audit 用 84
+            (done, total, phase, chunk) => {
+              if (phase === "chunk") {
+                const pct = total > 0 ? done / total : 0;
+                send(
+                  78 + Math.round(pct * 5),
+                  "主分析(分段)",
+                  `第 ${done + 1}/${total} 段 · [${(chunk?.startSec || 0).toFixed(0)}-${(chunk?.endSec || 0).toFixed(0)}s] · shots=${chunk?.shots?.length || 0} frames=${chunk?.frames?.length || 0}`,
+                );
+              } else if (phase === "audit") {
+                send(84, "主分析(审计)", "全部分段拉片完成, 跑方法论审计与全局报告…");
+              }
+            },
+          ),
           { model: provider?.model });
         nodes = modelResult.nodes;
         // 把金字塔中间产物 (代表帧 / 帧 captions / 字幕段) 挂到节点上, 让 UI 能渲染镜头级 evidence
