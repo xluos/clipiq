@@ -15,13 +15,6 @@ const STAGES = [
   "生成最终报告",
 ];
 
-type LogEntry = {
-  ts: number;        // ms since start
-  stage: string;
-  message: string;
-  tone: "info" | "ok" | "warn";
-};
-
 function formatElapsed(ms: number) {
   const s = Math.max(0, Math.floor(ms / 1000));
   const m = Math.floor(s / 60);
@@ -39,39 +32,61 @@ function formatEta(remainingMs: number) {
   return `≈ ${s}s`;
 }
 
-function detectTone(stageLabel: string, message: string): "info" | "ok" | "warn" {
-  const blob = `${stageLabel} ${message}`.toLowerCase();
-  if (/failed|error|skip|warn|超时/.test(blob)) return "warn";
-  if (/done|complete|ok|完成/.test(blob)) return "ok";
-  return "info";
-}
-
 export function ProgressScreen() {
   const {
     setCurrentScreen, activeProjectId, projects, setProjects,
     providers, activeVideoProviderId, activeAudioProviderId,
-    setNodesForProject, setReportForProject,
+    setNodesForProject, setReportForProject, progressByProject, logsByProject,
   } = useApp();
 
-  const [progress, setProgress] = useState(0);
-  const [stageLabel, setStageLabel] = useState(STAGES[0]);
-  const [detail, setDetail] = useState("");
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const project = projects.find(p => p.id === activeProjectId);
+
+  // 全局快照: AppContext 一直在订阅 analysis:progress, 这里读最新值做初始 / 切换 reset。
+  // 不再依赖组件 mount 后才订阅, 避免"打开屏 → 看到 0% 读取视频信息 → 几百 ms 后突跳到真实阶段"。
+  const liveSnapshot = project ? progressByProject[project.id] : undefined;
+  // 实时日志也是按 projectId 全局存的, 切 project / 退出再进都能跟着 project 走。
+  const logs = (project && logsByProject[project.id]) || [];
+
+  const [progress, setProgress] = useState(liveSnapshot?.progress ?? 0);
+  const [stageLabel, setStageLabel] = useState(liveSnapshot?.stage ?? STAGES[0]);
+  const [detail, setDetail] = useState(liveSnapshot?.message ?? "");
   const [error, setError] = useState("");
   const [isCancelling, setIsCancelling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
 
-  const startedAt = useRef<number>(Date.now());
+  // 分析启动时间从 project.analysisStartedAt 读 (持久化到 SQLite, 退出再进 / 重启都能恢复)。
+  // 老数据没有该字段 → fallback 到 mount 时刻; 完成后字段保留, Workspace 能看历史耗时。
+  const startedAt = useMemo(() => {
+    if (project?.analysisStartedAt) return new Date(project.analysisStartedAt).getTime();
+    return Date.now();
+  }, [project?.analysisStartedAt]);
+
   const hasStarted = useRef(false);
   const cancelledRef = useRef(false);
-  const lastLoggedStage = useRef<string>("");
   // attach 模式 = renderer 不是发起者,而是关窗后重开 / 切回 ProgressScreen,挂到已经在跑的分析上。
   // 完成 / 失败的"兜底处理"只在 attach 模式触发,避免跟 kickoff 路径的 await 结果重复。
   const inAttachMode = useRef(false);
   const completionHandledRef = useRef(false);
   const failureHandledRef = useRef(false);
 
-  const project = projects.find(p => p.id === activeProjectId);
+  // 切换 project 时 reset 本地 useState (progress/stage/detail/error/refs), 用全局快照
+  // 初始化。logs 不在这里清 — 它已经按 projectId 存在 AppContext.logsByProject 里,
+  // 切回同一个 project 自动恢复, 切到另一个 project 自然显示另一份。
+  useEffect(() => {
+    if (!project) return;
+    const snap = progressByProject[project.id];
+    setProgress(snap?.progress ?? 0);
+    setStageLabel(snap?.stage ?? STAGES[0]);
+    setDetail(snap?.message ?? "");
+    setError("");
+    setIsCancelling(false);
+    completionHandledRef.current = false;
+    failureHandledRef.current = false;
+    hasStarted.current = false;
+    cancelledRef.current = false;
+    inAttachMode.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id]);
 
   useEffect(() => {
     if (progress >= 100) return;
@@ -81,8 +96,8 @@ export function ProgressScreen() {
 
   const elapsedMs = useMemo(() => {
     void progress; void nowTick;
-    return Date.now() - startedAt.current;
-  }, [progress, nowTick]);
+    return Date.now() - startedAt;
+  }, [progress, nowTick, startedAt]);
 
   const etaMs = useMemo(() => {
     if (progress < 5 || elapsedMs < 1500) return null;
@@ -95,17 +110,6 @@ export function ProgressScreen() {
   const currentStageIndex = project?.status === "downloading"
     ? -1
     : Math.min(STAGES.length - 1, Math.floor((progress / 100) * STAGES.length));
-
-  const recordLog = (stage: string, message: string) => {
-    const tone = detectTone(stage, message);
-    const key = `${stage}|${message}`;
-    if (key === lastLoggedStage.current) return;
-    lastLoggedStage.current = key;
-    setLogs(prev => {
-      const next = [{ ts: Date.now() - startedAt.current, stage, message, tone }, ...prev];
-      return next.slice(0, 30);
-    });
-  };
 
   const handleCancel = async () => {
     if (!project || cancelledRef.current) {
@@ -138,7 +142,7 @@ export function ProgressScreen() {
       setProgress(event.progress);
       setStageLabel(event.stage);
       setDetail(event.message || "");
-      recordLog(event.stage, event.message || "");
+      // 日志由 AppContext 全局订阅统一写到 logsByProject, 这里不再 recordLog 避免重复。
 
       // attach 模式下,完成 / 失败要走广播兜底——kickoff 路径已通过 await 结果自己处理。
       if (!inAttachMode.current || !window.videoAnalyzer) return;
@@ -164,7 +168,6 @@ export function ProgressScreen() {
         failureHandledRef.current = true;
         const msg = event.message || "分析失败";
         setError(msg);
-        recordLog("失败", msg);
         setProjects(prev => prev.map(p => p.id === project.id
           ? { ...p, status: "failed", updatedAt: new Date().toISOString() }
           : p));
@@ -192,7 +195,8 @@ export function ProgressScreen() {
     // 从 downloading 切到 analyzing 时,把进度重置回 0,避免下载条 100% 直接接到分析条 0%。
     setProgress(0);
     setStageLabel(STAGES[0]);
-    startedAt.current = Date.now();
+    // startedAt 不在这里重置 — 它从 project.analysisStartedAt 派生 (持久化), HomeScreen
+    // 创建 downloading 项目时就写了, 整段 download → analyze 共用同一起点。
 
     if (!window.videoAnalyzer) {
       // Browser preview: simulate progress
@@ -201,13 +205,14 @@ export function ProgressScreen() {
       const intervalTime = 100;
       const progressStep = 100 / (totalTime / intervalTime);
 
+      // 浏览器预览模式 (没有 window.videoAnalyzer) 不经 main 进程 broadcast,
+      // 因此不写 logsByProject —— 实时日志区域会留空, 这是预期 (mock 流程无真实分析)。
       const timer = setInterval(() => {
         currentProgress += progressStep;
         if (currentProgress >= 100) {
           clearInterval(timer);
           setProgress(100);
           setStageLabel(STAGES[STAGES.length - 1]);
-          recordLog(STAGES[STAGES.length - 1], "完成");
           setNodesForProject(project.id, generateMockNodes(project.durationSec));
           setReportForProject(project.id, generateMockReport());
           setProjects(prev => prev.map(p => p.id === project.id ? { ...p, status: "completed", updatedAt: new Date().toISOString() } : p));
@@ -217,7 +222,6 @@ export function ProgressScreen() {
           const nextIndex = Math.min(STAGES.length - 1, Math.floor((currentProgress / 100) * STAGES.length));
           const label = STAGES[nextIndex];
           setStageLabel(label);
-          recordLog(label, "");
         }
       }, intervalTime);
 
@@ -235,7 +239,7 @@ export function ProgressScreen() {
       setProgress(snap.progress);
       setStageLabel(snap.stage);
       setDetail(snap.message || "");
-      recordLog(snap.stage, snap.message || "");
+      // 这是 main 端的 lastProgress 一次性回灌, 真实事件流走 AppContext 全局订阅 → logsByProject。
     };
 
     const launchOrAttach = async () => {
@@ -259,14 +263,13 @@ export function ProgressScreen() {
         setProjects(prev => prev.map(p => p.id === project.id ? result.project : p));
         setProgress(100);
         setStageLabel("完成");
-        recordLog("完成", "全部步骤已结束");
+        // 完成 / 失败 log 由 main 进程的 "完成" event 走 AppContext 统一记录, 不在这里重复。
         window.setTimeout(() => setCurrentScreen("workspace"), 1800);
       } catch (err) {
         if (cancelledRef.current) return;
         const message = err instanceof Error ? err.message : String(err);
         if (/cancel|取消/i.test(message)) return;
         setError(message);
-        recordLog("失败", message);
         setProjects(prev => prev.map(p => p.id === project.id ? { ...p, status: "failed", updatedAt: new Date().toISOString() } : p));
       }
     };
@@ -400,7 +403,7 @@ export function ProgressScreen() {
             <div className="space-y-0.5 max-h-[140px] overflow-y-auto">
               {logs.map((log, idx) => (
                 <div key={idx} className="flex gap-3 font-mono text-[11.5px] leading-relaxed">
-                  <span className="text-slate-400 shrink-0 tabular-nums w-12">{formatElapsed(log.ts)}</span>
+                  <span className="text-slate-400 shrink-0 tabular-nums w-12">{formatElapsed(log.absoluteMs - startedAt)}</span>
                   <span className={
                     log.tone === "ok" ? "text-emerald-600 dark:text-emerald-400" :
                     log.tone === "warn" ? "text-amber-600 dark:text-amber-400" :

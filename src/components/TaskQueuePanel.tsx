@@ -1,10 +1,12 @@
 // 全局任务队列面板 — sidebar 任务队列按钮浮出。
-// 数据源: AppContext 里的 projects state + analysis:progress 事件聚合的最新进度。
+// 数据源: AppContext.projects + AppContext.progressByProject (全局只挂一次的
+// analysis:progress 订阅, 见 AppContext.tsx)。drawer 打开时立即拿到最新进度,
+// 不再因为组件 mount 才订阅而错过之前的 events。
 // 单击任务行跳到对应项目的 progress / workspace 屏。
 
 import { type FunctionComponent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../AppContext";
-import type { AnalysisProgressEvent, Project } from "../types";
+import type { Project } from "../types";
 import { Cpu, X, ChevronRight, AlertTriangle, UserSquare2 } from "lucide-react";
 
 type RunningTask = {
@@ -24,16 +26,7 @@ type RunningAccountFetch = {
 };
 
 export function useTaskQueueData() {
-  const { projects, accounts, accountFetchUi } = useApp();
-  const [progressByProject, setProgressByProject] = useState<Record<string, AnalysisProgressEvent>>({});
-
-  useEffect(() => {
-    if (!window.videoAnalyzer?.onAnalysisProgress) return;
-    const unsub = window.videoAnalyzer.onAnalysisProgress((evt) => {
-      setProgressByProject((prev) => ({ ...prev, [evt.projectId]: evt }));
-    });
-    return unsub;
-  }, []);
+  const { projects, accounts, accountFetchUi, progressByProject } = useApp();
 
   const { running, queued, failed, accountFetches } = useMemo(() => {
     const running: RunningTask[] = [];
@@ -263,17 +256,9 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
           <div className="px-4 py-8 text-center">
             <p className="text-[12.5px] text-slate-500 dark:text-slate-400 leading-relaxed">
               当前没有任务在运行
-              <br />
-              <span className="text-[10.5px] font-mono uppercase tracking-wider mt-2 inline-block">视频下载 · 分析 / 账号拉取 都会出现在这里</span>
             </p>
           </div>
         )}
-      </div>
-
-      <div className="px-4 py-2 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40">
-        <span className="text-[10.5px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400">
-          全局任务面板 · 三个模块共享
-        </span>
       </div>
     </div>
   );

@@ -316,6 +316,9 @@ export function HomeScreen() {
         analysisOptions,
         createdAt: now,
         updatedAt: now,
+        // 整条 download → analyze 流水线从这里起算; 下载完成切 analyzing 时不再覆盖,
+        // 这样 ProgressScreen 的"已用"覆盖整段耗时, 退出再进也能恢复。
+        analysisStartedAt: now,
       }, ...prev]);
       setActiveProjectId(handle.projectId);
       setStatus("idle");

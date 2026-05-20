@@ -93,11 +93,12 @@ const MERGE_SCHEMA = {
 
 // 走 openai-client 统一入口, 按 provider.endpointType 自动分流 chat/completions vs responses。
 // medium_text 槽位的 provider 已经被 shapeEffectiveProvider 处理过 baseUrl/apiKeyRef/model/endpointType。
+// 返回 { parsed, usage, model } —— 上游需要按 batch 统计 token 消耗。
 async function callMediumText(provider, systemText, userText, signal) {
   if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
     throw new Error("medium_text provider 配置不全 (baseUrl/apiKeyRef/model 缺失)");
   }
-  const parsed = await callJsonCompletion(provider, {
+  const result = await callJsonCompletion(provider, {
     systemText,
     userText,
     temperature: 0.2,
@@ -105,12 +106,12 @@ async function callMediumText(provider, systemText, userText, signal) {
     maxOutputTokens: provider.maxOutputTokens ?? 8000,
     signal,
   });
-  if (!parsed) {
+  if (!result.parsed) {
     throw new Error(
       `medium_text 解析失败 (raw text 为空或不是合法 JSON; 走的 endpoint=${provider.endpointType})`,
     );
   }
-  return parsed;
+  return result;
 }
 
 // 生成兜底 shotDescription (LLM 失败 / 单批崩了时, 不让管线断)
@@ -159,6 +160,9 @@ async function mergeShots({ shots, provider, batchSize, handle, onProgress, cach
   let consecutiveFail = 0;
   let cacheHits = 0;
   let givenUp = false; // 连续失败 N 次 → 视为 provider 不可用, 余下 batch 直接 fallback (节省长视频几分钟空转)
+  // 按 batch 聚合 token 消耗 (caller 按"阶段"维度记总账, 这里只汇总)
+  const usageAgg = { promptTokens: 0, completionTokens: 0, totalTokens: 0, callCount: 0 };
+  let echoedModel = null;
   for (let i = 0; i < shots.length; i += size) {
     if (handle?.cancelled) throw new Error("cancelled");
     batchIndex += 1;
@@ -186,7 +190,17 @@ async function mergeShots({ shots, provider, batchSize, handle, onProgress, cach
     }
     const { system, user } = buildMergePrompt(batch);
     try {
-      const parsed = await callMediumText(provider, system, user, handle?.abortController?.signal);
+      const callResult = await callMediumText(provider, system, user, handle?.abortController?.signal);
+      const parsed = callResult.parsed;
+      if (callResult.usage) {
+        usageAgg.promptTokens += callResult.usage.promptTokens;
+        usageAgg.completionTokens += callResult.usage.completionTokens;
+        usageAgg.totalTokens += callResult.usage.totalTokens;
+        usageAgg.callCount += 1;
+      } else {
+        usageAgg.callCount += 1;
+      }
+      if (callResult.model) echoedModel = callResult.model;
       const out = Array.isArray(parsed?.shots) ? parsed.shots : [];
       if (out.length === 0) {
         // parsed 拿到了 JSON 但没 shots 字段, 视为本批次失败
@@ -243,6 +257,12 @@ async function mergeShots({ shots, provider, batchSize, handle, onProgress, cach
   if (typeof result.cacheHits === "undefined") {
     Object.defineProperty(result, "cacheHits", { value: cacheHits, enumerable: false });
   }
+  // 把 batch 维度的 usage 总和挂在数组上, 主流程按阶段记账 (不影响下标遍历)
+  Object.defineProperty(result, "usage", {
+    value: usageAgg.callCount > 0 ? usageAgg : null,
+    enumerable: false,
+  });
+  Object.defineProperty(result, "echoedModel", { value: echoedModel, enumerable: false });
   return result;
 }
 

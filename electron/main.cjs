@@ -71,6 +71,80 @@ async function runWithCache(scope, key, run, meta = {}) {
   return output;
 }
 
+// runWithCache 的"带缓存标记"变体: 返回 { payload, fromCache }, 让上游分支记账时
+// 区分"本次 LLM 真的跑了 → 记 tokens" 与 "缓存命中 → 只记一次 cacheHit"。
+async function runWithCacheTraced(scope, key, run, meta = {}) {
+  let invoked = false;
+  const payload = await runWithCache(scope, key, async () => {
+    invoked = true;
+    return run();
+  }, meta);
+  return { payload, fromCache: !invoked };
+}
+
+// Token 账本: 按 (stage, providerId, model) 维度聚合每次分析消耗的 LLM token。
+// - record: 单次调用 / 单 batch 调用完成后投递 usage
+// - snapshot: 持久化前快照, 写进 report.tokenUsage 和 token-usage.json
+// cache 命中只 +cacheHits, 不加 token; 累计调用次数走 callCount。
+function createTokenLedger() {
+  const buckets = new Map();
+  const keyOf = (stage, providerId, model) => `${stage}|${providerId || ""}|${model || ""}`;
+  const ensureBucket = (stage, providerId, providerName, model, source) => {
+    const k = keyOf(stage, providerId, model);
+    let b = buckets.get(k);
+    if (!b) {
+      b = {
+        stage,
+        providerId: providerId || null,
+        providerName: providerName || null,
+        model: model || null,
+        source: source || "remote",
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        callCount: 0,
+        cacheHits: 0,
+      };
+      buckets.set(k, b);
+    }
+    return b;
+  };
+  return {
+    record({ stage, provider, model, source, usage, callCount = 1 }) {
+      if (!stage) return;
+      const m = model || provider?.model || null;
+      const src = source || (provider?.source ?? "remote");
+      const b = ensureBucket(stage, provider?.id, provider?.name, m, src);
+      if (usage) {
+        b.promptTokens += Number(usage.promptTokens) || 0;
+        b.completionTokens += Number(usage.completionTokens) || 0;
+        b.totalTokens += Number(usage.totalTokens) || 0;
+      }
+      b.callCount += callCount;
+    },
+    cacheHit({ stage, provider, model, source }) {
+      if (!stage) return;
+      const m = model || provider?.model || null;
+      const src = source || (provider?.source ?? "remote");
+      const b = ensureBucket(stage, provider?.id, provider?.name, m, src);
+      b.cacheHits += 1;
+    },
+    snapshot() {
+      const stages = [...buckets.values()];
+      const totals = stages.reduce(
+        (acc, s) => {
+          acc.totalPromptTokens += s.promptTokens;
+          acc.totalCompletionTokens += s.completionTokens;
+          acc.totalTokens += s.totalTokens;
+          return acc;
+        },
+        { totalPromptTokens: 0, totalCompletionTokens: 0, totalTokens: 0 },
+      );
+      return { stages, ...totals };
+    },
+  };
+}
+
 // 给 prefilter.tagFrames 用的逐帧 cache injector
 function makePrefilterCache(modelKey) {
   if (!cacheStore.isConfigured()) return null;
@@ -1425,7 +1499,7 @@ async function generateProjectTitle(provider, sources = {}) {
   lines.push("请综合上面信息, 输出 JSON: { \"title\": \"...\" }");
 
   try {
-    const parsed = await openaiClient.callJsonCompletion(provider, {
+    const result = await openaiClient.callJsonCompletion(provider, {
       systemText:
         "你是视频拉片助理。我会给你一段视频的若干信息来源 (用户粘贴的分享文案 / 平台 metadata / 分析阶段总结), " +
         "请提炼一个 6-14 个汉字的简洁标题, 用作项目卡片显示。\n" +
@@ -1440,9 +1514,9 @@ async function generateProjectTitle(provider, sources = {}) {
       maxTokens: 300,
       maxOutputTokens: 300,
     });
-    const t = String(parsed?.title || "").trim();
+    const t = String(result.parsed?.title || "").trim();
     if (!t || t.length > 30) return null;
-    return t;
+    return { title: t, usage: result.usage, echoedModel: result.model };
   } catch (err) {
     console.warn("[title-gen] 失败:", err.message || err);
     return null;
@@ -3247,16 +3321,22 @@ async function runSinglePassAnalysis({
   }
 
   const useResponses = effectiveProvider.endpointType === "openai_responses";
-  const parsed = useResponses
+  const callResult = useResponses
     ? await callOpenAIResponses(effectiveProvider, systemText, userText, imageDataUrls, handle)
     : await callOpenAIChatCompletions(effectiveProvider, systemText, userText, imageDataUrls, handle);
+  const parsed = callResult.parsed;
 
   if (!parsed || (!Array.isArray(parsed.nodes) && !parsed.report)) {
     throw new Error(
       "模型未返回可解析的 JSON (响应为空或非 JSON)。reasoning 模型可能把内容放在 reasoning_content 字段, 当前 client 不解析; 或模型超 ctx / 没有视觉能力 / 输出被截断。",
     );
   }
-  return { ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, effectiveProvider, methodology), usedModel: true };
+  return {
+    ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, effectiveProvider, methodology),
+    usedModel: true,
+    usage: callResult.usage,
+    echoedModel: callResult.model,
+  };
 }
 
 // 跑单个 chunk: 只产 nodes, 不带 methodology
@@ -3268,9 +3348,10 @@ async function runChunkPass({ effectiveProvider, project, methodology, globalCon
     imageDataUrls.push(`data:image/jpeg;base64,${base64}`);
   }
   const useResponses = effectiveProvider.endpointType === "openai_responses";
-  const parsed = useResponses
+  const callResult = useResponses
     ? await callOpenAIResponses(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle)
     : await callOpenAIChatCompletions(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle);
+  const parsed = callResult.parsed;
   if (!parsed || !Array.isArray(parsed.nodes)) {
     throw new Error(`chunk ${chunk.index + 1} 返回不是合法 JSON 或缺少 nodes 字段`);
   }
@@ -3322,17 +3403,21 @@ async function runAuditPass({ effectiveProvider, project, methodology, globalCon
   console.log(`[analyze:main] audit pass prompt=${promptTokens}tok budget=${budget} compactNodes=${compactNodes} attempts=${attempt}`);
 
   const useResponses = effectiveProvider.endpointType === "openai_responses";
-  const parsed = useResponses
+  const callResult = useResponses
     ? await callOpenAIResponses(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle)
     : await callOpenAIChatCompletions(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle);
+  const parsed = callResult.parsed;
   if (!parsed) {
     throw new Error("audit pass 返回不是合法 JSON");
   }
-  return parsed; // { nodeTags?: [...], report?: {...} }
+  // audit usage / echoedModel 一并带回, 给 mergeChunkedResult 拼到最终 result 里
+  return { parsed, usage: callResult.usage, echoedModel: callResult.model };
 }
 
 // 把 chunk pass 出来的 nodes + audit pass 的 nodeTags 和 report 合并成最终 result。
+// auditResult 是 runAuditPass 返回的 { parsed, usage, echoedModel }
 function mergeChunkedResult({ chunkNodes, auditResult, project, effectiveProvider, methodology, fallbackNodes, fallbackReport }) {
+  const auditParsed = auditResult?.parsed || null;
   // 1) chunkNodes 已经按时间排序, 重新编号 id
   const allNodes = [...chunkNodes].sort((a, b) => (a.startSec || 0) - (b.startSec || 0));
   allNodes.forEach((n, i) => {
@@ -3342,8 +3427,8 @@ function mergeChunkedResult({ chunkNodes, auditResult, project, effectiveProvide
   // 2) 把 audit 的 methodologyTags 按"原 chunk-level id 或时间近邻" 合回去
   const tagsByOriginalId = new Map();
   const tagsByTime = []; // fallback: 时间最近匹配
-  if (Array.isArray(auditResult?.nodeTags)) {
-    for (const nt of auditResult.nodeTags) {
+  if (Array.isArray(auditParsed?.nodeTags)) {
+    for (const nt of auditParsed.nodeTags) {
       if (!nt?.id) continue;
       tagsByOriginalId.set(nt.id, nt.methodologyTags || []);
       tagsByTime.push(nt);
@@ -3363,11 +3448,14 @@ function mergeChunkedResult({ chunkNodes, auditResult, project, effectiveProvide
   // 4) 拼最终 payload, 跑现有的 normalizeModelResult 把字段规整
   const payload = {
     nodes: allNodes,
-    report: auditResult?.report || {},
+    report: auditParsed?.report || {},
   };
   return {
     ...normalizeModelResult(payload, fallbackNodes, fallbackReport, project, effectiveProvider, methodology),
     usedModel: true,
+    // chunked 模式 usage 只反映 audit 阶段(chunk 阶段每段 usage 独立, 调用方暂不需要逐段)
+    usage: auditResult?.usage || null,
+    echoedModel: auditResult?.echoedModel || null,
   };
 }
 
@@ -3547,9 +3635,10 @@ async function detectGenreLightweight(provider, project, scenes, transcript, han
 
   try {
     const useResponses = provider.endpointType === "openai_responses";
-    const parsed = useResponses
+    const callResult = useResponses
       ? await callOpenAIResponses(provider, systemText, userText, [], handle)
       : await callOpenAIChatCompletions(provider, systemText, userText, [], handle);
+    const parsed = callResult.parsed;
     const genre = String(parsed?.detectedGenre || "").trim();
     if (!ALLOWED_GENRES.has(genre)) return null;
     const conf = Number(parsed?.genreConfidence);
@@ -3557,6 +3646,8 @@ async function detectGenreLightweight(provider, project, scenes, transcript, han
       detectedGenre: genre,
       genreConfidence: Number.isFinite(conf) ? Math.max(0, Math.min(1, conf)) : 0.5,
       reasoning: String(parsed?.reasoning || "").slice(0, 500),
+      usage: callResult.usage,
+      echoedModel: callResult.model,
     };
   } catch (error) {
     if (handle?.cancelled) throw error;
@@ -3721,6 +3812,13 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   };
   handle.timings = timings;
 
+  // Token 账本: 每个 LLM 阶段调用完后 record(usage), cache 命中走 cacheHit(); 收尾时
+  // snapshot 进 report.tokenUsage 持久化。各阶段 stage key (用机器名而非中文 send stage,
+  // 便于 renderer/外部脚本聚合): "prefilter" | "shot-merger" | "summarizer" | "detect-genre"
+  // | "main-analysis" | "danmaku-emotion" | "title-gen"。
+  const tokenLedger = createTokenLedger();
+  handle.tokenLedger = tokenLedger;
+
   const send = (progress, stage, message) => {
     if (handle.cancelled) return;
     if (stage !== currentStage) {
@@ -3741,12 +3839,12 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     if (handle.cancelled || !handle.lastProgress) return;
     const idle = Date.now() - (handle.lastProgressAt || 0);
     if (idle < 1500) return;
-    const elapsed = Math.floor(idle / 1000);
+    const elapsed = formatDuration(idle);
     const base = handle.lastProgress;
     const baseMsg = base.message || "";
-    // 已经带过 "已等待 Ns" 后缀,只更新数字
-    const stripped = baseMsg.replace(/\s*·?\s*已等待 \d+s$/, "");
-    const msg = stripped ? `${stripped} · 已等待 ${elapsed}s` : `已等待 ${elapsed}s`;
+    // 已经带过 "已等待 ..." 后缀,只更新时长 (匹配 23s / 23.6s / 3分05秒 三种格式)
+    const stripped = baseMsg.replace(/\s*·?\s*已等待 (?:\d+(?:\.\d+)?s|\d+ms|\d+分\d+秒)$/, "");
+    const msg = stripped ? `${stripped} · 已等待 ${elapsed}` : `已等待 ${elapsed}`;
     broadcastToWindows("analysis:progress", { ...base, message: msg });
   }, 2000);
   handle.heartbeat = heartbeat;
@@ -3884,6 +3982,34 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           kept: refined.kept.length,
           dropped: refined.dropped.length,
         };
+        // 记 token: prefilter 走本地 llama-server, 单帧 usage 已在 prefilter.cjs 聚合成 totalTokens。
+        // prompt/completion 拆分拿不到 (逐帧调用没汇总), 整体放 totalTokens 字段。
+        // cacheHits 数也一并记上, 让上层看出本次跑了多少真实推理。
+        const callCount = Math.max(0, candidateFrames.length - tagResult.cacheHits);
+        if (callCount > 0) {
+          tokenLedger.record({
+            stage: "prefilter",
+            provider: {
+              id: "local-llama",
+              name: "本地推理",
+              source: "local_llama",
+            },
+            model: localStatus.modelKey,
+            source: "local_llama",
+            usage: tagResult.totalTokens > 0
+              ? { promptTokens: 0, completionTokens: 0, totalTokens: tagResult.totalTokens }
+              : null,
+            callCount,
+          });
+        }
+        for (let h = 0; h < tagResult.cacheHits; h++) {
+          tokenLedger.cacheHit({
+            stage: "prefilter",
+            provider: { id: "local-llama", name: "本地推理", source: "local_llama" },
+            model: localStatus.modelKey,
+            source: "local_llama",
+          });
+        }
         send(
           54,
           "精挑画面",
@@ -4003,9 +4129,29 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             ensureNotCancelled(handle);
             const pct = 67 + Math.round((done / total) * 4);
             const tail = mode === "cache-hit" ? " · 命中缓存" : "";
-            send(pct, "镜头合并", `已合并 ${done}/${total} (batch ${batchIndex}, 平均 ${Math.round((Date.now()-mergeStart)/done)}ms/镜头)${tail}`);
+            send(pct, "镜头合并", `已合并 ${done}/${total} (batch ${batchIndex}, 平均 ${formatDuration((Date.now()-mergeStart)/done)}/镜头)${tail}`);
           },
         });
+        if (mergeResults.usage && mergeResults.usage.callCount > 0) {
+          tokenLedger.record({
+            stage: "shot-merger",
+            provider: mediumTextProvider,
+            model: mergeResults.echoedModel || mediumTextProvider.model,
+            usage: {
+              promptTokens: mergeResults.usage.promptTokens,
+              completionTokens: mergeResults.usage.completionTokens,
+              totalTokens: mergeResults.usage.totalTokens,
+            },
+            callCount: mergeResults.usage.callCount,
+          });
+        }
+        for (let h = 0; h < (mergeResults.cacheHits || 0); h++) {
+          tokenLedger.cacheHit({
+            stage: "shot-merger",
+            provider: mediumTextProvider,
+            model: mediumTextProvider.model,
+          });
+        }
         // 写回 shots: shotDescription + representativeFrameIndex
         for (let i = 0; i < shots.length; i++) {
           shots[i].shotDescription = mergeResults[i]?.shotDescription || "";
@@ -4087,7 +4233,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             framesInShot: framesCtx.length,
           };
         });
-        send(71, "镜头合并完成", `${shots.length} 个镜头描述就绪 · ${((Date.now()-mergeStart)/1000).toFixed(1)}s`);
+        send(71, "镜头合并完成", `${shots.length} 个镜头描述就绪 · ${formatDuration(Date.now()-mergeStart)}`);
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
         send(71, "镜头合并失败", `${error.message || error}。降级到旧的逐帧路径。`);
@@ -4120,7 +4266,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
                 version: CACHE_VERSIONS.summarizer,
               })
             : null;
-          globalContext = await runWithCache("summarizer", summarizerCacheKey, () => summarizer.summarizeVideo({
+          const summarizerTraced = await runWithCacheTraced("summarizer", summarizerCacheKey, () => summarizer.summarizeVideo({
             shotContexts,
             transcript,
             shotStats: stats,
@@ -4130,6 +4276,21 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             allowedGenres: [...ALLOWED_GENRES],
             handle,
           }), { model: mediumTextProvider?.model });
+          globalContext = summarizerTraced.payload;
+          if (summarizerTraced.fromCache) {
+            tokenLedger.cacheHit({
+              stage: "summarizer",
+              provider: mediumTextProvider,
+              model: mediumTextProvider.model,
+            });
+          } else if (globalContext?.usage) {
+            tokenLedger.record({
+              stage: "summarizer",
+              provider: mediumTextProvider,
+              model: globalContext.echoedModel || mediumTextProvider.model,
+              usage: globalContext.usage,
+            });
+          }
           if (globalContext?.detectedGenre) {
             send(74, "全局聚合完成", `判定 ${globalContext.detectedGenre} (${Math.round((globalContext.genreConfidence||0)*100)}%) · 摘要 ${globalContext.globalSummary?.length || 0} 字 · ${((Date.now()-sumStart)/1000).toFixed(1)}s`);
           } else {
@@ -4174,9 +4335,24 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
                 version: CACHE_VERSIONS.detectGenre,
               })
             : null;
-          const detected = await runWithCache("detect-genre", detectGenreCacheKey,
+          const detectTraced = await runWithCacheTraced("detect-genre", detectGenreCacheKey,
             () => detectGenreLightweight(genreProvider, projectMeta, scenes, transcript, handle),
             { model: genreProvider?.model });
+          const detected = detectTraced.payload;
+          if (detectTraced.fromCache) {
+            tokenLedger.cacheHit({
+              stage: "detect-genre",
+              provider: genreProvider,
+              model: genreProvider?.model,
+            });
+          } else if (detected?.usage) {
+            tokenLedger.record({
+              stage: "detect-genre",
+              provider: genreProvider,
+              model: detected.echoedModel || genreProvider?.model,
+              usage: detected.usage,
+            });
+          }
           if (detected?.detectedGenre) {
             effectiveOptions = { ...options, detectedGenre: detected.detectedGenre };
             send(77, "识别视频类型完成", `判定为 ${detected.detectedGenre}（置信度 ${(detected.genreConfidence * 100).toFixed(0)}%，耗时 ${Math.round((Date.now() - detectStartedAt) / 1000)}s）。`);
@@ -4223,7 +4399,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             }
           } catch { /* 算 key 失败 → 不缓存 */ }
         }
-        const modelResult = await runWithCache("main-analysis", mainAnalysisCacheKey,
+        const mainAnalysisTraced = await runWithCacheTraced("main-analysis", mainAnalysisCacheKey,
           () => callOpenAICompatible(
             provider, projectMeta, frames, transcript, scenes, fallbackNodes, fallbackReport,
             effectiveOptions, handle,
@@ -4242,6 +4418,21 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             },
           ),
           { model: provider?.model });
+        const modelResult = mainAnalysisTraced.payload;
+        if (mainAnalysisTraced.fromCache) {
+          tokenLedger.cacheHit({
+            stage: "main-analysis",
+            provider,
+            model: provider?.model,
+          });
+        } else if (modelResult?.usage) {
+          tokenLedger.record({
+            stage: "main-analysis",
+            provider,
+            model: modelResult.echoedModel || provider?.model,
+            usage: modelResult.usage,
+          });
+        }
         nodes = modelResult.nodes;
         // 把金字塔中间产物 (代表帧 / 帧 captions / 字幕段) 挂到节点上, 让 UI 能渲染镜头级 evidence
         if (Array.isArray(shots) && shots.length > 0) {
@@ -4331,6 +4522,19 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           });
           windows = agg.windows;
           danmakuSummary = agg.summary;
+          if (agg.usage && agg.usage.callCount > 0) {
+            tokenLedger.record({
+              stage: "danmaku-emotion",
+              provider: mediumTextProvider,
+              model: agg.echoedModel || mediumTextProvider.model,
+              usage: {
+                promptTokens: agg.usage.promptTokens,
+                completionTokens: agg.usage.completionTokens,
+                totalTokens: agg.usage.totalTokens,
+              },
+              callCount: agg.usage.callCount,
+            });
+          }
           send(89, "弹幕情绪聚合完成", `${windows.filter((w) => w.danmakuCount > 0).length} 个时间桶 · ${((Date.now() - aggStart) / 1000).toFixed(1)}s`);
         }
 
@@ -4384,9 +4588,18 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     let generatedTitle = null;
     if (!project.titleAutoGenerated && globalContext?.globalSummary && mediumTextProvider?.apiKeyRef) {
       try {
-        generatedTitle = await generateProjectTitle(mediumTextProvider, {
+        const titleResult = await generateProjectTitle(mediumTextProvider, {
           summary: globalContext.globalSummary,
         });
+        generatedTitle = titleResult?.title || null;
+        if (titleResult?.usage) {
+          tokenLedger.record({
+            stage: "title-gen",
+            provider: mediumTextProvider,
+            model: titleResult.echoedModel || mediumTextProvider.model,
+            usage: titleResult.usage,
+          });
+        }
       } catch (err) {
         console.warn("[analyze] 标题生成失败:", err?.message || err);
       }
@@ -4424,9 +4637,11 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         message: `总耗时 ${(totalDurationMs / 1000).toFixed(1)}s${topLabel}`,
       });
     }
-    report = { ...report, timings: finalTimings, totalDurationMs };
+    const tokenUsage = tokenLedger.snapshot();
+    report = { ...report, timings: finalTimings, totalDurationMs, tokenUsage };
     await writeJson(path.join(projectDir, "analysis-result.json"), { project: updatedProject, nodes, report });
     await writeJson(path.join(projectDir, "timings.json"), { totalDurationMs, timings: finalTimings });
+    await writeJson(path.join(projectDir, "token-usage.json"), tokenUsage);
     // main 端直接落盘 SQLite,避免依赖 renderer 走 ProgressScreen 才能同步。
     // 与 renderer 端 setNodesForProject/setReportForProject 的 IPC 写是幂等的(INSERT OR UPDATE)。
     try {
@@ -4457,6 +4672,20 @@ function formatTime(sec) {
   const m = Math.floor(safe / 60);
   const s = Math.floor(safe % 60);
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// 进度消息里"耗时/平均/已等待"的统一格式化:
+// - 小于 1s → "950ms" (毫秒, 用于很快的批次)
+// - 小于 60s → "23.6s" (一位小数, 跟现有 (ms/1000).toFixed(1) 风格一致)
+// - 大于等于 60s → "3分05秒" (中文 m分ss秒, 比 m:ss 更易读)
+function formatDuration(ms) {
+  const n = Math.max(0, Number(ms) || 0);
+  if (n < 1000) return `${Math.round(n)}ms`;
+  if (n < 60_000) return `${(n / 1000).toFixed(1)}s`;
+  const totalSec = Math.round(n / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}分${String(s).padStart(2, "0")}秒`;
 }
 
 function exportMarkdown(project, nodes, report, provider) {
@@ -5834,7 +6063,7 @@ app.whenReady().then(async () => {
     lines.push(' "structure":{"summary":"结构模板 (1-2 句)","sampleVideoIds":[]},');
     lines.push(' "visual":{"summary":"视觉风格 (1-2 句)","sampleVideoIds":[]}}');
     try {
-      const parsed = await openaiClient.callJsonCompletion(provider, {
+      const result = await openaiClient.callJsonCompletion(provider, {
         systemText:
           "你是视频方法论分析师。给定一位 UP 主的若干视频分析摘要,请跨视频汇总出可复用的方法论 manifest。\n" +
           "规则:\n" +
@@ -5846,6 +6075,7 @@ app.whenReady().then(async () => {
         maxTokens: 800,
         maxOutputTokens: 800,
       });
+      const parsed = result.parsed;
       const methodology = {
         hooks: parsed?.hooks?.summary ? { summary: String(parsed.hooks.summary), sampleVideoIds: [] } : undefined,
         pacing: parsed?.pacing?.summary ? { summary: String(parsed.pacing.summary), sampleVideoIds: [] } : undefined,
@@ -5885,7 +6115,7 @@ app.whenReady().then(async () => {
     lines.push("请输出 JSON,steps 数组按时间顺序排列,总时长加起来等于目标时长:");
     lines.push('{"steps":[{"index":1,"label":"开场钩子 · 0:00-0:30","startSec":0,"endSec":30,"body":"具体剪辑指令","shotRefs":[{"assetIndex":0,"rangeStart":0,"rangeEnd":30,"note":"素材1·主播半身"}],"missing":"如果缺关键镜头描述,否则省略"}]}');
     try {
-      const parsed = await openaiClient.callJsonCompletion(provider, {
+      const result = await openaiClient.callJsonCompletion(provider, {
         systemText:
           "你是视频剪辑师助理。基于剪辑目标 + 对标账号方法论 + 可用素材池,给出叙事骨架 (4-7 段)。\n" +
           "规则:\n" +
@@ -5900,6 +6130,7 @@ app.whenReady().then(async () => {
         maxTokens: 2000,
         maxOutputTokens: 2000,
       });
+      const parsed = result.parsed;
       const rawSteps = Array.isArray(parsed?.steps) ? parsed.steps : [];
       const steps = rawSteps.map((s, i) => ({
         index: Number(s.index) || i + 1,
@@ -6280,7 +6511,8 @@ app.whenReady().then(async () => {
           }
           onProgress?.(92, "下载视频", "生成标题");
           const mp = await loadMediumTextProvider();
-          title = await generateProjectTitle(mp, { rawInput, url, ytdlpInfo });
+          const titleResult = await generateProjectTitle(mp, { rawInput, url, ytdlpInfo });
+          title = titleResult?.title || null;
           if (title) {
             cache[url] = { ...cached, title, ytdlpInfo: ytdlpInfo || cached.ytdlpInfo };
             await writeUrlCache(cache);
@@ -6365,7 +6597,8 @@ app.whenReady().then(async () => {
     const inspected = await inspectVideo(latest.filePath);
     onProgress?.(96, "下载视频", "生成标题");
     const mp = await loadMediumTextProvider();
-    const title = await generateProjectTitle(mp, { rawInput, url, ytdlpInfo });
+    const titleResult = await generateProjectTitle(mp, { rawInput, url, ytdlpInfo });
+    const title = titleResult?.title || null;
     cache[url] = {
       filePath: latest.filePath,
       savedAt: Date.now(),
