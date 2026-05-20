@@ -263,17 +263,9 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
           <div className="px-4 py-8 text-center">
             <p className="text-[12.5px] text-slate-500 dark:text-slate-400 leading-relaxed">
               当前没有任务在运行
-              <br />
-              <span className="text-[10.5px] font-mono uppercase tracking-wider mt-2 inline-block">视频下载 · 分析 / 账号拉取 都会出现在这里</span>
             </p>
           </div>
         )}
-      </div>
-
-      <div className="px-4 py-2 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40">
-        <span className="text-[10.5px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400">
-          全局任务面板 · 三个模块共享
-        </span>
       </div>
     </div>
   );
