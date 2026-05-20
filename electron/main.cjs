@@ -3321,7 +3321,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         const mergeResults = await shotMerger.mergeShots({
           shots: mergeInputs,
           provider: mediumTextProvider,
-          batchSize: 6,
+          // batchSize 不传 → shot-merger 按 provider.contextSize 动态算
           handle,
           cache: makeShotMergerCache(mediumTextProvider),
           onProgress: ({ done, total, batchIndex, mode }) => {
