@@ -3014,19 +3014,29 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   const analysisStartedAt = Date.now();
 
   // 阶段耗时记录:每次 send 检测 stage 字符串变化,把上一个 stage 的 duration 推入
+  // stage 内可通过 handle.attachStageMeta({...}) 注入额外元数据 (frames 数、shots 数、
+  // model 名、tok/s 之类), 关 stage 时跟 durationMs 一起持久化, 用于 ETA 标定。
   const timings = [];
   let currentStage = null;
   let currentStageStartedAt = analysisStartedAt;
+  let currentStageMeta = {};
   const closeCurrentStage = (note) => {
     if (currentStage) {
       timings.push({
         stage: currentStage,
         durationMs: Date.now() - currentStageStartedAt,
+        ...(Object.keys(currentStageMeta).length ? { meta: currentStageMeta } : {}),
         ...(note ? { note } : {}),
       });
+      currentStage = null; // 幂等: finally 路径会再 close 一次, 避免重复 push
     }
+    currentStageMeta = {};
   };
   handle.timings = timings;
+  handle.attachStageMeta = (partial) => {
+    if (!partial || typeof partial !== "object") return;
+    currentStageMeta = { ...currentStageMeta, ...partial };
+  };
 
   const send = (progress, stage, message) => {
     if (handle.cancelled) return;
@@ -3058,6 +3068,11 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   }, 2000);
   handle.heartbeat = heartbeat;
 
+  // ETA 埋点: 在分析全部生命周期里记录 ok / cancelled / failed, 结束时 append 一行到
+  // userData/eta-samples.jsonl, 用于离线推算各阶段耗时模型 (视频时长/帧数/shot数/tok-s)。
+  let analysisOutcome = "failed";
+  let analysisFailureMsg = null;
+
   try {
     const inputPath = resolveProjectVideoPath(project);
     if (!inputPath || !fsSync.existsSync(inputPath)) {
@@ -3072,7 +3087,9 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
 
     send(2, "读取视频信息", "正在校验视频时长、分辨率、音轨。");
     ensureNotCancelled(handle);
+    const inputFileSize = await fs.stat(inputPath).then((s) => s.size).catch(() => 0);
     const inspected = await inspectVideo(inputPath, handle);
+    handle.attachStageMeta({ fileSizeBytes: inputFileSize, durationSec: inspected.durationSec, width: inspected.width, height: inspected.height });
     const projectDir = getProjectDir(project.id);
     const artifactDir = path.join(projectDir, "artifacts");
     await fs.mkdir(artifactDir, { recursive: true });
@@ -3082,6 +3099,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     ensureNotCancelled(handle);
     const sceneThreshold = sceneThresholdFor(options);
     const scenes = await detectScenes(ffmpeg, inputPath, sceneThreshold, handle);
+    handle.attachStageMeta({ scenesCount: scenes.length, durationSec: inspected.durationSec });
     // 本地初筛预检: 用户希望用(lastLlamaModelKey 存在) → 主动确认/启动 server,
     // 失败一律降级为"跳过初筛但继续分析",绝不阻断主流程。
     let localStatus = llamaRuntime.getStatus();
@@ -3158,6 +3176,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     });
 
     send(8, "抽取关键画面", `准备抽取 ${plan.length} 张关键画面,会自动去掉相似画面。`);
+    handle.attachStageMeta({ planned: plan.length, durationSec: inspected.durationSec });
     const { frames: candidateFrames, skipped } = await buildFrames(
       ffmpeg,
       inputPath,
@@ -3169,6 +3188,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       },
       { withPrefilterFrame: localPrefilterReady },
     );
+    handle.attachStageMeta({ candidateFrames: candidateFrames.length, skipped });
     if (skipped > 0) {
       send(22, "画面去重", `去掉 ${skipped} 张相似画面,保留 ${candidateFrames.length} 张。`);
     }
@@ -3180,6 +3200,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     if (localPrefilterReady && candidateFrames.length > 0) {
       try {
         send(23, "本地初筛", `让本地模型给 ${candidateFrames.length} 张候选画面快速打标。`);
+        handle.attachStageMeta({ candidateFrames: candidateFrames.length, modelKey: localStatus.modelKey, port: localStatus.port });
         const prefilterStartedAt = Date.now();
         const tagResult = await prefilter.tagFrames(candidateFrames, {
           port: localStatus.port,
@@ -3209,6 +3230,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           kept: refined.kept.length,
           dropped: refined.dropped.length,
         };
+        handle.attachStageMeta({ kept: refined.kept.length, dropped: refined.dropped.length, totalElapsedMs: tagResult.totalElapsedMs, totalTokens: tagResult.totalTokens });
         send(
           34,
           "精挑画面",
@@ -3237,6 +3259,12 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         const wavPath = path.join(artifactDir, "audio.wav");
         await extractAudioWav(ffmpeg, inputPath, wavPath, handle);
         send(36, "字幕识别", `${audioProvider.name} 准备就绪`);
+        handle.attachStageMeta({
+          audioSec: inspected.durationSec,
+          providerName: audioProvider.name,
+          model: audioProvider.localWhisperModel || audioProvider.model,
+          source: audioProvider.source || audioProvider.endpointType,
+        });
         ensureNotCancelled(handle);
 
         // 缓存 key: 音频文件 sha + 模型 + 语言 + 后端来源 + prompt 版本
@@ -3265,6 +3293,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
 
         if (transcript) {
           await writeJson(path.join(artifactDir, "transcript.json"), transcript);
+          handle.attachStageMeta({ transcriptSegments: transcript.segments.length, transcriptChars: transcript.text.length });
           send(50, "字幕识别完成", `共 ${transcript.segments.length} 段字幕、${transcript.text.length} 个字。`);
         }
       } catch (error) {
@@ -3305,6 +3334,13 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       try {
         ensureNotCancelled(handle);
         send(51, "镜头合并", `让 ${mediumTextProvider.name} 把 ${shots.length} 个镜头合成可读描述。`);
+        handle.attachStageMeta({
+          shots: shots.length,
+          providerName: mediumTextProvider.name,
+          model: mediumTextProvider.model,
+          endpointType: mediumTextProvider.endpointType,
+          contextSize: mediumTextProvider.contextSize,
+        });
         const mergeStart = Date.now();
         const mergeInputs = shots.map((s) => ({
           startSec: s.startSec,
@@ -3336,6 +3372,11 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           shots[i].shotDescription = mergeResults[i]?.shotDescription || "";
           shots[i].representativeFrameIndex = mergeResults[i]?.representativeFrameIndex || [];
         }
+        handle.attachStageMeta({
+          cacheHits: mergeResults.cacheHits || 0,
+          mergeElapsedMs: Date.now() - mergeStart,
+          avgMsPerShot: Math.round((Date.now() - mergeStart) / Math.max(shots.length, 1)),
+        });
         // 兜底: scene detector 切出的镜头数 >> prefilter 保留的关键帧数时,
         // 大多数镜头会 frames=[]; 在镜头中点抽一张轻量缩略图, 让 UI 镜头时间线每个 card
         // 都有图, 也让 attachShotEvidenceToNodes 在帧稀疏时不至于完全失配。
@@ -3521,6 +3562,15 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         }
 
         send(74, "模型分析画面", `正在请 ${provider.name} 分析这段视频。`);
+        handle.attachStageMeta({
+          frames: frames.length,
+          transcriptChars: transcript?.text?.length || 0,
+          shots: Array.isArray(shots) ? shots.length : 0,
+          providerName: provider.name,
+          model: provider.model,
+          endpointType: provider.endpointType,
+          contextSize: provider.contextSize,
+        });
         let mainAnalysisCacheKey = null;
         if (cacheStore.isConfigured() && provider?.model) {
           try {
@@ -3749,10 +3799,71 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       // 不阻断返回:JSON 文件已经写了,renderer 路径仍可兜底
       console.warn("[clipiq] main 端 SQLite 持久化失败,renderer 路径会兜底:", persistError);
     }
+    analysisOutcome = "ok";
     return { project: updatedProject, nodes, report };
+  } catch (err) {
+    analysisFailureMsg = String(err?.message || err).slice(0, 300);
+    throw err;
   } finally {
+    if (handle.cancelled) analysisOutcome = "cancelled";
+    try {
+      closeCurrentStage(); // 失败/取消路径保证最后一个 stage 也被 push
+      await appendEtaSample({
+        project,
+        analysisStartedAt,
+        outcome: analysisOutcome,
+        failureMsg: analysisFailureMsg,
+        timings,
+        providers: { complexVision: complexVisionProvider, mediumText: mediumTextProvider, audio: audioProvider },
+      });
+    } catch (sampleErr) {
+      console.warn("[eta-samples] 写埋点失败:", sampleErr?.message || sampleErr);
+    }
     clearAnalysis(project.id);
   }
+}
+
+// ETA 埋点 jsonl 落盘 helper - 每次 analyzeProject 结束 append 一行 (ok/failed/cancelled 都写)
+async function appendEtaSample({ project, analysisStartedAt, outcome, failureMsg, timings, providers }) {
+  const machineDetect = require("./machine-detect.cjs");
+  const machine = machineDetect.detectMachine();
+  const summarizeProvider = (p) => p ? {
+    id: p.id,
+    name: p.name,
+    model: p.model,
+    endpointType: p.endpointType,
+    contextSize: p.contextSize,
+    maxOutputTokens: p.maxOutputTokens,
+    source: p.source,
+  } : null;
+  const sample = {
+    schemaVersion: 1,
+    projectId: project.id,
+    startedAt: new Date(analysisStartedAt).toISOString(),
+    totalDurationMs: Date.now() - analysisStartedAt,
+    outcome,
+    ...(failureMsg ? { failureMsg } : {}),
+    machine: {
+      platform: machine.platform,
+      arch: machine.arch,
+      cpuModel: machine.cpuModel,
+      backend: machine.backend,
+      totalMemoryGB: Math.round(machine.totalMemoryBytes / (1024 ** 3) * 10) / 10,
+      availableMemoryGB: Math.round(machine.availableMemoryBytes / (1024 ** 3) * 10) / 10,
+    },
+    project: {
+      platform: project.source?.platform || (project.source?.type === "url" ? "url" : "local"),
+      sourceType: project.source?.type,
+    },
+    providers: {
+      complexVision: summarizeProvider(providers.complexVision),
+      mediumText: summarizeProvider(providers.mediumText),
+      audio: summarizeProvider(providers.audio),
+    },
+    stages: timings,
+  };
+  const filePath = path.join(app.getPath("userData"), "eta-samples.jsonl");
+  await fs.appendFile(filePath, JSON.stringify(sample) + "\n");
 }
 
 function formatTime(sec) {
