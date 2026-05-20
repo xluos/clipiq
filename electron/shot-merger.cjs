@@ -4,8 +4,12 @@
 // 区间内的字幕, 用 medium_text 槽位的模型合并成"这个镜头讲了什么" + 代表帧。
 //
 // 设计要点:
-// - **batched**: 一次 LLM 调用合并多个 shot, 减少 round-trip; 30 个 shot 按 6/批
-//   要 5 次调用而不是 30 次。json_schema strict + structured output 保证每批返回完整。
+// - **batched**: 一次 LLM 调用合并多个 shot, 减少 round-trip; 30 个 shot 按 N/批
+//   要 30/N 次调用而不是 30 次。batch 越小, 单批 prompt 越短, 弱模型出 JSON 截断的
+//   概率越低; batch 越大单批吐越多但容易超 context。
+//   batchSize 不传 → 按 provider.contextSize 和该批 shots 的实际 prompt 长度动态算
+//   (chooseBatchSize), 留 15% 输出 + 600 token 模板成本后能塞下几个就用几个,
+//   范围 [1, 12]; 显式传值则跳过自动算。
 // - 没有图传上去, 输入全是文本 (frame caption + 字幕), 因为 medium_text 槽位
 //   不要求 vision capability。tokens 主要由 prompt 长度决定。
 // - 失败的 shot 给 fallback shotDescription (字幕 + 第一帧 caption 拼一下), 不阻断。
@@ -17,11 +21,72 @@
 
 const { callJsonCompletion } = require("./openai-client.cjs");
 
-const ALLOWED_BATCH_SIZE = { min: 1, max: 12, default: 6 };
+const ALLOWED_BATCH_SIZE = { min: 1, max: 12, default: 3 };
 
 function clampBatchSize(n) {
   if (!Number.isFinite(n)) return ALLOWED_BATCH_SIZE.default;
   return Math.max(ALLOWED_BATCH_SIZE.min, Math.min(ALLOWED_BATCH_SIZE.max, Math.round(n)));
+}
+
+// 估单个 shot 的 prompt token 成本: 时间戳行 + 字幕 + 每帧 caption + 元数据
+// 中文 ~0.5 token/字 (英文略低, 这里用 0.5 保守估)
+function estimateShotPromptTokens(shot) {
+  let chars = 30; // SHOT N [a.bs - c.ds] 时间戳行
+  if (shot.subtitleText) chars += shot.subtitleText.length;
+  if (Array.isArray(shot.frames)) {
+    for (const f of shot.frames) {
+      // caption 长度 + "[Fi] @x.xs salience=N: " 这种元数据 (~25 字)
+      chars += (f.caption?.length || 30) + 25;
+    }
+  }
+  return Math.ceil(chars * 0.5);
+}
+
+// 按 ctx 给"结构化输出能力"经验上限:
+// 单纯 token 预算够 ≠ LLM 真能稳定吐出 N 个 shot 的合法 JSON。本地 2B/4B 即使
+// ctx 塞得下 10 个 shot, 输出端常出 JSON 截断或非合规 markdown。这条曲线粗粒度
+// 把 ctx 当成模型能力的代理变量 (大 ctx 模型通常也大参数), 不让 batch 超过该档。
+function ctxToBatchCap(ctx) {
+  if (ctx <= 2048) return 2;
+  if (ctx <= 4096) return 3;
+  if (ctx <= 8192) return 4;
+  if (ctx <= 16384) return 6;
+  if (ctx <= 32768) return 8;
+  return ALLOWED_BATCH_SIZE.max;
+}
+
+// 按 provider.contextSize + 该批 shots 实际 prompt 长度动态选 batch
+//
+// 算法两条线取 min:
+// (a) token 预算: usable = ctx - outputReserve - systemOverhead, 单 shot 估 prompt+输出
+// (b) ctx 经验上限 ctxToBatchCap, 防止本地小模型输出端崩
+//
+// 预算细项:
+//   ctx                 = provider.contextSize (manifest 标注, 兜底 8192)
+//   outputReserve       = max(800, ctx*15%)             给 JSON 输出留
+//   systemOverhead      = 600                           system + user 模板固定成本
+//   perShotOutput       = 80 token                      每个 shot 输出 30-80 字 + JSON 包装
+//   avgShotPromptTokens = 取 shots 里最长的 5 个的平均  防偶发长字幕段把整批撑爆
+function chooseBatchSize(provider, shots) {
+  if (!Array.isArray(shots) || shots.length === 0) return ALLOWED_BATCH_SIZE.default;
+  const ctx = Number(provider?.contextSize) > 0 ? Number(provider.contextSize) : 8192;
+  const outputReserve = Math.max(800, Math.floor(ctx * 0.15));
+  const systemOverhead = 600;
+  const usable = ctx - outputReserve - systemOverhead;
+  if (usable <= 0) return ALLOWED_BATCH_SIZE.min;
+
+  const sampleCount = Math.min(5, shots.length);
+  const top = shots
+    .map(estimateShotPromptTokens)
+    .sort((a, b) => b - a)
+    .slice(0, sampleCount);
+  const avgShotPromptTokens = Math.max(1, top.reduce((a, b) => a + b, 0) / top.length);
+  const perShotOutput = 80;
+
+  const batchFromBudget = Math.floor(usable / (avgShotPromptTokens + perShotOutput));
+  const batchFromCap = ctxToBatchCap(ctx);
+  const batch = Math.min(batchFromBudget, batchFromCap);
+  return Math.max(ALLOWED_BATCH_SIZE.min, Math.min(ALLOWED_BATCH_SIZE.max, batch));
 }
 
 function formatShotForPrompt(shot, indexInBatch) {
@@ -154,7 +219,12 @@ function fillBatchWithFallback(batch, result, baseIndex) {
 const GIVE_UP_AFTER_CONSECUTIVE_FAIL = 3;
 
 async function mergeShots({ shots, provider, batchSize, handle, onProgress, cache }) {
-  const size = clampBatchSize(batchSize);
+  // batchSize 显式传入 → 用显式值; 不传 → 按 provider.contextSize + 实际 prompt 长度动态算
+  const size = batchSize == null ? chooseBatchSize(provider, shots) : clampBatchSize(batchSize);
+  // eslint-disable-next-line no-console
+  console.log(
+    `[shot-merger] batchSize=${size} (${batchSize == null ? "auto" : "explicit"}) · ctx=${provider?.contextSize ?? "?"} · shots=${shots.length}`,
+  );
   const result = new Array(shots.length);
   let batchIndex = 0;
   let consecutiveFail = 0;
