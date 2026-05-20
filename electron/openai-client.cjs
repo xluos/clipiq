@@ -10,6 +10,12 @@
 //
 // shot-merger / summarizer / detectGenreLightweight / callOpenAICompatible 全部
 // 通过本模块的 callJsonCompletion 入口, 避免重复实现 + 漏配 endpointType 路径。
+//
+// 返回结构:
+//   { parsed, raw, usage, model } —— parsed 是 JSON.parse 后的对象 (失败为 null),
+//   raw 是原始拼接文本, usage 是统一归一化后的 token 计数 { promptTokens, completionTokens, totalTokens },
+//   model 是 server 实际返回的 model (代理可能改写, 用它做账单更准)。
+//   无 usage 时 (老式 server / 拒绝 include_usage) 字段为 null, 不要假设一定有值。
 
 function tryParseJsonFromText(text) {
   if (!text) return null;
@@ -24,6 +30,18 @@ function tryParseJsonFromText(text) {
       return null;
     }
   }
+}
+
+// chat/completions 的 usage 字段: { prompt_tokens, completion_tokens, total_tokens }
+// responses API 的 usage 字段:    { input_tokens, output_tokens, total_tokens }
+// 归一化成统一的 { promptTokens, completionTokens, totalTokens }, 数字化失败一律 0
+function normalizeUsage(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const prompt = Number(raw.prompt_tokens ?? raw.input_tokens ?? 0) || 0;
+  const completion = Number(raw.completion_tokens ?? raw.output_tokens ?? 0) || 0;
+  const total = Number(raw.total_tokens ?? prompt + completion) || prompt + completion;
+  if (prompt === 0 && completion === 0 && total === 0) return null;
+  return { promptTokens: prompt, completionTokens: completion, totalTokens: total };
 }
 
 async function streamSSE(response, onEvent) {
@@ -61,7 +79,7 @@ async function streamSSE(response, onEvent) {
  *   maxTokens?: number       // 仅 chat/completions
  *   maxOutputTokens?: number // 仅 responses
  *   signal?: AbortSignal
- * @returns {Promise<string>} 拼好的 raw text (未 JSON.parse)
+ * @returns {Promise<{ text: string, usage: ?object, model: ?string }>}
  */
 async function callOpenAIChatCompletionsRaw(provider, opts) {
   const {
@@ -76,6 +94,9 @@ async function callOpenAIChatCompletionsRaw(provider, opts) {
   const body = {
     model: provider.model,
     stream: true,
+    // include_usage 让服务端在 [DONE] 前发一个 choices=[] 但带 usage 的 chunk。
+    // 非 OpenAI 兼容服务端可能忽略此字段, 但不会因此报错。
+    stream_options: { include_usage: true },
     temperature: temperature ?? provider.temperature ?? 0.2,
     max_tokens: maxTokens ?? provider.maxOutputTokens ?? 12000,
     messages: [
@@ -107,11 +128,17 @@ async function callOpenAIChatCompletionsRaw(provider, opts) {
     throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
   }
   let text = "";
+  let usageRaw = null;
+  let modelEcho = null;
   await streamSSE(response, (event) => {
     const delta = event?.choices?.[0]?.delta?.content;
     if (typeof delta === "string") text += delta;
+    // 服务端可能在 chunk 上重复带 model; 用最后一次为准 (代理会改写成上游真实模型)
+    if (typeof event?.model === "string" && event.model) modelEcho = event.model;
+    // include_usage 命中的 chunk: choices=[] 但带 usage
+    if (event?.usage && typeof event.usage === "object") usageRaw = event.usage;
   });
-  return text;
+  return { text, usage: normalizeUsage(usageRaw), model: modelEcho };
 }
 
 async function callOpenAIResponsesRaw(provider, opts) {
@@ -153,12 +180,16 @@ async function callOpenAIResponsesRaw(provider, opts) {
     throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
   }
   let text = "";
+  let usageRaw = null;
+  let modelEcho = null;
   await streamSSE(response, (event) => {
     if (event?.type === "response.output_text.delta" && typeof event.delta === "string") {
       text += event.delta;
     }
-    if (event?.type === "response.completed" && Array.isArray(event?.response?.output)) {
-      if (!text) {
+    if (event?.type === "response.completed" && event?.response) {
+      if (typeof event.response.model === "string") modelEcho = event.response.model;
+      if (event.response.usage) usageRaw = event.response.usage;
+      if (!text && Array.isArray(event.response.output)) {
         for (const item of event.response.output) {
           if (item?.type === "message" && Array.isArray(item.content)) {
             for (const block of item.content) {
@@ -171,41 +202,47 @@ async function callOpenAIResponsesRaw(provider, opts) {
       }
     }
   });
-  return text;
+  return { text, usage: normalizeUsage(usageRaw), model: modelEcho };
 }
 
-// 统一入口: 按 endpointType 自动分流, 返回 parsed JSON (或 null)
+// 统一入口: 按 endpointType 自动分流, 返回 { parsed, raw, usage, model }
 async function callJsonCompletion(provider, opts) {
   const useResponses = provider.endpointType === "openai_responses";
-  const text = useResponses
+  const result = useResponses
     ? await callOpenAIResponsesRaw(provider, opts)
     : await callOpenAIChatCompletionsRaw(provider, opts);
-  return tryParseJsonFromText(text);
+  return {
+    parsed: tryParseJsonFromText(result.text),
+    raw: result.text,
+    usage: result.usage,
+    model: result.model,
+  };
 }
 
-// 兼容旧调用: 主分析 callOpenAICompatible 用的形态 (返回 parsed JSON)
+// 兼容旧调用: 主分析 callOpenAICompatible 用的形态。返回 { parsed, usage, model }
 async function callOpenAIChatCompletions(provider, systemText, userText, imageDataUrls, handle) {
-  const text = await callOpenAIChatCompletionsRaw(provider, {
+  const result = await callOpenAIChatCompletionsRaw(provider, {
     systemText,
     userText,
     imageDataUrls,
     signal: handle?.abortController?.signal,
   });
-  return tryParseJsonFromText(text);
+  return { parsed: tryParseJsonFromText(result.text), usage: result.usage, model: result.model };
 }
 
 async function callOpenAIResponses(provider, systemText, userText, imageDataUrls, handle) {
-  const text = await callOpenAIResponsesRaw(provider, {
+  const result = await callOpenAIResponsesRaw(provider, {
     systemText,
     userText,
     imageDataUrls,
     signal: handle?.abortController?.signal,
   });
-  return tryParseJsonFromText(text);
+  return { parsed: tryParseJsonFromText(result.text), usage: result.usage, model: result.model };
 }
 
 module.exports = {
   tryParseJsonFromText,
+  normalizeUsage,
   streamSSE,
   callOpenAIChatCompletionsRaw,
   callOpenAIResponsesRaw,

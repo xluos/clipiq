@@ -421,6 +421,7 @@ export type AnalysisReport = {
   generatedAt?: string;
   timings?: AnalysisTiming[];
   totalDurationMs?: number;
+  tokenUsage?: TokenUsageSummary;
   methodologyAudit?: MethodologyAudit;
   // PR2 金字塔管线新增字段
   globalSummary?: string;           // medium_text 在主分析前生成的全局摘要 (优先于 summary 展示)
@@ -433,6 +434,31 @@ export type AnalysisTiming = {
   stage: string;
   durationMs: number;
   note?: string;
+};
+
+// 单个阶段 + 模型维度的 token 消耗。同一分析里若一个阶段调用了多个不同
+// provider/model (理论上不会, 但留 schema 余地), 会拆成多条。
+export type StageTokenUsage = {
+  // 机器名: "prefilter" | "shot-merger" | "summarizer" | "detect-genre"
+  //         | "main-analysis" | "danmaku-emotion" | "title-gen"
+  stage: string;
+  providerId: string | null;
+  providerName: string | null;
+  model: string | null;
+  // remote (OpenAI 兼容) / local_llama / local_whisper
+  source: "remote" | "local_llama" | "local_whisper";
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  callCount: number;   // 真正发起的 LLM 调用次数 (不含缓存命中)
+  cacheHits: number;   // 该阶段命中分析缓存的次数
+};
+
+export type TokenUsageSummary = {
+  stages: StageTokenUsage[];
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+  totalTokens: number;
 };
 
 export type AnalysisOptions = {

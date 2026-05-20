@@ -17,7 +17,8 @@ async function callMediumText(provider, systemText, userText, schema, signal) {
     throw new Error("medium_text provider 配置不全");
   }
   // 走 openai-client 统一入口, 自动按 endpointType 分流 chat/completions vs responses
-  const parsed = await callJsonCompletion(provider, {
+  // 返回 { parsed, usage, model }, 上游需要 usage 做 token 记账。
+  const result = await callJsonCompletion(provider, {
     systemText,
     userText,
     temperature: 0.3,
@@ -25,12 +26,12 @@ async function callMediumText(provider, systemText, userText, schema, signal) {
     maxOutputTokens: provider.maxOutputTokens ?? 6000,
     signal,
   });
-  if (!parsed) {
+  if (!result.parsed) {
     throw new Error(
       `summarizer 解析失败 (raw text 为空或不是合法 JSON; endpoint=${provider.endpointType})`,
     );
   }
-  return parsed;
+  return result;
 }
 
 function buildSummarySchema(allowedGenres) {
@@ -125,13 +126,14 @@ async function summarizeVideo({
   ].join("\n");
 
   try {
-    const parsed = await callMediumText(
+    const callResult = await callMediumText(
       provider,
       systemText,
       userText,
       schema,
       handle?.abortController?.signal,
     );
+    const parsed = callResult.parsed;
     // eslint-disable-next-line no-console
     console.log("[summarizer] LLM raw keys:", Object.keys(parsed || {}), "summaryLen:", String(parsed?.globalSummary || "").length, "genre:", parsed?.detectedGenre);
     // genre 不在 catalog 里 (用 json_object 没强约束 enum) → 兜底到 other,
@@ -152,6 +154,8 @@ async function summarizeVideo({
       detectedGenre: genre,
       genreConfidence: Number.isFinite(conf) ? Math.max(0, Math.min(1, conf)) : 0.5,
       structureHint: parsed.structureHint || null,
+      usage: callResult.usage,
+      echoedModel: callResult.model,
     };
   } catch (error) {
     if (handle?.cancelled) throw error;
