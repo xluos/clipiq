@@ -31,6 +31,10 @@ interface AppState {
   setAudioSlot: (assignment: SlotAssignment) => void;
   defaultAnalysis: DefaultAnalysis;
   setDefaultAnalysis: React.Dispatch<React.SetStateAction<DefaultAnalysis>>;
+  // 本地 llama 模型 ctx 覆盖。落 config.localModelOverrides;
+  // main 进程下次启动该 model 时 --ctx-size 用这里的值, 否则用 manifest 默认。
+  localModelOverrides: Record<string, { contextSize?: number }>;
+  updateLocalModelOverride: (modelKey: string, patch: { contextSize?: number } | null) => void;
   /** @deprecated derived from taskSlots.complex_vision; will be removed in PR-3 */
   activeVideoProviderId: string | null;
   /** @deprecated 写入会同步到 taskSlots.complex_vision.providerId,保留是为了在 PR-3 完成前旧 UI 不崩 */
@@ -150,6 +154,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [taskSlots, setTaskSlots] = useState<TaskSlots>(DEFAULT_TASK_SLOTS);
   const [audioSlot, setAudioSlotState] = useState<SlotAssignment>(null);
   const [defaultAnalysis, setDefaultAnalysis] = useState<DefaultAnalysis>(DEFAULT_ANALYSIS);
+  const [localModelOverrides, setLocalModelOverrides] = useState<Record<string, { contextSize?: number }>>({});
+  const updateLocalModelOverride = useCallback(
+    (modelKey: string, patch: { contextSize?: number } | null) => {
+      setLocalModelOverrides((prev) => {
+        const next = { ...prev };
+        if (!patch) {
+          delete next[modelKey];
+        } else {
+          const ctx = Number(patch.contextSize);
+          if (ctx > 0) {
+            next[modelKey] = { contextSize: ctx };
+          } else {
+            // patch.contextSize 非正数 → 视为删除 override, 回到 manifest 默认
+            delete next[modelKey];
+          }
+        }
+        return next;
+      });
+    },
+    [],
+  );
 
   // ref 始终指向最新 providers,供下面的 setActiveXxxProviderId 在更换 provider 时挑首个 model
   const providersRef = useRef<ModelProvider[]>(providers);
@@ -341,6 +366,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
           if (config?.defaultAnalysis) {
             setDefaultAnalysis(config.defaultAnalysis);
           }
+          if (config?.localModelOverrides && typeof config.localModelOverrides === "object") {
+            setLocalModelOverrides(config.localModelOverrides);
+          }
           const projectList = await window.videoAnalyzer.listProjects();
           setProjects(projectList);
           previousProjectsRef.current = new Map(projectList.map((p) => [p.id, p]));
@@ -421,6 +449,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       taskSlots,
       audioSlot,
       defaultAnalysis,
+      localModelOverrides,
       schemaVersion: 2,
     };
     const timer = window.setTimeout(() => {
@@ -437,7 +466,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [providers, taskSlots, audioSlot, defaultAnalysis, hasHydrated]);
+  }, [providers, taskSlots, audioSlot, defaultAnalysis, localModelOverrides, hasHydrated]);
 
   // 订阅后台账号拉取事件 (progress / done / failed) — 全局只挂一次
   useEffect(() => {
@@ -560,6 +589,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setAudioSlot,
         defaultAnalysis,
         setDefaultAnalysis,
+        localModelOverrides,
+        updateLocalModelOverride,
         activeVideoProviderId,
         setActiveVideoProviderId,
         activeAudioProviderId,

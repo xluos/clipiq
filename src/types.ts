@@ -122,6 +122,9 @@ export type ProviderModel = {
   family?: string;
   params?: string;
   contextSize?: number;
+  // 本地模型在 manifest 里的默认 contextSize, 跟 contextSize (effective, 可能被 override) 对比。
+  // 只有 builtin local_llama provider 会填这个字段;远端 provider 留空。
+  defaultContextSize?: number;
   ownedBy?: string;
   maxOutputTokens?: number;
   temperature?: number;
@@ -478,6 +481,9 @@ export type AppConfig = {
   defaultAnalysis?: DefaultAnalysis;
   // 本地模型下载镜像选择: hf-mirror (默认) 或 modelscope (魔搭/国内 CDN)
   localModelMirror?: "hf-mirror" | "modelscope";
+  // 本地 llama 模型 ctx 覆盖, 启动 server 时 --ctx-size 用这里的值; 缺省走 manifest。
+  // 调大需要更多内存 (主要是 KV cache), 小机器跑大 ctx 容易 OOM。
+  localModelOverrides?: Record<string, { contextSize?: number }>;
   // 分析阶段结果缓存目录, null/缺省 → userData/cache;
   // 可在设置里改到外部盘 (改路径会触发整目录迁移)。
   cacheDir?: string | null;

@@ -587,7 +587,7 @@ function ProviderCard({
   onUpdate: (patch: Partial<ModelProvider>) => void;
   kind: ProviderKind;
 }) {
-  const { taskSlots, audioSlot } = useApp();
+  const { taskSlots, audioSlot, localModelOverrides, updateLocalModelOverride } = useApp();
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [whisperCache, setWhisperCache] = useState<{ cached: boolean; sizeBytes?: number } | null>(null);
@@ -973,6 +973,9 @@ function ProviderCard({
         provider={persisted}
         fetched={fetchedModels}
         readOnly={isLocalProvider}
+        isLocalLlama={isLocalLlama}
+        localModelOverrides={localModelOverrides}
+        onLocalContextOverride={updateLocalModelOverride}
         onPersistModels={persistModels}
         slotUsage={slotUsage}
       />
@@ -1008,6 +1011,9 @@ function ModelManagerDialog({
   provider,
   fetched,
   readOnly,
+  isLocalLlama,
+  localModelOverrides,
+  onLocalContextOverride,
   onPersistModels,
   slotUsage,
 }: {
@@ -1015,7 +1021,12 @@ function ModelManagerDialog({
   onOpenChange: (next: boolean) => void;
   provider: ModelProvider;
   fetched: ModelDescriptor[];
+  // 整体只读 (本地 provider 不能增删模型, 模型清单由 manifest 锁死)
   readOnly: boolean;
+  // 本地 llama provider 标识。即便 readOnly=true, 用户也可单独改 contextSize (走 localModelOverrides)
+  isLocalLlama?: boolean;
+  localModelOverrides?: Record<string, { contextSize?: number }>;
+  onLocalContextOverride?: (modelKey: string, patch: { contextSize?: number } | null) => void;
   onPersistModels: (next: ProviderModel[]) => void;
   slotUsage: (modelId: string) => string[];
 }) {
@@ -1069,6 +1080,15 @@ function ModelManagerDialog({
   };
 
   const handleSaveEdit = (modelId: string, patch: Partial<ProviderModel>) => {
+    // 本地 llama: contextSize 走 localModelOverrides, 不写 provider.models (会被 builtin 重写)。
+    // 其他字段 (label / capabilities) 本地不允许改, 这里走的只可能是 contextSize。
+    if (isLocalLlama && onLocalContextOverride) {
+      if ("contextSize" in patch) {
+        onLocalContextOverride(modelId, { contextSize: patch.contextSize });
+      }
+      setEditingId(null);
+      return;
+    }
     onPersistModels(
       (provider.models || []).map((m) =>
         m.id === modelId ? { ...m, ...patch, capabilitiesSource: "manual" } : m,
@@ -1098,19 +1118,27 @@ function ModelManagerDialog({
               </div>
             ) : (
               <div className="space-y-1.5">
-                {(provider.models || []).map((m) => (
-                  <ModelRow
-                    key={m.id}
-                    model={m}
-                    readOnly={readOnly}
-                    editing={editingId === m.id}
-                    onEdit={() => setEditingId(m.id)}
-                    onCancel={() => setEditingId(null)}
-                    onSave={(patch) => handleSaveEdit(m.id, patch)}
-                    onRemove={() => handleRemove(m.id)}
-                    usage={slotUsage(m.id)}
-                  />
-                ))}
+                {(provider.models || []).map((m) => {
+                  // 本地 llama: 即便整体 readOnly, ctx 也可改。effective ctx 显示 override > 默认。
+                  const localOverrideCtx = isLocalLlama
+                    ? localModelOverrides?.[m.id]?.contextSize
+                    : undefined;
+                  return (
+                    <ModelRow
+                      key={m.id}
+                      model={m}
+                      readOnly={readOnly && !isLocalLlama}
+                      localCtxOnly={!!isLocalLlama}
+                      localCtxOverride={localOverrideCtx}
+                      editing={editingId === m.id}
+                      onEdit={() => setEditingId(m.id)}
+                      onCancel={() => setEditingId(null)}
+                      onSave={(patch) => handleSaveEdit(m.id, patch)}
+                      onRemove={() => handleRemove(m.id)}
+                      usage={slotUsage(m.id)}
+                    />
+                  );
+                })}
               </div>
             )}
           </section>
@@ -1184,6 +1212,10 @@ function ModelManagerDialog({
 type ModelRowProps = {
   model: ProviderModel;
   readOnly: boolean;
+  // 本地 llama 模式: label / capabilities 不能改 (manifest 锁死), 但 contextSize 可改 (走 override)
+  localCtxOnly?: boolean;
+  // 当前生效的 override 值; 没有 override 时显 manifest 默认 (model.defaultContextSize)
+  localCtxOverride?: number;
   editing: boolean;
   onEdit: () => void;
   onCancel: () => void;
@@ -1196,6 +1228,8 @@ type ModelRowProps = {
 const ModelRow: FunctionComponent<ModelRowProps> = ({
   model,
   readOnly,
+  localCtxOnly,
+  localCtxOverride,
   editing,
   onEdit,
   onCancel,
@@ -1206,18 +1240,28 @@ const ModelRow: FunctionComponent<ModelRowProps> = ({
   const [labelDraft, setLabelDraft] = useState(model.label);
   const [capsDraft, setCapsDraft] = useState<Set<ModelCapability>>(new Set(model.capabilities));
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [contextDraft, setContextDraft] = useState(model.contextSize?.toString() || "");
+  // 本地模式默认从 override 读, 没 override 用 model.contextSize (后者已经是 effective)。
+  const initialContextDraft = localCtxOnly
+    ? (localCtxOverride ?? model.contextSize ?? "").toString()
+    : (model.contextSize?.toString() || "");
+  const [contextDraft, setContextDraft] = useState(initialContextDraft);
 
   useEffect(() => {
     if (editing) {
       setLabelDraft(model.label);
       setCapsDraft(new Set(model.capabilities));
-      setContextDraft(model.contextSize?.toString() || "");
-      setShowAdvanced(false);
+      setContextDraft(
+        localCtxOnly
+          ? (localCtxOverride ?? model.contextSize ?? "").toString()
+          : (model.contextSize?.toString() || ""),
+      );
+      setShowAdvanced(localCtxOnly || false);
     }
-  }, [editing, model]);
+  }, [editing, model, localCtxOnly, localCtxOverride]);
 
   if (!editing) {
+    const defaultCtx = model.defaultContextSize;
+    const isCustomCtx = localCtxOnly && defaultCtx != null && model.contextSize !== defaultCtx;
     return (
       <div className="flex items-center gap-3 rounded-lg border border-slate-200 dark:border-slate-800 px-3 py-2 bg-white dark:bg-[#0E0E10]">
         <div className="min-w-0 flex-1">
@@ -1230,24 +1274,31 @@ const ModelRow: FunctionComponent<ModelRowProps> = ({
             </span>
             {model.capabilitiesSource === "manual" && <span className="text-slate-300">· 手动</span>}
             {model.capabilitiesSource === "inferred" && <span className="text-slate-300">· 自动识别</span>}
+            {model.contextSize != null && (
+              <span className={isCustomCtx ? "text-indigo-500 dark:text-indigo-400" : "text-slate-300"}>
+                · ctx={model.contextSize}{isCustomCtx ? "(自定义)" : ""}
+              </span>
+            )}
             {usage.length > 0 && (
               <span className="text-indigo-500 dark:text-indigo-400">· {usage.length} 槽位在用</span>
             )}
           </div>
         </div>
-        {!readOnly && (
+        {(!readOnly || localCtxOnly) && (
           <div className="flex items-center gap-1 shrink-0">
             <Button size="sm" variant="ghost" onClick={onEdit} className="h-7 text-xs">
-              编辑
+              {localCtxOnly ? "改 ctx" : "编辑"}
             </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={onRemove}
-              className="h-7 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </Button>
+            {!readOnly && !localCtxOnly && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={onRemove}
+                className="h-7 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </Button>
+            )}
           </div>
         )}
       </div>
@@ -1258,53 +1309,70 @@ const ModelRow: FunctionComponent<ModelRowProps> = ({
     <div className="rounded-lg border border-indigo-200 dark:border-indigo-500/40 bg-indigo-50/30 dark:bg-indigo-500/5 px-3 py-3 space-y-3">
       <div className="font-mono text-xs text-slate-700 dark:text-slate-200">{model.id}</div>
       <div className="space-y-2">
-        <div>
-          <Label className="text-[11px] text-slate-500 mb-1 block">显示名</Label>
-          <Input value={labelDraft} onChange={(e) => setLabelDraft(e.target.value)} className="h-8 text-sm" />
-        </div>
-        <div>
-          <Label className="text-[11px] text-slate-500 mb-1 block">capabilities</Label>
-          <div className="flex flex-wrap gap-2">
-            {EDITABLE_CAPABILITIES.map((cap) => {
-              const on = capsDraft.has(cap);
-              return (
-                <button
-                  key={cap}
-                  type="button"
-                  onClick={() => {
-                    const next = new Set(capsDraft);
-                    if (on) next.delete(cap);
-                    else next.add(cap);
-                    setCapsDraft(next);
-                  }}
-                  className={
-                    on
-                      ? "px-2 py-1 text-[11px] rounded border border-indigo-300 bg-indigo-100 text-indigo-700 dark:border-indigo-500/50 dark:bg-indigo-500/20 dark:text-indigo-300"
-                      : "px-2 py-1 text-[11px] rounded border border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400"
-                  }
-                >
-                  {CAPABILITY_LABELS_ZH[cap] || cap}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={() => setShowAdvanced((v) => !v)}
-          className="text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
-        >
-          {showAdvanced ? "− 收起高级" : "+ 高级"}
-        </button>
-        {showAdvanced && (
+        {!localCtxOnly && (
+          <>
+            <div>
+              <Label className="text-[11px] text-slate-500 mb-1 block">显示名</Label>
+              <Input value={labelDraft} onChange={(e) => setLabelDraft(e.target.value)} className="h-8 text-sm" />
+            </div>
+            <div>
+              <Label className="text-[11px] text-slate-500 mb-1 block">capabilities</Label>
+              <div className="flex flex-wrap gap-2">
+                {EDITABLE_CAPABILITIES.map((cap) => {
+                  const on = capsDraft.has(cap);
+                  return (
+                    <button
+                      key={cap}
+                      type="button"
+                      onClick={() => {
+                        const next = new Set(capsDraft);
+                        if (on) next.delete(cap);
+                        else next.add(cap);
+                        setCapsDraft(next);
+                      }}
+                      className={
+                        on
+                          ? "px-2 py-1 text-[11px] rounded border border-indigo-300 bg-indigo-100 text-indigo-700 dark:border-indigo-500/50 dark:bg-indigo-500/20 dark:text-indigo-300"
+                          : "px-2 py-1 text-[11px] rounded border border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400"
+                      }
+                    >
+                      {CAPABILITY_LABELS_ZH[cap] || cap}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((v) => !v)}
+              className="text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+            >
+              {showAdvanced ? "− 收起高级" : "+ 高级"}
+            </button>
+          </>
+        )}
+        {(showAdvanced || localCtxOnly) && (
           <div>
-            <Label className="text-[11px] text-slate-500 mb-1 block">上下文长度</Label>
+            <Label className="text-[11px] text-slate-500 mb-1 block">
+              上下文长度 (token)
+              {localCtxOnly && model.defaultContextSize != null && (
+                <span className="ml-2 text-slate-400 font-mono">
+                  默认 {model.defaultContextSize}
+                </span>
+              )}
+            </Label>
             <Input
               value={contextDraft}
               onChange={(e) => setContextDraft(e.target.value)}
-              placeholder="如 128000"
-              className="h-8 text-sm font-mono w-[180px]"
+              placeholder={localCtxOnly ? `留空回到默认 ${model.defaultContextSize ?? ""}` : "如 128000"}
+              className="h-8 text-sm font-mono w-[220px]"
             />
+            {localCtxOnly && (
+              <div className="text-[10.5px] text-slate-400 mt-1">
+                改完保存后, 下次启动该模型时 llama-server --ctx-size 用这里的值。
+                ctx 越大占内存越多 (KV cache), 小机器跑大 ctx 容易 OOM。
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1314,13 +1382,20 @@ const ModelRow: FunctionComponent<ModelRowProps> = ({
         </Button>
         <Button
           size="sm"
-          onClick={() =>
+          onClick={() => {
+            if (localCtxOnly) {
+              // 留空 → 删除 override, contextSize 传 undefined; 否则按数字传入。
+              const trimmed = contextDraft.trim();
+              const n = trimmed ? Number(trimmed) : undefined;
+              onSave({ contextSize: n });
+              return;
+            }
             onSave({
               label: labelDraft,
               capabilities: Array.from(capsDraft),
               contextSize: contextDraft ? Number(contextDraft) : undefined,
-            })
-          }
+            });
+          }}
           className="h-7 text-xs bg-indigo-600 hover:bg-indigo-700 text-white"
         >
           保存

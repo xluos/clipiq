@@ -311,11 +311,21 @@ const state = {
   borrowedPid: null,
   port: null,
   modelKey: null,
+  // 实际启动 llama-server 时生效的 --ctx-size。manifest 默认 + config override 解析后落定。
+  contextSize: 0,
   startedAt: 0,
   status: "idle", // idle | starting | ready | stopping | error
   lastError: null,
   logBuffer: [],
 };
+
+// 外部 (main.cjs) 注册的 ctx 解析器: modelKey → number | null。
+// 用于把 config.json 里 localModelOverrides[modelKey].contextSize 注入到 --ctx-size。
+// null 时回落到 manifest 默认。
+let contextResolver = null;
+function setContextResolver(fn) {
+  contextResolver = typeof fn === "function" ? fn : null;
+}
 
 function pushLog(channel, line) {
   state.logBuffer.push({ ts: Date.now(), channel, line });
@@ -330,6 +340,7 @@ function getStatus() {
     status: state.status,
     modelKey: state.modelKey,
     port: state.port,
+    contextSize: state.contextSize || 0,
     startedAt: state.startedAt,
     lastError: state.lastError,
     recentLogs: state.logBuffer.slice(-30),
@@ -575,11 +586,17 @@ async function waitForReady(port, timeoutMs = 60_000) {
   throw new Error("llama-server 启动超时(60s)");
 }
 
-async function start(modelKey, { onLog } = {}) {
+async function start(modelKey, { onLog, contextSize } = {}) {
   // 复用: 当前会话或上一会话残留 (borrowedPid) 都算; 模型对得上就直接返回
   if (state.process || state.borrowedPid) {
     if (state.modelKey === modelKey && state.status === "ready") {
-      return { ok: true, port: state.port, reused: true, adopted: !!state.borrowedPid };
+      return {
+        ok: true,
+        port: state.port,
+        contextSize: state.contextSize,
+        reused: true,
+        adopted: !!state.borrowedPid,
+      };
     }
     await stop();
   }
@@ -626,12 +643,25 @@ async function start(modelKey, { onLog } = {}) {
   }
 
   const port = await findFreePort();
+
+  // ctx 解析优先级: 显式传入 > setContextResolver 注册的 hook > manifest 默认 > 8192 兜底
+  let effectiveCtx = Number(contextSize) > 0 ? Number(contextSize) : 0;
+  if (!effectiveCtx && contextResolver) {
+    try {
+      const fromHook = await contextResolver(modelKey);
+      if (Number(fromHook) > 0) effectiveCtx = Number(fromHook);
+    } catch (err) {
+      console.warn(`[llama-runtime] contextResolver(${modelKey}) 失败:`, err?.message || err);
+    }
+  }
+  if (!effectiveCtx) effectiveCtx = Number(meta.contextSize) > 0 ? Number(meta.contextSize) : 8192;
+
   const args = [
     "--host", "127.0.0.1",
     "--port", String(port),
     "--model", llmPath,
     "--mmproj", mmprojPath,
-    "--ctx-size", String(meta.contextSize || 8192),
+    "--ctx-size", String(effectiveCtx),
     // Apple Silicon 上让所有层 offload 到 Metal;CPU 后端会忽略该参数
     "--n-gpu-layers", "999",
   ];
@@ -642,6 +672,7 @@ async function start(modelKey, { onLog } = {}) {
   state.startedAt = Date.now();
   state.modelKey = modelKey;
   state.port = port;
+  state.contextSize = effectiveCtx;
 
   const child = spawn(binary, args, {
     cwd: dir,
@@ -654,6 +685,7 @@ async function start(modelKey, { onLog } = {}) {
     pid: child.pid,
     port,
     modelKey,
+    contextSize: effectiveCtx,
     parentPid: process.pid,
     startedAt: state.startedAt,
     binaryPath: binary,
@@ -680,6 +712,7 @@ async function start(modelKey, { onLog } = {}) {
     state.process = null;
     state.port = null;
     state.modelKey = null;
+    state.contextSize = 0;
     sidecarUtils.clearPidFile(pidFilePath());
     if (wasStopping) {
       state.status = "idle";
@@ -698,7 +731,7 @@ async function start(modelKey, { onLog } = {}) {
     throw error;
   }
   state.status = "ready";
-  return { ok: true, port, reused: false };
+  return { ok: true, port, contextSize: effectiveCtx, reused: false };
 }
 
 async function selfTest({ imageDataUrl, prompt } = {}) {
@@ -780,6 +813,10 @@ async function reapOrAdopt() {
   state.borrowedPid = info.pid;
   state.port = info.port;
   state.modelKey = info.modelKey;
+  // 接管时 ctx 从 PID 文件读; 老版本 PID 文件没有这个字段就用 manifest 默认作为近似
+  state.contextSize = Number(info.contextSize) > 0
+    ? Number(info.contextSize)
+    : (Number(MODELS[info.modelKey]?.contextSize) > 0 ? Number(MODELS[info.modelKey].contextSize) : 8192);
   state.startedAt = info.startedAt || Date.now();
   state.status = "ready";
   // eslint-disable-next-line no-console
@@ -819,5 +856,6 @@ module.exports = {
   getRuntimePid,
   selfTest,
   resolveLlamaServerPath,
+  setContextResolver,
   shutdownSync,
 };

@@ -11,6 +11,25 @@
 // shot-merger / summarizer / detectGenreLightweight / callOpenAICompatible 全部
 // 通过本模块的 callJsonCompletion 入口, 避免重复实现 + 漏配 endpointType 路径。
 
+// 本地 llama 适配器: main.cjs 在 app ready 时调 setLocalProviderAdapter 注入。
+// adapter 签名: (modelKey, { signal }) => Promise<{ baseUrl, apiKey, model, contextSize, release }>。
+// 当 provider.source === "local_llama" 时, openai-client 在请求前自动 acquire,
+// 完成后 (含异常) release。业务方零改动复用本地 server。
+let localProviderAdapter = null;
+function setLocalProviderAdapter(fn) {
+  localProviderAdapter = typeof fn === "function" ? fn : null;
+}
+
+async function maybeAcquireLocalSlot(provider, signal) {
+  if (!localProviderAdapter) return null;
+  if (provider?.source !== "local_llama") return null;
+  if (!provider?.model) return null;
+  // 调用方已经手动 acquire 过 (例如主分析为了拿 ctx 做预算), 不再二次 acquire。
+  if (provider?._preacquired) return null;
+  const slot = await localProviderAdapter(provider.model, { signal });
+  return slot;
+}
+
 function tryParseJsonFromText(text) {
   if (!text) return null;
   try {
@@ -72,46 +91,53 @@ async function callOpenAIChatCompletionsRaw(provider, opts) {
     maxTokens,
     signal,
   } = opts;
-  const endpoint = `${provider.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-  const body = {
-    model: provider.model,
-    stream: true,
-    temperature: temperature ?? provider.temperature ?? 0.2,
-    max_tokens: maxTokens ?? provider.maxOutputTokens ?? 12000,
-    messages: [
-      { role: "system", content: systemText },
-      {
-        role: "user",
-        content:
-          imageDataUrls.length > 0
-            ? [
-                { type: "text", text: userText },
-                ...imageDataUrls.map((url) => ({ type: "image_url", image_url: { url } })),
-              ]
-            : userText,
+  const slot = await maybeAcquireLocalSlot(provider, signal);
+  try {
+    const baseUrl = slot ? slot.baseUrl : provider.baseUrl;
+    const apiKey = slot ? slot.apiKey : provider.apiKeyRef;
+    const endpoint = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+    const body = {
+      model: provider.model,
+      stream: true,
+      temperature: temperature ?? provider.temperature ?? 0.2,
+      max_tokens: maxTokens ?? provider.maxOutputTokens ?? 12000,
+      messages: [
+        { role: "system", content: systemText },
+        {
+          role: "user",
+          content:
+            imageDataUrls.length > 0
+              ? [
+                  { type: "text", text: userText },
+                  ...imageDataUrls.map((url) => ({ type: "image_url", image_url: { url } })),
+                ]
+              : userText,
+        },
+      ],
+    };
+    const response = await fetch(endpoint, {
+      method: "POST",
+      signal,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
+        accept: "text/event-stream",
       },
-    ],
-  };
-  const response = await fetch(endpoint, {
-    method: "POST",
-    signal,
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${provider.apiKeyRef}`,
-      accept: "text/event-stream",
-    },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
+    }
+    let text = "";
+    await streamSSE(response, (event) => {
+      const delta = event?.choices?.[0]?.delta?.content;
+      if (typeof delta === "string") text += delta;
+    });
+    return text;
+  } finally {
+    slot?.release();
   }
-  let text = "";
-  await streamSSE(response, (event) => {
-    const delta = event?.choices?.[0]?.delta?.content;
-    if (typeof delta === "string") text += delta;
-  });
-  return text;
 }
 
 async function callOpenAIResponsesRaw(provider, opts) {
@@ -123,55 +149,62 @@ async function callOpenAIResponsesRaw(provider, opts) {
     maxOutputTokens,
     signal,
   } = opts;
-  const endpoint = `${provider.baseUrl.replace(/\/+$/, "")}/responses`;
-  const userContent = [
-    { type: "input_text", text: userText },
-    ...imageDataUrls.map((url) => ({ type: "input_image", image_url: url })),
-  ];
-  const body = {
-    model: provider.model,
-    stream: true,
-    temperature: temperature ?? provider.temperature ?? 0.2,
-    max_output_tokens: maxOutputTokens ?? provider.maxOutputTokens ?? 12000,
-    input: [
-      { role: "system", content: [{ type: "input_text", text: systemText }] },
-      { role: "user", content: userContent },
-    ],
-  };
-  const response = await fetch(endpoint, {
-    method: "POST",
-    signal,
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${provider.apiKeyRef}`,
-      accept: "text/event-stream",
-    },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
-  }
-  let text = "";
-  await streamSSE(response, (event) => {
-    if (event?.type === "response.output_text.delta" && typeof event.delta === "string") {
-      text += event.delta;
+  const slot = await maybeAcquireLocalSlot(provider, signal);
+  try {
+    const baseUrl = slot ? slot.baseUrl : provider.baseUrl;
+    const apiKey = slot ? slot.apiKey : provider.apiKeyRef;
+    const endpoint = `${baseUrl.replace(/\/+$/, "")}/responses`;
+    const userContent = [
+      { type: "input_text", text: userText },
+      ...imageDataUrls.map((url) => ({ type: "input_image", image_url: url })),
+    ];
+    const body = {
+      model: provider.model,
+      stream: true,
+      temperature: temperature ?? provider.temperature ?? 0.2,
+      max_output_tokens: maxOutputTokens ?? provider.maxOutputTokens ?? 12000,
+      input: [
+        { role: "system", content: [{ type: "input_text", text: systemText }] },
+        { role: "user", content: userContent },
+      ],
+    };
+    const response = await fetch(endpoint, {
+      method: "POST",
+      signal,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
+        accept: "text/event-stream",
+      },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
     }
-    if (event?.type === "response.completed" && Array.isArray(event?.response?.output)) {
-      if (!text) {
-        for (const item of event.response.output) {
-          if (item?.type === "message" && Array.isArray(item.content)) {
-            for (const block of item.content) {
-              if ((block?.type === "output_text" || block?.type === "text") && typeof block.text === "string") {
-                text += block.text;
+    let text = "";
+    await streamSSE(response, (event) => {
+      if (event?.type === "response.output_text.delta" && typeof event.delta === "string") {
+        text += event.delta;
+      }
+      if (event?.type === "response.completed" && Array.isArray(event?.response?.output)) {
+        if (!text) {
+          for (const item of event.response.output) {
+            if (item?.type === "message" && Array.isArray(item.content)) {
+              for (const block of item.content) {
+                if ((block?.type === "output_text" || block?.type === "text") && typeof block.text === "string") {
+                  text += block.text;
+                }
               }
             }
           }
         }
       }
-    }
-  });
-  return text;
+    });
+    return text;
+  } finally {
+    slot?.release();
+  }
 }
 
 // 统一入口: 按 endpointType 自动分流, 返回 parsed JSON (或 null)
@@ -212,4 +245,5 @@ module.exports = {
   callOpenAIChatCompletions,
   callOpenAIResponses,
   callJsonCompletion,
+  setLocalProviderAdapter,
 };

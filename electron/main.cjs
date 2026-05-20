@@ -9,6 +9,7 @@ const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const { Readable } = require("node:stream");
 const llamaRuntime = require("./llama-runtime.cjs");
+const llamaManager = require("./llama-manager.cjs");
 const whisperCppRuntime = require("./whisper-cpp-runtime.cjs");
 const prefilter = require("./prefilter.cjs");
 const shotMerger = require("./shot-merger.cjs");
@@ -1067,20 +1068,26 @@ function localWhisperEntryToDescriptor(entry) {
 // builtin local_llama: 内置本地推理 provider,覆盖 manifest 里所有可用模型。
 // 每次 loadConfig 强制重写这个 entry,避免用户的旧配置把它覆盖。
 // capabilities 派生统一走 localLlamaEntryToDescriptor,跟 listManifest 输出对齐。
-function buildBuiltinLocalLlamaProvider() {
+//
+// contextSize 解析: manifest 默认 > localModelOverrides[modelKey].contextSize (用户覆盖)。
+// UI 拿到的 model.contextSize 是 effective 值, 跟 llama-server 启动时实际 --ctx-size 一致。
+function buildBuiltinLocalLlamaProvider(localModelOverrides = {}) {
   const llamaRuntime = require("./llama-runtime.cjs");
   const models = Object.values(llamaRuntime.MODELS)
     .filter((meta) => meta._manifest && meta._manifest.available !== false)
     .map((meta) => {
       const descriptor = localLlamaEntryToDescriptor(meta._manifest);
       if (!descriptor) return null;
+      const override = Number(localModelOverrides?.[descriptor.id]?.contextSize);
+      const effectiveCtx = override > 0 ? override : descriptor.contextSize;
       return {
         id: descriptor.id,
         label: descriptor.label,
         capabilities: descriptor.capabilities,
         capabilitiesSource: descriptor.capabilitiesSource,
         family: descriptor.family,
-        contextSize: descriptor.contextSize,
+        contextSize: effectiveCtx,
+        defaultContextSize: descriptor.contextSize, // UI 显示"默认 ctx"对比用
         localKey: descriptor.id,
       };
     })
@@ -1161,16 +1168,12 @@ function resolveAudioProvider(config) {
 }
 
 function shapeEffectiveProvider(provider, model) {
-  let baseUrl = provider.baseUrl;
-  let apiKeyRef = provider.apiKeyRef;
-  if (provider.source === "local_llama") {
-    const llamaRuntime = require("./llama-runtime.cjs");
-    const status = llamaRuntime.getStatus();
-    if (status?.running && status?.port) {
-      baseUrl = `http://127.0.0.1:${status.port}/v1`;
-      apiKeyRef = "local"; // llama-server 不验证 key
-    }
-  }
+  // local_llama 的 baseUrl / apiKeyRef 由 llama-manager 在请求时动态注入,
+  // 这里只占位; openai-client 看到 provider.source === "local_llama" 会自动 acquire slot。
+  // 不在这里读 runtime.getStatus(): 那样拿到的 port 是"当前 server", 但当前 server
+  // 跑的不一定就是 model.id; 真正切换在 acquire 内做。
+  const baseUrl = provider.source === "local_llama" ? "http://127.0.0.1:0/v1" : provider.baseUrl;
+  const apiKeyRef = provider.source === "local_llama" ? "local" : provider.apiKeyRef;
   return {
     ...provider,
     baseUrl,
@@ -1201,8 +1204,11 @@ function migrateConfigV1ToV2(raw) {
     .map(migrateProviderV1)
     .filter(Boolean);
 
+  const localModelOverrides = cfg.localModelOverrides && typeof cfg.localModelOverrides === "object"
+    ? cfg.localModelOverrides
+    : {};
   const providers = [
-    buildBuiltinLocalLlamaProvider(),
+    buildBuiltinLocalLlamaProvider(localModelOverrides),
     buildBuiltinLocalWhisperProvider(),
     ...userProviders,
   ];
@@ -1296,6 +1302,7 @@ function migrateConfigV1ToV2(raw) {
     audioSlot,
     lastLlamaModelKey: cfg.lastLlamaModelKey || null,
     defaultAnalysis: cfg.defaultAnalysis || null,
+    localModelOverrides,
     schemaVersion: 2,
   };
 }
@@ -2754,71 +2761,93 @@ const VISION_TOKENS_PER_FRAME = 800;
 const HARD_FRAME_CAP = 12;
 const HARD_FRAME_MIN = 1;
 
+
 async function callOpenAICompatible(provider, project, frames, transcript, scenes, fallbackNodes, fallbackReport, options, handle = null) {
   if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
     return { nodes: fallbackNodes, report: fallbackReport, usedModel: false };
   }
 
-  // 按 model contextSize 动态算可用空间。manifest 没标 -> 兜底 8192 (llama-server 默认)
-  const ctxSize = Number(provider?.contextSize) > 0 ? Number(provider.contextSize) : 8192;
-  // 输出 reserve: 拍片报告 JSON 一般 1.5-3k token, 取 ctx 的 25% 但不少于 1500
-  const reserveForOutput = Math.max(1500, Math.floor(ctxSize * 0.25));
-  // 系统 prompt + 镜头列表 + methodology 规则 + 字段说明等模板成本
-  const reserveForPrompt = 1500;
-  // transcript 字符上限。中文 ~0.5 token/字, 给 transcript 留可用预算的 40%, 但不超过 4000
-  const transcriptCap = Math.max(
-    0,
-    Math.min(4000, Math.floor((ctxSize - reserveForOutput - reserveForPrompt) * 0.4 * 2)),
-  );
-  let visibleTranscript = transcript;
-  if (transcript?.text && transcriptCap > 0) {
-    const trimmed = trimTranscriptForBudget(transcript.text, transcript.segments, transcriptCap);
-    visibleTranscript = { ...transcript, text: trimmed.text, segments: trimmed.segments };
-  } else if (transcript?.text && transcriptCap === 0) {
-    visibleTranscript = { ...transcript, text: "", segments: [] };
-  }
-  const transcriptTokens = Math.ceil((visibleTranscript?.text || "").length * 0.5);
-  const remainingForFrames = ctxSize - reserveForOutput - reserveForPrompt - transcriptTokens;
-  const maxImages = Math.max(
-    HARD_FRAME_MIN,
-    Math.min(HARD_FRAME_CAP, Math.floor(remainingForFrames / VISION_TOKENS_PER_FRAME)),
-  );
-  const requestedFrames = frames.length;
-  frames = frames.slice(0, maxImages);
-
-  console.log(
-    `[analyze:main] provider=${provider.id} model=${provider.model} ctx=${ctxSize} ` +
-    `reserve(out/sys)=${reserveForOutput}/${reserveForPrompt} transcript=${visibleTranscript?.text?.length || 0}字(${transcriptTokens}tok) ` +
-    `frames=${frames.length}/${requestedFrames}(cap=${maxImages})`,
-  );
-
-  const imageDataUrls = [];
-  for (const frame of frames) {
-    const base64 = await fs.readFile(frame.framePath, "base64");
-    imageDataUrls.push(`data:image/jpeg;base64,${base64}`);
+  // 本地 llama: 显式 acquire 拿到 slot, 这样能读到 server 实际启动时的 --ctx-size,
+  // 用真实 ctx 做预算才准。同时给 provider 打 _preacquired 标记, 让 openai-client 不再二次 acquire。
+  let preacquiredSlot = null;
+  let effectiveProvider = provider;
+  if (provider.source === "local_llama") {
+    preacquiredSlot = await llamaManager.acquire(provider.model, {
+      signal: handle?.abortController?.signal,
+    });
+    effectiveProvider = {
+      ...provider,
+      baseUrl: preacquiredSlot.baseUrl,
+      apiKeyRef: preacquiredSlot.apiKey,
+      contextSize: preacquiredSlot.contextSize,
+      _preacquired: true,
+    };
   }
 
-  const { userText, methodology } = await buildAnalysisPrompt(project, frames, visibleTranscript, scenes, options);
-  const systemText =
-    "你是一名严谨的视频拉片分析师。你既要描述视频内容，又要严格按照提供的剪辑方法论规则集对视频打标（命中 / 违反 / 缺失）。所有回答必须是合法 JSON，不要使用 Markdown 围栏，不要解释。";
-
-  const useResponses = provider.endpointType === "openai_responses";
-  const parsed = useResponses
-    ? await callOpenAIResponses(provider, systemText, userText, imageDataUrls, handle)
-    : await callOpenAIChatCompletions(provider, systemText, userText, imageDataUrls, handle);
-
-  // 即便 HTTP 200, 模型也可能返回空 / 无法解析。常见场景:
-  //  - reasoning 模型 (Qwen3.5/3.6 等) stream 把内容放到 delta.reasoning_content,
-  //    client 只取 delta.content 导致拼出空 text -> tryParseJsonFromText 返 null
-  //  - 模型回了非 JSON (markdown / 自然语言) -> tryParseJsonFromText 也返 null
-  // 这两种情况让上层走"分析失败"路径, 而不是 normalizeModelResult 静默兜底成假节点。
-  if (!parsed || (!Array.isArray(parsed.nodes) && !parsed.report)) {
-    throw new Error(
-      "模型未返回可解析的 JSON (响应为空或非 JSON)。reasoning 模型可能把内容放在 reasoning_content 字段, 当前 client 不解析; 或模型超 ctx / 没有视觉能力 / 输出被截断。",
+  try {
+    // 按 model contextSize 动态算可用空间。manifest 没标 -> 兜底 8192 (llama-server 默认)
+    const ctxSize = Number(effectiveProvider?.contextSize) > 0 ? Number(effectiveProvider.contextSize) : 8192;
+    // 输出 reserve: 拍片报告 JSON 一般 1.5-3k token, 取 ctx 的 25% 但不少于 1500
+    const reserveForOutput = Math.max(1500, Math.floor(ctxSize * 0.25));
+    // 系统 prompt + 镜头列表 + methodology 规则 + 字段说明等模板成本
+    const reserveForPrompt = 1500;
+    // transcript 字符上限。中文 ~0.5 token/字, 给 transcript 留可用预算的 40%, 但不超过 4000
+    const transcriptCap = Math.max(
+      0,
+      Math.min(4000, Math.floor((ctxSize - reserveForOutput - reserveForPrompt) * 0.4 * 2)),
     );
-  }
+    let visibleTranscript = transcript;
+    if (transcript?.text && transcriptCap > 0) {
+      const trimmed = trimTranscriptForBudget(transcript.text, transcript.segments, transcriptCap);
+      visibleTranscript = { ...transcript, text: trimmed.text, segments: trimmed.segments };
+    } else if (transcript?.text && transcriptCap === 0) {
+      visibleTranscript = { ...transcript, text: "", segments: [] };
+    }
+    const transcriptTokens = Math.ceil((visibleTranscript?.text || "").length * 0.5);
+    const remainingForFrames = ctxSize - reserveForOutput - reserveForPrompt - transcriptTokens;
+    const maxImages = Math.max(
+      HARD_FRAME_MIN,
+      Math.min(HARD_FRAME_CAP, Math.floor(remainingForFrames / VISION_TOKENS_PER_FRAME)),
+    );
+    const requestedFrames = frames.length;
+    frames = frames.slice(0, maxImages);
 
-  return { ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, provider, methodology), usedModel: true };
+    console.log(
+      `[analyze:main] provider=${effectiveProvider.id} model=${effectiveProvider.model} ctx=${ctxSize} ` +
+      `reserve(out/sys)=${reserveForOutput}/${reserveForPrompt} transcript=${visibleTranscript?.text?.length || 0}字(${transcriptTokens}tok) ` +
+      `frames=${frames.length}/${requestedFrames}(cap=${maxImages})`,
+    );
+
+    const imageDataUrls = [];
+    for (const frame of frames) {
+      const base64 = await fs.readFile(frame.framePath, "base64");
+      imageDataUrls.push(`data:image/jpeg;base64,${base64}`);
+    }
+
+    const { userText, methodology } = await buildAnalysisPrompt(project, frames, visibleTranscript, scenes, options);
+    const systemText =
+      "你是一名严谨的视频拉片分析师。你既要描述视频内容，又要严格按照提供的剪辑方法论规则集对视频打标（命中 / 违反 / 缺失）。所有回答必须是合法 JSON，不要使用 Markdown 围栏，不要解释。";
+
+    const useResponses = effectiveProvider.endpointType === "openai_responses";
+    const parsed = useResponses
+      ? await callOpenAIResponses(effectiveProvider, systemText, userText, imageDataUrls, handle)
+      : await callOpenAIChatCompletions(effectiveProvider, systemText, userText, imageDataUrls, handle);
+
+    // 即便 HTTP 200, 模型也可能返回空 / 无法解析。常见场景:
+    //  - reasoning 模型 (Qwen3.5/3.6 等) stream 把内容放到 delta.reasoning_content,
+    //    client 只取 delta.content 导致拼出空 text -> tryParseJsonFromText 返 null
+    //  - 模型回了非 JSON (markdown / 自然语言) -> tryParseJsonFromText 也返 null
+    // 这两种情况让上层走"分析失败"路径, 而不是 normalizeModelResult 静默兜底成假节点。
+    if (!parsed || (!Array.isArray(parsed.nodes) && !parsed.report)) {
+      throw new Error(
+        "模型未返回可解析的 JSON (响应为空或非 JSON)。reasoning 模型可能把内容放在 reasoning_content 字段, 当前 client 不解析; 或模型超 ctx / 没有视觉能力 / 输出被截断。",
+      );
+    }
+
+    return { ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, effectiveProvider, methodology), usedModel: true };
+  } finally {
+    preacquiredSlot?.release();
+  }
 }
 
 // Pass 1（轻量、无图）：仅靠字幕分段 + 镜头列表识别 genre。失败时返回 null。
@@ -3082,13 +3111,14 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     ensureNotCancelled(handle);
     const sceneThreshold = sceneThresholdFor(options);
     const scenes = await detectScenes(ffmpeg, inputPath, sceneThreshold, handle);
-    // 本地初筛预检: 用户希望用(lastLlamaModelKey 存在) → 主动确认/启动 server,
-    // 失败一律降级为"跳过初筛但继续分析",绝不阻断主流程。
-    let localStatus = llamaRuntime.getStatus();
-    let localPrefilterReady = !!(localStatus.running && localStatus.port);
-    if (!localPrefilterReady) {
+    // 本地初筛预检: 检查"用户配了模型 + 二进制装了 + 模型下完",通过即可走初筛。
+    // 真正的 server start / model 切换由 llamaManager.acquire 在 tagFrames 时按需触发。
+    let localPrefilterReady = false;
+    let prefilterModelKey = null;
+    {
       const cfg = await readJson(getConfigPath(), null).catch(() => null);
       const preferredModel = cfg?.lastLlamaModelKey;
+      const localStatus = llamaRuntime.getStatus();
       if (preferredModel) {
         if (!localStatus.binaryFound) {
           send(10, "本地推理预检", "推理引擎未安装,本次跳过初筛(去设置 → 本地推理可安装)。");
@@ -3097,28 +3127,9 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           const target = models.find((m) => m.key === preferredModel);
           if (!target || !target.downloaded) {
             send(10, "本地推理预检", `模型 ${preferredModel} 未下载完成,本次跳过初筛。`);
-          } else if (localStatus.status === "starting") {
-            send(10, "本地推理预检", "本地模型启动中,等待就绪(最多 15 秒)。");
-            const deadline = Date.now() + 15_000;
-            while (Date.now() < deadline) {
-              await new Promise((r) => setTimeout(r, 500));
-              localStatus = llamaRuntime.getStatus();
-              if (localStatus.running) break;
-              ensureNotCancelled(handle);
-            }
-            localPrefilterReady = !!(localStatus.running && localStatus.port);
-            if (!localPrefilterReady) {
-              send(10, "本地推理预检", "本地模型 15 秒内未就绪,本次跳过初筛。");
-            }
           } else {
-            send(10, "本地推理预检", `本地模型未启动,正在自动拉起 ${preferredModel}…`);
-            try {
-              await llamaRuntime.start(preferredModel);
-              localStatus = llamaRuntime.getStatus();
-              localPrefilterReady = !!(localStatus.running && localStatus.port);
-            } catch (error) {
-              send(10, "本地推理预检", `本地模型启动失败: ${error?.message || error}。本次跳过初筛。`);
-            }
+            localPrefilterReady = true;
+            prefilterModelKey = preferredModel;
           }
         }
       }
@@ -3182,10 +3193,10 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         send(48, "本地初筛", `让本地模型给 ${candidateFrames.length} 张候选画面快速打标。`);
         const prefilterStartedAt = Date.now();
         const tagResult = await prefilter.tagFrames(candidateFrames, {
-          port: localStatus.port,
-          modelKey: localStatus.modelKey,
+          modelKey: prefilterModelKey,
+          acquireSlot: (mk, opts) => llamaManager.acquire(mk, opts),
           perFrameTimeoutMs: 30_000,
-          cache: makePrefilterCache(localStatus.modelKey),
+          cache: makePrefilterCache(prefilterModelKey),
           onProgress: (i, total, _tag, _elapsedMs, fromCache) => {
             ensureNotCancelled(handle);
             const avgMs = Math.round((Date.now() - prefilterStartedAt) / (i + 1));
@@ -4045,6 +4056,21 @@ app.whenReady().then(async () => {
     console.warn("[cache-store] 初始化失败:", err?.message || err);
   }
 
+  // 本地 llama 接线: ctx override 解析 + openai-client 自动 acquire/release。
+  // 业务方零改动: 任何 provider.source === "local_llama" 的请求都会被 manager 调度。
+  llamaRuntime.setContextResolver(async (modelKey) => {
+    try {
+      const cfg = (await readJson(getConfigPath(), null)) || {};
+      const override = cfg?.localModelOverrides?.[modelKey]?.contextSize;
+      return Number(override) > 0 ? Number(override) : null;
+    } catch {
+      return null;
+    }
+  });
+  openaiClient.setLocalProviderAdapter((modelKey, opts) =>
+    llamaManager.acquire(modelKey, opts),
+  );
+
   try {
     await extensionBridge.start(app.getPath("userData"));
     extensionBridge.onStatusChange((s) => {
@@ -4448,11 +4474,13 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("config:save", async (_event, config) => {
     // 落盘前再过一次 migrate,保证 builtin 永远存在 + schema 永远是 v2
-    // 合并磁盘上的 lastLlamaModelKey 等 renderer 不持有的字段,避免被覆盖
+    // 合并磁盘上的 lastLlamaModelKey / localModelOverrides 等 renderer 可能不持有的字段,
+    // 避免单字段更新打回时把别的字段抹掉。
     const cur = await readJson(getConfigPath(), null);
     const merged = {
       ...config,
       lastLlamaModelKey: config?.lastLlamaModelKey ?? cur?.lastLlamaModelKey ?? null,
+      localModelOverrides: config?.localModelOverrides ?? cur?.localModelOverrides ?? {},
     };
     const migrated = migrateConfigV1ToV2(merged);
     await writeJson(getConfigPath(), { ...migrated, savedAt: new Date().toISOString() });
