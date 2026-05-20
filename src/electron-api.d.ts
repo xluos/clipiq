@@ -285,6 +285,7 @@ declare global {
         audioProvider?: ModelProvider | null;
         options: AnalysisOptions;
       }) => Promise<AnalysisResult>;
+      resetAnalysis: (projectId: string) => Promise<{ ok: boolean; message?: string }>;
       cancelAnalysis: (projectId: string) => Promise<{ cancelled: boolean }>;
       isAnalysisActive: (projectId: string) => Promise<boolean>;
       getLastAnalysisProgress: (projectId: string) => Promise<AnalysisProgressEvent | null>;

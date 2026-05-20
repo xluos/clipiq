@@ -65,6 +65,7 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   getReport: (projectId) => ipcRenderer.invoke("report:get", projectId),
   setReport: (projectId, report) => ipcRenderer.invoke("report:set", projectId, report),
   analyzeProject: (payload) => ipcRenderer.invoke("analysis:start", payload),
+  resetAnalysis: (projectId) => ipcRenderer.invoke("analysis:reset", projectId),
   cancelAnalysis: (projectId) => ipcRenderer.invoke("analysis:cancel", projectId),
   isAnalysisActive: (projectId) => ipcRenderer.invoke("analysis:isActive", projectId),
   getLastAnalysisProgress: (projectId) => ipcRenderer.invoke("analysis:getLastProgress", projectId),
