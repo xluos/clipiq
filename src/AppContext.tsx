@@ -305,6 +305,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
     (projectId: string, optionsOverride?: AnalysisOptions) => {
       const provider = providersRef.current.find((pr) => pr.id === activeVideoProviderId)
         ?? providersRef.current.find((pr) => pr.kind === "video");
+      // 重新分析前清掉旧 nodes / report (内存 + SQLite + JSON 文件)。
+      // 避免新跑失败时 UI 仍展示上次的耗时图 / 节点 —— 这种"看着像成功了但其实是旧的"最坑。
+      // artifacts 目录(关键帧 / 音轨 / transcript)保留, 新分析可以复用。
+      setNodesByProject((prev) => {
+        if (!(projectId in prev)) return prev;
+        const next = { ...prev };
+        delete next[projectId];
+        return next;
+      });
+      setReportByProject((prev) => {
+        if (!(projectId in prev)) return prev;
+        const next = { ...prev };
+        delete next[projectId];
+        return next;
+      });
+      if (window.videoAnalyzer?.resetAnalysis) {
+        window.videoAnalyzer.resetAnalysis(projectId).catch((error) => {
+          console.warn("resetAnalysis failed", error);
+        });
+      }
       setProjects((prev) =>
         prev.map((p) => {
           if (p.id !== projectId) return p;

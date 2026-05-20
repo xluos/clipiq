@@ -915,6 +915,54 @@ async function writeJson(filePath, payload) {
   await fs.rename(tmp, filePath);
 }
 
+// 主分析失败 catch 里立刻落一次盘。
+// 目的:分析后续阶段如果再 crash / Mac sleep 杀掉进程 / 用户关 app,
+// 至少 SQLite 和 JSON 都有这次跑的 failed report, 不会停在上次跑的旧数据上。
+// 不写 projects 表(让最终成功路径决定 status); 不更新 timings(timings 是 mutable 数组, 最终路径会再写一遍)。
+async function persistEarlySnapshot(project, projectDir, nodes, report, timings, analysisStartedAt) {
+  const snapshotReport = {
+    ...report,
+    timings: [...timings],
+    totalDurationMs: Date.now() - analysisStartedAt,
+  };
+  try {
+    await writeJson(path.join(projectDir, "analysis-result.json"), {
+      project,
+      nodes,
+      report: snapshotReport,
+    });
+  } catch (err) {
+    await appendPersistErrorLog(project.id, "persistEarlySnapshot writeJson", err);
+  }
+  try {
+    const db = getDb();
+    db.prepare(
+      "INSERT INTO analysis_nodes (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
+    ).run(project.id, JSON.stringify(nodes));
+    db.prepare(
+      "INSERT INTO analysis_reports (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
+    ).run(project.id, JSON.stringify(snapshotReport));
+  } catch (err) {
+    await appendPersistErrorLog(project.id, "persistEarlySnapshot SQLite", err);
+  }
+}
+
+// 落盘错误日志(SQLite 持久化失败 / fallback 自愈失败 等)。
+// console 在 packaged app 里没 stdout 落盘, 这里直接 append 到项目目录, 出问题能事后查。
+async function appendPersistErrorLog(projectId, where, err) {
+  try {
+    const dir = getProjectDir(projectId);
+    await fs.mkdir(dir, { recursive: true });
+    const msg = err?.stack || err?.message || String(err);
+    await fs.appendFile(
+      path.join(dir, "persist-error.log"),
+      `[${new Date().toISOString()}] [${where}] ${msg}\n\n`,
+    );
+  } catch {
+    // best-effort, 不影响业务
+  }
+}
+
 // 把单个 v1 provider 转新 schema (含 source/models/[]/builtin)。幂等。
 function migrateProviderV1(raw) {
   if (!raw || typeof raw !== "object") return null;
@@ -4224,6 +4272,10 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         nodes = markFallbackNodesAsFailed(fallbackNodes);
         report = markFallbackReportAsFailed(fallbackReport, shortMsg, provider);
         send(85, "分析失败", `${shortMsg}。已保留镜头骨架,节点字段标记为分析失败。`);
+        // 立刻把 failed 快照写到 JSON + SQLite。
+        // 后续弹幕情绪聚合 / 整理结果如果跑到一半 crash 或被 Mac sleep 杀进程,
+        // 至少 ReportScreen 加载到的是这次的 failed report, 而不是上次跑的脏数据。
+        await persistEarlySnapshot(project, projectDir, nodes, report, timings, analysisStartedAt);
       }
     } else if (globalContext || shotContexts) {
       // 视觉主分析未配置, 但中间层有产物, 让 fallback report 至少能带上 globalSummary
@@ -4389,8 +4441,10 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         "INSERT INTO analysis_reports (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data",
       ).run(project.id, JSON.stringify(report));
     } catch (persistError) {
-      // 不阻断返回:JSON 文件已经写了,renderer 路径仍可兜底
-      console.warn("[clipiq] main 端 SQLite 持久化失败,renderer 路径会兜底:", persistError);
+      // 不阻断返回:JSON 文件已经写了, report:get / nodes:get 会自动 fallback 到文件。
+      // 把错误也落盘 (console 在 packaged app 里没 stdout), 事后能查为啥 SQLite 没写。
+      console.warn("[clipiq] main 端 SQLite 持久化失败,JSON 会兜底:", persistError);
+      await appendPersistErrorLog(project.id, "analyzeProject finalize", persistError);
     }
     return { project: updatedProject, nodes, report };
   } finally {
@@ -5159,10 +5213,51 @@ app.whenReady().then(async () => {
     return { ok: true };
   });
 
+  // analysis-result.json 是分析管线落盘的 source of truth(写在 SQLite 之前)。
+  // 如果 SQLite 写盘失败被吞 / 没走到, JSON 文件就比 SQLite 新 —— 这里 fallback 到文件,
+  // 顺手把 SQLite 自愈回新内容, 下次直接命中 SQLite 不用读盘。
+  async function loadProjectResultJson(projectId) {
+    try {
+      const jsonPath = path.join(getProjectDir(projectId), "analysis-result.json");
+      const stat = await fs.stat(jsonPath);
+      const raw = await fs.readFile(jsonPath, "utf-8");
+      const parsed = JSON.parse(raw);
+      return { parsed, mtimeMs: stat.mtimeMs };
+    } catch {
+      return null;
+    }
+  }
+  function reportTimestamp(report, fallbackMtimeMs) {
+    if (!report) return 0;
+    const ts = report.generatedAt ? Date.parse(report.generatedAt) : NaN;
+    if (Number.isFinite(ts)) return ts;
+    return fallbackMtimeMs || 0;
+  }
+
   ipcMain.handle("nodes:get", async (_event, projectId) => {
     const db = getDb();
     const row = db.prepare("SELECT data FROM analysis_nodes WHERE project_id = ?").get(projectId);
-    return row ? JSON.parse(row.data) : [];
+    const sqliteNodes = row ? JSON.parse(row.data) : null;
+    // fallback: JSON 文件比 SQLite 新就用文件版 + 自愈写回 SQLite。
+    // 用 report.generatedAt 来判断新旧(nodes 自己没时间戳, 和 report 一起写所以可用)。
+    const fileSnap = await loadProjectResultJson(projectId);
+    if (fileSnap) {
+      const sqliteReportRow = db.prepare("SELECT data FROM analysis_reports WHERE project_id = ?").get(projectId);
+      const sqliteReport = sqliteReportRow ? JSON.parse(sqliteReportRow.data) : null;
+      const fileTs = reportTimestamp(fileSnap.parsed?.report, fileSnap.mtimeMs);
+      const sqlTs = reportTimestamp(sqliteReport, 0);
+      if (fileTs > sqlTs && Array.isArray(fileSnap.parsed?.nodes)) {
+        try {
+          db.prepare(
+            "INSERT INTO analysis_nodes (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
+          ).run(projectId, JSON.stringify(fileSnap.parsed.nodes));
+        } catch (err) {
+          await appendPersistErrorLog(projectId, "nodes:get self-heal", err);
+        }
+        return fileSnap.parsed.nodes;
+      }
+    }
+    return sqliteNodes || [];
   });
 
   ipcMain.handle("nodes:set", async (_event, projectId, nodes) => {
@@ -5176,7 +5271,46 @@ app.whenReady().then(async () => {
   ipcMain.handle("report:get", async (_event, projectId) => {
     const db = getDb();
     const row = db.prepare("SELECT data FROM analysis_reports WHERE project_id = ?").get(projectId);
-    return row ? JSON.parse(row.data) : null;
+    const sqliteReport = row ? JSON.parse(row.data) : null;
+    const fileSnap = await loadProjectResultJson(projectId);
+    if (fileSnap?.parsed?.report) {
+      const fileTs = reportTimestamp(fileSnap.parsed.report, fileSnap.mtimeMs);
+      const sqlTs = reportTimestamp(sqliteReport, 0);
+      if (fileTs > sqlTs) {
+        try {
+          db.prepare(
+            "INSERT INTO analysis_reports (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
+          ).run(projectId, JSON.stringify(fileSnap.parsed.report));
+        } catch (err) {
+          await appendPersistErrorLog(projectId, "report:get self-heal", err);
+        }
+        return fileSnap.parsed.report;
+      }
+    }
+    return sqliteReport;
+  });
+
+  // 重新分析前调用:清掉旧的 nodes/report SQLite 行 + analysis-result.json + timings.json,
+  // 让新跑的"失败 fallback report"不会被旧数据覆盖, 也不会让 ReportScreen 短暂展示上次的耗时图。
+  // artifacts/ 目录(关键帧 / 镜头缩略图 / audio / transcript) 保留 — 新分析可以复用避免重抽。
+  ipcMain.handle("analysis:reset", async (_event, projectId) => {
+    if (!projectId) return { ok: false, message: "缺少 projectId" };
+    const db = getDb();
+    try {
+      db.prepare("DELETE FROM analysis_nodes WHERE project_id = ?").run(projectId);
+      db.prepare("DELETE FROM analysis_reports WHERE project_id = ?").run(projectId);
+    } catch (err) {
+      await appendPersistErrorLog(projectId, "analysis:reset SQLite", err);
+    }
+    const dir = getProjectDir(projectId);
+    for (const name of ["analysis-result.json", "timings.json"]) {
+      try {
+        await fs.unlink(path.join(dir, name));
+      } catch {
+        // 不存在就跳过, best-effort
+      }
+    }
+    return { ok: true };
   });
 
   ipcMain.handle("report:set", async (_event, projectId, report) => {
