@@ -3070,7 +3070,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       throw new Error("未检测到 ffmpeg/ffprobe，无法生成关键帧和媒体清单。");
     }
 
-    send(5, "读取视频信息", "正在校验视频时长、分辨率、音轨。");
+    send(2, "读取视频信息", "正在校验视频时长、分辨率、音轨。");
     ensureNotCancelled(handle);
     const inspected = await inspectVideo(inputPath, handle);
     const projectDir = getProjectDir(project.id);
@@ -3078,7 +3078,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     await fs.mkdir(artifactDir, { recursive: true });
     const projectMeta = { ...project, ...inspected, hasAudio: inspected.hasAudio };
 
-    send(12, "检测镜头切换", "扫描视频中的镜头切换点。");
+    send(6, "检测镜头切换", "扫描视频中的镜头切换点。");
     ensureNotCancelled(handle);
     const sceneThreshold = sceneThresholdFor(options);
     const scenes = await detectScenes(ffmpeg, inputPath, sceneThreshold, handle);
@@ -3091,14 +3091,14 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       const preferredModel = cfg?.lastLlamaModelKey;
       if (preferredModel) {
         if (!localStatus.binaryFound) {
-          send(10, "本地推理预检", "推理引擎未安装,本次跳过初筛(去设置 → 本地推理可安装)。");
+          send(7, "本地推理预检", "推理引擎未安装,本次跳过初筛(去设置 → 本地推理可安装)。");
         } else {
           const models = await llamaRuntime.listModels();
           const target = models.find((m) => m.key === preferredModel);
           if (!target || !target.downloaded) {
-            send(10, "本地推理预检", `模型 ${preferredModel} 未下载完成,本次跳过初筛。`);
+            send(7, "本地推理预检", `模型 ${preferredModel} 未下载完成,本次跳过初筛。`);
           } else if (localStatus.status === "starting") {
-            send(10, "本地推理预检", "本地模型启动中,等待就绪(最多 15 秒)。");
+            send(7, "本地推理预检", "本地模型启动中,等待就绪(最多 15 秒)。");
             const deadline = Date.now() + 15_000;
             while (Date.now() < deadline) {
               await new Promise((r) => setTimeout(r, 500));
@@ -3108,16 +3108,16 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             }
             localPrefilterReady = !!(localStatus.running && localStatus.port);
             if (!localPrefilterReady) {
-              send(10, "本地推理预检", "本地模型 15 秒内未就绪,本次跳过初筛。");
+              send(7, "本地推理预检", "本地模型 15 秒内未就绪,本次跳过初筛。");
             }
           } else {
-            send(10, "本地推理预检", `本地模型未启动,正在自动拉起 ${preferredModel}…`);
+            send(7, "本地推理预检", `本地模型未启动,正在自动拉起 ${preferredModel}…`);
             try {
               await llamaRuntime.start(preferredModel);
               localStatus = llamaRuntime.getStatus();
               localPrefilterReady = !!(localStatus.running && localStatus.port);
             } catch (error) {
-              send(10, "本地推理预检", `本地模型启动失败: ${error?.message || error}。本次跳过初筛。`);
+              send(7, "本地推理预检", `本地模型启动失败: ${error?.message || error}。本次跳过初筛。`);
             }
           }
         }
@@ -3131,7 +3131,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     );
     const plan = planFramePlan(scenes, inspected.durationSec || project.durationSec || 1, candidateCount);
     send(
-      20,
+      8,
       "挑选关键画面",
       localPrefilterReady
         ? `本地初筛已就绪,从 ${scenes.length} 个镜头里先抽 ${plan.length} 张候选。`
@@ -3157,7 +3157,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       generatedAt: new Date().toISOString(),
     });
 
-    send(24, "抽取关键画面", `准备抽取 ${plan.length} 张关键画面,会自动去掉相似画面。`);
+    send(8, "抽取关键画面", `准备抽取 ${plan.length} 张关键画面,会自动去掉相似画面。`);
     const { frames: candidateFrames, skipped } = await buildFrames(
       ffmpeg,
       inputPath,
@@ -3165,12 +3165,12 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       artifactDir,
       handle,
       (i, total, sec) => {
-        send(24 + Math.round((i / total) * 22), "抽取关键画面", `已抽 ${i + 1} / ${total} 张 · 第 ${sec.toFixed(1)} 秒`);
+        send(8 + Math.round((i / total) * 14), "抽取关键画面", `已抽 ${i + 1} / ${total} 张 · 第 ${sec.toFixed(1)} 秒`);
       },
       { withPrefilterFrame: localPrefilterReady },
     );
     if (skipped > 0) {
-      send(46, "画面去重", `去掉 ${skipped} 张相似画面,保留 ${candidateFrames.length} 张。`);
+      send(22, "画面去重", `去掉 ${skipped} 张相似画面,保留 ${candidateFrames.length} 张。`);
     }
 
     // 本地初筛 + 精筛:让 Qwen3.5-0.8B 给每帧打标,据此 dedup / 删空镜 / cap 总数。
@@ -3179,7 +3179,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     let prefilterStats = null;
     if (localPrefilterReady && candidateFrames.length > 0) {
       try {
-        send(48, "本地初筛", `让本地模型给 ${candidateFrames.length} 张候选画面快速打标。`);
+        send(23, "本地初筛", `让本地模型给 ${candidateFrames.length} 张候选画面快速打标。`);
         const prefilterStartedAt = Date.now();
         const tagResult = await prefilter.tagFrames(candidateFrames, {
           port: localStatus.port,
@@ -3190,7 +3190,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             ensureNotCancelled(handle);
             const avgMs = Math.round((Date.now() - prefilterStartedAt) / (i + 1));
             send(
-              48 + Math.round(((i + 1) / total) * 6),
+              23 + Math.round(((i + 1) / total) * 11),
               "本地初筛",
               `已打标 ${i + 1} / ${total} 张 · 平均 ${avgMs} ms/帧${fromCache ? " · 命中缓存" : ""}`,
             );
@@ -3210,14 +3210,14 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           dropped: refined.dropped.length,
         };
         send(
-          54,
+          34,
           "精挑画面",
           `从 ${candidateFrames.length} 张候选里精选 ${refined.kept.length} 张送给视觉模型 · 本地初筛用时 ${(tagResult.totalElapsedMs / 1000).toFixed(1)}s`,
         );
       } catch (error) {
         if (error instanceof AnalysisCancelledError) throw error;
         const msg = error instanceof Error ? error.message : String(error);
-        send(54, "本地初筛失败", `${msg}（已回退到全部候选画面）`);
+        send(34, "本地初筛失败", `${msg}（已回退到全部候选画面）`);
         frames = candidateFrames;
       }
     }
@@ -3233,10 +3233,10 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     );
     if (audioReady) {
       try {
-        send(55, "提取音轨", "从视频里分离出音频,准备识别字幕。");
+        send(35, "提取音轨", "从视频里分离出音频,准备识别字幕。");
         const wavPath = path.join(artifactDir, "audio.wav");
         await extractAudioWav(ffmpeg, inputPath, wavPath, handle);
-        send(60, "字幕识别", `${audioProvider.name} 准备就绪`);
+        send(36, "字幕识别", `${audioProvider.name} 准备就绪`);
         ensureNotCancelled(handle);
 
         // 缓存 key: 音频文件 sha + 模型 + 语言 + 后端来源 + prompt 版本
@@ -3259,18 +3259,18 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         };
         transcript = await runWithCache("transcript", transcriptCacheKey, async () => {
           return await transcribeAudio(audioProvider, wavPath, handle, (p) => {
-            send(62, "字幕识别", p.message);
+            send(42, "字幕识别", p.message);
           });
         }, transcribeMeta);
 
         if (transcript) {
           await writeJson(path.join(artifactDir, "transcript.json"), transcript);
-          send(66, "字幕识别完成", `共 ${transcript.segments.length} 段字幕、${transcript.text.length} 个字。`);
+          send(50, "字幕识别完成", `共 ${transcript.segments.length} 段字幕、${transcript.text.length} 个字。`);
         }
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
         transcriptError = error?.message || String(error);
-        send(66, "字幕识别失败", `${transcriptError}（不影响后续画面分析）`);
+        send(50, "字幕识别失败", `${transcriptError}（不影响后续画面分析）`);
       }
     }
 
@@ -3304,7 +3304,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     if (canUseMedium) {
       try {
         ensureNotCancelled(handle);
-        send(67, "镜头合并", `让 ${mediumTextProvider.name} 把 ${shots.length} 个镜头合成可读描述。`);
+        send(51, "镜头合并", `让 ${mediumTextProvider.name} 把 ${shots.length} 个镜头合成可读描述。`);
         const mergeStart = Date.now();
         const mergeInputs = shots.map((s) => ({
           startSec: s.startSec,
@@ -3326,7 +3326,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           cache: makeShotMergerCache(mediumTextProvider),
           onProgress: ({ done, total, batchIndex, mode }) => {
             ensureNotCancelled(handle);
-            const pct = 67 + Math.round((done / total) * 4);
+            const pct = 51 + Math.round((done / total) * 17);
             const tail = mode === "cache-hit" ? " · 命中缓存" : "";
             send(pct, "镜头合并", `已合并 ${done}/${total} (batch ${batchIndex}, 平均 ${Math.round((Date.now()-mergeStart)/done)}ms/镜头)${tail}`);
           },
@@ -3367,13 +3367,13 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             );
             thumbDone += batch.length;
             send(
-              71,
+              68,
               "镜头缩略图",
               `已为 ${thumbDone}/${shotsNeedingThumb.length} 个无关键帧镜头抽兜底缩略图`
             );
           }
           send(
-            71,
+            68,
             "镜头缩略图就绪",
             `${shotsNeedingThumb.length} 张兜底缩略图 · ${((Date.now() - thumbStart) / 1000).toFixed(1)}s`
           );
@@ -3412,10 +3412,10 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             framesInShot: framesCtx.length,
           };
         });
-        send(71, "镜头合并完成", `${shots.length} 个镜头描述就绪 · ${((Date.now()-mergeStart)/1000).toFixed(1)}s`);
+        send(68, "镜头合并完成", `${shots.length} 个镜头描述就绪 · ${((Date.now()-mergeStart)/1000).toFixed(1)}s`);
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
-        send(71, "镜头合并失败", `${error.message || error}。降级到旧的逐帧路径。`);
+        send(68, "镜头合并失败", `${error.message || error}。降级到旧的逐帧路径。`);
         shotContexts = null;
       }
 
@@ -3423,7 +3423,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       if (shotContexts && shotContexts.length > 0) {
         try {
           ensureNotCancelled(handle);
-          send(72, "全局聚合", `综合 ${shotContexts.length} 个镜头描述 + 字幕推断视频类型和摘要。`);
+          send(69, "全局聚合", `综合 ${shotContexts.length} 个镜头描述 + 字幕推断视频类型和摘要。`);
           const sumStart = Date.now();
           const stats = computeShotStats(
             buildShotListFromScenes(scenes, projectMeta.durationSec, []),
@@ -3456,13 +3456,13 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             handle,
           }), { model: mediumTextProvider?.model });
           if (globalContext?.detectedGenre) {
-            send(74, "全局聚合完成", `判定 ${globalContext.detectedGenre} (${Math.round((globalContext.genreConfidence||0)*100)}%) · 摘要 ${globalContext.globalSummary?.length || 0} 字 · ${((Date.now()-sumStart)/1000).toFixed(1)}s`);
+            send(71, "全局聚合完成", `判定 ${globalContext.detectedGenre} (${Math.round((globalContext.genreConfidence||0)*100)}%) · 摘要 ${globalContext.globalSummary?.length || 0} 字 · ${((Date.now()-sumStart)/1000).toFixed(1)}s`);
           } else {
-            send(74, "全局聚合跳过", "未能从镜头描述推断, 让主分析自行识别。");
+            send(71, "全局聚合跳过", "未能从镜头描述推断, 让主分析自行识别。");
           }
         } catch (error) {
           if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
-          send(74, "全局聚合失败", `${error.message || error}。降级到 detectGenreLightweight。`);
+          send(71, "全局聚合失败", `${error.message || error}。降级到 detectGenreLightweight。`);
           globalContext = null;
         }
       }
@@ -3471,7 +3471,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     let nodes = fallbackNodes;
     let report = fallbackReport;
     ensureNotCancelled(handle);
-    send(76, "准备分析素材", provider?.apiKeyRef ? `已整理好 ${frames.length} 张关键画面${transcript ? " + 字幕" : ""}${shotContexts ? ` + ${shotContexts.length} 个镜头描述` : ""},准备送给模型。` : "未配置视觉模型,本次只生成时间线骨架。");
+    send(72, "准备分析素材", provider?.apiKeyRef ? `已整理好 ${frames.length} 张关键画面${transcript ? " + 字幕" : ""}${shotContexts ? ` + ${shotContexts.length} 个镜头描述` : ""},准备送给模型。` : "未配置视觉模型,本次只生成时间线骨架。");
 
     if (provider?.apiKeyRef && provider.inputMode !== "direct_video") {
       try {
@@ -3485,7 +3485,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           effectiveOptions = { ...options, detectedGenre: globalContext.detectedGenre };
         } else if (isAutoGenre && (transcript || scenes?.length)) {
           const genreProvider = mediumTextProvider || provider;
-          send(77, "识别视频类型", `根据字幕和镜头切换让 ${genreProvider.name} 推断视频类型。`);
+          send(73, "识别视频类型", `根据字幕和镜头切换让 ${genreProvider.name} 推断视频类型。`);
           const detectStartedAt = Date.now();
           const detectGenreCacheKey = cacheStore.isConfigured() && genreProvider?.model
             ? cacheStore.makeKey({
@@ -3504,9 +3504,9 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             { model: genreProvider?.model });
           if (detected?.detectedGenre) {
             effectiveOptions = { ...options, detectedGenre: detected.detectedGenre };
-            send(77, "识别视频类型完成", `判定为 ${detected.detectedGenre}（置信度 ${(detected.genreConfidence * 100).toFixed(0)}%，耗时 ${Math.round((Date.now() - detectStartedAt) / 1000)}s）。`);
+            send(73, "识别视频类型完成", `判定为 ${detected.detectedGenre}（置信度 ${(detected.genreConfidence * 100).toFixed(0)}%，耗时 ${Math.round((Date.now() - detectStartedAt) / 1000)}s）。`);
           } else {
-            send(77, "类型识别跳过", "未能从字幕推断类型，将让主分析在 catalog 中识别。");
+            send(73, "类型识别跳过", "未能从字幕推断类型，将让主分析在 catalog 中识别。");
           }
         }
 
@@ -3520,7 +3520,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           };
         }
 
-        send(78, "模型分析画面", `正在请 ${provider.name} 分析这段视频。`);
+        send(74, "模型分析画面", `正在请 ${provider.name} 分析这段视频。`);
         let mainAnalysisCacheKey = null;
         if (cacheStore.isConfigured() && provider?.model) {
           try {
@@ -3580,7 +3580,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         }
         nodes = markFallbackNodesAsFailed(fallbackNodes);
         report = markFallbackReportAsFailed(fallbackReport, shortMsg, provider);
-        send(85, "分析失败", `${shortMsg}。已保留镜头骨架,节点字段标记为分析失败。`);
+        send(92, "分析失败", `${shortMsg}。已保留镜头骨架,节点字段标记为分析失败。`);
       }
     } else if (globalContext || shotContexts) {
       // 视觉主分析未配置, 但中间层有产物, 让 fallback report 至少能带上 globalSummary
@@ -3598,7 +3598,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     ) {
       try {
         ensureNotCancelled(handle);
-        send(86, "拉取弹幕", "向 B 站请求弹幕分段…");
+        send(92, "拉取弹幕", "向 B 站请求弹幕分段…");
         const danmakuStart = Date.now();
         const danmakuRaw = await danmakuFetcher.fetchDanmakuWithCache({
           url: project.source.url,
@@ -3607,9 +3607,9 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           onProgress: ({ segment, total, count, fromCache }) => {
             if (handle.cancelled) return;
             if (fromCache) {
-              send(87, "拉取弹幕", `命中缓存,直接使用 ${count} 条历史弹幕。`);
+              send(94, "拉取弹幕", `命中缓存,直接使用 ${count} 条历史弹幕。`);
             } else {
-              const pct = 86 + Math.min(1, Math.round((segment / Math.max(total, 1)) * 1));
+              const pct = 92 + Math.min(2, Math.round((segment / Math.max(total, 1)) * 2));
               send(pct, "拉取弹幕", `已拉 ${segment}/${total} 段 · 累计 ${count} 条`);
             }
           },
@@ -3620,7 +3620,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         let danmakuSummary = "";
         if (mediumTextProvider?.apiKeyRef && danmakuRaw.messages.length > 0) {
           ensureNotCancelled(handle);
-          send(88, "弹幕情绪聚合", `让 ${mediumTextProvider.name} 给 ${danmakuRaw.totalCount} 条弹幕分段评分。`);
+          send(94, "弹幕情绪聚合", `让 ${mediumTextProvider.name} 给 ${danmakuRaw.totalCount} 条弹幕分段评分。`);
           const aggStart = Date.now();
           const agg = await danmakuEmotion.aggregateEmotions({
             messages: danmakuRaw.messages,
@@ -3631,12 +3631,12 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             cache: makeDanmakuEmotionCache(mediumTextProvider),
             onProgress: ({ done, total }) => {
               if (handle.cancelled) return;
-              send(88, "弹幕情绪聚合", `已评 ${done}/${total} 个时间桶`);
+              send(95, "弹幕情绪聚合", `已评 ${done}/${total} 个时间桶`);
             },
           });
           windows = agg.windows;
           danmakuSummary = agg.summary;
-          send(89, "弹幕情绪聚合完成", `${windows.filter((w) => w.danmakuCount > 0).length} 个时间桶 · ${((Date.now() - aggStart) / 1000).toFixed(1)}s`);
+          send(97, "弹幕情绪聚合完成", `${windows.filter((w) => w.danmakuCount > 0).length} 个时间桶 · ${((Date.now() - aggStart) / 1000).toFixed(1)}s`);
         }
 
         // 词云 (LLM 不可用也能跑, 纯本地启发式)
@@ -3671,18 +3671,18 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         };
 
         send(
-          89,
+          97,
           "弹幕分析完成",
           `${danmakuRaw.totalCount} 条弹幕 · 词云 ${wordCloud.length} 词 · ${((Date.now() - danmakuStart) / 1000).toFixed(1)}s`,
         );
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
-        send(89, "弹幕分析失败", `${error?.message || error}（不影响主分析结果）`);
+        send(97, "弹幕分析失败", `${error?.message || error}（不影响主分析结果）`);
       }
     }
 
     ensureNotCancelled(handle);
-    send(90, "整理结果", "正在保存分析结果。");
+    send(98, "整理结果", "正在保存分析结果。");
 
     // 本地选取的视频 (没经过 URL 拉取那条路, videoName 是磁盘文件名) 在这里补标题。
     // URL 拉取场景在 downloadVideo handler 里已经生成过 → titleAutoGenerated:true → 跳过。
