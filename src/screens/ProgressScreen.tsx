@@ -53,6 +53,8 @@ export function ProgressScreen() {
     setNodesForProject, setReportForProject,
   } = useApp();
 
+  const project = projects.find(p => p.id === activeProjectId);
+
   const [progress, setProgress] = useState(0);
   const [stageLabel, setStageLabel] = useState(STAGES[0]);
   const [detail, setDetail] = useState("");
@@ -61,7 +63,13 @@ export function ProgressScreen() {
   const [isCancelling, setIsCancelling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
 
-  const startedAt = useRef<number>(Date.now());
+  // 分析启动时间从 project.analysisStartedAt 读 (持久化到 SQLite, 退出再进 / 重启都能恢复)。
+  // 老数据没有该字段 → fallback 到 mount 时刻; 完成后字段保留, Workspace 能看历史耗时。
+  const startedAt = useMemo(() => {
+    if (project?.analysisStartedAt) return new Date(project.analysisStartedAt).getTime();
+    return Date.now();
+  }, [project?.analysisStartedAt]);
+
   const hasStarted = useRef(false);
   const cancelledRef = useRef(false);
   const lastLoggedStage = useRef<string>("");
@@ -71,8 +79,6 @@ export function ProgressScreen() {
   const completionHandledRef = useRef(false);
   const failureHandledRef = useRef(false);
 
-  const project = projects.find(p => p.id === activeProjectId);
-
   useEffect(() => {
     if (progress >= 100) return;
     const id = setInterval(() => setNowTick(Date.now()), 1000);
@@ -81,8 +87,8 @@ export function ProgressScreen() {
 
   const elapsedMs = useMemo(() => {
     void progress; void nowTick;
-    return Date.now() - startedAt.current;
-  }, [progress, nowTick]);
+    return Date.now() - startedAt;
+  }, [progress, nowTick, startedAt]);
 
   const etaMs = useMemo(() => {
     if (progress < 5 || elapsedMs < 1500) return null;
@@ -102,7 +108,7 @@ export function ProgressScreen() {
     if (key === lastLoggedStage.current) return;
     lastLoggedStage.current = key;
     setLogs(prev => {
-      const next = [{ ts: Date.now() - startedAt.current, stage, message, tone }, ...prev];
+      const next = [{ ts: Date.now() - startedAt, stage, message, tone }, ...prev];
       return next.slice(0, 30);
     });
   };
@@ -192,7 +198,8 @@ export function ProgressScreen() {
     // 从 downloading 切到 analyzing 时,把进度重置回 0,避免下载条 100% 直接接到分析条 0%。
     setProgress(0);
     setStageLabel(STAGES[0]);
-    startedAt.current = Date.now();
+    // startedAt 不在这里重置 — 它从 project.analysisStartedAt 派生 (持久化), HomeScreen
+    // 创建 downloading 项目时就写了, 整段 download → analyze 共用同一起点。
 
     if (!window.videoAnalyzer) {
       // Browser preview: simulate progress

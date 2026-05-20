@@ -286,13 +286,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
           const analysisOptions = optionsOverride
             ?? p.analysisOptions
             ?? defaultPresetToAnalysisOptions(defaultAnalysis);
+          const now = new Date().toISOString();
           return {
             ...p,
             status: "analyzing",
             providerId: provider?.id,
             model: provider?.model,
             analysisOptions,
-            updatedAt: new Date().toISOString(),
+            updatedAt: now,
+            analysisStartedAt: now,
           };
         }),
       );
@@ -505,6 +507,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
             orientation: video.orientation,
             status: "analyzing",
             updatedAt: now,
+            // 兜底: HomeScreen 创建 downloading 项目时已经设过 analysisStartedAt;
+            // 这里只在缺失时补一次, 避免历史数据 / 老分支没有这个字段。
+            analysisStartedAt: p.analysisStartedAt || now,
           };
         }
         return {
