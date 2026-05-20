@@ -1,5 +1,5 @@
 const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, protocol, session, shell } = require("electron");
-const { execFile } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
 const execFileAsync = promisify(execFile);
 const fsSync = require("node:fs");
@@ -5402,28 +5402,73 @@ app.whenReady().then(async () => {
     }
   });
 
-  ipcMain.handle("video:downloadUrl", async (_event, rawInput) => {
+  // ---- URL 拉取共用底座 ------------------------------------------------
+  // 解析 yt-dlp stdout 里的进度行,形如 "[download]  35.4% of 12.34MiB at  500KiB/s ETA 00:10"
+  function parseYtDlpProgressLine(line) {
+    const m = line.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
+    return m ? parseFloat(m[1]) : null;
+  }
+
+  // spawn yt-dlp + 解析进度,handle 用来支持 cancelAnalysis 的 SIGTERM kill。
+  // onProgress(pct 0-100, line) 在每条新的百分比行触发。
+  function runYtDlpWithProgress(ytDlpBin, args, handle, onProgress) {
+    return new Promise((resolve, reject) => {
+      const child = spawn(ytDlpBin, args, { windowsHide: true });
+      if (handle) handle.children.add(child);
+      let stderr = "";
+      let lastPct = -1;
+      const consume = (chunk) => {
+        const text = chunk.toString("utf8");
+        for (const line of text.split(/\r?\n|\r/)) {
+          if (!line) continue;
+          const pct = parseYtDlpProgressLine(line);
+          if (pct != null && Math.abs(pct - lastPct) >= 0.5) {
+            lastPct = pct;
+            try { onProgress?.(pct, line.trim()); } catch { /* swallow */ }
+          }
+        }
+      };
+      child.stdout?.on("data", consume);
+      child.stderr?.on("data", (chunk) => { stderr += chunk.toString("utf8"); consume(chunk); });
+      child.on("error", (err) => {
+        if (handle) handle.children.delete(child);
+        reject(err);
+      });
+      child.on("close", (code) => {
+        if (handle) handle.children.delete(child);
+        if (handle?.cancelled) return reject(new AnalysisCancelledError());
+        if (code === 0) return resolve();
+        const err = new Error(stderr.slice(-2000).trim() || `yt-dlp 退出码 ${code}`);
+        err.stderr = stderr;
+        reject(err);
+      });
+    });
+  }
+
+  // URL 拉取核心流程:解析 URL → 查 cache → (cache 命中走快路径 / miss 跑 yt-dlp) →
+  // 读 info.json → inspectVideo → 生成项目标题 → 写 cache。返回 DownloadedVideo。
+  // onProgress(pct 0-100, stage, message) 在每个里程碑触发,sync 路径传 null 即可。
+  async function performUrlDownloadFlow(rawInput, { projectId, mediaDir, handle, onProgress }) {
     const ytDlp = await commandPath("yt-dlp");
     if (!ytDlp) {
       throw new Error("未找到 yt-dlp，无法通过链接拉取视频。请先安装 yt-dlp，或改用本地视频。");
     }
 
-    // 抖音/小红书等平台的分享文案是「中文 + URL + 时间戳 + 口令」混排,
-    // 用户经常整段粘贴。这里提取首个 http(s) URL,允许整段输入。
     const urlMatch = String(rawInput || "").match(/https?:\/\/[^\s'"<>，。、）]+/);
     const url = urlMatch ? urlMatch[0].replace(/[.,;)]+$/, "") : "";
     if (!url) {
       throw new Error("未从输入中识别到视频链接,请确认粘贴的内容里包含 http(s):// 开头的链接。");
     }
 
+    onProgress?.(2, "下载视频", "解析链接");
+
     const cache = await readUrlCache();
     const cached = cache[url];
     if (cached?.filePath) {
       try {
         await fs.access(cached.filePath);
+        onProgress?.(85, "下载视频", "命中缓存");
         const inspected = await inspectVideo(cached.filePath);
-        // 老 cache (无 title) 懒迁移: 命中时补一次, 写回 cache。
-        // 若磁盘上还有 .info.json 也读一下, 给 LLM 多一份证据。
         let title = cached.title;
         if (!title) {
           let ytdlpInfo = cached.ytdlpInfo || null;
@@ -5437,10 +5482,9 @@ app.whenReady().then(async () => {
                 description: j.description,
                 uploader: j.uploader || j.channel || j.creator,
               };
-            } catch {
-              // 老缓存没有 info.json: 仅用 rawInput
-            }
+            } catch { /* 老缓存没有 info.json */ }
           }
+          onProgress?.(92, "下载视频", "生成标题");
           const mp = await loadMediumTextProvider();
           title = await generateProjectTitle(mp, { rawInput, url, ytdlpInfo });
           if (title) {
@@ -5449,7 +5493,7 @@ app.whenReady().then(async () => {
           }
         }
         return {
-          projectId: `proj-url-${Date.now()}`,
+          projectId: projectId || `proj-url-${Date.now()}`,
           platform: inferPlatform(url),
           ...inspected,
           title: title || null,
@@ -5461,34 +5505,47 @@ app.whenReady().then(async () => {
       }
     }
 
-    const projectId = `proj-url-${Date.now()}`;
-    const mediaDir = path.join(app.getPath("userData"), "projects", projectId, "media");
-    await fs.mkdir(mediaDir, { recursive: true });
+    const useProjectId = projectId || `proj-url-${Date.now()}`;
+    const useMediaDir = mediaDir || path.join(app.getPath("userData"), "projects", useProjectId, "media");
+    await fs.mkdir(useMediaDir, { recursive: true });
 
-    const outputPattern = path.join(mediaDir, "%(extractor)s_%(id)s.%(ext)s");
+    const outputPattern = path.join(useMediaDir, "%(extractor)s_%(id)s.%(ext)s");
+    const ytdlpArgs = [
+      "--no-playlist",
+      "--restrict-filenames",
+      "--write-info-json",
+      "--newline",
+      "--progress",
+      "-o", outputPattern,
+      url,
+    ];
+
+    onProgress?.(5, "下载视频", "启动 yt-dlp");
     try {
-      // --write-info-json 让 yt-dlp 把视频元数据 (title/description/uploader/upload_date 等)
-      // 落到 <basename>.info.json, 后面解析出来喂给 medium_text 生成项目标题。
-      await run(ytDlp, [
-        "--no-playlist",
-        "--restrict-filenames",
-        "--write-info-json",
-        "-o", outputPattern,
-        url,
-      ]);
+      // 有 onProgress 走 streaming spawn(解析百分比);没有则用旧的一次性 run(更轻)。
+      if (onProgress) {
+        await runYtDlpWithProgress(ytDlp, ytdlpArgs, handle, (pct, line) => {
+          // yt-dlp 0-100 映射到 5-85,留 15% 给 inspect / 生成标题 / cache 写入。
+          const mapped = Math.min(85, Math.max(5, Math.round(5 + pct * 0.8)));
+          onProgress(mapped, "下载视频", line.slice(0, 160));
+        });
+      } else {
+        await run(ytDlp, ytdlpArgs, {}, handle);
+      }
     } catch (error) {
+      if (error instanceof AnalysisCancelledError) throw error;
       const detail = String(error.stderr || error.stdout || error.message || error).trim();
       throw new Error(detail || "yt-dlp 下载失败");
     }
 
-    // 只挑视频文件 (排除 .info.json / .description / .live_chat.json 等附件)
+    onProgress?.(88, "下载视频", "扫描产物");
     const VIDEO_EXTS = new Set([".mp4", ".mkv", ".webm", ".mov", ".m4v", ".flv", ".avi"]);
-    const files = await fs.readdir(mediaDir);
+    const files = await fs.readdir(useMediaDir);
     const candidates = await Promise.all(
       files
         .filter((f) => VIDEO_EXTS.has(path.extname(f).toLowerCase()))
         .map(async (file) => {
-          const filePath = path.join(mediaDir, file);
+          const filePath = path.join(useMediaDir, file);
           const stat = await fs.stat(filePath);
           return { filePath, mtimeMs: stat.mtimeMs };
         })
@@ -5496,7 +5553,6 @@ app.whenReady().then(async () => {
     const latest = candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
     if (!latest) throw new Error("yt-dlp 执行完成，但没有生成视频文件。");
 
-    // 读 .info.json 拿平台 metadata (失败不阻断, 文件可能因为平台限制没拿到)
     let ytdlpInfo = null;
     const infoJsonPath = latest.filePath.replace(/\.[^.]+$/, ".info.json");
     try {
@@ -5509,11 +5565,11 @@ app.whenReady().then(async () => {
         uploadDate: j.upload_date,
         duration: j.duration,
       };
-    } catch {
-      // info.json 缺失 / 损坏: 让 medium_text 仅用 rawInput
-    }
+    } catch { /* info.json 缺失 */ }
 
+    onProgress?.(92, "下载视频", "读取视频信息");
     const inspected = await inspectVideo(latest.filePath);
+    onProgress?.(96, "下载视频", "生成标题");
     const mp = await loadMediumTextProvider();
     const title = await generateProjectTitle(mp, { rawInput, url, ytdlpInfo });
     cache[url] = {
@@ -5523,13 +5579,78 @@ app.whenReady().then(async () => {
       ytdlpInfo: ytdlpInfo || undefined,
     };
     await writeUrlCache(cache);
+    onProgress?.(100, "下载完成", "");
     return {
-      projectId,
+      projectId: useProjectId,
       platform: inferPlatform(url),
       ...inspected,
       title: title || null,
       fromCache: false,
     };
+  }
+
+  // 阻塞版本:整段 await 完才返回 DownloadedVideo。AccountScreen 仍在用。
+  ipcMain.handle("video:downloadUrl", async (_event, rawInput) => {
+    return performUrlDownloadFlow(rawInput, {
+      projectId: null,
+      mediaDir: null,
+      handle: null,
+      onProgress: null,
+    });
+  });
+
+  // 异步版本:同步 return { projectId, url, platform },下载在后台进行,
+  // 进度通过 analysis:progress 广播,完成 / 失败通过 download:complete 广播。
+  ipcMain.handle("video:downloadUrlAsync", async (_event, rawInput) => {
+    const urlMatch = String(rawInput || "").match(/https?:\/\/[^\s'"<>，。、）]+/);
+    const url = urlMatch ? urlMatch[0].replace(/[.,;)]+$/, "") : "";
+    if (!url) {
+      throw new Error("未从输入中识别到视频链接,请确认粘贴的内容里包含 http(s):// 开头的链接。");
+    }
+    const ytDlp = await commandPath("yt-dlp");
+    if (!ytDlp) {
+      throw new Error("未找到 yt-dlp，无法通过链接拉取视频。请先安装 yt-dlp，或改用本地视频。");
+    }
+
+    const projectId = `proj-url-${Date.now()}`;
+    const mediaDir = path.join(app.getPath("userData"), "projects", projectId, "media");
+    await fs.mkdir(mediaDir, { recursive: true });
+
+    const handle = registerAnalysis(projectId);
+    const emitProgress = (progress, stage, message) => {
+      if (handle.cancelled) return;
+      const payload = { projectId, progress, stage, message: message || "" };
+      handle.lastProgress = payload;
+      handle.lastProgressAt = Date.now();
+      broadcastToWindows("analysis:progress", payload);
+    };
+
+    emitProgress(0, "下载视频", "排队中");
+
+    // 后台跑,不 await
+    (async () => {
+      try {
+        const video = await performUrlDownloadFlow(rawInput, {
+          projectId,
+          mediaDir,
+          handle,
+          onProgress: emitProgress,
+        });
+        broadcastToWindows("download:complete", { projectId, success: true, video });
+      } catch (err) {
+        if (err instanceof AnalysisCancelledError) {
+          broadcastToWindows("download:complete", { projectId, success: false, cancelled: true, error: "已取消" });
+        } else {
+          const msg = err instanceof Error ? err.message : String(err);
+          emitProgress(0, "失败", msg);
+          broadcastToWindows("download:complete", { projectId, success: false, error: msg });
+        }
+      } finally {
+        clearAnalysis(projectId);
+      }
+    })();
+
+    return { projectId, url, platform: inferPlatform(url) };
   });
 
   await llamaRuntime.init();

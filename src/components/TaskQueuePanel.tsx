@@ -42,11 +42,12 @@ export function useTaskQueueData() {
     for (const p of projects) {
       if (p.status === "analyzing" || p.status === "downloading") {
         const evt = progressByProject[p.id];
+        const isDownloading = p.status === "downloading";
         running.push({
           projectId: p.id,
           videoName: p.videoName,
-          progress: Math.round(evt?.progress ?? (p.status === "downloading" ? 5 : 50)),
-          stage: evt?.stage || (p.status === "downloading" ? "下载视频" : "分析中"),
+          progress: Math.round(evt?.progress ?? (isDownloading ? 5 : 50)),
+          stage: evt?.stage || (isDownloading ? "下载视频" : "分析中"),
           message: evt?.message,
         });
       } else if (p.status === "failed" || p.status === "download_failed") {
@@ -190,7 +191,7 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
       </div>
 
       <div className="max-h-[460px] overflow-y-auto">
-        {/* 视频任务 (下载 + 分析) */}
+        {/* 下载 + 分析 */}
         {running.length > 0 && (
           <Section title="视频任务" count={running.length}>
             {running.map((t) => (
@@ -263,7 +264,7 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
             <p className="text-[12.5px] text-slate-500 dark:text-slate-400 leading-relaxed">
               当前没有任务在运行
               <br />
-              <span className="text-[10.5px] font-mono uppercase tracking-wider mt-2 inline-block">分析视频 / 拉取账号 / 入库素材 都会出现在这里</span>
+              <span className="text-[10.5px] font-mono uppercase tracking-wider mt-2 inline-block">视频下载 · 分析 / 账号拉取 都会出现在这里</span>
             </p>
           </div>
         )}

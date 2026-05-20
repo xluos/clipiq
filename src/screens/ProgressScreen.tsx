@@ -91,7 +91,10 @@ export function ProgressScreen() {
     return Math.max(0, total - elapsedMs);
   }, [elapsedMs, progress]);
 
-  const currentStageIndex = Math.min(STAGES.length - 1, Math.floor((progress / 100) * STAGES.length));
+  // 下载阶段下方的"分析流水线"还没开始,所以强制 currentStageIndex = -1,所有 stages 灰色。
+  const currentStageIndex = project?.status === "downloading"
+    ? -1
+    : Math.min(STAGES.length - 1, Math.floor((progress / 100) * STAGES.length));
 
   const recordLog = (stage: string, message: string) => {
     const tone = detectTone(stage, message);
@@ -172,9 +175,23 @@ export function ProgressScreen() {
   }, [project?.id]);
 
   // Kick off the analysis exactly once per project; survives StrictMode double-invoke via the ref guard.
+  // downloading 阶段不起分析,等异步下载完成 (AppContext 把 status 切到 analyzing) 后再触发。
   useEffect(() => {
     if (!project || hasStarted.current) return;
+    if (project.status === "downloading") {
+      // 下载进度通过 onAnalysisProgress (stage="下载视频") 已经在另一个 effect 里订阅。
+      // 这里只把 UI 初始 stage label 设好,等 status 切换后 effect 重跑进入分析 kickoff。
+      if (!stageLabel || stageLabel === STAGES[0]) setStageLabel("下载视频");
+      return;
+    }
+    if (project.status === "download_failed") {
+      setError("视频下载失败,请检查链接或换一个再试。");
+      return;
+    }
     hasStarted.current = true;
+    // 从 downloading 切到 analyzing 时,把进度重置回 0,避免下载条 100% 直接接到分析条 0%。
+    setProgress(0);
+    setStageLabel(STAGES[0]);
     startedAt.current = Date.now();
 
     if (!window.videoAnalyzer) {
@@ -255,7 +272,7 @@ export function ProgressScreen() {
     };
     launchOrAttach();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project?.id]);
+  }, [project?.id, project?.status]);
 
   if (!project) return null;
 
@@ -278,7 +295,7 @@ export function ProgressScreen() {
           <div className="flex items-center gap-3 text-[11px] font-mono uppercase tracking-wider text-slate-500">
             <span className="inline-flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
-              分析中 · {presetLabel}
+              {project.status === "downloading" ? "下载中" : "分析中"} · {presetLabel}
             </span>
             <span>已用 {formatElapsed(elapsedMs)}</span>
           </div>
@@ -348,8 +365,9 @@ export function ProgressScreen() {
             <div className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 mb-2 font-medium">流水线</div>
             <ul className="space-y-1.5">
               {STAGES.map((s, idx) => {
-                const done = idx < currentStageIndex || progress >= 100;
-                const active = idx === currentStageIndex && progress < 100;
+                const isDownloading = project.status === "downloading";
+                const done = !isDownloading && (idx < currentStageIndex || progress >= 100);
+                const active = !isDownloading && idx === currentStageIndex && progress < 100;
                 return (
                   <li key={s} className="flex items-center gap-2 font-mono text-[11.5px]">
                     {done ? (

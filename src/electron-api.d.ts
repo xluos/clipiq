@@ -69,6 +69,10 @@ export type DownloadedVideo = InspectedVideo & {
   fromCache?: boolean;      // true: 复用了 url-cache 里的本地文件, 没走 yt-dlp
 };
 
+export type DownloadCompleteEvent =
+  | { projectId: string; success: true; video: DownloadedVideo }
+  | { projectId: string; success: false; cancelled?: boolean; error: string };
+
 export type AnalysisResult = {
   project: Project;
   nodes: AnalysisNode[];
@@ -222,6 +226,15 @@ declare global {
       inspectVideoPath: (filePath: string) => Promise<InspectedVideo>;
       getPathForFile: (file: File) => string;
       downloadVideo: (url: string) => Promise<DownloadedVideo>;
+      // 异步下载 — 同步返回 { projectId, url, platform };下载在后台进行,
+      // 进度通过 onAnalysisProgress 上报 (stage="下载视频"),
+      // 完成 / 失败通过 onDownloadComplete 上报。
+      downloadVideoAsync: (url: string) => Promise<{
+        projectId: string;
+        url: string;
+        platform: Extract<ProjectSource, { type: "url" }>["platform"];
+      }>;
+      onDownloadComplete: (callback: (payload: DownloadCompleteEvent) => void) => () => void;
       loadConfig: () => Promise<AppConfig | null>;
       saveConfig: (config: AppConfig) => Promise<{ ok: true }>;
       listProjects: () => Promise<Project[]>;

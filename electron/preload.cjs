@@ -14,6 +14,12 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
     }
   },
   downloadVideo: (url) => ipcRenderer.invoke("video:downloadUrl", url),
+  downloadVideoAsync: (url) => ipcRenderer.invoke("video:downloadUrlAsync", url),
+  onDownloadComplete: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("download:complete", listener);
+    return () => ipcRenderer.removeListener("download:complete", listener);
+  },
   loadConfig: () => ipcRenderer.invoke("config:load"),
   saveConfig: (config) => ipcRenderer.invoke("config:save", config),
   listProjects: () => ipcRenderer.invoke("projects:list"),
