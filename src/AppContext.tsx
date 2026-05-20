@@ -1,5 +1,16 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, ProgressLogEntry, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
+
+// 进度日志的 tone 推断 — 跟原 ProgressScreen.detectTone 一致, 提到全局是因为
+// 订阅 onAnalysisProgress 在 AppContext 里就要落 logsByProject。
+function detectLogTone(stage: string, message: string): "info" | "ok" | "warn" {
+  const blob = `${stage} ${message}`.toLowerCase();
+  if (/failed|error|skip|warn|超时|失败/.test(blob)) return "warn";
+  if (/done|complete|ok|完成/.test(blob)) return "ok";
+  return "info";
+}
+
+const PROGRESS_LOG_LIMIT = 30;
 
 export type AccountFetchUiState = {
   stage: string;
@@ -68,6 +79,10 @@ interface AppState {
   // TaskQueueDrawer / ProgressScreen 都直接读, 避免各自挂 listener 导致 drawer
   // 在打开瞬间订阅 → 错过之前事件 → 显示停留在很旧的 stage。
   progressByProject: Record<string, AnalysisProgressEvent>;
+  // 进度屏实时日志, 按 projectId 分组保存最近 N 条 (N=30)。
+  // 跟 progressByProject 一样走全局订阅 → 写入, 这样切 project 时各自累积,
+  // 同一 project 退出再进 ProgressScreen 时也能恢复历史日志。
+  logsByProject: Record<string, ProgressLogEntry[]>;
 }
 
 const AppContext = createContext<AppState | undefined>(undefined);
@@ -210,6 +225,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [accountVideosByAccountId, setAccountVideosByAccountId] = useState<Record<string, AccountVideo[]>>({});
   const [accountFetchUi, setAccountFetchUi] = useState<Record<string, AccountFetchUiState>>({});
   const [progressByProject, setProgressByProject] = useState<Record<string, AnalysisProgressEvent>>({});
+  const [logsByProject, setLogsByProject] = useState<Record<string, ProgressLogEntry[]>>({});
 
   const upsertAccount = useCallback((a: Account) => {
     setAccounts((prev) => {
@@ -325,6 +341,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return next;
     });
     setActiveProjectId((current) => (current === projectId ? null : current));
+    setProgressByProject((prev) => {
+      if (!(projectId in prev)) return prev;
+      const next = { ...prev };
+      delete next[projectId];
+      return next;
+    });
+    setLogsByProject((prev) => {
+      if (!(projectId in prev)) return prev;
+      const next = { ...prev };
+      delete next[projectId];
+      return next;
+    });
     if (window.videoAnalyzer) {
       window.videoAnalyzer.deleteProject(projectId).catch((error) => {
         console.warn("deleteProject failed", error);
@@ -491,13 +519,31 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // 订阅 main 进程的分析 / 下载进度事件 — 全局只挂一次, 写到 progressByProject。
-  // 任何屏 (ProgressScreen / TaskQueueDrawer / 首屏卡片) 都从这个全局 map 读最新进度,
-  // 避免组件 mount 才订阅导致漏掉之前的 events。
+  // 订阅 main 进程的分析 / 下载进度事件 — 全局只挂一次, 同时写 progressByProject
+  // (最新一条快照) 和 logsByProject (按 projectId 累积 30 条历史)。
+  // 任何屏 (ProgressScreen / TaskQueueDrawer / 首屏卡片) 都从这两个全局 map 读,
+  // 避免组件 mount 才订阅导致漏掉之前的 events, 也避免 ProgressScreen 切换 /
+  // 退出再进时日志被清掉混在一起。
   useEffect(() => {
     if (!window.videoAnalyzer?.onAnalysisProgress) return;
     const off = window.videoAnalyzer.onAnalysisProgress((evt) => {
       setProgressByProject((prev) => ({ ...prev, [evt.projectId]: evt }));
+      setLogsByProject((prev) => {
+        const list = prev[evt.projectId] || [];
+        const message = evt.message || "";
+        // dedup: 跟最近一条 (新条在数组头部) stage+message 相同则跳过, 避免心跳广播
+        // 把同一条日志刷屏。
+        const head = list[0];
+        if (head && head.stage === evt.stage && head.message === message) return prev;
+        const entry: ProgressLogEntry = {
+          absoluteMs: Date.now(),
+          stage: evt.stage,
+          message,
+          tone: detectLogTone(evt.stage, message),
+        };
+        const next = [entry, ...list].slice(0, PROGRESS_LOG_LIMIT);
+        return { ...prev, [evt.projectId]: next };
+      });
     });
     return off;
   }, []);
@@ -605,6 +651,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         upsertAccountVideoLocal,
         accountFetchUi,
         progressByProject,
+        logsByProject,
       }}
     >
       {children}

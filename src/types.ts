@@ -498,6 +498,16 @@ export type AnalysisProgressEvent = {
   message?: string;
 };
 
+// 进度屏的"实时日志"一条。absoluteMs 是 Date.now() 记录瞬间, 显示时按当前
+// project.analysisStartedAt 算相对偏移 (m:ss) — 这样同一条 log 跨退出再进 /
+// 切 project 都不需要重算时基。
+export type ProgressLogEntry = {
+  absoluteMs: number;
+  stage: string;
+  message: string;
+  tone: "info" | "ok" | "warn";
+};
+
 export type AppConfig = {
   providers: ModelProvider[];
   taskSlots: TaskSlots;
