@@ -6,6 +6,7 @@ import type {
   AnalysisNode,
   AnalysisOptions,
   AnalysisProgressEvent,
+  AnalysisBudgetEvent,
   AnalysisReport,
   AppConfig,
   MachineSpecs,
@@ -289,7 +290,9 @@ declare global {
       cancelAnalysis: (projectId: string) => Promise<{ cancelled: boolean }>;
       isAnalysisActive: (projectId: string) => Promise<boolean>;
       getLastAnalysisProgress: (projectId: string) => Promise<AnalysisProgressEvent | null>;
+      getLastAnalysisBudget: (projectId: string) => Promise<AnalysisBudgetEvent | null>;
       onAnalysisProgress: (callback: (event: AnalysisProgressEvent) => void) => () => void;
+      onAnalysisBudget: (callback: (event: AnalysisBudgetEvent) => void) => () => void;
       exportProject: (payload: {
         project: Project;
         nodes: AnalysisNode[];

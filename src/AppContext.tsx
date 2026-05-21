@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, ProgressLogEntry, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, AnalysisBudget, ProgressLogEntry, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
 
 // 进度日志的 tone 推断 — 跟原 ProgressScreen.detectTone 一致, 提到全局是因为
 // 订阅 onAnalysisProgress 在 AppContext 里就要落 logsByProject。
@@ -87,6 +87,11 @@ interface AppState {
   // 跟 progressByProject 一样走全局订阅 → 写入, 这样切 project 时各自累积,
   // 同一 project 退出再进 ProgressScreen 时也能恢复历史日志。
   logsByProject: Record<string, ProgressLogEntry[]>;
+  // ETA baseline budget: main 在 analyzeProject 开头算一次 broadcast, 这里 cache 给
+  // ProgressScreen 用做精准 ETA 估算 (替代之前的 elapsed/progress 线性外推)。
+  budgetByProject: Record<string, AnalysisBudget>;
+  // attach 模式重连时, ProgressScreen 调 getLastAnalysisBudget 拉一次后用这个写回 cache。
+  setBudgetForProject: (projectId: string, budget: AnalysisBudget) => void;
 }
 
 const AppContext = createContext<AppState | undefined>(undefined);
@@ -251,6 +256,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [accountFetchUi, setAccountFetchUi] = useState<Record<string, AccountFetchUiState>>({});
   const [progressByProject, setProgressByProject] = useState<Record<string, AnalysisProgressEvent>>({});
   const [logsByProject, setLogsByProject] = useState<Record<string, ProgressLogEntry[]>>({});
+  const [budgetByProject, setBudgetByProject] = useState<Record<string, AnalysisBudget>>({});
 
   const upsertAccount = useCallback((a: Account) => {
     setAccounts((prev) => {
@@ -312,6 +318,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         console.warn("setNodes failed", error);
       });
     }
+  }, []);
+
+  const setBudgetForProject = useCallback((projectId: string, budget: AnalysisBudget) => {
+    setBudgetByProject((prev) => ({ ...prev, [projectId]: budget }));
   }, []);
 
   const setReportForProject = useCallback((projectId: string, report: AnalysisReport) => {
@@ -597,6 +607,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return off;
   }, []);
 
+  // 订阅 analyzeProject 起来时广播的 ETA budget — 全局只挂一次, 写进 budgetByProject。
+  // ProgressScreen 读这里给出比线性外推更准的 ETA; attach 模式重连时通过
+  // getLastAnalysisBudget IPC 拉一次补回 cache。
+  useEffect(() => {
+    if (!window.videoAnalyzer?.onAnalysisBudget) return;
+    const off = window.videoAnalyzer.onAnalysisBudget((evt) => {
+      setBudgetByProject((prev) => ({ ...prev, [evt.projectId]: evt.budget }));
+    });
+    return off;
+  }, []);
+
   // 订阅异步下载完成事件 — 把 yt-dlp 拿到的真实元数据回填进 downloading 项目,
   // 把 status 切到 analyzing 让 ProgressScreen 起分析;失败则切到 download_failed。
   useEffect(() => {
@@ -703,6 +724,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         accountFetchUi,
         progressByProject,
         logsByProject,
+        budgetByProject,
+        setBudgetForProject,
       }}
     >
       {children}

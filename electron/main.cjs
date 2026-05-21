@@ -18,6 +18,8 @@ const danmakuFetcher = require("./danmaku-fetcher.cjs");
 const danmakuEmotion = require("./danmaku-emotion.cjs");
 const danmakuWordcloud = require("./danmaku-wordcloud.cjs");
 const openaiClient = require("./openai-client.cjs");
+const etaEstimator = require("./eta-estimator.cjs");
+const etaLearner = require("./eta-learner.cjs");
 const cacheStore = require("./cache-store.cjs");
 const extensionBridge = require("./extension-bridge.cjs");
 const { getTranscriber } = require("./transcribe/index.cjs");
@@ -422,6 +424,11 @@ async function resolveYtDlp() {
 }
 
 const activeAnalyses = new Map();
+
+// 云端模型 TPS baseline: 启动时从 userData/eta-baselines.json 加载, 每次 analyzeProject
+// 跑完根据 eta-samples.jsonl 重算 + 写回。eta-estimator.computeBudget 把它当成"learned
+// hint" 覆盖云端 hardcoded fallback。
+let learnedBaselines = { providers: {} };
 
 class AnalysisCancelledError extends Error {
   constructor() {
@@ -3804,12 +3811,44 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   let currentStage = null;
   let currentStageStartedAt = analysisStartedAt;
   let currentStageMeta = {};
+  // tokenLedger 是累加全程的, 关 stage 时跟上一次快照算 delta 挂到 timings, 让 eta-learner
+  // 能 join (stage durationMs, completion tokens) 出 effective TPS, 不需要专门记 wall time。
+  const lastBucketSnapshot = new Map(); // key = `${stage}|${providerId}|${model}`
+  const collectTokenDelta = () => {
+    if (!handle.tokenLedger) return null;
+    const snap = handle.tokenLedger.snapshot();
+    const delta = [];
+    for (const bucket of snap.stages) {
+      const k = `${bucket.stage}|${bucket.providerId || ""}|${bucket.model || ""}`;
+      const last = lastBucketSnapshot.get(k) || { promptTokens: 0, completionTokens: 0, totalTokens: 0, callCount: 0 };
+      const d = {
+        stage: bucket.stage,
+        providerId: bucket.providerId,
+        model: bucket.model,
+        source: bucket.source,
+        promptTokens: bucket.promptTokens - last.promptTokens,
+        completionTokens: bucket.completionTokens - last.completionTokens,
+        totalTokens: bucket.totalTokens - last.totalTokens,
+        callCount: bucket.callCount - last.callCount,
+      };
+      if (d.completionTokens > 0 || d.callCount > 0) delta.push(d);
+      lastBucketSnapshot.set(k, {
+        promptTokens: bucket.promptTokens,
+        completionTokens: bucket.completionTokens,
+        totalTokens: bucket.totalTokens,
+        callCount: bucket.callCount,
+      });
+    }
+    return delta.length > 0 ? delta : null;
+  };
   const closeCurrentStage = (note) => {
     if (currentStage) {
+      const tokenDelta = collectTokenDelta();
       timings.push({
         stage: currentStage,
         durationMs: Date.now() - currentStageStartedAt,
         ...(Object.keys(currentStageMeta).length ? { meta: currentStageMeta } : {}),
+        ...(tokenDelta ? { tokenDelta } : {}),
         ...(note ? { note } : {}),
       });
       currentStage = null; // 幂等: finally 路径会再 close 一次, 避免重复 push
@@ -3842,6 +3881,33 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     // 广播到所有窗口,允许关窗后重开的新 renderer 继续接收进度。
     broadcastToWindows("analysis:progress", payload);
   };
+
+  // ETA baseline: 根据 project.durationSec + providers + machine baseline 算出各 stage 预算,
+  // 立刻广播一次。ProgressScreen 用它替换 "elapsed/progress 线性外推" 的粗算法。
+  // 实际跑到某 stage 时 baseline 偏低 / 偏高都由 renderer 端的 已完成 stage 实测时长去校准。
+  try {
+    const prefilterModelKey = cfgSnapshot?.lastLlamaModelKey || null;
+    const budget = etaEstimator.computeBudget({
+      durationSec: project.durationSec,
+      hasAudio: project.hasAudio !== false,
+      platform: project.source?.platform,
+      complexVisionProvider,
+      mediumTextProvider,
+      audioProvider,
+      prefilterEnabled: !!prefilterModelKey,
+      prefilterModelKey,
+      contextSize: complexVisionProvider?.contextSize,
+      options,
+      // 学习器拟合的云端 TPS — 覆盖 hardcoded fallback。本地模型不受影响。
+      learnedBaselines,
+    });
+    if (budget.totalMs > 0) {
+      handle.budget = { projectId: project.id, budget };
+      broadcastToWindows("analysis:budget", handle.budget);
+    }
+  } catch (err) {
+    console.warn("[analyze:budget] 计算 ETA budget 失败:", err?.message || err);
+  }
 
   // 心跳:某些阶段(本地 whisper 加载/推理)单次任务 30s+,
   // 中间没有事件 UI 看起来卡死。每 2s 重发最近一次 progress 并附累计等待时长。
@@ -4729,6 +4795,16 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         timings,
         providers: { complexVision: complexVisionProvider, mediumText: mediumTextProvider, audio: audioProvider },
       });
+      // 只有 ok 样本才参与学习 (失败 / 取消的 timing 偏短); 学习器自己也会过滤
+      if (analysisOutcome === "ok") {
+        try {
+          learnedBaselines = await etaLearner.updateAndSave(app.getPath("userData"));
+          const count = Object.keys(learnedBaselines.providers || {}).length;
+          if (count > 0) console.log(`[eta-learner] baseline 更新, 当前 ${count} 个 provider`);
+        } catch (learnErr) {
+          console.warn("[eta-learner] 学习失败:", learnErr?.message || learnErr);
+        }
+      }
     } catch (sampleErr) {
       console.warn("[eta-samples] 写埋点失败:", sampleErr?.message || sampleErr);
     }
@@ -5054,6 +5130,15 @@ app.whenReady().then(async () => {
     if (icon) app.dock.setIcon(icon);
   }
   app.setName("ClipIQ");
+
+  // 加载已学习的云端模型 TPS baseline (没文件就是空 baselines, 一切走 hardcoded fallback)
+  try {
+    learnedBaselines = await etaLearner.loadBaselines(app.getPath("userData"));
+    const count = Object.keys(learnedBaselines.providers || {}).length;
+    if (count > 0) console.log(`[eta-learner] 加载 ${count} 个 provider baseline`);
+  } catch (err) {
+    console.warn("[eta-learner] 加载 baseline 失败:", err?.message || err);
+  }
 
   // 生产环境注入严格 CSP — dev 下 Vite HMR 需要 unsafe-eval,跳过。
   // packaged app 加载 file:// 的 dist/index.html,React 已编译为静态 JS,不需要 eval。
@@ -6407,6 +6492,11 @@ app.whenReady().then(async () => {
   ipcMain.handle("analysis:getLastProgress", async (_event, projectId) => {
     const handle = activeAnalyses.get(projectId);
     return handle?.lastProgress || null;
+  });
+
+  ipcMain.handle("analysis:getLastBudget", async (_event, projectId) => {
+    const handle = activeAnalyses.get(projectId);
+    return handle?.budget || null;
   });
 
   ipcMain.handle("project:export", async (_event, { project, nodes, report, provider, format }) => {

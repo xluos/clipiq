@@ -69,10 +69,16 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   cancelAnalysis: (projectId) => ipcRenderer.invoke("analysis:cancel", projectId),
   isAnalysisActive: (projectId) => ipcRenderer.invoke("analysis:isActive", projectId),
   getLastAnalysisProgress: (projectId) => ipcRenderer.invoke("analysis:getLastProgress", projectId),
+  getLastAnalysisBudget: (projectId) => ipcRenderer.invoke("analysis:getLastBudget", projectId),
   onAnalysisProgress: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("analysis:progress", listener);
     return () => ipcRenderer.removeListener("analysis:progress", listener);
+  },
+  onAnalysisBudget: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("analysis:budget", listener);
+    return () => ipcRenderer.removeListener("analysis:budget", listener);
   },
   exportProject: (payload) => ipcRenderer.invoke("project:export", payload),
   testProvider: (provider) => ipcRenderer.invoke("provider:testConnection", provider),

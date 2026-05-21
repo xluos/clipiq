@@ -501,6 +501,34 @@ export type AnalysisProgressEvent = {
   message?: string;
 };
 
+// analyzeProject 起来时 broadcast 一次, 把各 stage 的 baseline 耗时预算发给 renderer。
+// ProgressScreen 用它替代 elapsed/progress 线性外推, 给出更稳定的 ETA。
+// stage 字符串是 main.cjs send(stage) 用的 prefix, renderer 用 stageLabel.startsWith() 关联。
+export type AnalysisBudgetStage = {
+  stage: string;
+  estMs: number;
+  kind: "cpu" | "ffmpeg" | "whisper" | "llm-text" | "llm-vision" | "network";
+  note?: string;
+};
+
+export type AnalysisBudget = {
+  totalMs: number;
+  stages: AnalysisBudgetStage[];
+  inputs?: {
+    durationSec?: number;
+    candidateFrames?: number;
+    shotsCount?: number;
+    chunksCount?: number;
+    framesPerChunk?: number;
+    contextSize?: number | null;
+  };
+};
+
+export type AnalysisBudgetEvent = {
+  projectId: string;
+  budget: AnalysisBudget;
+};
+
 // 进度屏的"实时日志"一条。absoluteMs 是 Date.now() 记录瞬间, 显示时按当前
 // project.analysisStartedAt 算相对偏移 (m:ss) — 这样同一条 log 跨退出再进 /
 // 切 project 都不需要重算时基。

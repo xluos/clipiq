@@ -37,6 +37,7 @@ export function ProgressScreen() {
     setCurrentScreen, activeProjectId, projects, setProjects,
     providers, activeVideoProviderId, activeAudioProviderId,
     setNodesForProject, setReportForProject, progressByProject, logsByProject,
+    budgetByProject, setBudgetForProject,
   } = useApp();
 
   const project = projects.find(p => p.id === activeProjectId);
@@ -46,6 +47,8 @@ export function ProgressScreen() {
   const liveSnapshot = project ? progressByProject[project.id] : undefined;
   // 实时日志也是按 projectId 全局存的, 切 project / 退出再进都能跟着 project 走。
   const logs = (project && logsByProject[project.id]) || [];
+  // ETA budget: main 在 analyzeProject 开头算一次广播给 renderer。订阅在 AppContext, 这里直接读。
+  const budget = project ? budgetByProject[project.id] : undefined;
 
   const [progress, setProgress] = useState(liveSnapshot?.progress ?? 0);
   const [stageLabel, setStageLabel] = useState(liveSnapshot?.stage ?? STAGES[0]);
@@ -99,12 +102,39 @@ export function ProgressScreen() {
     return Date.now() - startedAt;
   }, [progress, nowTick, startedAt]);
 
+  // 追踪当前 stage 进入时刻, 用于 budget-based ETA 算"当前 stage 剩余预算"。
+  const stageStartedAtRef = useRef<{ stage: string; ts: number }>({ stage: stageLabel, ts: Date.now() });
+  useEffect(() => {
+    if (stageStartedAtRef.current.stage !== stageLabel) {
+      stageStartedAtRef.current = { stage: stageLabel, ts: Date.now() };
+    }
+  }, [stageLabel]);
+
   const etaMs = useMemo(() => {
-    if (progress < 5 || elapsedMs < 1500) return null;
+    void nowTick;
     if (progress >= 100) return 0;
+    // 优先用 main 推过来的 budget: 剩余 = sum(后续 stages estMs) + max(0, currentStage estMs - elapsedInCurrent)
+    // stage prefix 匹配从后往前找最长 (例: "主分析(审计)" 优先于 "主分析")
+    if (budget && budget.stages.length > 0) {
+      let idx = -1;
+      for (let i = budget.stages.length - 1; i >= 0; i--) {
+        if (stageLabel.startsWith(budget.stages[i].stage)) { idx = i; break; }
+      }
+      if (idx >= 0) {
+        const currentStage = budget.stages[idx];
+        const elapsedInCurrent = Date.now() - stageStartedAtRef.current.ts;
+        const remainingInCurrent = Math.max(0, currentStage.estMs - elapsedInCurrent);
+        const remainingAfter = budget.stages.slice(idx + 1).reduce((sum, s) => sum + s.estMs, 0);
+        return remainingInCurrent + remainingAfter;
+      }
+      // stage label 还没在 budget 里出现 (例: 刚启动, label 是占位的 STAGES[0]) → 给总预算
+      if (progress < 1) return budget.totalMs;
+    }
+    // fallback: 老的线性外推 (没 budget 或者 stage label 完全对不上)
+    if (progress < 5 || elapsedMs < 1500) return null;
     const total = elapsedMs / (progress / 100);
     return Math.max(0, total - elapsedMs);
-  }, [elapsedMs, progress]);
+  }, [budget, stageLabel, progress, elapsedMs, nowTick]);
 
   // 下载阶段下方的"分析流水线"还没开始,所以强制 currentStageIndex = -1,所有 stages 灰色。
   const currentStageIndex = project?.status === "downloading"
@@ -253,6 +283,11 @@ export function ProgressScreen() {
         } catch {
           setStageLabel("后台分析任务运行中");
         }
+        // attach 模式: budget broadcast 已经在我们订阅前发完了, 拉一次补回 cache
+        try {
+          const budgetEvt = await window.videoAnalyzer!.getLastAnalysisBudget(project.id);
+          if (budgetEvt?.budget) setBudgetForProject(project.id, budgetEvt.budget);
+        } catch { /* 老 main / 没装 handler → 静默 fallback 到线性外推 */ }
         return;
       }
       try {
