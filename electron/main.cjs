@@ -2900,6 +2900,25 @@ const AUDIT_SYSTEM_PROMPT =
   "(2) 产出全局剪辑报告 (summary / structure / pacing / takeaways / methodologyAudit)。" +
   "所有回答必须是合法 JSON, 不要 markdown 围栏, 不要解释。";
 
+// 给 chat/completions response_format 用的宽松 schema。strict:false 让云端 OpenAI 不强制
+// additionalProperties:false 等约束 (那是 strict 模式特有), llama.cpp 端编出 GBNF 强制
+// 顶层结构 — probe 实测 0.8B 自由 JSON 1/3 invalid, 上 json_schema strict:false 后 4/4 valid。
+// 字段内部不约束, 模型自由发挥, 后续 normalizeModelResult 兜底。
+const SINGLE_PASS_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: { nodes: { type: "array" }, report: { type: "object" } },
+  required: ["nodes"],
+};
+const CHUNK_PASS_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: { nodes: { type: "array" } },
+  required: ["nodes"],
+};
+const AUDIT_PASS_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: { nodeTags: { type: "array" }, report: { type: "object" } },
+};
+
 function buildGlobalContextBlock(project, methodology, globalContext) {
   const lines = [];
   lines.push("# 整体上下文 (帮助你理解本片段在全片中的位置)");
@@ -3328,9 +3347,15 @@ async function runSinglePassAnalysis({
   }
 
   const useResponses = effectiveProvider.endpointType === "openai_responses";
+  // probe 实测: json_object 不足以让 llama.cpp 编 grammar (它只对 json_schema 生效);
+  // 走宽松 json_schema strict:false, 0.8B 8 帧 chunk-pass 从 2/3 valid 提升到 4/4。
+  const responseFormat = {
+    type: "json_schema",
+    json_schema: { name: "single_pass_output", strict: false, schema: SINGLE_PASS_OUTPUT_SCHEMA },
+  };
   const callResult = useResponses
-    ? await callOpenAIResponses(effectiveProvider, systemText, userText, imageDataUrls, handle)
-    : await callOpenAIChatCompletions(effectiveProvider, systemText, userText, imageDataUrls, handle);
+    ? await callOpenAIResponses(effectiveProvider, systemText, userText, imageDataUrls, handle, { responseFormat })
+    : await callOpenAIChatCompletions(effectiveProvider, systemText, userText, imageDataUrls, handle, { responseFormat });
   const parsed = callResult.parsed;
 
   if (!parsed || (!Array.isArray(parsed.nodes) && !parsed.report)) {
@@ -3355,9 +3380,15 @@ async function runChunkPass({ effectiveProvider, project, methodology, globalCon
     imageDataUrls.push(`data:image/jpeg;base64,${base64}`);
   }
   const useResponses = effectiveProvider.endpointType === "openai_responses";
+  // 见 runSinglePassAnalysis 同位置注释: json_schema strict:false 让 llama.cpp 编 GBNF
+  // 强制顶层 nodes 数组结构, 字段内部不约束。
+  const responseFormat = {
+    type: "json_schema",
+    json_schema: { name: "chunk_pass_output", strict: false, schema: CHUNK_PASS_OUTPUT_SCHEMA },
+  };
   const callResult = useResponses
-    ? await callOpenAIResponses(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle)
-    : await callOpenAIChatCompletions(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle);
+    ? await callOpenAIResponses(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle, { responseFormat })
+    : await callOpenAIChatCompletions(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle, { responseFormat });
   const parsed = callResult.parsed;
   if (!parsed || !Array.isArray(parsed.nodes)) {
     throw new Error(`chunk ${chunk.index + 1} 返回不是合法 JSON 或缺少 nodes 字段`);
@@ -3410,9 +3441,14 @@ async function runAuditPass({ effectiveProvider, project, methodology, globalCon
   console.log(`[analyze:main] audit pass prompt=${promptTokens}tok budget=${budget} compactNodes=${compactNodes} attempts=${attempt}`);
 
   const useResponses = effectiveProvider.endpointType === "openai_responses";
+  // 同 chunk-pass: json_schema strict:false。audit 输出 { nodeTags, report } 两个 optional 顶层字段。
+  const responseFormat = {
+    type: "json_schema",
+    json_schema: { name: "audit_pass_output", strict: false, schema: AUDIT_PASS_OUTPUT_SCHEMA },
+  };
   const callResult = useResponses
-    ? await callOpenAIResponses(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle)
-    : await callOpenAIChatCompletions(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle);
+    ? await callOpenAIResponses(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle, { responseFormat })
+    : await callOpenAIChatCompletions(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle, { responseFormat });
   const parsed = callResult.parsed;
   if (!parsed) {
     throw new Error("audit pass 返回不是合法 JSON");

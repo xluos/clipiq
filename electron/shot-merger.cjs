@@ -163,12 +163,16 @@ async function callMediumText(provider, systemText, userText, signal) {
   if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
     throw new Error("medium_text provider 配置不全 (baseUrl/apiKeyRef/model 缺失)");
   }
+  // 实测中位 (probe-2026-05-21): batch=3 ≈ 240 tok, batch=6 ≈ 550 tok, batch=12 ≈ 880 tok。
+  // 8000 严重过预算 — 给本地 server 浪费 KV pre-alloc, 云端按实际 token 收费虽然不亏钱
+  // 但 stream timeout 防护偏松。1500 = batch=12 上限 ×1.7 buffer, 用户显式设
+  // provider.maxOutputTokens 覆盖。
   const result = await callJsonCompletion(provider, {
     systemText,
     userText,
     temperature: 0.2,
-    maxTokens: provider.maxOutputTokens ?? 8000,
-    maxOutputTokens: provider.maxOutputTokens ?? 8000,
+    maxTokens: provider.maxOutputTokens ?? 1500,
+    maxOutputTokens: provider.maxOutputTokens ?? 1500,
     signal,
   });
   if (!result.parsed) {

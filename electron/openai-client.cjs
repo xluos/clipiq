@@ -107,6 +107,7 @@ async function callOpenAIChatCompletionsRaw(provider, opts) {
     imageDataUrls = [],
     temperature,
     maxTokens,
+    responseFormat,
     signal,
   } = opts;
   const slot = await maybeAcquireLocalSlot(provider, signal);
@@ -121,7 +122,9 @@ async function callOpenAIChatCompletionsRaw(provider, opts) {
       // 非 OpenAI 兼容服务端可能忽略此字段, 但不会因此报错。
       stream_options: { include_usage: true },
       temperature: temperature ?? provider.temperature ?? 0.2,
-      max_tokens: maxTokens ?? provider.maxOutputTokens ?? 12000,
+      // 默认 2500 = probe 实测 chunk-pass 8 帧中位 1671 tok ×1.5 buffer。
+      // 调用方需要更大 budget (例如 audit 走超长 nodes 列表) 在 opts.maxTokens 显式传。
+      max_tokens: maxTokens ?? provider.maxOutputTokens ?? 2500,
       messages: [
         { role: "system", content: systemText },
         {
@@ -135,6 +138,7 @@ async function callOpenAIChatCompletionsRaw(provider, opts) {
               : userText,
         },
       ],
+      ...(responseFormat ? { response_format: responseFormat } : {}),
     };
     const response = await fetch(endpoint, {
       method: "POST",
@@ -174,6 +178,7 @@ async function callOpenAIResponsesRaw(provider, opts) {
     imageDataUrls = [],
     temperature,
     maxOutputTokens,
+    responseFormat,
     signal,
   } = opts;
   const slot = await maybeAcquireLocalSlot(provider, signal);
@@ -189,12 +194,17 @@ async function callOpenAIResponsesRaw(provider, opts) {
       model: provider.model,
       stream: true,
       temperature: temperature ?? provider.temperature ?? 0.2,
-      max_output_tokens: maxOutputTokens ?? provider.maxOutputTokens ?? 12000,
+      // 同 chat/completions: 默认 2500 实测 chunk-pass 中位 ×1.5 buffer
+      max_output_tokens: maxOutputTokens ?? provider.maxOutputTokens ?? 2500,
       input: [
         { role: "system", content: [{ type: "input_text", text: systemText }] },
         { role: "user", content: userContent },
       ],
+      // /responses endpoint 的 schema 约束字段叫 text.format, 跟 chat/completions 的
+      // response_format 形态不同 (本期没主分析跑 reasoning 模型场景, 暂不映射)。
+      // 调用方传 responseFormat 时这里忽略, 避免在不支持的端点发生错误。
     };
+    void responseFormat;
     const response = await fetch(endpoint, {
       method: "POST",
       signal,
@@ -253,21 +263,28 @@ async function callJsonCompletion(provider, opts) {
 }
 
 // 兼容旧调用: 主分析 callOpenAICompatible 用的形态。返回 { parsed, usage, model }
-async function callOpenAIChatCompletions(provider, systemText, userText, imageDataUrls, handle) {
+// 兼容签名 (5 个位置参数 + 可选 options): options 支持 { responseFormat, maxTokens, maxOutputTokens }。
+// 不传 options 行为完全兼容老调用; runChunkPass / runAuditPass 想要 JSON 模式时
+// 传 { responseFormat: { type: "json_object" } } 让小模型不漂出 JSON 包装。
+async function callOpenAIChatCompletions(provider, systemText, userText, imageDataUrls, handle, options) {
   const result = await callOpenAIChatCompletionsRaw(provider, {
     systemText,
     userText,
     imageDataUrls,
+    maxTokens: options?.maxTokens,
+    responseFormat: options?.responseFormat,
     signal: handle?.abortController?.signal,
   });
   return { parsed: tryParseJsonFromText(result.text), usage: result.usage, model: result.model };
 }
 
-async function callOpenAIResponses(provider, systemText, userText, imageDataUrls, handle) {
+async function callOpenAIResponses(provider, systemText, userText, imageDataUrls, handle, options) {
   const result = await callOpenAIResponsesRaw(provider, {
     systemText,
     userText,
     imageDataUrls,
+    maxOutputTokens: options?.maxOutputTokens ?? options?.maxTokens,
+    responseFormat: options?.responseFormat,
     signal: handle?.abortController?.signal,
   });
   return { parsed: tryParseJsonFromText(result.text), usage: result.usage, model: result.model };
