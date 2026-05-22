@@ -45,7 +45,7 @@ import {
 } from "../types";
 import type { CacheScopeStats, CacheStats, ExtensionBridgeStatus, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
 
-type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "cache" | "bridge" | "data";
+type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "bridge" | "data";
 
 const NONE = "__none__";
 
@@ -55,7 +55,6 @@ const SECTIONS: { key: Section; label: string }[] = [
   { key: "local", label: "本地推理" },
   { key: "deps", label: "本地依赖" },
   { key: "analysis", label: "默认分析" },
-  { key: "cache", label: "分析缓存" },
   { key: "bridge", label: "浏览器插件桥" },
   { key: "data", label: "项目数据" },
 ];
@@ -148,7 +147,6 @@ export function SettingsScreen() {
             {section === "deps" && <DepsSection />}
             {section === "local" && <LocalInferenceSection />}
             {section === "analysis" && <AnalysisDefaultsSection />}
-            {section === "cache" && <CacheSection />}
             {section === "bridge" && <ExtensionBridgeSection />}
             {section === "data" && <DataSection />}
           </div>
@@ -2459,87 +2457,85 @@ function CacheSection() {
     : [];
 
   return (
-    <>
-      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">分析缓存</h2>
-      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4 text-sm">
-        <Stat label="总占用" value={stats ? `${formatBytes(stats.totalBytes)} · ${stats.totalEntries} 条` : "—"} />
-        <Stat label="容量上限" value={stats ? (stats.maxBytes > 0 ? formatBytes(stats.maxBytes) : "不限") : "—"} />
-        <Stat label="缓存目录" value={stats?.cacheDir ?? "—"} mono />
+    <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4 text-sm">
+      <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">分析缓存</h3>
+      <Stat label="总占用" value={stats ? `${formatBytes(stats.totalBytes)} · ${stats.totalEntries} 条` : "—"} />
+      <Stat label="容量上限" value={stats ? (stats.maxBytes > 0 ? formatBytes(stats.maxBytes) : "不限") : "—"} />
+      <Stat label="缓存目录" value={stats?.cacheDir ?? "—"} mono />
 
-        <div className="grid grid-cols-[160px_1fr] items-center gap-3 pt-2">
-          <span className="text-slate-500 dark:text-slate-400 text-right">改容量上限 (GB)</span>
-          <div className="flex gap-2">
-            <Input
-              type="number"
-              min={0}
-              step={1}
-              value={maxBytesInput}
-              onChange={(e) => { setMaxBytesInput(e.target.value); setMaxBytesDirty(true); }}
-              className="max-w-[120px] font-mono text-xs"
-            />
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!maxBytesDirty || busy === "__maxBytes__"}
-              onClick={handleApplyMaxBytes}
-              className="border-slate-200 dark:border-slate-800"
-            >
-              应用
-            </Button>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap gap-2 pt-2">
-          <Button variant="outline" size="sm" onClick={handleChangeDir} disabled={busy === "__setDir__"} className="border-slate-200 dark:border-slate-800">
-            <FolderOpen className="w-4 h-4 mr-1.5" />
-            迁移到新目录
-          </Button>
-          <Button variant="outline" size="sm" onClick={handleOpenDir} className="border-slate-200 dark:border-slate-800">
-            <FolderOpen className="w-4 h-4 mr-1.5" />
-            打开缓存目录
-          </Button>
-          <Button variant="ghost" size="sm" onClick={refresh} className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-100">
-            <RefreshCw className="w-4 h-4 mr-1.5" />
-            刷新
-          </Button>
+      <div className="grid grid-cols-[160px_1fr] items-center gap-3 pt-2">
+        <span className="text-slate-500 dark:text-slate-400 text-right">改容量上限 (GB)</span>
+        <div className="flex gap-2">
+          <Input
+            type="number"
+            min={0}
+            step={1}
+            value={maxBytesInput}
+            onChange={(e) => { setMaxBytesInput(e.target.value); setMaxBytesDirty(true); }}
+            className="max-w-[120px] font-mono text-xs"
+          />
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
-            disabled={busy === "__all__" || !stats?.totalEntries}
-            onClick={handleClearAll}
-            className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+            disabled={!maxBytesDirty || busy === "__maxBytes__"}
+            onClick={handleApplyMaxBytes}
+            className="border-slate-200 dark:border-slate-800"
           >
-            <Trash2 className="w-4 h-4 mr-1.5" />
-            清除全部
+            应用
           </Button>
         </div>
+      </div>
 
-        {scopeEntries.length > 0 && (
-          <div className="pt-2 space-y-2 border-t border-slate-200 dark:border-slate-800">
-            <div className="text-xs text-slate-500 dark:text-slate-400 pt-2">按阶段</div>
-            {scopeEntries.map(([scope, info]) => (
-              <div key={scope} className="grid grid-cols-[160px_1fr_auto] items-center gap-3">
-                <span className="text-slate-700 dark:text-slate-300">{SCOPE_LABELS_ZH[scope] || scope}</span>
-                <span className="font-mono text-xs text-slate-500">{formatBytes(info.bytes)} · {info.count} 条</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={busy === scope}
-                  onClick={() => handleClearScope(scope)}
-                  className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
-                >
-                  清除
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
-        {scopeEntries.length === 0 && stats && (
-          <p className="text-xs text-slate-500">还没有缓存数据。下次跑分析时会自动写入。</p>
-        )}
-        {statusMessage && <p className="text-xs text-slate-500">{statusMessage}</p>}
-      </section>
-    </>
+      <div className="flex flex-wrap gap-2 pt-2">
+        <Button variant="outline" size="sm" onClick={handleChangeDir} disabled={busy === "__setDir__"} className="border-slate-200 dark:border-slate-800">
+          <FolderOpen className="w-4 h-4 mr-1.5" />
+          迁移到新目录
+        </Button>
+        <Button variant="outline" size="sm" onClick={handleOpenDir} className="border-slate-200 dark:border-slate-800">
+          <FolderOpen className="w-4 h-4 mr-1.5" />
+          打开缓存目录
+        </Button>
+        <Button variant="ghost" size="sm" onClick={refresh} className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-100">
+          <RefreshCw className="w-4 h-4 mr-1.5" />
+          刷新
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy === "__all__" || !stats?.totalEntries}
+          onClick={handleClearAll}
+          className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+        >
+          <Trash2 className="w-4 h-4 mr-1.5" />
+          清除全部
+        </Button>
+      </div>
+
+      {scopeEntries.length > 0 && (
+        <div className="pt-2 space-y-2 border-t border-slate-200 dark:border-slate-800">
+          <div className="text-xs text-slate-500 dark:text-slate-400 pt-2">按阶段</div>
+          {scopeEntries.map(([scope, info]) => (
+            <div key={scope} className="grid grid-cols-[160px_1fr_auto] items-center gap-3">
+              <span className="text-slate-700 dark:text-slate-300">{SCOPE_LABELS_ZH[scope] || scope}</span>
+              <span className="font-mono text-xs text-slate-500">{formatBytes(info.bytes)} · {info.count} 条</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy === scope}
+                onClick={() => handleClearScope(scope)}
+                className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+              >
+                清除
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      {scopeEntries.length === 0 && stats && (
+        <p className="text-xs text-slate-500">还没有缓存数据。下次跑分析时会自动写入。</p>
+      )}
+      {statusMessage && <p className="text-xs text-slate-500">{statusMessage}</p>}
+    </section>
   );
 }
 
@@ -2709,6 +2705,7 @@ function DataSection() {
     <>
       <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">项目数据</h2>
       <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4 text-sm">
+        <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">项目文件</h3>
         <Stat label="项目数量（应用内）" value={`${projects.length} 个`} />
         <Stat label="项目数量（SQLite）" value={info ? `${info.dbProjectCount} 个` : "—"} />
         <Stat label="项目数量（磁盘目录）" value={info ? `${info.projectCount} 个` : "—"} />
@@ -2745,6 +2742,7 @@ function DataSection() {
         </div>
         {statusMessage && <p className="text-xs text-slate-500">{statusMessage}</p>}
       </section>
+      <CacheSection />
     </>
   );
 }
