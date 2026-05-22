@@ -1,131 +1,166 @@
 // 各 stage 预估耗时计算器。
 //
-// baseline 数据来源: scripts/probe/reports/probe-2026-05-21T03-24-42-612Z (M-series Metal,
-// Qwen3.5 Q4_K_M 三档实测)。每条函数都按 "实测中位 × 1.0" 给, 不再额外加 buffer —
-// ProgressScreen 会用真实经过的 stage 时长去 calibrate 剩余预算, 偏低 / 偏高都会被纠正。
+// 模型: 每个 LLM stage 的 wall time = prefill (prompt tokens / prefillTps) +
+//       decode (estimated completion tokens / decodeTps) + per-frame image encode (vision only)
+//       + 固定开销 (HTTP / grammar / JSON)。
 //
-// 设计原则:
-// - 每个 stage 估算只关心"这一段的纯计算量", 不算上下游
-// - LLM 阶段用 (per-batch / per-frame / per-chunk) × 次数, 系数按 modelKey 查表
-// - 云端模型 (非 local_llama) 给保守经验值, 后续接 telemetry 再细分
-// - 没法精算的字段 (chunks 数 / shots 数 / frames 数) 用 durationSec 推算; main.cjs
-//   实际跑到对应 stage 时可以发 budget update 修正 (本期未做)
+// 早期版本 (commit 235d0af) 用 base + perFrame 拟合 probe fixture, 结果跟生产 workload
+// 严重低估 (主分析 5.3x / 镜头合并 3.4x): 因为 probe completion 几百 tok, 实际生产 5000-7000
+// tok。改成 token-driven 之后, eta-learner 学到的 TPS 也能直接喂回来覆盖 hardcoded。
 //
-// 输出 stage.stage 必须跟 main.cjs send(stage) 用的字符串保持 prefix 匹配, ProgressScreen
-// 拿 stageLabel.startsWith(s.stage) 关联。
+// 基础数据来源: eta-samples.jsonl sample #9 (2026-05-21 M3 Pro Metal, 110.9s 视频, Qwen3.5-9B
+// Q4_K_M, ctx 32K) 实测:
+//   - main-analysis: prompt 8291 tok / completion 7008 tok / wall 407.6s → decode≈20 tok/s,
+//     prefill 用余量 ~250 tok/s 反推
+//   - shot-merger batch=6, 3 batches, wall 163s 总 → ~54s/batch
+//
+// stage 名必须跟 main.cjs send(stage) 字符串严格 prefix 匹配 (ProgressScreen 用 startsWith
+// join), 否则 ProgressScreen 找不到 stage 预算, 退化成线性外推。修过的对齐:
+//   main 用 "模型分析画面" / "准备分析素材" / "识别视频类型" / "提取音轨" / "字幕识别",
+//   不是 "主分析" / "整理素材" / "识别题材" / "音频转码" / "音频转录"。
 
-// per-frame prefilter 总耗时 (ms): 包含 prompt eval 305 tok + completion ~85 tok
-// 探测: 0.8B=0.9s, 4B=3.0s, 9B=4.5s
-const PREFILTER_PER_FRAME_MS = {
-  qwen3_5_0_8b_q4km: 900,
-  qwen3_5_4b_q4km: 3000,
-  qwen3_5_9b_q4km: 4500,
+// 各本地模型的 decode 速度 (tok/s) 和 prefill 速度 (tok/s) on M3 Pro Metal Q4_K_M.
+// decodeTps 是关键: completion tokens / decodeTps 主导一切长输出 stage 的耗时。
+const LOCAL_MODEL_TPS = {
+  qwen3_5_0_8b_q4km: { decode: 200, prefill: 1500 },
+  qwen3_5_4b_q4km: { decode: 30, prefill: 400 },
+  qwen3_5_9b_q4km: { decode: 20, prefill: 300 },
 };
 
-// shot-merger per-batch ms, by batchSize. 实测中位 (跳过 truncated 那档)
-const SHOT_MERGER_PER_BATCH_MS = {
-  qwen3_5_0_8b_q4km: { 3: 2400, 6: 4900, 12: 8000 },
-  qwen3_5_4b_q4km: { 3: 7200, 6: 13500, 12: 25500 },
-  qwen3_5_9b_q4km: { 3: 7800, 6: 16000, 12: 40000 },
+// per-frame image encode (vision LLM 加载 jpeg → token 的额外开销, 不算在 prompt prefill 里)
+const PER_FRAME_IMAGE_ENCODE_MS = {
+  qwen3_5_0_8b_q4km: 300,
+  qwen3_5_4b_q4km: 800,
+  qwen3_5_9b_q4km: 1200,
 };
 
-// chunk-pass per-chunk ms: y = base + framesPerChunk * perFrame
-// 探测拟合 (4f / 8f 两点线性):
-//   0.8B: 4f=7.4s, 8f=12.2s → base=2.6s, perFrame=1.2s
-//   4B:   4f=32s,  8f=47s   → base=17s,  perFrame=3.75s
-//   9B:   4f=32s,  8f=45s   → base=19s,  perFrame=3.25s
-const CHUNK_PASS_COEFFS = {
-  qwen3_5_0_8b_q4km: { base: 2600, perFrame: 1200 },
-  qwen3_5_4b_q4km: { base: 17000, perFrame: 3750 },
-  qwen3_5_9b_q4km: { base: 19000, perFrame: 3250 },
-};
+// 云端 fallback (没 learner TPS 时用; learner 学到就覆盖)
+const CLOUD_FALLBACK_TPS = 60;
+const CLOUD_FALLBACK_PREFILL_TPS = 800;
+const CLOUD_NETWORK_LATENCY_MS = 800;
 
-// audit-pass: 无图, 输入只有 nodes + transcript, 输出 ~1500-2500 tok
-// 估算 = base (prompt eval) + 1800 tok / TPS
-const AUDIT_TPS = {
-  qwen3_5_0_8b_q4km: 110,
-  qwen3_5_4b_q4km: 32,
-  qwen3_5_9b_q4km: 20,
-};
-
-// 云端 fallback (没 telemetry, 经验值)
-const CLOUD_FALLBACK = {
-  prefilterPerFrameMs: 1500,
-  shotMergerPerBatchMs: { 3: 4000, 6: 8000, 12: 14000 },
-  chunkPassPerChunkMs: 25000,
-  auditMs: 15000,
-  tps: 60,
-};
-
-// 云端 picker 查 learned baseline; 没数据返回 null, 让上层 fallback hardcoded。
-// 单次 call 估算 = 网络往返 + (估算 completion tokens / learnedTps)。
-function lookupLearnedTps(learnedBaselines, provider) {
-  if (!learnedBaselines?.providers || !provider?.id || !provider?.model) return null;
-  return learnedBaselines.providers[`${provider.id}|${provider.model}`]?.tps || null;
+function pickModelTps(provider, learnedBaselines) {
+  // 优先 learner 学到的; 否则 hardcoded; 都没有给云端 fallback
+  if (learnedBaselines?.providers && provider?.id && provider?.model) {
+    const learned = learnedBaselines.providers[`${provider.id}|${provider.model}`];
+    if (learned?.tps) {
+      return { decode: learned.tps, prefill: learned.prefillTps || learned.tps * 12, source: "learned" };
+    }
+  }
+  if (provider?.source === "local_llama" && LOCAL_MODEL_TPS[provider.model]) {
+    return { ...LOCAL_MODEL_TPS[provider.model], source: "hardcoded" };
+  }
+  return { decode: CLOUD_FALLBACK_TPS, prefill: CLOUD_FALLBACK_PREFILL_TPS, source: "fallback" };
 }
 
-function pickPrefilterPerFrameMs(modelKey) {
-  return PREFILTER_PER_FRAME_MS[modelKey] || CLOUD_FALLBACK.prefilterPerFrameMs;
+// 基础公式: 估单次 LLM 调用的 wall time
+function estimateLlmCallMs({ promptTokens, completionTokens, framesInPrompt = 0, provider, learnedBaselines }) {
+  const tps = pickModelTps(provider, learnedBaselines);
+  const prefillMs = (promptTokens / tps.prefill) * 1000;
+  const decodeMs = (completionTokens / tps.decode) * 1000;
+  const imageEncodeMs =
+    framesInPrompt > 0 && provider?.source === "local_llama"
+      ? framesInPrompt * (PER_FRAME_IMAGE_ENCODE_MS[provider.model] || 1000)
+      : framesInPrompt * 1500; // 云端 vision
+  const overheadMs = provider?.source === "local_llama" ? 300 : CLOUD_NETWORK_LATENCY_MS + 500;
+  return prefillMs + decodeMs + imageEncodeMs + overheadMs;
 }
 
-function pickShotMergerPerBatchMs(provider, batchSize, learnedBaselines) {
-  if (provider?.source === "local_llama" && SHOT_MERGER_PER_BATCH_MS[provider.model]) {
-    return SHOT_MERGER_PER_BATCH_MS[provider.model][batchSize] || SHOT_MERGER_PER_BATCH_MS[provider.model][6];
-  }
-  // 云端: 查 learner 拟合的 TPS
-  const learnedTps = lookupLearnedTps(learnedBaselines, provider);
-  if (learnedTps) {
-    // 经验估 completion token: batch=3 → ~250, batch=6 → ~500, batch=12 → ~950
-    const estTokens = batchSize === 3 ? 250 : batchSize === 6 ? 500 : 950;
-    const networkLatencyMs = 800;
-    return Math.round(networkLatencyMs + (estTokens / learnedTps) * 1000);
-  }
-  return CLOUD_FALLBACK.shotMergerPerBatchMs[batchSize] || CLOUD_FALLBACK.shotMergerPerBatchMs[6];
+// 各 LLM stage 的 token / frame 量级估算 (基于 #9 + 经验)
+//
+// shot-merger per batch (按 #9 14 shots / 3 batch / 163s 实测拟合):
+//   - prompt: shotsPerBatch * 500 tok (含字幕片段 + scene 元数据)
+//   - completion: shotsPerBatch * 150 tok (每个 shot 输出一句 shotDescription)
+function estimateShotMergerBatch(batchSize, provider, learnedBaselines) {
+  return estimateLlmCallMs({
+    promptTokens: batchSize * 500,
+    completionTokens: batchSize * 150,
+    provider,
+    learnedBaselines,
+  });
 }
 
-function pickChunkPassPerChunkMs(provider, framesPerChunk, learnedBaselines) {
-  if (provider?.source === "local_llama" && CHUNK_PASS_COEFFS[provider.model]) {
-    const c = CHUNK_PASS_COEFFS[provider.model];
-    return c.base + framesPerChunk * c.perFrame;
-  }
-  // 云端 vision: 网络 + per-image encode (估 1500ms/张) + 输出 1000 tok / learnedTps
-  const learnedTps = lookupLearnedTps(learnedBaselines, provider);
-  if (learnedTps) {
-    const imageEncodeMs = framesPerChunk * 1500;
-    const outputMs = (1000 / learnedTps) * 1000;
-    return Math.round(2000 + imageEncodeMs + outputMs);
-  }
-  return CLOUD_FALLBACK.chunkPassPerChunkMs + framesPerChunk * 500;
+// summarizer (全局聚合):
+//   - prompt: shotContexts JSON (shots * 300) + transcript (≤4000 chars ≈ 6000 tok) + catalog
+//   - completion: ~3000 tok (genre + summary + structureHint)
+function estimateSummarizerCall(shotsCount, transcriptChars, provider, learnedBaselines) {
+  const transcriptTokens = Math.round((transcriptChars || 0) * 1.5);
+  return estimateLlmCallMs({
+    promptTokens: shotsCount * 300 + transcriptTokens + 1500,
+    completionTokens: 3000,
+    provider,
+    learnedBaselines,
+  });
 }
 
-function pickAuditMs(provider, learnedBaselines) {
-  if (provider?.source === "local_llama" && AUDIT_TPS[provider.model]) {
-    // prompt eval (1500 tok) + completion (1800 tok / TPS)
-    return Math.round(2500 + (1800 / AUDIT_TPS[provider.model]) * 1000);
-  }
-  const learnedTps = lookupLearnedTps(learnedBaselines, provider);
-  if (learnedTps) {
-    return Math.round(2000 + (1800 / learnedTps) * 1000);
-  }
-  return CLOUD_FALLBACK.auditMs;
+// detect-genre (兜底, 没 shotContexts 时跑):
+//   - prompt: transcript + catalog ≈ 3000 tok
+//   - completion: ~800 tok
+function estimateDetectGenreCall(transcriptChars, provider, learnedBaselines) {
+  const transcriptTokens = Math.round((transcriptChars || 0) * 1.5);
+  return estimateLlmCallMs({
+    promptTokens: transcriptTokens + 1500,
+    completionTokens: 800,
+    provider,
+    learnedBaselines,
+  });
 }
 
-function pickLightTextCallMs(provider, completionTokens, learnedBaselines) {
-  if (provider?.source === "local_llama" && AUDIT_TPS[provider.model]) {
-    return Math.round(2500 + (completionTokens / AUDIT_TPS[provider.model]) * 1000);
-  }
-  const learnedTps = lookupLearnedTps(learnedBaselines, provider);
-  if (learnedTps) {
-    return Math.round(1500 + (completionTokens / learnedTps) * 1000);
-  }
-  // fallback: 云端中等模型经验值
-  return Math.round(2000 + (completionTokens / CLOUD_FALLBACK.tps) * 1000);
+// chunk-pass 主分析:
+//   - prompt: globalSummary + shotContexts + transcript chunk + frames
+//     按 #9 实测 1 chunk = 8291 tok prompt → 拟合公式: 1500 (template) + framesPerChunk * 400 +
+//     transcriptChars * 1.5 + shotsCount * 200
+//   - completion: 按 framesPerChunk 输出 nodes JSON, 每帧 ~800 tok 节点描述
+//     #9: 7 帧 (实际 prefilter 后) → 7008 tok ≈ 1000 tok/frame
+function estimateChunkPassCall(framesPerChunk, transcriptCharsInChunk, shotsCount, provider, learnedBaselines) {
+  const transcriptTokens = Math.round((transcriptCharsInChunk || 0) * 1.5);
+  return estimateLlmCallMs({
+    promptTokens: 1500 + framesPerChunk * 400 + transcriptTokens + shotsCount * 100,
+    completionTokens: framesPerChunk * 1000,
+    framesInPrompt: framesPerChunk,
+    provider,
+    learnedBaselines,
+  });
+}
+
+// audit-pass (chunks > 1 时, 无 frames):
+//   - prompt: 所有 chunk 节点 JSON 摘要 ≈ 4000 tok
+//   - completion: ~2500 tok (校准 + 全局补充)
+function estimateAuditCall(provider, learnedBaselines) {
+  return estimateLlmCallMs({
+    promptTokens: 4000,
+    completionTokens: 2500,
+    provider,
+    learnedBaselines,
+  });
+}
+
+// 单 prefilter 调用 (1 frame): prompt ~300 tok + 1 frame, completion ~85 tok
+function estimatePrefilterPerFrame(provider, learnedBaselines) {
+  return estimateLlmCallMs({
+    promptTokens: 300,
+    completionTokens: 85,
+    framesInPrompt: 1,
+    provider,
+    learnedBaselines,
+  });
+}
+
+// 弹幕情绪聚合: 每个时间桶一次, prompt 含若干弹幕原文 ~600 tok, completion ~300 tok
+function estimateDanmakuBucketCall(provider, learnedBaselines) {
+  return estimateLlmCallMs({
+    promptTokens: 600,
+    completionTokens: 300,
+    provider,
+    learnedBaselines,
+  });
 }
 
 // ---------- 数量级推算 ----------
-// shots: 每 ~3.5s 一个 shot 经验
+// shots: M3 Pro 实测短视频 (110s) 14 shots ≈ 1 shot / 8s。
+// 长视频 cut 密度趋稳, 用 / 7.5 兼顾。
 function estimateShotsCount(durationSec) {
-  return Math.max(1, Math.round(durationSec / 3.5));
+  return Math.max(1, Math.round(durationSec / 7.5));
 }
 
 // candidateFrames: 跟 main.cjs candidateFrameCount 大致对齐
@@ -141,6 +176,12 @@ function estimateCandidateFrames(durationSec, options, hasPrefilter) {
   return Math.max(8, Math.min(300, n));
 }
 
+// keptFrames: prefilter 之后留给主分析的帧数 (经验保留率 ~40%)
+function estimateKeptFrames(candidateFrames, hasPrefilter) {
+  if (!hasPrefilter) return candidateFrames;
+  return Math.max(4, Math.round(candidateFrames * 0.4));
+}
+
 // chunks: 主分析 chunked split. ctx 越大单 chunk 装越多 → chunks 越少
 // 经验 secPerChunk: 8K→144s, 16K→288s, 32K→576s
 function estimateChunksCount(durationSec, contextSize) {
@@ -149,19 +190,24 @@ function estimateChunksCount(durationSec, contextSize) {
   return Math.max(1, Math.ceil(durationSec / secPerChunk));
 }
 
+// transcript 字数估算: 中文短视频 ~5 char/sec (无字幕场景给 0)
+function estimateTranscriptChars(durationSec, hasAudio) {
+  if (!hasAudio) return 0;
+  return Math.round(durationSec * 5);
+}
+
 // whisper / api audio
 function estimateAudioMs(durationSec, audioProvider) {
   if (!audioProvider) return 0;
-  // 本地 whisper-cpp metal: ~0.15x realtime
+  // 本地 whisper-cpp metal: M3 Pro base 实测 ~32ms/sec
   if (audioProvider.source === "local_whisper" || audioProvider.source === "local") {
-    return Math.round(durationSec * 150);
+    return Math.round(durationSec * 35);
   }
-  // 云端 (groq whisper-large): ~0.05x realtime + 网络
+  // 云端 (groq whisper-large): ~50ms/sec + 网络
   return Math.round(durationSec * 50 + 2000);
 }
 
 // ---------- 主入口 ----------
-// 输出: { totalMs, stages: [{ stage, estMs, kind, note? }] }
 function computeBudget({
   durationSec,
   hasAudio = true,
@@ -173,61 +219,57 @@ function computeBudget({
   prefilterModelKey,
   contextSize,
   options,
-  learnedBaselines, // { providers: { "providerId|model": { tps, ... } } } — 学习器输出
+  learnedBaselines,
 } = {}) {
   if (!durationSec || durationSec <= 0) {
     return { totalMs: 0, stages: [], note: "missing durationSec" };
   }
 
   const candidateFrames = estimateCandidateFrames(durationSec, options, prefilterEnabled);
+  const keptFrames = estimateKeptFrames(candidateFrames, prefilterEnabled);
   const shotsCount = estimateShotsCount(durationSec);
   const chunksCount = estimateChunksCount(durationSec, contextSize ?? complexVisionProvider?.contextSize);
-  const framesPerChunk = chunksCount > 0 ? Math.ceil(candidateFrames / chunksCount) : candidateFrames;
+  const framesPerChunk = chunksCount > 0 ? Math.ceil(keptFrames / chunksCount) : keptFrames;
+  const transcriptChars = estimateTranscriptChars(durationSec, hasAudio);
+  const transcriptCharsPerChunk = chunksCount > 0 ? Math.round(transcriptChars / chunksCount) : transcriptChars;
   const shotMergerBatchSize = 6;
 
   const stages = [];
 
-  // 1. 视频探测 / 镜头检测 / 关键画面选点 (CPU + ffmpeg)
-  stages.push({ stage: "读取视频信息", estMs: 1500, kind: "cpu" });
+  // 1. ffmpeg / 选点 (CPU)
+  stages.push({ stage: "读取视频信息", estMs: 600, kind: "cpu" });
   stages.push({ stage: "检测镜头切换", estMs: Math.round(durationSec * 30), kind: "ffmpeg" });
-  stages.push({ stage: "本地推理预检", estMs: prefilterEnabled ? 1000 : 200, kind: "cpu" });
-  stages.push({ stage: "挑选关键画面", estMs: 800, kind: "cpu" });
-  stages.push({ stage: "抽取关键画面", estMs: candidateFrames * 70, kind: "ffmpeg", note: `${candidateFrames} 帧` });
+  stages.push({ stage: "本地推理预检", estMs: prefilterEnabled ? 600 : 100, kind: "cpu" });
+  stages.push({ stage: "挑选关键画面", estMs: 100, kind: "cpu" });
+  stages.push({ stage: "抽取关键画面", estMs: candidateFrames * 500, kind: "ffmpeg", note: `${candidateFrames} 帧` });
 
   // 2. 本地初筛 (vision LLM 逐帧)
   if (prefilterEnabled && prefilterModelKey) {
+    const prefilterProvider = { source: "local_llama", model: prefilterModelKey };
+    const perFrame = estimatePrefilterPerFrame(prefilterProvider, learnedBaselines);
     stages.push({
       stage: "本地初筛",
-      estMs: candidateFrames * pickPrefilterPerFrameMs(prefilterModelKey),
+      estMs: candidateFrames * perFrame,
       kind: "llm-vision",
       note: `${candidateFrames} 帧 × ${prefilterModelKey}`,
     });
   }
 
-  // 3. 音频转录
+  // 3. 音频转录 (注意: main 用 "提取音轨" / "字幕识别", 不是 "音频转码" / "音频转录")
   if (hasAudio) {
-    stages.push({ stage: "音频转码", estMs: 2500, kind: "ffmpeg" });
+    stages.push({ stage: "提取音轨", estMs: 500, kind: "ffmpeg" });
     stages.push({
-      stage: "音频转录",
+      stage: "字幕识别",
       estMs: estimateAudioMs(durationSec, audioProvider),
       kind: "whisper",
       note: audioProvider?.source === "local_whisper" ? "本地 whisper" : "云端",
     });
   }
 
-  // 4. 整理素材
-  stages.push({ stage: "整理素材", estMs: 600, kind: "cpu" });
-
-  // 5. 全局聚合 (summarizer 之前的 detect-genre / globalSummary)
-  if (mediumTextProvider?.baseUrl) {
-    stages.push({ stage: "识别题材", estMs: pickLightTextCallMs(mediumTextProvider, 800, learnedBaselines), kind: "llm-text" });
-    stages.push({ stage: "全局聚合", estMs: pickLightTextCallMs(mediumTextProvider, 1200, learnedBaselines), kind: "llm-text" });
-  }
-
-  // 6. 镜头合并 (shot-merger, 文本 LLM 按 batch)
+  // 4. 镜头合并 (shot-merger, 文本 LLM 按 batch)
   if (mediumTextProvider?.baseUrl) {
     const batches = Math.ceil(shotsCount / shotMergerBatchSize);
-    const perBatch = pickShotMergerPerBatchMs(mediumTextProvider, shotMergerBatchSize, learnedBaselines);
+    const perBatch = estimateShotMergerBatch(shotMergerBatchSize, mediumTextProvider, learnedBaselines);
     stages.push({
       stage: "镜头合并",
       estMs: batches * perBatch,
@@ -236,39 +278,68 @@ function computeBudget({
     });
   }
 
-  // 7. 主分析 (chunk-pass 或 single-pass)
-  if (complexVisionProvider?.baseUrl) {
-    const perChunk = pickChunkPassPerChunkMs(complexVisionProvider, framesPerChunk, learnedBaselines);
+  // 5. 全局聚合 (summarizer); shotContexts 在手才跑, 否则 detectGenre 兜底
+  if (mediumTextProvider?.baseUrl) {
     stages.push({
-      stage: "主分析",
+      stage: "全局聚合",
+      estMs: estimateSummarizerCall(shotsCount, transcriptChars, mediumTextProvider, learnedBaselines),
+      kind: "llm-text",
+    });
+  }
+
+  // 6. 准备分析素材 (CPU, 整理 frames + transcripts 喂给主分析)
+  stages.push({ stage: "准备分析素材", estMs: 200, kind: "cpu" });
+
+  // 7. 识别视频类型 (detect-genre fallback, 仅 summarizer 失败/无 shotContexts 时跑;
+  //    summarizer 成功时跳过, 所以不计入 budget 总和, 避免重复算 — 但保留一个 stage 位让
+  //    ProgressScreen 能 startsWith 匹配上 send("识别视频类型...") 的 progress 区间)。
+  if (complexVisionProvider?.baseUrl) {
+    stages.push({
+      stage: "识别视频类型",
+      estMs: 0,
+      kind: "llm-text",
+      note: "全局聚合成功时跳过, 不计入预算",
+    });
+  }
+
+  // 8. 主分析 (chunk-pass × N)
+  if (complexVisionProvider?.baseUrl) {
+    const perChunk = estimateChunkPassCall(
+      framesPerChunk,
+      transcriptCharsPerChunk,
+      shotsCount,
+      complexVisionProvider,
+      learnedBaselines,
+    );
+    stages.push({
+      stage: "模型分析画面",
       estMs: chunksCount * perChunk,
       kind: "llm-vision",
       note: `${chunksCount} 段 × ${framesPerChunk} 帧/段`,
     });
 
-    // 8. audit-pass (仅 chunked 模式跑 — chunks > 1)
+    // 9. audit-pass (仅 chunked 模式 chunks > 1)
     if (chunksCount > 1) {
       stages.push({
         stage: "主分析(审计)",
-        estMs: pickAuditMs(complexVisionProvider, learnedBaselines),
+        estMs: estimateAuditCall(complexVisionProvider, learnedBaselines),
         kind: "llm-text",
       });
     }
   }
 
-  // 9. 弹幕 (B 站)
+  // 10. 弹幕 (B 站)
   if (platform === "bilibili") {
     stages.push({ stage: "拉取弹幕", estMs: 3000, kind: "network" });
     if (mediumTextProvider?.baseUrl) {
-      // 弹幕情绪聚合, 大约 ceil(durationSec/30) 个时间桶, 每桶一次 LLM 调用
       const buckets = Math.max(1, Math.ceil(durationSec / 30));
-      const perBucket = pickLightTextCallMs(mediumTextProvider, 300, learnedBaselines);
+      const perBucket = estimateDanmakuBucketCall(mediumTextProvider, learnedBaselines);
       stages.push({ stage: "弹幕情绪聚合", estMs: buckets * perBucket, kind: "llm-text", note: `${buckets} 桶` });
     }
   }
 
-  // 10. 标题生成 + 整理结果
-  stages.push({ stage: "整理结果", estMs: 1500, kind: "cpu" });
+  // 11. 整理结果 (thumbnails + report + SQLite, 跟 shots 数线性)
+  stages.push({ stage: "整理结果", estMs: 1500 + shotsCount * 1000, kind: "cpu" });
 
   const totalMs = stages.reduce((sum, s) => sum + s.estMs, 0);
 
@@ -278,9 +349,11 @@ function computeBudget({
     inputs: {
       durationSec,
       candidateFrames,
+      keptFrames,
       shotsCount,
       chunksCount,
       framesPerChunk,
+      transcriptChars,
       contextSize: contextSize ?? complexVisionProvider?.contextSize ?? null,
     },
   };
@@ -288,12 +361,13 @@ function computeBudget({
 
 module.exports = {
   computeBudget,
-  // 暴露查表用 helpers 给外部脚本 / 测试
-  PREFILTER_PER_FRAME_MS,
-  SHOT_MERGER_PER_BATCH_MS,
-  CHUNK_PASS_COEFFS,
-  AUDIT_TPS,
+  LOCAL_MODEL_TPS,
+  PER_FRAME_IMAGE_ENCODE_MS,
   estimateShotsCount,
   estimateCandidateFrames,
+  estimateKeptFrames,
   estimateChunksCount,
+  estimateLlmCallMs,
+  estimateChunkPassCall,
+  estimateShotMergerBatch,
 };
