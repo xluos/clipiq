@@ -146,13 +146,13 @@ async function callBatch(provider, batch, abortSignal) {
     "windows 数组要包含上面所有桶的评分,index 与桶号对应。",
   ].join("\n");
 
+  // max_tokens 走 openai-client deriveDefaultMaxTokens (ctx 派生, 无上限),
+  // 不再 hardcode 3000。
   const result = await callJsonCompletion(provider, {
     systemText:
       "你在帮一个视频拉片工具评弹幕情绪。只返回 JSON,不要 markdown 围栏,不要解释过程。",
     userText,
     temperature: 0.2,
-    maxTokens: provider.maxOutputTokens ?? 3000,
-    maxOutputTokens: provider.maxOutputTokens ?? 3000,
     signal: abortSignal,
   });
   return result; // { parsed, usage, model }

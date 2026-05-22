@@ -33,7 +33,10 @@ const CACHE_VERSIONS = {
   shotMerger: "v1",
   summarizer: "v1",
   detectGenre: "v1",
-  mainAnalysis: "v1",
+  // v1 → v2: buildAnalysisPrompt + buildChunkPrompt 加了"节点划分规则"section
+  // (引导小模型把多个 shot 合并成 4-7 个逻辑节点, 不要 1:1 映射)。旧 cache 输出仍是
+  // 1 shot=1 node 的退化结果, 必须失效让新 prompt 生效。
+  mainAnalysis: "v2",
   danmakuEmotion: "v1",
 };
 
@@ -992,8 +995,23 @@ async function readJson(filePath, fallback) {
 async function writeJson(filePath, payload) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(payload, null, 2), "utf8");
-  await fs.rename(tmp, filePath);
+  const text = JSON.stringify(payload, null, 2);
+  try {
+    await fs.writeFile(tmp, text, "utf8");
+    await fs.rename(tmp, filePath);
+  } catch (err) {
+    // rename ENOENT = tmp 在 writeFile 之后被外部移走了 (并发 writeJson 抢同一路径 /
+    // 系统 cleanup / 用户取消触发的 reset 等)。不用 atomic 保证, 直接覆写 final 文件让
+    // 流程往下走。artifacts JSON 不是关键数据 (内存里 transcript 还在用), 半残文件下次
+    // 跑会自愈, 容错优先于 atomicity。
+    if (err?.code === "ENOENT") {
+      await fs.writeFile(filePath, text, "utf8");
+      // 顺手清理可能残留的 tmp (rename 抛 ENOENT 说明大概率 tmp 已经没了, 但 best-effort)
+      await fs.unlink(tmp).catch(() => { /* noop */ });
+      return;
+    }
+    throw err;
+  }
 }
 
 // 主分析失败 catch 里立刻落一次盘。
@@ -1107,15 +1125,20 @@ const { inferCapabilitiesFromRemoteId } = require("./model-detection-rules.cjs")
 function remoteEntryToDescriptor(entry) {
   const id = String(entry?.id || "").trim();
   if (!id) return null;
+  const capabilities = inferCapabilitiesFromRemoteId(id);
+  // 远程 thinking 模型推断: cherry-studio 的规则表已经把 OpenAI o1/o3、DeepSeek-R1、Qwen3-*、
+  // GLM-4-thinking 等映成 capabilities=["reasoning",...], 直接复用。后续如果发现 capabilities
+  // 标得不对(例如 R1-distill 系列其实不走 reasoning_content), 在 model-detection-rules.cjs 修。
   return {
     source: "remote",
     id,
     label: id,
     family: id.split(/[-_/]/)[0] || undefined,
-    capabilities: inferCapabilitiesFromRemoteId(id),
+    capabilities,
     capabilitiesSource: "inferred",
     availability: { state: "ready" },
     ownedBy: entry?.owned_by || undefined,
+    isThinking: capabilities.includes("reasoning"),
   };
 }
 
@@ -1158,6 +1181,8 @@ function localLlamaEntryToDescriptor(entry) {
     capabilitiesSource: "manifest",
     availability,
     contextSize: entry.contextSize,
+    nativeContextSize: entry.nativeContextSize || entry.contextSize,
+    isThinking: !!entry.isThinking,
     local: {
       fit: entry.fit,
       memPercent: entry.memPercent,
@@ -1217,7 +1242,10 @@ function buildBuiltinLocalLlamaProvider(localModelOverrides = {}) {
         family: descriptor.family,
         contextSize: effectiveCtx,
         defaultContextSize: descriptor.contextSize, // UI 显示"默认 ctx"对比用
+        nativeContextSize: descriptor.nativeContextSize, // ctx slider 上限
         localKey: descriptor.id,
+        // isThinking 从 manifest 透传到 model 列表, 上层 UI / 任务分配能基于此决定要不要给"启用思考"开关
+        isThinking: !!meta._manifest.isThinking,
       };
     })
     .filter(Boolean);
@@ -1284,7 +1312,7 @@ function resolveSlotProvider(config, slotKey) {
   const provider = config.providers?.find((p) => p.id === slot.providerId);
   const model = provider?.models?.find((m) => m.id === slot.modelId);
   if (!provider || !model) return null;
-  return shapeEffectiveProvider(provider, model);
+  return shapeEffectiveProvider(provider, model, slot);
 }
 
 function resolveAudioProvider(config) {
@@ -1293,10 +1321,10 @@ function resolveAudioProvider(config) {
   const provider = config.providers?.find((p) => p.id === slot.providerId);
   const model = provider?.models?.find((m) => m.id === slot.modelId);
   if (!provider || !model) return null;
-  return shapeEffectiveProvider(provider, model);
+  return shapeEffectiveProvider(provider, model, slot);
 }
 
-function shapeEffectiveProvider(provider, model) {
+function shapeEffectiveProvider(provider, model, slot) {
   // local_llama 的 baseUrl / apiKeyRef 由 llama-manager 在请求时动态注入,
   // 这里只占位; openai-client 看到 provider.source === "local_llama" 会自动 acquire slot。
   // 不在这里读 runtime.getStatus(): 那样拿到的 port 是"当前 server", 但当前 server
@@ -1314,6 +1342,11 @@ function shapeEffectiveProvider(provider, model) {
     localWhisperModel: model.localWhisperModel || provider.localWhisperModel,
     localWhisperMirror: model.localWhisperMirror || provider.localWhisperMirror,
     language: model.language || provider.language,
+    // thinking 模型挂在 model 上, "是否启用思考"挂在 slot 上 (任务分配维度的运行时开关)。
+    // 下游 openai-client 用 effectiveProvider.enableThinking 决定要不要传
+    // chat_template_kwargs.enable_thinking=true。slot.enableThinking 不为 true 时 = 默认关。
+    isThinking: !!model.isThinking,
+    enableThinking: slot?.enableThinking === true,
   };
 }
 
@@ -1483,13 +1516,24 @@ async function writeUrlCache(cache) {
 //   - summary:    分析阶段产出的 globalSummary (本地视频场景, 没有外部文案时的兜底)
 // 失败 / 信息都缺 / provider 未配置 都返回 null, 让调用方 fallback。
 async function generateProjectTitle(provider, sources = {}) {
-  if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) return null;
+  if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) {
+    console.warn(
+      `[title-gen] short-circuit: provider 不完整 apiKeyRef=${!!provider?.apiKeyRef} ` +
+      `baseUrl=${!!provider?.baseUrl} model=${!!provider?.model}`,
+    );
+    return null;
+  }
   const { rawInput, url, ytdlpInfo, summary } = sources;
-  // 各 source 的总信息量, 太少就别浪费 LLM call
   const rawTextOnly = String(rawInput || "").replace(url || "", "").trim();
   const haveYtdlp = !!(ytdlpInfo && (ytdlpInfo.title || ytdlpInfo.description));
   const haveSummary = !!(summary && summary.length >= 10);
-  if (rawTextOnly.length < 5 && !haveYtdlp && !haveSummary) return null;
+  if (rawTextOnly.length < 5 && !haveYtdlp && !haveSummary) {
+    console.warn(
+      `[title-gen] short-circuit: 信息源都不够 rawTextLen=${rawTextOnly.length} ` +
+      `haveYtdlp=${haveYtdlp} haveSummary=${haveSummary} summaryLen=${summary?.length || 0}`,
+    );
+    return null;
+  }
 
   const lines = [];
   if (rawInput) lines.push("# 用户分享文案", rawInput, "");
@@ -1518,12 +1562,30 @@ async function generateProjectTitle(provider, sources = {}) {
         "- 直接返回 JSON, 不要 markdown 围栏, 不要思考过程",
       userText: lines.join("\n"),
       temperature: 0.3,
-      maxTokens: 300,
-      maxOutputTokens: 300,
+      // max_tokens 不再 hardcode, 走 openai-client deriveDefaultMaxTokens(ctx*0.25 clamp [1500,16000])
+      // thinking 模型在 settings 把 ctx 调大后, output 预算自动跟着大,
+      // thinking 用一半 + JSON title 出一半都装得下。
     });
     const t = String(result.parsed?.title || "").trim();
-    if (!t || t.length > 30) return null;
-    return { title: t, usage: result.usage, echoedModel: result.model };
+    const diagnostic = {
+      rawLen: (result.raw || "").length,
+      reasoningLen: (result.reasoning || "").length,
+      parsedSource: result.parsedSource,
+      rawHead: (result.raw || "").slice(0, 200),
+      reasoningHead: (result.reasoning || "").slice(0, 200),
+      parsedTitle: t,
+      parsedTitleLen: t.length,
+    };
+    if (!t || t.length > 30) {
+      console.warn(
+        `[title-gen] 模型返回 title 不合规: title=${JSON.stringify(t)} len=${t.length} ` +
+        `rawLen=${diagnostic.rawLen} reasoningLen=${diagnostic.reasoningLen} ` +
+        `parsedSource=${result.parsedSource} raw=${JSON.stringify(diagnostic.rawHead)}`,
+      );
+      // 失败也返回带诊断信息的对象 (title 为 null), 让上层能落到 analysis-error.log
+      return { title: null, usage: result.usage, echoedModel: result.model, _diagnostic: diagnostic };
+    }
+    return { title: t, usage: result.usage, echoedModel: result.model, _diagnostic: diagnostic };
   } catch (err) {
     console.warn("[title-gen] 失败:", err.message || err);
     return null;
@@ -2797,6 +2859,11 @@ async function buildAnalysisPrompt(project, frames, transcript, scenes, options)
     return lines.length > 0 ? lines.join("\n") : "";
   })();
 
+  // 目标节点数 = 时长 / 18s 上下浮动, 钉死 2-10 的硬区间。
+  // 短视频 (<30s) 不要超过 4 个; 中等 (60-120s) 4-7 个; 长 (>180s) 不超过 12 个。
+  const targetNodeMin = Math.max(2, Math.round(project.durationSec / 25));
+  const targetNodeMax = Math.min(12, Math.max(targetNodeMin + 2, Math.round(project.durationSec / 15)));
+
   const userText = [
     `请分析视频《${project.videoName}》。`,
     `时长 ${Math.round(project.durationSec)}s（lengthBucket=${methodology.lengthBucket}）, 画幅 ${project.width}x${project.height} (${project.orientation === "portrait" ? "竖屏" : project.orientation === "square" ? "方形" : "横屏"})。`,
@@ -2804,6 +2871,16 @@ async function buildAnalysisPrompt(project, frames, transcript, scenes, options)
     "",
     pyramidBlock,
     pyramidBlock ? "" : null,
+    "# 节点划分规则（本规则优先级最高，违反此规则的输出会被驳回）",
+    "逻辑节点 ≠ 镜头(shot)。一个逻辑节点表达「同一个目的 / 同一个信息块 / 同一段叙事意图」，通常会跨越多个连续 shot。",
+    `本视频时长 ${Math.round(project.durationSec)}s, 目标节点数 ${targetNodeMin}-${targetNodeMax} 个。**禁止**给每个 shot 都建一个 node (那是镜头列表, 不是逻辑节点)。`,
+    "切分规则:",
+    "- 把「演示同一个参数 / 同一段示范 / 同一个情绪段 / 同一个信息点」的连续 shot 合并成 1 个 node",
+    "- 每个 node 的 startSec = 该 node 覆盖的第一个 shot 的 startSec; endSec = 该 node 覆盖的最后一个 shot 的 endSec",
+    "- nodeTypes 不要全部用 shot_change。按节点真实功能选: info_point (信息点/科普) / edit_intent (剪辑意图段) / emotion_turn (情绪转折) / shot_change (单纯镜头切换, 谨慎使用) / audio_change",
+    "- title 写「这一段在做什么」, 不是单镜头描述。例如「参数设置详解 (ISO + 快门 + 光圈联调)」, 不是「特写相机屏幕」",
+    `自检: 输出的 nodes 数组长度必须在 [${targetNodeMin}, ${targetNodeMax}] 区间内, 否则重新合并。`,
+    "",
     "# 关键帧时间表（与下面图片顺序一一对应）",
     "(图片是 镜头描述/字幕 之外的视觉补充, 重点用来确认主体细节和画面构图; 数量受 token 预算限制, 不代表全部画面信息)",
     frameDescriptions,
@@ -2827,24 +2904,34 @@ async function buildAnalysisPrompt(project, frames, transcript, scenes, options)
     {
       "id":"node-1",
       "startSec":0,
-      "endSec":3,
-      "title":"...",
-      "nodeTypes":["shot_change"],
-      "shotDescription":"...",
+      "endSec":8,
+      "title":"开场 hook: 抛出问题钩子",
+      "nodeTypes":["info_point"],
+      "shotDescription":"(本节点覆盖多个连续 shot 的画面要点)",
       "shotType":"近景",
       "cameraMovement":"固定",
       "visualElements":[],
       "audioElements":[],
-      "editIntent":"...",
-      "emotionLabel":"...",
+      "editIntent":"建立期待 + 锁定观看意图",
+      "emotionLabel":"好奇",
       "emotionIntensity":7,
       "narrativeFunction":"Hook",
       "confidence":0.9,
       "isHighlight":true,
       "methodologyTags":[
-        {"ruleId":"R-HOOK-001","ruleName":"黄金 3 秒钩子","category":"hook","status":"hit","evidence":"开头特写 + 字幕 'XX' + 旁白 'YY'","confidence":0.9},
-        {"ruleId":"R-HOOK-002","ruleName":"钩子三层同步","category":"hook","status":"violation","evidence":"画面拍 A、字幕讲 B、旁白讲 C","confidence":0.8,"fixSuggestion":"统一首屏字幕和旁白都聚焦同一钩子"}
+        {"ruleId":"R-HOOK-001","ruleName":"黄金 3 秒钩子","category":"hook","status":"hit","evidence":"开头特写 + 字幕 'XX' + 旁白 'YY'","confidence":0.9}
       ]
+    },
+    {
+      "id":"node-2",
+      "startSec":8,
+      "endSec":33,
+      "title":"参数设置详解",
+      "nodeTypes":["info_point","edit_intent"],
+      "shotDescription":"(本节点合并了 4 个连续 shot, 都在讲同一个参数演示)",
+      "narrativeFunction":"Development",
+      "isHighlight":false,
+      "methodologyTags":[]
     }
   ],
   "report":{
@@ -2986,6 +3073,12 @@ function buildChunkPrompt(project, methodology, globalContext, chunk, totalChunk
     "综合关注叙事结构、剪辑节奏、情绪曲线和画面信息。";
   const modeHint = options?.mode === "detailed" ? "拆解到尽可能细的镜头级。" : options?.mode === "quick" ? "只覆盖关键节点, 不要面面俱到。" : "覆盖主要剪辑节点。";
 
+  // chunk 本段时长 → 该段内建议节点数 (大致 1 node / 20s, 2-5 区间)
+  const chunkDur = Math.max(1, chunk.endSec - chunk.startSec);
+  const chunkNodeMin = Math.max(1, Math.round(chunkDur / 25));
+  const chunkNodeMax = Math.min(5, Math.max(chunkNodeMin + 1, Math.round(chunkDur / 12)));
+  const chunkShotCount = Array.isArray(chunk.shots) ? chunk.shots.length : 0;
+
   const parts = [
     `请分析视频的第 ${chunk.index + 1}/${totalChunks} 片段, 时间区间 [${chunk.startSec.toFixed(1)}, ${chunk.endSec.toFixed(1)}]s。`,
     `${focusHint} ${modeHint}`,
@@ -2998,17 +3091,23 @@ function buildChunkPrompt(project, methodology, globalContext, chunk, totalChunk
     "",
     buildChunkTranscriptBlock(chunk.transcriptSegments),
     "",
+    "# 节点划分规则（本规则优先级最高）",
+    "逻辑节点 ≠ 镜头(shot)。一个逻辑节点表达「同一个目的 / 同一个信息块」, 通常跨越多个连续 shot。",
+    `本片段 ${chunkDur.toFixed(0)}s 含 ${chunkShotCount} 个 shot, 目标输出 ${chunkNodeMin}-${chunkNodeMax} 个 node。**禁止**每个 shot 都建一个 node。`,
+    "- 把演示同一参数 / 同一情绪段 / 同一信息点的连续 shot 合并成 1 个 node",
+    "- nodeTypes 优先用 info_point / edit_intent / emotion_turn, 不要全用 shot_change",
+    "",
     "# 输出格式 (必须严格遵守)",
     "只返回 JSON (不要 markdown 围栏), 结构:",
     `{
   "nodes":[
     {
       "id":"chunk-${chunk.index + 1}-node-1",
-      "startSec":0,
-      "endSec":3,
-      "title":"...",
-      "nodeTypes":["shot_change"],
-      "shotDescription":"...",
+      "startSec":${chunk.startSec.toFixed(1)},
+      "endSec":${(chunk.startSec + Math.min(chunkDur, 15)).toFixed(1)},
+      "title":"该段在做什么 (跨多个 shot)",
+      "nodeTypes":["info_point"],
+      "shotDescription":"(覆盖该 node 范围内多个 shot 的画面要点)",
       "shotType":"近景",
       "cameraMovement":"固定",
       "visualElements":[],
@@ -3024,6 +3123,7 @@ function buildChunkPrompt(project, methodology, globalContext, chunk, totalChunk
 }`,
     "",
     "硬性要求:",
+    `- nodes 数组长度必须在 [${chunkNodeMin}, ${chunkNodeMax}] 区间内 (不是 shot 数!)。`,
     `- nodes 时间戳 startSec/endSec 必须严格落在本片段 [${chunk.startSec.toFixed(1)}, ${chunk.endSec.toFixed(1)}]s 内, 不要跨段。`,
     "- nodes 按时间升序。",
     "- 不要返回 methodologyTags 字段 (后续步骤做)。",
@@ -3334,6 +3434,7 @@ function estimateChunkOverheadTokens(globalContext) {
 // 适合短视频 / 信息量小、能装进 ctx 的场景。
 async function runSinglePassAnalysis({
   effectiveProvider, project, frames, transcript, scenes, options, methodology,
+  reserveOutput,
   handle, fallbackNodes, fallbackReport,
 }) {
   const { userText } = await buildAnalysisPrompt(project, frames, transcript, scenes, options);
@@ -3353,14 +3454,62 @@ async function runSinglePassAnalysis({
     type: "json_schema",
     json_schema: { name: "single_pass_output", strict: false, schema: SINGLE_PASS_OUTPUT_SCHEMA },
   };
+  // single-pass 输出量 = 14 shots × shotDescription + nodes + report ≈ 5K+ tok,
+  // 远超 openai-client default 2500。用 callOpenAICompatible 已经算好的 reserveOutput,
+  // 让"留给 output 的 ctx 预算"和"实际 max_tokens"对齐,避免输出被截断成残 JSON。
+  const callOpts = {
+    responseFormat,
+    maxTokens: reserveOutput,
+    maxOutputTokens: reserveOutput,
+    enableThinking: effectiveProvider.enableThinking === true,
+  };
   const callResult = useResponses
-    ? await callOpenAIResponses(effectiveProvider, systemText, userText, imageDataUrls, handle, { responseFormat })
-    : await callOpenAIChatCompletions(effectiveProvider, systemText, userText, imageDataUrls, handle, { responseFormat });
+    ? await callOpenAIResponses(effectiveProvider, systemText, userText, imageDataUrls, handle, callOpts)
+    : await callOpenAIChatCompletions(effectiveProvider, systemText, userText, imageDataUrls, handle, callOpts);
   const parsed = callResult.parsed;
+  // Layer 3 reasoning fallback 命中时这里能看到, 顺便记入 token-usage 让用户察觉异常
+  if (callResult.parsedSource === "reasoning") {
+    console.warn(
+      `[main-analysis] Layer 3 fallback: content 没出 JSON, 已从 reasoning 末尾兜底提到 (reasoningLen=${callResult.reasoning?.length || 0})。` +
+      `检查 model.isThinking / slot.enableThinking 配置, 或 server 不接受 chat_template_kwargs.enable_thinking=false。`,
+    );
+  }
 
   if (!parsed || (!Array.isArray(parsed.nodes) && !parsed.report)) {
+    // 诊断: 把模型真实吐出的内容 + thinking 长度 + usage 全打出来 ——
+    // (a) raw 空 + reasoning 长 = thinking 模型把内容全塞 reasoning_content (chat_template_kwargs 没生效)
+    // (b) raw 空 + reasoning 空 = stream 完全没出 (grammar 编译失败 / mmproj 没加载 / ctx 满)
+    // (c) raw 看着像 JSON 但被截断 = 输出超过 max_tokens
+    // (d) raw 非空但不是 JSON = markdown 围栏 / 自由文字
+    const raw = typeof callResult.raw === "string" ? callResult.raw : "";
+    const reasoning = typeof callResult.reasoning === "string" ? callResult.reasoning : "";
+    const usage = callResult.usage || null;
+    console.error(
+      `[main-analysis] parse 失败诊断: rawLen=${raw.length} reasoningLen=${reasoning.length} ` +
+      `usage=${usage ? JSON.stringify(usage) : "n/a"} model=${callResult.model || effectiveProvider.model}`,
+    );
+    if (raw.length > 0) {
+      console.error(`[main-analysis] raw head: ${JSON.stringify(raw.slice(0, 200))}`);
+      console.error(`[main-analysis] raw tail: ${JSON.stringify(raw.slice(-200))}`);
+    }
+    if (reasoning.length > 0) {
+      console.error(`[main-analysis] reasoning head: ${JSON.stringify(reasoning.slice(0, 200))}`);
+    }
+    const completionTokens = usage?.completionTokens ?? 0;
+    const hint =
+      raw.length === 0 && reasoning.length > 0
+        ? `模型在 thinking 模式没出 content (reasoning ${reasoning.length} 字符) — chat_template_kwargs.enable_thinking=false 可能没被 server 接受,需要换 server 版本或关 reasoning 模型`
+        : raw.length === 0
+          ? "模型 stream 0 字节 (grammar 编译失败 / mmproj 未加载 / ctx 满 / max_tokens=0)"
+          : completionTokens >= reserveOutput - 50
+            ? `输出被 max_tokens=${reserveOutput} 截断 (completion=${completionTokens})`
+            : "模型吐了内容但不是合法 JSON (markdown 围栏 / 自由文字)";
+    const sample = raw.length > 0
+      ? ` head=${JSON.stringify(raw.slice(0, 120))} tail=${JSON.stringify(raw.slice(-120))}`
+      : "";
     throw new Error(
-      "模型未返回可解析的 JSON (响应为空或非 JSON)。reasoning 模型可能把内容放在 reasoning_content 字段, 当前 client 不解析; 或模型超 ctx / 没有视觉能力 / 输出被截断。",
+      `模型未返回可解析的 JSON。${hint} ` +
+      `(rawLen=${raw.length} reasoningLen=${reasoning.length} completion=${completionTokens} max=${reserveOutput})${sample}`,
     );
   }
   return {
@@ -3372,7 +3521,7 @@ async function runSinglePassAnalysis({
 }
 
 // 跑单个 chunk: 只产 nodes, 不带 methodology
-async function runChunkPass({ effectiveProvider, project, methodology, globalContext, chunk, totalChunks, options, handle }) {
+async function runChunkPass({ effectiveProvider, project, methodology, globalContext, chunk, totalChunks, options, reserveOutput, handle }) {
   const userText = buildChunkPrompt(project, methodology, globalContext, chunk, totalChunks, options);
   const imageDataUrls = [];
   for (const frame of chunk.frames) {
@@ -3386,9 +3535,16 @@ async function runChunkPass({ effectiveProvider, project, methodology, globalCon
     type: "json_schema",
     json_schema: { name: "chunk_pass_output", strict: false, schema: CHUNK_PASS_OUTPUT_SCHEMA },
   };
+  // 同 runSinglePassAnalysis: 预算和 max_tokens 对齐,避免大节点数 chunk 输出被截断。
+  const callOpts = {
+    responseFormat,
+    maxTokens: reserveOutput,
+    maxOutputTokens: reserveOutput,
+    enableThinking: effectiveProvider.enableThinking === true,
+  };
   const callResult = useResponses
-    ? await callOpenAIResponses(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle, { responseFormat })
-    : await callOpenAIChatCompletions(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle, { responseFormat });
+    ? await callOpenAIResponses(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle, callOpts)
+    : await callOpenAIChatCompletions(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle, callOpts);
   const parsed = callResult.parsed;
   if (!parsed || !Array.isArray(parsed.nodes)) {
     throw new Error(`chunk ${chunk.index + 1} 返回不是合法 JSON 或缺少 nodes 字段`);
@@ -3446,9 +3602,17 @@ async function runAuditPass({ effectiveProvider, project, methodology, globalCon
     type: "json_schema",
     json_schema: { name: "audit_pass_output", strict: false, schema: AUDIT_PASS_OUTPUT_SCHEMA },
   };
+  // 同 runSinglePassAnalysis: 预算和 max_tokens 对齐;audit 输出 nodeTags + report,
+  // 节点多时同样会超 openai-client default 2500。
+  const callOpts = {
+    responseFormat,
+    maxTokens: reserveOutput,
+    maxOutputTokens: reserveOutput,
+    enableThinking: effectiveProvider.enableThinking === true,
+  };
   const callResult = useResponses
-    ? await callOpenAIResponses(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle, { responseFormat })
-    : await callOpenAIChatCompletions(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle, { responseFormat });
+    ? await callOpenAIResponses(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle, callOpts)
+    : await callOpenAIChatCompletions(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle, callOpts);
   const parsed = callResult.parsed;
   if (!parsed) {
     throw new Error("audit pass 返回不是合法 JSON");
@@ -3537,7 +3701,7 @@ async function runChunkedAnalysis({
     try {
       const nodes = await runChunkPass({
         effectiveProvider, project, methodology, globalContext, chunk,
-        totalChunks: chunks.length, options, handle,
+        totalChunks: chunks.length, options, reserveOutput, handle,
       });
       // 给每个 node 标记来源 chunk + 临时 id, 后面合并
       nodes.forEach((n, j) => {
@@ -3600,7 +3764,10 @@ async function callOpenAICompatible(provider, project, frames, transcript, scene
 
   try {
     const ctxSize = Number(effectiveProvider?.contextSize) > 0 ? Number(effectiveProvider.contextSize) : 8192;
-    const reserveForOutput = Math.max(1500, Math.min(4000, Math.floor(ctxSize * 0.25)));
+    // reserveForOutput 跟 ctx 走 (×0.25, 下限 1500, **无上限**):settings 里 ctx slider 调多大就给多大 output 预算。
+    // 在线大模型 (Claude 200K / Gemini 1M / Qwen3.5 256K) 和本地大 ctx 模型都按比例伸缩,
+    // thinking 模型也有足够空间 (thinking 占一半 content 占一半的极端 case)。
+    const reserveForOutput = Math.max(1500, Math.floor(ctxSize * 0.25));
     const safetyMargin = Math.max(256, Math.floor(ctxSize * 0.05));
     const globalContext = {
       globalSummary: options?.globalSummary || null,
@@ -3630,6 +3797,7 @@ async function callOpenAICompatible(provider, project, frames, transcript, scene
     if (singleTotal <= singleBudget) {
       return await runSinglePassAnalysis({
         effectiveProvider, project, frames, transcript, scenes, options, methodology,
+        reserveOutput: reserveForOutput,
         handle, fallbackNodes, fallbackReport,
       });
     }
@@ -3904,7 +4072,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   const tokenLedger = createTokenLedger();
   handle.tokenLedger = tokenLedger;
 
-  const send = (progress, stage, message) => {
+  const send = (progress, stage, message, meta = {}) => {
     if (handle.cancelled) return;
     if (stage !== currentStage) {
       closeCurrentStage();
@@ -3912,9 +4080,11 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       currentStageStartedAt = Date.now();
     }
     const payload = { projectId: project.id, progress, stage, message };
+    // 整段命中缓存的 stage 在 message 之外加 fromCache 标记,
+    // UI 渲染 log 时加 "(缓存)" 标记 (省了真跑 LLM 的时间)。
+    if (meta && meta.fromCache) payload.fromCache = true;
     handle.lastProgress = payload;
     handle.lastProgressAt = Date.now();
-    // 广播到所有窗口,允许关窗后重开的新 renderer 继续接收进度。
     broadcastToWindows("analysis:progress", payload);
   };
 
@@ -4135,11 +4305,15 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           });
         }
         handle.attachStageMeta({ kept: refined.kept.length, dropped: refined.dropped.length, totalElapsedMs: tagResult.totalElapsedMs, totalTokens: tagResult.totalTokens });
-        send(
-          34,
-          "精挑画面",
-          `从 ${candidateFrames.length} 张候选里精选 ${refined.kept.length} 张送给视觉模型 · 本地初筛用时 ${(tagResult.totalElapsedMs / 1000).toFixed(1)}s`,
-        );
+        {
+          const allCached = (tagResult.cacheHits || 0) >= candidateFrames.length && candidateFrames.length > 0;
+          send(
+            34,
+            "精挑画面",
+            `从 ${candidateFrames.length} 张候选里精选 ${refined.kept.length} 张送给视觉模型 · 本地初筛用时 ${(tagResult.totalElapsedMs / 1000).toFixed(1)}s`,
+            { fromCache: allCached },
+          );
+        }
       } catch (error) {
         if (error instanceof AnalysisCancelledError) throw error;
         const msg = error instanceof Error ? error.message : String(error);
@@ -4377,7 +4551,17 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             framesInShot: framesCtx.length,
           };
         });
-        send(71, "镜头合并完成", `${shots.length} 个镜头描述就绪 · ${formatDuration(Date.now()-mergeStart)}`);
+        {
+          const cacheHits = mergeResults.cacheHits || 0;
+          const allCached = cacheHits >= shots.length && shots.length > 0;
+          const cacheTail = cacheHits > 0 ? ` · 命中缓存 ${cacheHits}/${shots.length}` : "";
+          send(
+            71,
+            "镜头合并完成",
+            `${shots.length} 个镜头描述就绪 · ${formatDuration(Date.now()-mergeStart)}${cacheTail}`,
+            { fromCache: allCached },
+          );
+        }
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
         send(68, "镜头合并失败", `${error.message || error}。降级到旧的逐帧路径。`);
@@ -4436,9 +4620,14 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             });
           }
           if (globalContext?.detectedGenre) {
-            send(71, "全局聚合完成", `判定 ${globalContext.detectedGenre} (${Math.round((globalContext.genreConfidence||0)*100)}%) · 摘要 ${globalContext.globalSummary?.length || 0} 字 · ${((Date.now()-sumStart)/1000).toFixed(1)}s`);
+            send(
+              71,
+              "全局聚合完成",
+              `判定 ${globalContext.detectedGenre} (${Math.round((globalContext.genreConfidence||0)*100)}%) · 摘要 ${globalContext.globalSummary?.length || 0} 字 · ${((Date.now()-sumStart)/1000).toFixed(1)}s`,
+              { fromCache: summarizerTraced.fromCache },
+            );
           } else {
-            send(71, "全局聚合跳过", "未能从镜头描述推断, 让主分析自行识别。");
+            send(71, "全局聚合跳过", "未能从镜头描述推断, 让主分析自行识别。", { fromCache: summarizerTraced.fromCache });
           }
         } catch (error) {
           if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
@@ -4503,7 +4692,12 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           }
           if (detected?.detectedGenre) {
             effectiveOptions = { ...options, detectedGenre: detected.detectedGenre };
-            send(73, "识别视频类型完成", `判定为 ${detected.detectedGenre}（置信度 ${(detected.genreConfidence * 100).toFixed(0)}%，耗时 ${Math.round((Date.now() - detectStartedAt) / 1000)}s）。`);
+            send(
+              73,
+              "识别视频类型完成",
+              `判定为 ${detected.detectedGenre}（置信度 ${(detected.genreConfidence * 100).toFixed(0)}%，耗时 ${Math.round((Date.now() - detectStartedAt) / 1000)}s）。`,
+              { fromCache: detectTraced.fromCache },
+            );
           } else {
             send(73, "类型识别跳过", "未能从字幕推断类型，将让主分析在 catalog 中识别。");
           }
@@ -4582,6 +4776,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             provider,
             model: provider?.model,
           });
+          // 让 log 上有一行 "(缓存)" 标记 — 避免用户误以为模型这次真跑了 5 分钟
+          send(85, "模型分析画面", `命中缓存,跳过 LLM 调用。`, { fromCache: true });
         } else if (modelResult?.usage) {
           tokenLedger.record({
             stage: "main-analysis",
@@ -4751,11 +4947,41 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     // URL 拉取场景在 downloadVideo handler 里已经生成过 → titleAutoGenerated:true → 跳过。
     // 主分析失败时不再补标题: globalContext 可能没有 / 标题用 LLM 又要 5-10s, 用户已经知道失败了
     let generatedTitle = null;
-    if (!mainAnalysisFailed && !project.titleAutoGenerated && globalContext?.globalSummary && mediumTextProvider?.apiKeyRef) {
+    const titleCanRun =
+      !mainAnalysisFailed &&
+      !project.titleAutoGenerated &&
+      !!globalContext?.globalSummary &&
+      !!mediumTextProvider?.apiKeyRef;
+    // 诊断: 把 gate + result 也写到 projectDir/analysis-error.log, 这样开发期能直接 Read 文件查看,
+    // 不依赖 main 进程 stdout (那个只在 electron:dev 终端窗口里, 调试断了之后看不到)。
+    const titleGenLogPath = path.join(projectDir, "analysis-error.log");
+    const appendTitleGenLog = async (line) => {
+      try {
+        await fs.appendFile(titleGenLogPath, `[${new Date().toISOString()}] [title-gen] ${line}\n`);
+      } catch { /* noop */ }
+    };
+    const gateLine =
+      `gate: mainFailed=${mainAnalysisFailed} ` +
+      `alreadyGenerated=${!!project.titleAutoGenerated} ` +
+      `hasSummary=${!!globalContext?.globalSummary} summaryLen=${globalContext?.globalSummary?.length || 0} ` +
+      `hasProvider=${!!mediumTextProvider?.apiKeyRef} providerModel=${mediumTextProvider?.model || "n/a"} ` +
+      `→ canRun=${titleCanRun}`;
+    console.log(`[analyze:title-gen] ${gateLine}`);
+    await appendTitleGenLog(gateLine);
+    if (titleCanRun) {
       try {
         const titleResult = await generateProjectTitle(mediumTextProvider, {
           summary: globalContext.globalSummary,
         });
+        const resultLine =
+          `result: title=${JSON.stringify(titleResult?.title)} ` +
+          `usage=${titleResult?.usage ? JSON.stringify(titleResult.usage) : "n/a"} ` +
+          `rawLen=${(titleResult?._diagnostic?.rawLen) ?? "n/a"} ` +
+          `reasoningLen=${(titleResult?._diagnostic?.reasoningLen) ?? "n/a"} ` +
+          `parsedSource=${titleResult?._diagnostic?.parsedSource ?? "n/a"} ` +
+          `rawHead=${JSON.stringify(titleResult?._diagnostic?.rawHead || "")}`;
+        console.log(`[analyze:title-gen] ${resultLine}`);
+        await appendTitleGenLog(resultLine);
         generatedTitle = titleResult?.title || null;
         if (titleResult?.usage) {
           tokenLedger.record({
@@ -4766,7 +4992,9 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           });
         }
       } catch (err) {
-        console.warn("[analyze] 标题生成失败:", err?.message || err);
+        const errLine = `失败: ${err?.message || err}`;
+        console.warn(`[analyze:title-gen] ${errLine}`);
+        await appendTitleGenLog(errLine);
       }
     }
 
@@ -6321,8 +6549,7 @@ app.whenReady().then(async () => {
           "- 直接返回 JSON,不要 markdown 围栏,不要思考过程",
         userText: lines.join("\n"),
         temperature: 0.4,
-        maxTokens: 800,
-        maxOutputTokens: 800,
+        // max_tokens 走 openai-client deriveDefaultMaxTokens (ctx 派生)
       });
       const parsed = result.parsed;
       const methodology = {
@@ -6376,8 +6603,7 @@ app.whenReady().then(async () => {
           "- 直接返回 JSON,不要 markdown 围栏,不要思考过程",
         userText: lines.join("\n"),
         temperature: 0.5,
-        maxTokens: 2000,
-        maxOutputTokens: 2000,
+        // max_tokens 走 openai-client deriveDefaultMaxTokens (ctx 派生)
       });
       const parsed = result.parsed;
       const rawSteps = Array.isArray(parsed?.steps) ? parsed.steps : [];
@@ -6937,11 +7163,29 @@ app.whenReady().then(async () => {
   await llamaRuntime.init();
   await whisperCppRuntime.init();
 
+  // 从 config 读 localModelOverrides[*].contextSize → { modelKey: ctx } 给 annotateManifest 用
+  // 让 fit/memPercent 反映用户实际调过的 ctx 值, 不是 manifest 默认。
+  async function readCtxOverrides() {
+    try {
+      const cfg = (await readJson(getConfigPath(), null)) || {};
+      const overrides = cfg.localModelOverrides || {};
+      const out = {};
+      for (const [k, v] of Object.entries(overrides)) {
+        const ctx = Number(v?.contextSize);
+        if (ctx > 0) out[k] = ctx;
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  }
+
   // listModels 与 listManifest 共用同一映射,差别只在不带 machine 字段
   ipcMain.handle("llama:listModels", async () => {
     const machineDetect = require("./machine-detect.cjs");
     const machine = machineDetect.detectMachine();
-    const annotated = machineDetect.annotateManifest(llamaRuntime.getManifest(), machine);
+    const ctxOverrides = await readCtxOverrides();
+    const annotated = machineDetect.annotateManifest(llamaRuntime.getManifest(), machine, ctxOverrides);
     const installed = await llamaRuntime.listModels();
     const installedMap = Object.fromEntries(installed.map((m) => [m.key, m]));
     return Object.values(annotated)
@@ -6959,12 +7203,28 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("llama:getStatus", async () => llamaRuntime.getStatus());
 
+  // SettingsScreen ctx slider onChange 实时调:用新 ctx 重算单个 model 的 fit/memPercent/tps,
+  // 返回 { fit, memPercent, tps, totalMemBytes, weightBytes, kvBytes, memCapBytes }。
+  // 不持久化 — slider 改完用户点保存才会写到 config.localModelOverrides。
+  ipcMain.handle("llama:recomputeFit", async (_evt, { modelKey, contextSize }) => {
+    const machineDetect = require("./machine-detect.cjs");
+    const machine = machineDetect.detectMachine();
+    const manifest = llamaRuntime.getManifest();
+    const entry = manifest?.[modelKey];
+    if (!entry) return null;
+    const paramsB = machineDetect.parseParams(entry.params);
+    const defaultQuant = entry.quantizations?.[0];
+    if (!defaultQuant) return null;
+    return machineDetect.computeQuantFit(defaultQuant, machine, paramsB, contextSize, entry);
+  });
+
   // 返回 ModelDescriptor[] + 机器规格. annotated manifest 合并 downloaded 状态后投影成统一 schema
   ipcMain.handle("llama:listManifest", async () => {
     const machineDetect = require("./machine-detect.cjs");
     const machine = machineDetect.detectMachine();
     const manifest = llamaRuntime.getManifest();
-    const annotated = machineDetect.annotateManifest(manifest, machine);
+    const ctxOverrides = await readCtxOverrides();
+    const annotated = machineDetect.annotateManifest(manifest, machine, ctxOverrides);
     const installed = await llamaRuntime.listModels();
     const installedMap = Object.fromEntries(installed.map((m) => [m.key, m]));
     const descriptors = Object.values(annotated)

@@ -512,6 +512,36 @@ const PipelineRow: FunctionComponent<PipelineRowProps> = ({
             ))}
           </SelectContent>
         </Select>
+        {/* 思考模式开关: 只在选中的 model 支持 thinking 时显示。默认关 (业务要 JSON 不要 thinking),
+            用户可显式打开调试 / 复杂推理场景。绑定到 SlotAssignment.enableThinking。 */}
+        {(() => {
+          if (!assignment || !selectedProvider) return null;
+          const m = selectedProvider.models.find((x) => x.id === assignment.modelId);
+          if (!m?.isThinking) return null;
+          const on = assignment.enableThinking === true;
+          return (
+            <label className="flex items-center justify-between gap-2 cursor-pointer select-none">
+              <span className="text-[11.5px] text-slate-600 dark:text-slate-400">启用思考</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={on}
+                onClick={() => onChange({ ...assignment, enableThinking: !on })}
+                className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full border transition-colors ${
+                  on
+                    ? "bg-indigo-600 border-indigo-600"
+                    : "bg-slate-200 dark:bg-slate-700 border-slate-300 dark:border-slate-600"
+                }`}
+              >
+                <span
+                  className={`inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform mt-[1px] ${
+                    on ? "translate-x-3.5" : "translate-x-[1px]"
+                  }`}
+                />
+              </button>
+            </label>
+          );
+        })()}
       </div>
     </div>
   );
@@ -1207,6 +1237,98 @@ function ModelManagerDialog({
   );
 }
 
+// 把 token 数格式化成 "32K" / "128K" / "256K" 这样的简短显示。
+// 非整 K 的(用户手动输入 35000)保持原值。
+function formatCtxNumber(n: number): string {
+  if (!n || n < 1024) return String(n);
+  if (n >= 1024 && n % 1024 === 0) return `${n / 1024}K`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)}K`;
+  return String(n);
+}
+
+function formatBytesShort(bytes: number): string {
+  if (!bytes || bytes <= 0) return "0";
+  const gb = bytes / (1024 ** 3);
+  if (gb >= 1) return `${gb.toFixed(1)} GB`;
+  return `${(bytes / (1024 ** 2)).toFixed(0)} MB`;
+}
+
+// ctx slider + 实时 fit 预览。debounce 200ms 调 IPC recomputeFit 减少抖动。
+type CtxSliderProps = {
+  modelKey: string;
+  value: string;       // 受控字符串 (跟 contextDraft 一致, "" 表示删除 override 回默认)
+  onChange: (v: string) => void;
+  min: number;
+  max: number;
+  defaultValue: number; // manifest 默认值 (空 string 时使用)
+};
+
+const CtxSlider: FunctionComponent<CtxSliderProps> = ({ modelKey, value, onChange, min, max, defaultValue }) => {
+  const numeric = (() => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : defaultValue;
+  })();
+  // step 4K, 最小 4K (匹配下限) — slider 滑动颗粒度
+  const step = 4096;
+  // recomputeFit 拿到的本地预览, debounce 后异步更新
+  const [preview, setPreview] = useState<{
+    fit: string; memPercent: number; tps: number;
+    totalMemBytes: number; weightBytes: number; kvBytes: number; memCapBytes: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!window.videoAnalyzer?.llama?.recomputeFit) return;
+    const t = window.setTimeout(() => {
+      window.videoAnalyzer!.llama.recomputeFit(modelKey, numeric).then((res) => {
+        if (res) setPreview(res);
+      }).catch(() => { /* noop */ });
+    }, 200);
+    return () => window.clearTimeout(t);
+  }, [modelKey, numeric]);
+
+  const isDefault = !value.trim();
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-3">
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={numeric}
+          onChange={(e) => onChange(String(Number(e.target.value)))}
+          className="flex-1 accent-indigo-600"
+        />
+        <div className="font-mono text-[12px] w-[110px] text-right">
+          <span className="text-slate-900 dark:text-slate-100">{formatCtxNumber(numeric)}</span>
+          <span className="text-slate-400 ml-1">/ {formatCtxNumber(max)}</span>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 text-[10.5px]">
+        {preview && (
+          <>
+            <FitChip fit={preview.fit} />
+            <span className="font-mono text-slate-500 dark:text-slate-400">
+              占 {preview.memPercent}% · {formatBytesShort(preview.totalMemBytes)} / {formatBytesShort(preview.memCapBytes)}
+            </span>
+            <span className="font-mono text-slate-400 dark:text-slate-500">
+              · 权重 {formatBytesShort(preview.weightBytes)} + KV {formatBytesShort(preview.kvBytes)}
+            </span>
+          </>
+        )}
+        <button
+          type="button"
+          onClick={() => onChange("")}
+          className={`ml-auto text-[10.5px] ${isDefault ? "text-slate-300 cursor-default" : "text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 underline"}`}
+          disabled={isDefault}
+        >
+          {isDefault ? "已是默认" : "回到默认"}
+        </button>
+      </div>
+    </div>
+  );
+};
+
 type ModelRowProps = {
   model: ProviderModel;
   readOnly: boolean;
@@ -1355,18 +1477,34 @@ const ModelRow: FunctionComponent<ModelRowProps> = ({
               上下文长度 (token)
               {localCtxOnly && model.defaultContextSize != null && (
                 <span className="ml-2 text-slate-400 font-mono">
-                  默认 {model.defaultContextSize}
+                  默认 {formatCtxNumber(model.defaultContextSize)}
+                </span>
+              )}
+              {localCtxOnly && model.nativeContextSize != null && model.nativeContextSize > (model.defaultContextSize || 0) && (
+                <span className="ml-2 text-slate-400 font-mono">
+                  · 原生 {formatCtxNumber(model.nativeContextSize)}
                 </span>
               )}
             </Label>
-            <Input
-              value={contextDraft}
-              onChange={(e) => setContextDraft(e.target.value)}
-              placeholder={localCtxOnly ? `留空回到默认 ${model.defaultContextSize ?? ""}` : "如 128000"}
-              className="h-8 text-sm font-mono w-[220px]"
-            />
+            {localCtxOnly && model.nativeContextSize != null ? (
+              <CtxSlider
+                modelKey={model.id}
+                value={contextDraft}
+                onChange={setContextDraft}
+                min={4096}
+                max={model.nativeContextSize}
+                defaultValue={model.defaultContextSize ?? model.contextSize ?? 8192}
+              />
+            ) : (
+              <Input
+                value={contextDraft}
+                onChange={(e) => setContextDraft(e.target.value)}
+                placeholder={localCtxOnly ? `留空回到默认 ${model.defaultContextSize ?? ""}` : "如 128000"}
+                className="h-8 text-sm font-mono w-[220px]"
+              />
+            )}
             {localCtxOnly && (
-              <div className="text-[10.5px] text-slate-400 mt-1">
+              <div className="text-[10.5px] text-slate-400 mt-1.5">
                 改完保存后, 下次启动该模型时 llama-server --ctx-size 用这里的值。
                 ctx 越大占内存越多 (KV cache), 小机器跑大 ctx 容易 OOM。
               </div>

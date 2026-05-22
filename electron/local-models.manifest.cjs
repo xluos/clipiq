@@ -39,6 +39,11 @@ const PRESETS = {
     primaryCapabilities: ["vision", "text"],
     secondaryTags: ["fast"],
     available: true,
+    isThinking: true,
+    // Qwen3.5/3.6 全系原生 256K (YaRN 可扩到 1M)。contextSize 字段是"安全默认值"
+    // (保守, 让 16GB Mac 也能开箱即用); nativeContextSize 是权重真实上限, settings UI
+    // 用它做 slider 上限, 允许大内存用户手动开到更大。
+    nativeContextSize: 262144,
     contextSize: 8192,
     quantizations: [
       {
@@ -60,6 +65,11 @@ const PRESETS = {
     primaryCapabilities: ["vision", "text"],
     secondaryTags: ["chinese"],
     available: true,
+    isThinking: true,
+    // Qwen3.5/3.6 全系原生 256K (YaRN 可扩到 1M)。contextSize 字段是"安全默认值"
+    // (保守, 让 16GB Mac 也能开箱即用); nativeContextSize 是权重真实上限, settings UI
+    // 用它做 slider 上限, 允许大内存用户手动开到更大。
+    nativeContextSize: 262144,
     contextSize: 8192,
     quantizations: [
       {
@@ -81,6 +91,11 @@ const PRESETS = {
     primaryCapabilities: ["vision", "text"],
     secondaryTags: ["chinese"],
     available: true,
+    isThinking: true,
+    // Qwen3.5/3.6 全系原生 256K (YaRN 可扩到 1M)。contextSize 字段是"安全默认值"
+    // (保守, 让 16GB Mac 也能开箱即用); nativeContextSize 是权重真实上限, settings UI
+    // 用它做 slider 上限, 允许大内存用户手动开到更大。
+    nativeContextSize: 262144,
     contextSize: 16384,
     quantizations: [
       {
@@ -102,6 +117,11 @@ const PRESETS = {
     primaryCapabilities: ["vision", "text"],
     secondaryTags: ["chinese", "reasoning"],
     available: true,
+    isThinking: true,
+    // Qwen3.5/3.6 全系原生 256K (YaRN 可扩到 1M)。contextSize 字段是"安全默认值"
+    // (保守, 让 16GB Mac 也能开箱即用); nativeContextSize 是权重真实上限, settings UI
+    // 用它做 slider 上限, 允许大内存用户手动开到更大。
+    nativeContextSize: 262144,
     contextSize: 32768,
     quantizations: [
       {
@@ -123,6 +143,11 @@ const PRESETS = {
     primaryCapabilities: ["vision", "text"],
     secondaryTags: ["chinese", "reasoning"],
     available: true,
+    isThinking: true,
+    // Qwen3.5/3.6 全系原生 256K (YaRN 可扩到 1M)。contextSize 字段是"安全默认值"
+    // (保守, 让 16GB Mac 也能开箱即用); nativeContextSize 是权重真实上限, settings UI
+    // 用它做 slider 上限, 允许大内存用户手动开到更大。
+    nativeContextSize: 262144,
     contextSize: 32768,
     quantizations: [
       {
@@ -144,6 +169,11 @@ const PRESETS = {
     primaryCapabilities: ["vision", "text"],
     secondaryTags: ["chinese", "reasoning", "moe"],
     available: true,
+    isThinking: true,
+    // Qwen3.5/3.6 全系原生 256K (YaRN 可扩到 1M)。contextSize 字段是"安全默认值"
+    // (保守, 让 16GB Mac 也能开箱即用); nativeContextSize 是权重真实上限, settings UI
+    // 用它做 slider 上限, 允许大内存用户手动开到更大。
+    nativeContextSize: 262144,
     contextSize: 32768,
     quantizations: [
       {
@@ -165,6 +195,11 @@ const PRESETS = {
     primaryCapabilities: ["vision", "text"],
     secondaryTags: ["chinese", "reasoning", "long_context"],
     available: true,
+    isThinking: true,
+    // Qwen3.5/3.6 全系原生 256K (YaRN 可扩到 1M)。contextSize 字段是"安全默认值"
+    // (保守, 让 16GB Mac 也能开箱即用); nativeContextSize 是权重真实上限, settings UI
+    // 用它做 slider 上限, 允许大内存用户手动开到更大。
+    nativeContextSize: 262144,
     contextSize: 65536,
     quantizations: [
       {
@@ -186,6 +221,11 @@ const PRESETS = {
     primaryCapabilities: ["vision", "text"],
     secondaryTags: ["chinese", "reasoning", "moe", "long_context"],
     available: true,
+    isThinking: true,
+    // Qwen3.5/3.6 全系原生 256K (YaRN 可扩到 1M)。contextSize 字段是"安全默认值"
+    // (保守, 让 16GB Mac 也能开箱即用); nativeContextSize 是权重真实上限, settings UI
+    // 用它做 slider 上限, 允许大内存用户手动开到更大。
+    nativeContextSize: 262144,
     contextSize: 65536,
     quantizations: [
       {

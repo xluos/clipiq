@@ -9,6 +9,7 @@ import type {
   AnalysisBudgetEvent,
   AnalysisReport,
   AppConfig,
+  LocalFitLevel,
   MachineSpecs,
   ModelDescriptor,
   ModelProvider,
@@ -329,6 +330,17 @@ declare global {
       llama: {
         listModels: () => Promise<ModelDescriptor[]>;
         listManifest: () => Promise<{ machine: MachineSpecs; models: ModelDescriptor[] }>;
+        // 给 SettingsScreen ctx slider 实时算 fit/mem%/tps, 不持久化
+        recomputeFit: (modelKey: string, contextSize: number) => Promise<{
+          fit: LocalFitLevel;
+          memPercent: number;
+          tps: number;
+          totalMemBytes: number;
+          weightBytes: number;
+          kvBytes: number;
+          memCapBytes: number;
+          effectiveCtx: number;
+        } | null>;
         getStatus: () => Promise<LlamaStatus>;
         ensureBinary: () => Promise<{ ok: true; binaryPath: string }>;
         ensureModel: (modelKey: string) => Promise<{ ok: true; modelKey: string }>;

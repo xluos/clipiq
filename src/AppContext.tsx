@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
 import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, AnalysisBudget, ProgressLogEntry, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
+import type { DownloadedVideo } from "./electron-api";
 
 // 进度日志的 tone 推断 — 跟原 ProgressScreen.detectTone 一致, 提到全局是因为
 // 订阅 onAnalysisProgress 在 AppContext 里就要落 logsByProject。
@@ -352,6 +353,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
         delete next[projectId];
         return next;
       });
+      // 也清 logs / progress / budget 缓存,避免 progress 屏的实时日志区把上次跑的
+      // 7 条 stage log 跟这次新跑的混在一起 (用户看到 "本地初筛→精挑画面→提取音轨"
+      // alternation 重复就是这个原因 — 旧 7 条 + 新 7 条 append 到同 projectId)。
+      setLogsByProject((prev) => {
+        if (!(projectId in prev)) return prev;
+        const next = { ...prev };
+        delete next[projectId];
+        return next;
+      });
+      setProgressByProject((prev) => {
+        if (!(projectId in prev)) return prev;
+        const next = { ...prev };
+        delete next[projectId];
+        return next;
+      });
+      setBudgetByProject((prev) => {
+        if (!(projectId in prev)) return prev;
+        const next = { ...prev };
+        delete next[projectId];
+        return next;
+      });
       if (window.videoAnalyzer?.resetAnalysis) {
         window.videoAnalyzer.resetAnalysis(projectId).catch((error) => {
           console.warn("resetAnalysis failed", error);
@@ -372,6 +394,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
             analysisOptions,
             updatedAt: now,
             analysisStartedAt: now,
+            // 重试时清掉上次的失败信息,避免重启后 UI 仍按"失败"展示
+            lastErrorMessage: undefined,
+            lastErrorAt: undefined,
           };
         }),
       );
@@ -590,15 +615,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setLogsByProject((prev) => {
         const list = prev[evt.projectId] || [];
         const message = evt.message || "";
-        // dedup: 跟最近一条 (新条在数组头部) stage+message 相同则跳过, 避免心跳广播
-        // 把同一条日志刷屏。
         const head = list[0];
-        if (head && head.stage === evt.stage && head.message === message) return prev;
+        // dedup 规则升级 (2026-05):
+        // - head.stage === evt.stage → 就地替换 head, 不 append (同 stage 的状态更新, 例如
+        //   "镜头合并 · 已等待 5s" → "...已等待 34s", 体验上是同一条日志的时间在变)。
+        //   absoluteMs 保留 head 原值, 让相对偏移 (m:ss) 锁在 stage 开始时刻不跳。
+        // - stage 切换才 append 新条。
+        if (head && head.stage === evt.stage) {
+          if (head.message === message && head.fromCache === !!evt.fromCache) return prev;
+          const updated: ProgressLogEntry = {
+            absoluteMs: head.absoluteMs,
+            stage: evt.stage,
+            message,
+            tone: detectLogTone(evt.stage, message),
+            fromCache: !!evt.fromCache || undefined,
+          };
+          return { ...prev, [evt.projectId]: [updated, ...list.slice(1)] };
+        }
         const entry: ProgressLogEntry = {
           absoluteMs: Date.now(),
           stage: evt.stage,
           message,
           tone: detectLogTone(evt.stage, message),
+          fromCache: !!evt.fromCache || undefined,
         };
         const next = [entry, ...list].slice(0, PROGRESS_LOG_LIMIT);
         return { ...prev, [evt.projectId]: next };
@@ -623,11 +662,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!window.videoAnalyzer?.onDownloadComplete) return;
     const off = window.videoAnalyzer.onDownloadComplete((evt) => {
+      // 项目 strict 未开,DownloadCompleteEvent 是 discriminated union 但 narrow 不稳。
+      // 这里把字段全显式抽出, callback 闭包里只用平铺常量,绕开 TS narrow 失效。
+      const projectId = evt.projectId;
+      const success = evt.success;
+      let video: DownloadedVideo | null = null;
+      let cancelled = false;
+      let errorMessage = "";
+      if (evt.success) {
+        video = evt.video;
+      } else {
+        // strict 未开, union 在 else 分支也不收窄到 success:false; 显式 cast 拍死。
+        const failEvt = evt as { projectId: string; success: false; cancelled?: boolean; error: string };
+        cancelled = !!failEvt.cancelled;
+        errorMessage = failEvt.error || "视频下载失败";
+      }
       setProjects((prev) => prev.map((p) => {
-        if (p.id !== evt.projectId) return p;
+        if (p.id !== projectId) return p;
         const now = new Date().toISOString();
-        if (evt.success) {
-          const video = evt.video;
+        if (success && video) {
           return {
             ...p,
             localVideoPath: video.mediaUrl,
@@ -643,12 +696,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
             // 兜底: HomeScreen 创建 downloading 项目时已经设过 analysisStartedAt;
             // 这里只在缺失时补一次, 避免历史数据 / 老分支没有这个字段。
             analysisStartedAt: p.analysisStartedAt || now,
+            // 下载成功就清掉上轮的 download_failed 错误信息(若有)
+            lastErrorMessage: undefined,
+            lastErrorAt: undefined,
           };
+        }
+        if (cancelled) {
+          return { ...p, status: "not_analyzed", updatedAt: now };
         }
         return {
           ...p,
-          status: evt.cancelled ? "not_analyzed" : "download_failed",
+          status: "download_failed",
           updatedAt: now,
+          lastErrorMessage: errorMessage,
+          lastErrorAt: now,
         };
       }));
     });

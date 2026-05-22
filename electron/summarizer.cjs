@@ -18,12 +18,12 @@ async function callMediumText(provider, systemText, userText, schema, signal) {
   }
   // 走 openai-client 统一入口, 自动按 endpointType 分流 chat/completions vs responses
   // 返回 { parsed, usage, model }, 上游需要 usage 做 token 记账。
+  // max_tokens 走 openai-client deriveDefaultMaxTokens (ctx*0.25 clamp [1500,16000]),
+  // 不再 hardcode 6000。settings 里 ctx slider 调大自动跟着大。
   const result = await callJsonCompletion(provider, {
     systemText,
     userText,
     temperature: 0.3,
-    maxTokens: provider.maxOutputTokens ?? 6000,
-    maxOutputTokens: provider.maxOutputTokens ?? 6000,
     signal,
   });
   if (!result.parsed) {
