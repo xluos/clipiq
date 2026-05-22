@@ -113,6 +113,8 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   llama: {
     listModels: () => ipcRenderer.invoke("llama:listModels"),
     listManifest: () => ipcRenderer.invoke("llama:listManifest"),
+    recomputeFit: (modelKey, contextSize) =>
+      ipcRenderer.invoke("llama:recomputeFit", { modelKey, contextSize }),
     getStatus: () => ipcRenderer.invoke("llama:getStatus"),
     ensureBinary: () => ipcRenderer.invoke("llama:ensureBinary"),
     ensureModel: (modelKey) => ipcRenderer.invoke("llama:ensureModel", modelKey),

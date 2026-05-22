@@ -46,6 +46,9 @@ export type LocalModelEntry = {
   secondaryTags: LocalSecondaryTag[];
   available: boolean;
   contextSize: number;
+  // 权重原生支持的 ctx 上限 (Qwen3.5/3.6 全系 262144 / 256K)。
+  // contextSize 字段是"安全默认值"; nativeContextSize 是 slider 上限, 允许用户手动放开。
+  nativeContextSize?: number;
   quantizations: LocalQuantization[];
   fit?: LocalFitLevel;
   memPercent?: number;
@@ -53,6 +56,10 @@ export type LocalModelEntry = {
   downloaded?: boolean;
   llmBytes?: number;
   mmprojBytes?: number;
+  // 模型是否带 thinking / reasoning 能力 (Qwen3 / DeepSeek-R1 / Kimi-K1.5 / GLM-4-thinking 等)。
+  // 业务侧默认会关 thinking 直出 JSON; SlotAssignment.enableThinking 显式 true 时才放开。
+  // 非 thinking 模型 (普通 instruct) 留空, 行为不变。
+  isThinking?: boolean;
 };
 
 // 通用模型描述 - 远程 /models / 本地 llama manifest / 本地 whisper 都统一映射到这里
@@ -77,7 +84,13 @@ export type ModelDescriptor = {
   capabilitiesSource: "inferred" | "manifest" | "manual";
   availability: ModelAvailability;
   contextSize?: number;
+  // 权重原生支持的 ctx 上限 (本地 manifest 直接读, 远程模型暂不可知留 undefined)
+  nativeContextSize?: number;
   ownedBy?: string;                    // 远程 /models 的 owned_by 兜底展示
+  // 同 LocalModelEntry.isThinking: 模型支持 thinking 时这里也置 true。
+  // 远程 (OpenAI o1/o3 / DeepSeek-R1 / Qwen DashScope qwen3-* / 火山方舟 deepseek-r1 等) 通过 id 正则推断,
+  // 本地从 manifest 直接读, 上层 UI / 任务分配可以基于这个字段决定要不要给"启用思考"开关。
+  isThinking?: boolean;
   local?: {
     fit?: LocalFitLevel;
     memPercent?: number;
@@ -125,6 +138,8 @@ export type ProviderModel = {
   // 本地模型在 manifest 里的默认 contextSize, 跟 contextSize (effective, 可能被 override) 对比。
   // 只有 builtin local_llama provider 会填这个字段;远端 provider 留空。
   defaultContextSize?: number;
+  // 权重原生支持的 ctx 上限 (256K 等)。settings UI 的 ctx slider 用它做上限。
+  nativeContextSize?: number;
   ownedBy?: string;
   maxOutputTokens?: number;
   temperature?: number;
@@ -134,6 +149,9 @@ export type ProviderModel = {
   localWhisperModel?: string;
   localWhisperMirror?: string;
   language?: string;
+  // 同 ModelDescriptor.isThinking: model 是否带 thinking 能力
+  // (local llama 走 manifest, 远端走 inferCapabilitiesFromRemoteId 推断)
+  isThinking?: boolean;
 };
 
 export type ModelProvider = {
@@ -173,7 +191,11 @@ export type TaskSlotKey =
   | "complex_vision"
   | "complex_text";
 
-export type SlotAssignment = { providerId: string; modelId: string } | null;
+// enableThinking: 任务分配维度的"是否启用思考"开关。
+// - undefined / false: 默认行为, 关 thinking 直出 JSON (chat_template_kwargs.enable_thinking=false)
+// - true: 用户在任务分配 UI 上显式打开, 允许模型 thinking (调试 / 复杂推理场景)
+// 模型是否支持 thinking 看 ModelDescriptor.isThinking; 不支持的模型这个开关无意义不显示。
+export type SlotAssignment = { providerId: string; modelId: string; enableThinking?: boolean } | null;
 export type TaskSlots = Record<TaskSlotKey, SlotAssignment>;
 
 export type ProjectSource =
@@ -227,6 +249,11 @@ export type Project = {
   assetTags?: string[];
   // 仅 kind=account_video 时使用: 关联的对标账号 id
   accountId?: string;
+  // status=failed/download_failed 时的最近一次错误信息,持久化以便重启后仍能展示。
+  // 重试成功后由 AppContext 清空,避免误显示。
+  lastErrorMessage?: string;
+  // 失败发生时间(ISO),让 UI 能写"X 分钟前失败"。
+  lastErrorAt?: string;
 };
 
 export type AnalysisNodeType =
@@ -499,6 +526,10 @@ export type AnalysisProgressEvent = {
   progress: number;
   stage: string;
   message?: string;
+  // 该 stage 整段命中缓存 (没真跑 LLM/重计算)。UI 在 log 里加 "(缓存)" 标记。
+  // 只在 stage-level 整段缓存场景标 (summarizer / main-analysis / detectGenre 这类);
+  // prefilter / shot-merger 这种逐 item 部分缓存场景在 message 文案里自己写"命中 N 张"。
+  fromCache?: boolean;
 };
 
 // analyzeProject 起来时 broadcast 一次, 把各 stage 的 baseline 耗时预算发给 renderer。
@@ -537,6 +568,8 @@ export type ProgressLogEntry = {
   stage: string;
   message: string;
   tone: "info" | "ok" | "warn";
+  // 跟 AnalysisProgressEvent.fromCache 同源, UI 渲染时加 "(缓存)" 标记
+  fromCache?: boolean;
 };
 
 export type AppConfig = {

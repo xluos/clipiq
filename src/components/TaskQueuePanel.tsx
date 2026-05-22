@@ -148,17 +148,14 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
 };
 
 const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: number }> = ({ onClose, sidebarWidth }) => {
-  const { setLocation, setActiveProjectId, startAnalysisForProject } = useApp();
+  const { setLocation, setActiveProjectId } = useApp();
   const { running, failed, accountFetches } = useTaskQueueData();
 
-  const openProject = (projectId: string, kind: "running" | "failed") => {
-    if (kind === "running") {
-      setActiveProjectId(projectId);
-      setLocation({ module: "analysis", screen: "progress" });
-    } else {
-      // 失败重试: 直接用项目自带或全局默认参数重跑
-      startAnalysisForProject(projectId);
-    }
+  const openProject = (projectId: string) => {
+    // running / failed 都跳 progress 屏:running 显示实时进度;failed 显示上次错误 + "重试"按钮
+    // (旧逻辑对 failed 直接 startAnalysisForProject 静默重跑,既看不到原因也很可能因同样问题再次失败)
+    setActiveProjectId(projectId);
+    setLocation({ module: "analysis", screen: "progress" });
     onClose();
   };
 
@@ -190,7 +187,7 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
             {running.map((t) => (
               <button
                 key={t.projectId}
-                onClick={() => openProject(t.projectId, "running")}
+                onClick={() => openProject(t.projectId)}
                 className="w-full text-left px-4 py-2.5 hover:bg-slate-50 dark:hover:bg-slate-800/40 border-b border-slate-100 dark:border-slate-800/60 last:border-b-0"
               >
                 <div className="flex items-center gap-2">
@@ -241,7 +238,7 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
             {failed.map((p) => (
               <button
                 key={p.id}
-                onClick={() => openProject(p.id, "failed")}
+                onClick={() => openProject(p.id)}
                 className="w-full text-left px-4 py-2.5 hover:bg-slate-50 dark:hover:bg-slate-800/40 border-b border-slate-100 dark:border-slate-800/60 last:border-b-0 flex items-center gap-2"
               >
                 <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" strokeWidth={1.5} />

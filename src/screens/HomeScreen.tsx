@@ -201,7 +201,13 @@ export function HomeScreen() {
       setCurrentScreen("progress");
       return;
     }
-    // not_analyzed / failed / download_failed: 用项目自带或全局默认参数直跑
+    // failed / download_failed: 跳 progress 屏让用户先看错误,再点重试,不再自动重跑。
+    if (proj.status === "failed" || proj.status === "download_failed") {
+      setActiveProjectId(proj.id);
+      setCurrentScreen("progress");
+      return;
+    }
+    // not_analyzed: 直接跑
     startAnalysisForProject(proj.id);
   };
 

@@ -37,7 +37,7 @@ export function ProgressScreen() {
     setCurrentScreen, activeProjectId, projects, setProjects,
     providers, activeVideoProviderId, activeAudioProviderId,
     setNodesForProject, setReportForProject, progressByProject, logsByProject,
-    budgetByProject, setBudgetForProject,
+    budgetByProject, setBudgetForProject, startAnalysisForProject,
   } = useApp();
 
   const project = projects.find(p => p.id === activeProjectId);
@@ -198,8 +198,9 @@ export function ProgressScreen() {
         failureHandledRef.current = true;
         const msg = event.message || "分析失败";
         setError(msg);
+        const now = new Date().toISOString();
         setProjects(prev => prev.map(p => p.id === project.id
-          ? { ...p, status: "failed", updatedAt: new Date().toISOString() }
+          ? { ...p, status: "failed", updatedAt: now, lastErrorMessage: msg, lastErrorAt: now }
           : p));
       }
     });
@@ -211,6 +212,10 @@ export function ProgressScreen() {
   // downloading 阶段不起分析,等异步下载完成 (AppContext 把 status 切到 analyzing) 后再触发。
   useEffect(() => {
     if (!project || hasStarted.current) return;
+    // status 切换重跑 effect 时 (例: 重试时 failed → analyzing) 先清掉上次留下的 error,
+    // 只有真的走到 failed/download_failed 分支才再 setError。否则点重试后 UI 会一直显示
+    // "上次分析失败,点击重试" 这种残留提示。
+    setError("");
     if (project.status === "downloading") {
       // 下载进度通过 onAnalysisProgress (stage="下载视频") 已经在另一个 effect 里订阅。
       // 这里只把 UI 初始 stage label 设好,等 status 切换后 effect 重跑进入分析 kickoff。
@@ -218,7 +223,13 @@ export function ProgressScreen() {
       return;
     }
     if (project.status === "download_failed") {
-      setError("视频下载失败,请检查链接或换一个再试。");
+      setError(project.lastErrorMessage || "视频下载失败,请检查链接或换一个再试。");
+      return;
+    }
+    if (project.status === "failed") {
+      // 不再自动 kickoff:从 HomeScreen 点 failed 项目进来时,先显示上次失败原因,等用户点重试。
+      setError(project.lastErrorMessage || "上次分析失败。点击下方'重试'重新运行。");
+      setStageLabel("已结束 · 失败");
       return;
     }
     hasStarted.current = true;
@@ -276,6 +287,11 @@ export function ProgressScreen() {
       const alreadyRunning = await window.videoAnalyzer!.isAnalysisActive(project.id);
       if (alreadyRunning) {
         inAttachMode.current = true;
+        // 进入 attach 模式前清掉上轮的 handled 标记。reset effect 只在 project.id 变化时跑,
+        // 重试时 (同 project, status failed → analyzing) 不重置,残留的 true 会让本轮
+        // onAnalysisProgress 的 "完成"/"失败" event 静默 (走 !ref.current 防重入)。
+        completionHandledRef.current = false;
+        failureHandledRef.current = false;
         try {
           const last = await window.videoAnalyzer!.getLastAnalysisProgress(project.id);
           if (last) applyProgressSnapshot(last);
@@ -305,7 +321,10 @@ export function ProgressScreen() {
         const message = err instanceof Error ? err.message : String(err);
         if (/cancel|取消/i.test(message)) return;
         setError(message);
-        setProjects(prev => prev.map(p => p.id === project.id ? { ...p, status: "failed", updatedAt: new Date().toISOString() } : p));
+        const now = new Date().toISOString();
+        setProjects(prev => prev.map(p => p.id === project.id
+          ? { ...p, status: "failed", updatedAt: now, lastErrorMessage: message, lastErrorAt: now }
+          : p));
       }
     };
     launchOrAttach();
@@ -445,6 +464,9 @@ export function ProgressScreen() {
                     "text-slate-700 dark:text-slate-300"
                   }>
                     <span className="text-slate-500 dark:text-slate-500">{log.stage}</span>
+                    {log.fromCache && (
+                      <span className="ml-1 text-emerald-600 dark:text-emerald-400">(缓存)</span>
+                    )}
                     {log.message && <span className="text-slate-400 mx-1">·</span>}
                     {log.message}
                   </span>
@@ -456,22 +478,44 @@ export function ProgressScreen() {
 
         {/* Actions */}
         <div className="flex justify-end gap-2.5">
-          <button
-            type="button"
-            onClick={handleCancel}
-            disabled={isCancelling}
-            className="inline-flex items-center h-10 px-4 rounded-lg text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 text-[13.5px] transition-colors disabled:opacity-50"
-          >
-            {isCancelling ? "正在取消…" : "取消"}
-          </button>
-          <button
-            type="button"
-            onClick={handleBackground}
-            className="inline-flex items-center gap-1.5 h-10 px-5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[13.5px] font-medium transition-colors"
-          >
-            后台运行
-            <ArrowRight className="w-4 h-4" />
-          </button>
+          {project.status === "failed" || project.status === "download_failed" ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setCurrentScreen("home")}
+                className="inline-flex items-center h-10 px-4 rounded-lg text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 text-[13.5px] transition-colors"
+              >
+                返回
+              </button>
+              <button
+                type="button"
+                onClick={() => startAnalysisForProject(project.id)}
+                className="inline-flex items-center gap-1.5 h-10 px-5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[13.5px] font-medium transition-colors"
+              >
+                重试分析
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={handleCancel}
+                disabled={isCancelling}
+                className="inline-flex items-center h-10 px-4 rounded-lg text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 text-[13.5px] transition-colors disabled:opacity-50"
+              >
+                {isCancelling ? "正在取消…" : "取消"}
+              </button>
+              <button
+                type="button"
+                onClick={handleBackground}
+                className="inline-flex items-center gap-1.5 h-10 px-5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[13.5px] font-medium transition-colors"
+              >
+                后台运行
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            </>
+          )}
         </div>
 
       </div>

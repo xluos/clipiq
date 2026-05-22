@@ -36,6 +36,18 @@ async function maybeAcquireLocalSlot(provider, signal) {
   return slot;
 }
 
+// 从 provider.contextSize 派生默认 max_tokens, 替代各调用点的 hardcode 数字。
+// 公式: ctx × 0.25, 下限 1500。
+// **不设上限** — settings 里 ctx slider 反映的就是模型实际支持的 ctx, 用户调多大就给多大。
+// 在线大模型 (Claude 200K / Gemini 1M / Qwen3.5 256K) 和本地大 ctx 模型都按比例伸缩。
+// 1500 下限: 兜底小 ctx 模型 (6K-8K) 至少保留够写一段完整 JSON。
+// 调用方需要严格限制时仍可显式传 maxTokens override (例如 prefilter 单帧用 280)。
+function deriveDefaultMaxTokens(provider) {
+  const ctx = Number(provider?.contextSize);
+  if (!Number.isFinite(ctx) || ctx <= 0) return 2500;
+  return Math.max(1500, Math.floor(ctx * 0.25));
+}
+
 function tryParseJsonFromText(text) {
   if (!text) return null;
   try {
@@ -49,6 +61,38 @@ function tryParseJsonFromText(text) {
       return null;
     }
   }
+}
+
+// Layer 3 兜底: 当 content 里 parse 不出 JSON 时, 尝试从 reasoning_content 末尾扫一个 JSON 块。
+//
+// 适用场景: thinking 模型 (Qwen3 / DeepSeek-R1 / Kimi-K1.5 / 内部 / 远程 ...) 把内容塞到
+// delta.reasoning_content 而不是 delta.content, 且 server 不支持 chat_template_kwargs.enable_thinking
+// 关掉 thinking (例如部分线上 API)。reasoning 末尾通常就是 final answer JSON 草稿。
+//
+// 策略: 从 reasoning 末尾向前找最后一个 { 到末尾的 } 配对块, 尝试 parse。比 tryParseJsonFromText
+// 的贪婪 regex 更可靠 (regex 在 reasoning 含多个 JSON 草稿时会匹到第一个 { 到最后一个 })。
+function tryRescueJsonFromReasoning(reasoning) {
+  if (!reasoning) return null;
+  // 优先找带闭合的最后一个 JSON 对象: 从尾部找 }, 再回找配对的 {
+  const lastClose = reasoning.lastIndexOf("}");
+  if (lastClose < 0) return null;
+  // 从 lastClose 向前找配对 { (栈算法处理嵌套 JSON)
+  let depth = 0;
+  for (let i = lastClose; i >= 0; i--) {
+    const c = reasoning[i];
+    if (c === "}") depth += 1;
+    else if (c === "{") {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return JSON.parse(reasoning.slice(i, lastClose + 1));
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
 }
 
 // chat/completions 的 usage 字段: { prompt_tokens, completion_tokens, total_tokens }
@@ -108,6 +152,7 @@ async function callOpenAIChatCompletionsRaw(provider, opts) {
     temperature,
     maxTokens,
     responseFormat,
+    enableThinking,
     signal,
   } = opts;
   const slot = await maybeAcquireLocalSlot(provider, signal);
@@ -122,9 +167,10 @@ async function callOpenAIChatCompletionsRaw(provider, opts) {
       // 非 OpenAI 兼容服务端可能忽略此字段, 但不会因此报错。
       stream_options: { include_usage: true },
       temperature: temperature ?? provider.temperature ?? 0.2,
-      // 默认 2500 = probe 实测 chunk-pass 8 帧中位 1671 tok ×1.5 buffer。
-      // 调用方需要更大 budget (例如 audit 走超长 nodes 列表) 在 opts.maxTokens 显式传。
-      max_tokens: maxTokens ?? provider.maxOutputTokens ?? 2500,
+      // 默认走 deriveDefaultMaxTokens(provider) 从 ctx 派生 (settings 里 ctx slider 调大,
+      // output budget 自动跟着大)。调用方需要更严格的限制时仍可显式传 maxTokens override
+      // (例如 prefilter 单帧用 280)。原来 hardcode 2500 对 thinking 模型不够 → 删除。
+      max_tokens: maxTokens ?? provider.maxOutputTokens ?? deriveDefaultMaxTokens(provider),
       messages: [
         { role: "system", content: systemText },
         {
@@ -139,7 +185,22 @@ async function callOpenAIChatCompletionsRaw(provider, opts) {
         },
       ],
       ...(responseFormat ? { response_format: responseFormat } : {}),
+      // Qwen3 / DeepSeek-R1 等 thinking 模型默认 enable_thinking=true → 内容塞 delta.reasoning_content
+      // 不走 delta.content, 上层会看到 content 为空。本项目业务都要 JSON 不要 thinking, 默认关掉。
+      // 来源优先级 opts.enableThinking > provider.enableThinking > false。前者是调用方显式覆盖,
+      // 后者是 shapeEffectiveProvider 从 slot.enableThinking 透传过来 (任务分配维度的运行时开关)。
+      // chat_template_kwargs 是 llama.cpp 扩展字段, DashScope / 火山方舟 / DeepSeek 等多数 OpenAI-兼容
+      // API 也支持; 不支持的 server 会忽略 (Layer 3 reasoning fallback 兜底)。
+      chat_template_kwargs: { enable_thinking: (enableThinking ?? provider.enableThinking) === true },
     };
+    // 诊断: 把请求关键字段打到 stdout, 用户报"thinking 没关掉"时拿来对账
+    // (rawLen=0 reasoningLen>0 应该意味着 body 里没 chat_template_kwargs, 或者 server 不接受)
+    console.log(
+      `[openai-client] POST ${endpoint} | model=${body.model} max_tokens=${body.max_tokens} ` +
+      `temp=${body.temperature} response_format=${body.response_format?.type || "none"} ` +
+      `enable_thinking=${body.chat_template_kwargs?.enable_thinking} ` +
+      `(enableThinkingOpt=${enableThinking} providerEnableThinking=${provider.enableThinking})`,
+    );
     const response = await fetch(endpoint, {
       method: "POST",
       signal,
@@ -155,17 +216,22 @@ async function callOpenAIChatCompletionsRaw(provider, opts) {
       throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
     }
     let text = "";
+    let reasoning = "";
     let usageRaw = null;
     let modelEcho = null;
     await streamSSE(response, (event) => {
       const delta = event?.choices?.[0]?.delta?.content;
       if (typeof delta === "string") text += delta;
+      // Qwen3 / DeepSeek-R1 等 reasoning 模型: thinking 内容走 delta.reasoning_content,
+      // 不进 text(text 必须保持只装最终 JSON), 但单独累积以便诊断 + 在 content 为空时给上层提示。
+      const reasoningDelta = event?.choices?.[0]?.delta?.reasoning_content;
+      if (typeof reasoningDelta === "string") reasoning += reasoningDelta;
       // 服务端可能在 chunk 上重复带 model; 用最后一次为准 (代理会改写成上游真实模型)
       if (typeof event?.model === "string" && event.model) modelEcho = event.model;
       // include_usage 命中的 chunk: choices=[] 但带 usage
       if (event?.usage && typeof event.usage === "object") usageRaw = event.usage;
     });
-    return { text, usage: normalizeUsage(usageRaw), model: modelEcho };
+    return { text, reasoning, usage: normalizeUsage(usageRaw), model: modelEcho };
   } finally {
     slot?.release();
   }
@@ -194,8 +260,8 @@ async function callOpenAIResponsesRaw(provider, opts) {
       model: provider.model,
       stream: true,
       temperature: temperature ?? provider.temperature ?? 0.2,
-      // 同 chat/completions: 默认 2500 实测 chunk-pass 中位 ×1.5 buffer
-      max_output_tokens: maxOutputTokens ?? provider.maxOutputTokens ?? 2500,
+      // 同 chat/completions: 默认从 ctx 派生 (deriveDefaultMaxTokens)
+      max_output_tokens: maxOutputTokens ?? provider.maxOutputTokens ?? deriveDefaultMaxTokens(provider),
       input: [
         { role: "system", content: [{ type: "input_text", text: systemText }] },
         { role: "user", content: userContent },
@@ -248,18 +314,15 @@ async function callOpenAIResponsesRaw(provider, opts) {
   }
 }
 
-// 统一入口: 按 endpointType 自动分流, 返回 { parsed, raw, usage, model }
+// 统一入口: 按 endpointType 自动分流, 返回 { parsed, raw, reasoning, parsedSource, usage, model }
+// 走 finalizeCallResult 同款 Layer 3 reasoning fallback, shot-merger / summarizer / danmaku-emotion
+// 之后任何 thinking 模型也都自动兜底, 不需要分散改。
 async function callJsonCompletion(provider, opts) {
   const useResponses = provider.endpointType === "openai_responses";
   const result = useResponses
     ? await callOpenAIResponsesRaw(provider, opts)
     : await callOpenAIChatCompletionsRaw(provider, opts);
-  return {
-    parsed: tryParseJsonFromText(result.text),
-    raw: result.text,
-    usage: result.usage,
-    model: result.model,
-  };
+  return finalizeCallResult(result);
 }
 
 // 兼容旧调用: 主分析 callOpenAICompatible 用的形态。返回 { parsed, usage, model }
@@ -273,9 +336,10 @@ async function callOpenAIChatCompletions(provider, systemText, userText, imageDa
     imageDataUrls,
     maxTokens: options?.maxTokens,
     responseFormat: options?.responseFormat,
+    enableThinking: options?.enableThinking,
     signal: handle?.abortController?.signal,
   });
-  return { parsed: tryParseJsonFromText(result.text), usage: result.usage, model: result.model };
+  return finalizeCallResult(result);
 }
 
 async function callOpenAIResponses(provider, systemText, userText, imageDataUrls, handle, options) {
@@ -287,7 +351,32 @@ async function callOpenAIResponses(provider, systemText, userText, imageDataUrls
     responseFormat: options?.responseFormat,
     signal: handle?.abortController?.signal,
   });
-  return { parsed: tryParseJsonFromText(result.text), usage: result.usage, model: result.model };
+  return finalizeCallResult(result);
+}
+
+// 统一出口处理 raw → parsed, 含 Layer 3 reasoning fallback。
+//
+// 返回:
+//   parsed: 解析出的 JSON 对象, 或 null
+//   raw: chat content stream 累积的原始文本
+//   reasoning: reasoning_content stream 累积 (thinking 模型才会非空)
+//   parsedSource: "content" | "reasoning" | "none" — content 解出走 "content";
+//                 content 解不出但从 reasoning 末尾兜底走 "reasoning"; 都失败走 "none"
+//   usage / model: SSE chunk 里 server 返回的统计 / model echo
+function finalizeCallResult(result) {
+  const text = result.text || "";
+  const reasoning = result.reasoning || "";
+  const fromContent = tryParseJsonFromText(text);
+  if (fromContent) {
+    return { parsed: fromContent, raw: text, reasoning, parsedSource: "content", usage: result.usage, model: result.model };
+  }
+  // Layer 3: content 没解出 → reasoning 末尾兜底。任何 reasoning 模型都受益,
+  // 即便 server 不支持 chat_template_kwargs 关 thinking。
+  const fromReasoning = tryRescueJsonFromReasoning(reasoning);
+  if (fromReasoning) {
+    return { parsed: fromReasoning, raw: text, reasoning, parsedSource: "reasoning", usage: result.usage, model: result.model };
+  }
+  return { parsed: null, raw: text, reasoning, parsedSource: "none", usage: result.usage, model: result.model };
 }
 
 module.exports = {

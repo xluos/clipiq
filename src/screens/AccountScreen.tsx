@@ -892,8 +892,11 @@ function VideosTab({
     setActiveProjectId(proj.id);
     if (proj.status === "completed") setLocation({ module: "analysis", screen: "workspace" });
     else if (proj.status === "analyzing" || proj.status === "downloading") setLocation({ module: "analysis", screen: "progress" });
-    else {
-      // not_analyzed / failed / download_failed: 用系统默认参数直接重跑
+    else if (proj.status === "failed" || proj.status === "download_failed") {
+      // 跳 progress 屏让用户看错误 + 手动点重试,跟 HomeScreen.goToProject 行为一致
+      setLocation({ module: "analysis", screen: "progress" });
+    } else {
+      // not_analyzed: 用系统默认参数直接跑
       startAnalyzeOne(av);
     }
   };
