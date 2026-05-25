@@ -1,7 +1,7 @@
 import { useApp } from "../AppContext";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { generateMockNodes, generateMockReport } from "../mockData";
-import { ArrowRight, CheckCircle2 } from "lucide-react";
+import { ArrowRight, CheckCircle2, Settings } from "lucide-react";
 import type { AnalysisOptions } from "../types";
 
 const STAGES = [
@@ -318,7 +318,8 @@ export function ProgressScreen() {
         window.setTimeout(() => setCurrentScreen("workspace"), 1800);
       } catch (err) {
         if (cancelledRef.current) return;
-        const message = err instanceof Error ? err.message : String(err);
+        const raw = err instanceof Error ? err.message : String(err);
+        const message = raw.replace(/^Error invoking remote method '[^']+': Error: /, "");
         if (/cancel|取消/i.test(message)) return;
         setError(message);
         const now = new Date().toISOString();
@@ -399,9 +400,23 @@ export function ProgressScreen() {
         </section>
 
         {error && (
-          <div className="rounded-lg border border-rose-200 dark:border-rose-900/40 bg-rose-50 dark:bg-rose-950/30 px-3.5 py-2.5 text-[13px] text-rose-700 dark:text-rose-300">
-            {error}
-          </div>
+          error.includes("设置页") ? (
+            <div className="rounded-lg border border-amber-200 dark:border-amber-800/40 bg-amber-50 dark:bg-amber-950/20 px-4 py-3 flex items-center gap-3">
+              <span className="text-[13px] text-amber-800 dark:text-amber-200 flex-1">{error}</span>
+              <button
+                type="button"
+                onClick={() => setCurrentScreen("settings")}
+                className="inline-flex items-center gap-1.5 shrink-0 px-3 py-1.5 rounded-md bg-amber-600 hover:bg-amber-700 text-white text-[12px] font-medium transition-colors"
+              >
+                <Settings className="w-3.5 h-3.5" />
+                去设置
+              </button>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-rose-200 dark:border-rose-900/40 bg-rose-50 dark:bg-rose-950/30 px-3.5 py-2.5 text-[13px] text-rose-700 dark:text-rose-300">
+              {error}
+            </div>
+          )
         )}
 
         {/* Stage cards */}

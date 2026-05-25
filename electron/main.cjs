@@ -4039,15 +4039,21 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     if (!localStatus.binaryFound) {
       const binaryPath = await llamaRuntime.resolveLlamaServerPath();
       if (!binaryPath) {
-        throw new Error("本地推理引擎未安装。请先在 设置 → 本地推理 安装推理引擎。");
+        const err = new Error("当前选择了本地模型,但推理引擎还没安装,需要先到设置页安装。");
+        err.code = "LOCAL_SETUP_REQUIRED";
+        throw err;
       }
     }
+    const manifest = llamaRuntime.getManifest();
     const installedModels = await llamaRuntime.listModels();
     const installedMap = new Map(installedModels.map((m) => [m.key, m]));
     for (const lp of localProviders) {
       const m = installedMap.get(lp.model);
       if (!m || !m.downloaded) {
-        throw new Error(`本地模型 ${lp.model} 未下载。请先在 设置 → 本地推理 下载该模型。`);
+        const displayName = manifest?.[lp.model]?.name || lp.model;
+        const err = new Error(`当前选择的本地模型「${displayName}」还没下载完成,需要先到设置页下载。`);
+        err.code = "LOCAL_SETUP_REQUIRED";
+        throw err;
       }
     }
   }
