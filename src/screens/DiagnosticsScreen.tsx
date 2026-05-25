@@ -1,28 +1,16 @@
 import { useApp } from "../AppContext";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, RefreshCw, ChevronDown, ChevronRight, Clock, Cpu, Zap, Hash, Database } from "lucide-react";
+import { ArrowLeft, RefreshCw, ChevronDown, ChevronRight, Clock, Zap, Hash, Database } from "lucide-react";
 import { type FunctionComponent, useCallback, useEffect, useMemo, useState } from "react";
 import type { AnalysisSample, AnalysisSampleStage } from "../electron-api";
 import type { Project } from "../types";
 
-const STAGE_LABELS: Record<string, string> = {
-  "prepare": "准备",
-  "extract-frames": "抽帧",
-  "prefilter": "预筛选",
-  "scene-detect": "场景检测",
-  "plan-frames": "帧规划",
-  "shot-merge": "镜头合并",
-  "shot-merger": "镜头合并",
-  "transcribe": "语音转写",
-  "summarizer": "生成摘要",
-  "summarize": "生成摘要",
-  "detect-genre": "类型识别",
-  "main-analysis": "主分析",
-  "danmaku-emotion": "弹幕情绪",
-  "title-gen": "标题生成",
-  "audit": "方法论审计",
-};
+// stage 已经是中文，过滤掉"完成"/"就绪"等纯状态标记行（不含实际耗时）
+const SKIP_STAGES = new Set([
+  "完成", "已结束", "全局聚合完成", "全局聚合跳过", "镜头合并完成",
+  "镜头缩略图就绪", "字幕识别完成", "识别视频类型完成", "类型识别跳过",
+]);
 
 function fmtDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -128,13 +116,14 @@ function extractStageMeta(stages: AnalysisSampleStage[]) {
 
 const SampleCard: FunctionComponent<{
   sample: AnalysisSample;
-  projectTitle?: string;
-}> = ({ sample, projectTitle }) => {
+  project?: Project;
+}> = ({ sample, project }) => {
   const [expanded, setExpanded] = useState(false);
   const tokens = useMemo(() => aggregateStageTokens(sample.stages), [sample.stages]);
   const meta = useMemo(() => extractStageMeta(sample.stages), [sample.stages]);
 
-  const title = projectTitle || sample.projectId.slice(0, 8);
+  const title = project?.videoName || sample.projectId.slice(0, 8);
+  const sourceUrl = project?.source?.type === "url" ? project.source.url : undefined;
 
   return (
     <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] overflow-hidden">
@@ -154,8 +143,9 @@ const SampleCard: FunctionComponent<{
               {outcomeLabel(sample.outcome)}
             </span>
           </div>
-          <div className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5 font-mono">
-            {fmtDate(sample.startedAt)}
+          <div className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5 flex items-center gap-2 min-w-0">
+            <span className="font-mono shrink-0">{fmtDate(sample.startedAt)}</span>
+            {sourceUrl && <span className="truncate opacity-60">{sourceUrl}</span>}
           </div>
         </div>
         {/* Quick stats on the right */}
@@ -255,28 +245,33 @@ const SampleCard: FunctionComponent<{
                   </tr>
                 </thead>
                 <tbody>
-                  {sample.stages.map((s, i) => {
-                    const stageTokens = tokens.byStage.get(s.stage);
+                  {sample.stages.filter((s) => !SKIP_STAGES.has(s.stage) && s.durationMs > 0).map((s, i) => {
+                    const td = s.tokenDelta;
+                    const calls = td?.reduce((a, d) => a + d.callCount, 0) || 0;
+                    const prompt = td?.reduce((a, d) => a + d.promptTokens, 0) || 0;
+                    const completion = td?.reduce((a, d) => a + d.completionTokens, 0) || 0;
+                    const total = td?.reduce((a, d) => a + d.totalTokens, 0) || 0;
+                    const hasTokens = calls > 0 || total > 0;
                     return (
                       <tr key={i} className="border-t border-slate-100 dark:border-slate-800">
                         <td className="px-3 py-1.5 text-slate-700 dark:text-slate-300">
-                          {STAGE_LABELS[s.stage] || s.stage}
+                          {s.stage}
                           {s.note && <span className="text-slate-400 ml-1">({s.note})</span>}
                         </td>
                         <td className="px-3 py-1.5 text-right font-mono text-slate-600 dark:text-slate-400">
                           {fmtDuration(s.durationMs)}
                         </td>
                         <td className="px-3 py-1.5 text-right font-mono text-slate-600 dark:text-slate-400">
-                          {stageTokens?.callCount || "—"}
+                          {hasTokens ? calls : "—"}
                         </td>
                         <td className="px-3 py-1.5 text-right font-mono text-slate-600 dark:text-slate-400">
-                          {stageTokens ? fmtTokens(stageTokens.promptTokens) : "—"}
+                          {hasTokens ? fmtTokens(prompt) : "—"}
                         </td>
                         <td className="px-3 py-1.5 text-right font-mono text-slate-600 dark:text-slate-400">
-                          {stageTokens ? fmtTokens(stageTokens.completionTokens) : "—"}
+                          {hasTokens ? fmtTokens(completion) : "—"}
                         </td>
                         <td className="px-3 py-1.5 text-right font-mono text-slate-600 dark:text-slate-400">
-                          {stageTokens ? fmtTokens(stageTokens.totalTokens) : "—"}
+                          {hasTokens ? fmtTokens(total) : "—"}
                         </td>
                       </tr>
                     );
@@ -459,7 +454,7 @@ export function DiagnosticsScreen() {
               <SampleCard
                 key={`${s.projectId}-${s.startedAt}-${i}`}
                 sample={s}
-                projectTitle={projectMap.get(s.projectId)?.title || projectMap.get(s.projectId)?.source?.url}
+                project={projectMap.get(s.projectId)}
               />
             ))}
           </div>
