@@ -15,6 +15,7 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
+  Activity,
 } from "lucide-react";
 
 type Item = {
@@ -97,7 +98,21 @@ export function Sidebar() {
       {/* Task queue — 全局任务面板 (sidebar 徽章 + 浮层) */}
       <TaskQueueButton collapsed={collapsed} />
 
-      {/* Settings */}
+      {/* Diagnostics + Settings */}
+      <button
+        onClick={() => goModule("diagnostics")}
+        title={collapsed ? "诊断" : undefined}
+        className={[
+          "flex items-center rounded-lg text-left text-[14px] transition-colors",
+          collapsed ? "gap-0 justify-center py-[9px]" : "gap-2.5 justify-start px-2.5 py-[9px]",
+          activeModule === "diagnostics"
+            ? "bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200/70 dark:border-indigo-800/50 font-medium"
+            : "border border-transparent text-slate-700 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800/60",
+        ].join(" ")}
+      >
+        <Activity className="w-4 h-4 shrink-0" strokeWidth={1.5} />
+        {!collapsed && <span className="flex-1">诊断</span>}
+      </button>
       <button
         onClick={() => goModule("settings")}
         title={collapsed ? "设置" : undefined}

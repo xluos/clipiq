@@ -7442,6 +7442,33 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("whisperCpp:stop", async () => whisperCppRuntime.stop());
 
+  // 诊断: 读 eta-samples.jsonl, 返回历史分析执行记录 (含 timing/token/provider 信息)
+  ipcMain.handle("diagnostics:getAnalysisSamples", async () => {
+    const filePath = path.join(app.getPath("userData"), "eta-samples.jsonl");
+    try {
+      const raw = await fs.readFile(filePath, "utf-8");
+      const lines = raw.trim().split("\n").filter(Boolean);
+      const samples = [];
+      for (const line of lines) {
+        try { samples.push(JSON.parse(line)); } catch { /* skip malformed */ }
+      }
+      return { ok: true, samples };
+    } catch (err) {
+      if (err?.code === "ENOENT") return { ok: true, samples: [] };
+      return { ok: false, error: err?.message || String(err), samples: [] };
+    }
+  });
+
+  // 诊断: 按 projectId 读 token-usage.json (单个项目的详细 token 账本)
+  ipcMain.handle("diagnostics:getTokenUsage", async (_event, projectId) => {
+    const projectDir = path.join(app.getPath("userData"), "projects", projectId);
+    try {
+      return { ok: true, data: await readJson(path.join(projectDir, "token-usage.json"), null) };
+    } catch {
+      return { ok: true, data: null };
+    }
+  });
+
   await createWindow();
   createTray();
 

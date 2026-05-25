@@ -151,7 +151,7 @@ const LOCAL_STORAGE_KEY = "video-analyzer-state";
 const SIDEBAR_COLLAPSED_KEY = "clipiq-sidebar-collapsed";
 
 // 模块切换时的默认子屏
-const MODULE_DEFAULT_SCREEN: Record<Exclude<AppModule, "settings">, AppLocation> = {
+const MODULE_DEFAULT_SCREEN: Record<Exclude<AppModule, "settings" | "diagnostics">, AppLocation> = {
   analysis: { module: "analysis", screen: "home" },
   library: { module: "library", screen: "list" },
   account: { module: "account", screen: "list" },
@@ -177,6 +177,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const goModule = useCallback((m: AppModule) => {
     if (m === "settings") setCurrentLocation({ module: "settings" });
+    else if (m === "diagnostics") setCurrentLocation({ module: "diagnostics" });
     else setCurrentLocation(MODULE_DEFAULT_SCREEN[m]);
   }, []);
 

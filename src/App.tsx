@@ -8,6 +8,7 @@ import { ReportScreen } from './screens/ReportScreen';
 import { LibraryScreen } from './screens/LibraryScreen';
 import { AccountScreen } from './screens/AccountScreen';
 import { StudioScreen } from './screens/StudioScreen';
+import { DiagnosticsScreen } from './screens/DiagnosticsScreen';
 import { AnimatePresence, motion } from 'motion/react';
 import { TitleBar } from './components/TitleBar';
 import { Sidebar } from './components/Sidebar';
@@ -17,8 +18,8 @@ import { ConfirmDialogProvider } from './components/ConfirmDialog';
 export default function App() {
   const { currentLocation } = useApp();
   // 用于 AnimatePresence key — module + screen 唯一标识
-  const routeKey = currentLocation.module === 'settings'
-    ? 'settings'
+  const routeKey = currentLocation.module === 'settings' || currentLocation.module === 'diagnostics'
+    ? currentLocation.module
     : `${currentLocation.module}:${currentLocation.screen}`;
 
   return (
@@ -46,6 +47,7 @@ export default function App() {
                 {currentLocation.module === 'account' && <AccountScreen />}
                 {currentLocation.module === 'studio' && <StudioScreen />}
                 {currentLocation.module === 'settings' && <SettingsScreen />}
+                {currentLocation.module === 'diagnostics' && <DiagnosticsScreen />}
               </motion.div>
             </AnimatePresence>
           </div>
