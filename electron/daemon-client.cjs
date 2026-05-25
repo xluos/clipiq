@@ -102,9 +102,14 @@ async function findDaemonBinary() {
   const envPath = process.env.AI_MODEL_DAEMON_PATH;
   if (envPath && fsSync.existsSync(envPath)) return envPath;
 
-  // 3. 常见安装位置
+  // 3. dev 模式: build 产物 / daemon 源码目录
   const exe = process.platform === "win32" ? "ai-model-daemon.exe" : "ai-model-daemon";
+  const osKey = { darwin: "mac", linux: "linux", win32: "win" }[process.platform] || "mac";
+  const archKey = process.arch === "arm64" ? "arm64" : "x64";
+  const repoRoot = path.resolve(__dirname, "..");
   const candidates = [
+    path.join(repoRoot, "build", "daemon", `${osKey}-${archKey}`, exe),
+    path.resolve(repoRoot, "..", "ai-model-daemon", exe),
     path.join(os.homedir(), ".local", "bin", exe),
     path.join(os.homedir(), "go", "bin", exe),
     `/usr/local/bin/${exe}`,
