@@ -1386,7 +1386,7 @@ const ModelRow: FunctionComponent<ModelRowProps> = ({
       <div className="flex items-center gap-3 rounded-lg border border-slate-200 dark:border-slate-800 px-3 py-2 bg-white dark:bg-[#0E0E10]">
         <div className="min-w-0 flex-1">
           <div className="font-mono text-xs text-slate-800 dark:text-slate-100 truncate">{model.id}</div>
-          <div className="text-[10.5px] text-slate-400 dark:text-slate-500 flex items-center gap-1.5 mt-0.5">
+          <div className="text-[10.5px] text-slate-400 dark:text-slate-500 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mt-0.5">
             <span>
               {model.capabilities.length > 0
                 ? model.capabilities.map((c) => CAPABILITY_LABELS_ZH[c] || c).join(" · ")
