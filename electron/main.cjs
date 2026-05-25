@@ -4572,11 +4572,11 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           concurrency: mergeConcurrency,
           handle,
           cache: makeShotMergerCache(mediumTextProvider),
-          onProgress: ({ done, total, batchIndex, mode }) => {
+          onProgress: ({ done, total, batchIndex, batchSize, mode }) => {
             ensureNotCancelled(handle);
             const pct = 51 + Math.round((done / total) * 17);
             const tail = mode === "cache-hit" ? " · 命中缓存" : "";
-            send(pct, "镜头合并", `已合并 ${done}/${total} (batch ${batchIndex}, 平均 ${formatDuration((Date.now()-mergeStart)/done)}/镜头)${tail}`);
+            send(pct, "镜头合并", `已合并 ${done}/${total} (第 ${batchIndex} 轮 · 每轮 ${batchSize} 个, 平均 ${formatDuration((Date.now()-mergeStart)/done)}/镜头)${tail}`);
           },
         });
         if (mergeResults.usage && mergeResults.usage.callCount > 0) {
