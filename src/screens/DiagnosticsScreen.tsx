@@ -139,6 +139,7 @@ const SampleCard: FunctionComponent<{
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium truncate">{title}</span>
+            <span className="text-[10px] font-mono text-slate-400 dark:text-slate-600 shrink-0">{sample.projectId.slice(0, 8)}</span>
             <span className={`text-[11px] font-medium ${outcomeColor(sample.outcome)}`}>
               {outcomeLabel(sample.outcome)}
             </span>
