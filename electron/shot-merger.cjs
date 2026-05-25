@@ -326,23 +326,33 @@ async function mergeShots({ shots, provider, batchSize, concurrency: concurrency
     }
   };
 
-  // 并发池: 同时最多 concurrency 个 batch 在飞
+  // 交错并发池: 维持最多 concurrency 个 batch 同时在飞,
+  // 但每个新请求之间间隔 STAGGER_MS 避免瞬时并发被服务端限流。
+  const STAGGER_MS = 1500;
   if (concurrency <= 1) {
     for (const b of batches) await processBatch(b);
   } else {
     let cursor = 0;
     const inflight = new Set();
-    const launch = () => {
-      while (inflight.size < concurrency && cursor < batches.length) {
-        const b = batches[cursor++];
-        const p = processBatch(b).finally(() => { inflight.delete(p); });
-        inflight.add(p);
-      }
+    const launchOne = () => {
+      if (inflight.size >= concurrency || cursor >= batches.length) return false;
+      const b = batches[cursor++];
+      const p = processBatch(b).finally(() => { inflight.delete(p); });
+      inflight.add(p);
+      return true;
     };
-    launch();
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    // 交错启动初始批次
+    while (inflight.size < concurrency && cursor < batches.length) {
+      launchOne();
+      if (inflight.size < concurrency && cursor < batches.length) await sleep(STAGGER_MS);
+    }
+    // 持续补充: 有请求完成就立即补一个新的
     while (inflight.size > 0) {
       await Promise.race(inflight);
-      launch();
+      if (cursor < batches.length) {
+        launchOne();
+      }
     }
   }
   if (typeof result.cacheHits === "undefined") {
