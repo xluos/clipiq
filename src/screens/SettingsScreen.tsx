@@ -2090,14 +2090,18 @@ const ProgressButton: FunctionComponent<ProgressButtonProps> = ({ progress, busy
   const circumference = 2 * Math.PI * radius;
   const dashOffset = circumference * (1 - clamped / 100);
 
-  const mb = (n?: number) => (n ? (n / 1024 / 1024).toFixed(0) : null);
-  const recvMB = mb(progress?.receivedBytes);
-  const totalMB = mb(progress?.totalBytes);
+  const fmtSize = (n?: number) => {
+    if (!n) return null;
+    if (n >= 1024 * 1024 * 1024) return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+    return `${(n / 1024 / 1024).toFixed(0)} MB`;
+  };
+  const recvLabel = fmtSize(progress?.receivedBytes);
+  const totalLabel = fmtSize(progress?.totalBytes);
   const stageLabel = progress?.label
     || (busyAction === "binary" ? "推理引擎" : busyAction === "download" ? "下载中" : "启动中");
   const speedLabel = formatSpeed(speed);
-  const tooltipBody = hasPercent && recvMB && totalMB
-    ? `${stageLabel} · ${recvMB} / ${totalMB} MB · ${speedLabel}`
+  const tooltipBody = hasPercent && recvLabel && totalLabel
+    ? `${stageLabel} · ${recvLabel} / ${totalLabel} · ${speedLabel}`
     : busyAction === "start"
       ? "正在启动模型"
       : `${stageLabel}…`;
