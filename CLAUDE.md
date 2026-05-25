@@ -107,7 +107,7 @@ URL 拉取通过 `window.videoAnalyzer.downloadVideo(url)` 调 yt-dlp,返回 `Do
 - `electron/preload.cjs` — 唯一 `window.videoAnalyzer.*` 暴露面。
 - `electron/llama-runtime.cjs` — 本地 llama.cpp sidecar。**单例 server,同一时刻只跑一个 model;切换先 stop 再 start**(5–15s 冷启动)。从 `local-models.manifest.cjs` 读模型清单。
 - `electron/whisper-cpp-runtime.cjs` — 本地 whisper.cpp sidecar(同样单例结构)。
-- `electron/machine-detect.cjs` — 机器规格检测 + fit/tps/memPercent 计算(llmfit 风格四档:perfect / good / marginal / tight,Metal 后端 K=160 速度公式)。
+- `electron/daemon-client.cjs` — ai-model-daemon IPC 客户端(模型下载 / 硬件检测 / fit 计算 / 推荐排序)。
 - `src/AppContext.tsx` — 屏幕路由 + projects / providers / taskSlots / audioSlot / defaultAnalysis 持久化。debounced 250ms 后 saveConfig。
 - `src/screens/SettingsScreen.tsx` — 6 个 section:供应商 / 任务分配 / 本地推理 / 本地依赖 / 默认分析 / 项目数据。每个 section 独立组件。
 - `src/types.ts` — `AppConfig` / `AnalysisOptions` / `LocalModelEntry` / `MachineSpecs` / `TaskSlots` schema source of truth。

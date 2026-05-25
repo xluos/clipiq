@@ -56,7 +56,7 @@ npm run electron:dev      # Vite + Electron, renderer 走 HMR
 | 主进程编排 | `electron/main.cjs` |
 | 本地 LLM sidecar | `electron/llama-runtime.cjs` |
 | 本地 ASR sidecar | `electron/whisper-cpp-runtime.cjs` |
-| 机器规格检测 | `electron/machine-detect.cjs` |
+| 模型管理 daemon | `electron/daemon-client.cjs` → ai-model-daemon |
 | 本地模型清单 | `electron/local-models.manifest.cjs` |
 | 设计系统 | `DESIGN.md` |
 | 产品规划 | `PRODUCT.md` |
