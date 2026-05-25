@@ -113,7 +113,7 @@ export function ProgressScreen() {
     cancelledRef.current = false;
     inAttachMode.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project?.id]);
+  }, [project?.id, project?.analysisStartedAt]);
 
   useEffect(() => {
     if (progress >= 100) return;

@@ -5040,7 +5040,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
               callCount: agg.usage.callCount,
             });
           }
-          send(89, "弹幕情绪聚合完成", `${windows.filter((w) => w.danmakuCount > 0).length} 个时间桶 · ${((Date.now() - aggStart) / 1000).toFixed(1)}s`);
+          send(96, "弹幕情绪聚合完成", `${windows.filter((w) => w.danmakuCount > 0).length} 个时间桶 · ${((Date.now() - aggStart) / 1000).toFixed(1)}s`);
         }
 
         // 词云 (LLM 不可用也能跑, 纯本地启发式)
