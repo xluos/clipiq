@@ -352,11 +352,8 @@ export function ReportScreen() {
               )}
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400 font-mono pt-1">
                 <span className="text-slate-400 dark:text-slate-600">{project.id}</span>
-                {report.providerSnapshot?.name && (
-                  <span>来源 · {report.providerSnapshot.name}</span>
-                )}
                 {report.providerSnapshot?.model && (
-                  <span>模型 · {report.providerSnapshot.model}</span>
+                  <span>{report.providerSnapshot.name ? `${report.providerSnapshot.name} · ` : ""}{report.providerSnapshot.model}</span>
                 )}
                 {report.pipelineVersion && <span>流水线 · {report.pipelineVersion}</span>}
                 {report.schemaVersion && <span>Schema · {report.schemaVersion}</span>}
