@@ -2041,35 +2041,6 @@ type ProgressButtonProps = {
   busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
 };
 
-// 用 EMA 平滑两次 progress sample 的瞬时速度, 避免单点 byte 抖动 (网络 chunk 大小不均).
-// reset 条件: receivedBytes 缺失, 或 progress.file 切换 (llm → mmproj, 或 model → binary).
-function useDownloadSpeed(progress: LlamaProgress | null): number {
-  const last = useRef({ ts: 0, bytes: 0, ema: 0, file: "" });
-  const [speed, setSpeed] = useState(0);
-  const recv = progress?.receivedBytes ?? 0;
-  const file = progress?.file ?? "";
-  useEffect(() => {
-    if (!recv) {
-      last.current = { ts: 0, bytes: 0, ema: 0, file };
-      setSpeed(0);
-      return;
-    }
-    const now = Date.now();
-    if (last.current.ts === 0 || last.current.file !== file) {
-      last.current = { ts: now, bytes: recv, ema: 0, file };
-      setSpeed(0);
-      return;
-    }
-    const dt = (now - last.current.ts) / 1000;
-    if (dt < 0.2) return; // 采样太密就跳过, 防止抖
-    const inst = (recv - last.current.bytes) / dt;
-    const alpha = 0.3;
-    const ema = last.current.ema === 0 ? inst : alpha * inst + (1 - alpha) * last.current.ema;
-    last.current = { ts: now, bytes: recv, ema, file };
-    setSpeed(ema);
-  }, [recv, file]);
-  return speed;
-}
 
 function formatSpeed(bps: number): string {
   if (!bps || bps <= 0) return "—";
@@ -2084,7 +2055,7 @@ const ProgressButton: FunctionComponent<ProgressButtonProps> = ({ progress, busy
   const percent = progress?.percent;
   const hasPercent = typeof percent === "number" && percent >= 0;
   const clamped = hasPercent ? Math.min(100, Math.max(0, percent)) : 0;
-  const speed = useDownloadSpeed(progress);
+  const speed = (progress as any)?.speed ?? 0;
 
   const radius = 13;
   const circumference = 2 * Math.PI * radius;

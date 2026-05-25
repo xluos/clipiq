@@ -406,6 +406,7 @@ async function doEnsureModel(modelKey, onProgress, options = {}) {
       receivedBytes: p.done,
       totalBytes: p.total,
       percent: pct,
+      speed: p.speed || 0,
       message: p.total > 0
         ? `${label} ${pct}% (${mb(p.done)}MB / ${mb(p.total)}MB)`
         : `${label} ${mb(p.done)}MB`,
