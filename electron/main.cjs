@@ -4029,6 +4029,29 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   const audioProvider = resolveAudioProvider(cfgSnapshot);
   // 兼容旧主流程变量名
   const provider = complexVisionProvider;
+
+  // 前置校验: 本地模型 provider 必须引擎已装 + 模型已下载,否则直接拦截
+  const localProviders = [complexVisionProvider, mediumTextProvider].filter(
+    (p) => p?.source === "local_llama",
+  );
+  if (localProviders.length > 0) {
+    const localStatus = llamaRuntime.getStatus();
+    if (!localStatus.binaryFound) {
+      const binaryPath = await llamaRuntime.resolveLlamaServerPath();
+      if (!binaryPath) {
+        throw new Error("本地推理引擎未安装。请先在 设置 → 本地推理 安装推理引擎。");
+      }
+    }
+    const installedModels = await llamaRuntime.listModels();
+    const installedMap = new Map(installedModels.map((m) => [m.key, m]));
+    for (const lp of localProviders) {
+      const m = installedMap.get(lp.model);
+      if (!m || !m.downloaded) {
+        throw new Error(`本地模型 ${lp.model} 未下载。请先在 设置 → 本地推理 下载该模型。`);
+      }
+    }
+  }
+
   const handle = registerAnalysis(project.id);
   const analysisStartedAt = Date.now();
 
