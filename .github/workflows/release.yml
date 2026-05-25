@@ -41,7 +41,7 @@ jobs:
           go-version: '1.22'
 
       - name: Clone ai-model-daemon
-        run: git clone https://github.com/xushuaiwu/ai-model-daemon.git ../ai-model-daemon
+        run: git clone https://github.com/xluos/ai-model-daemon.git ../ai-model-daemon
 
       - name: Install dependencies
         timeout-minutes: 10
