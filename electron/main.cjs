@@ -7470,6 +7470,24 @@ app.whenReady().then(async () => {
     }
   });
 
+  ipcMain.handle("diagnostics:getFramesCheckpoint", async (_event, projectId) => {
+    const projectDir = path.join(app.getPath("userData"), "projects", projectId);
+    try {
+      return { ok: true, data: await readJson(path.join(projectDir, "frames-checkpoint.json"), null) };
+    } catch {
+      return { ok: true, data: null };
+    }
+  });
+
+  ipcMain.handle("diagnostics:getTranscript", async (_event, projectId) => {
+    const projectDir = path.join(app.getPath("userData"), "projects", projectId);
+    try {
+      return { ok: true, data: await readJson(path.join(projectDir, "artifacts", "transcript.json"), null) };
+    } catch {
+      return { ok: true, data: null };
+    }
+  });
+
   await createWindow();
   createTray();
 
