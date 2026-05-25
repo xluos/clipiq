@@ -213,6 +213,29 @@ export type CacheEntry = {
   meta: Record<string, unknown> | null;
 };
 
+export type FramesCheckpointEntry = {
+  index: number;
+  startSec: number;
+  endSec: number;
+  midSec: number;
+  framePath: string;
+  prefilterFramePath?: string | null;
+  hash?: string;
+};
+
+export type FramesCheckpoint = {
+  frames: FramesCheckpointEntry[];
+  skipped: number;
+  pipelineVersion?: string;
+};
+
+export type TranscriptData = {
+  language?: string;
+  text: string;
+  segments: Array<{ start: number; end: number; text: string }>;
+  duration?: number;
+};
+
 export type AnalysisSampleStageTokenDelta = {
   stage: string;
   providerId: string | null;
@@ -411,6 +434,8 @@ declare global {
       diagnostics: {
         getAnalysisSamples: () => Promise<{ ok: boolean; samples: AnalysisSample[]; error?: string }>;
         getTokenUsage: (projectId: string) => Promise<{ ok: boolean; data: import("./types").TokenUsageSummary | null }>;
+        getFramesCheckpoint: (projectId: string) => Promise<{ ok: boolean; data: FramesCheckpoint | null }>;
+        getTranscript: (projectId: string) => Promise<{ ok: boolean; data: TranscriptData | null }>;
       };
       cache: {
         getStats: () => Promise<CacheStats>;

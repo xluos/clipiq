@@ -1,10 +1,11 @@
 import { useApp } from "../AppContext";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, RefreshCw, ChevronDown, ChevronRight, Clock, Zap, Hash, Database } from "lucide-react";
+import { ArrowLeft, RefreshCw, ChevronDown, ChevronRight, Clock, Zap, Hash, Database, GitBranch } from "lucide-react";
 import { type FunctionComponent, useCallback, useEffect, useMemo, useState } from "react";
 import type { AnalysisSample, AnalysisSampleStage } from "../electron-api";
 import type { Project } from "../types";
+import { PipelineView } from "./PipelineView";
 
 // stage 已经是中文，过滤掉"完成"/"就绪"等纯状态标记行（不含实际耗时）
 const SKIP_STAGES = new Set([
@@ -117,7 +118,8 @@ function extractStageMeta(stages: AnalysisSampleStage[]) {
 const SampleCard: FunctionComponent<{
   sample: AnalysisSample;
   project?: Project;
-}> = ({ sample, project }) => {
+  onViewPipeline?: () => void;
+}> = ({ sample, project, onViewPipeline }) => {
   const [expanded, setExpanded] = useState(false);
   const tokens = useMemo(() => aggregateStageTokens(sample.stages), [sample.stages]);
   const meta = useMemo(() => extractStageMeta(sample.stages), [sample.stages]);
@@ -163,6 +165,19 @@ const SampleCard: FunctionComponent<{
             <Hash className="w-3 h-3" />
             {fmtTokens(tokens.totalTokens)}
           </span>
+          {sample.outcome === "ok" && onViewPipeline && (
+            <span
+              role="button"
+              tabIndex={0}
+              onClick={(e) => { e.stopPropagation(); onViewPipeline(); }}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); onViewPipeline(); } }}
+              className="flex items-center gap-1 text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+              title="查看管线"
+            >
+              <GitBranch className="w-3 h-3" />
+              管线
+            </span>
+          )}
         </div>
       </button>
 
@@ -310,6 +325,8 @@ export function DiagnosticsScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterOutcome>("all");
+  const [viewMode, setViewMode] = useState<"list" | "pipeline">("list");
+  const [pipelineProjectId, setPipelineProjectId] = useState<string | null>(null);
 
   const projectMap = useMemo(() => {
     const m = new Map<string, Project>();
@@ -365,6 +382,16 @@ export function DiagnosticsScreen() {
       totalDuration,
     };
   }, [samples]);
+
+  if (viewMode === "pipeline" && pipelineProjectId) {
+    return (
+      <PipelineView
+        projectId={pipelineProjectId}
+        project={projectMap.get(pipelineProjectId)}
+        onBack={() => { setViewMode("list"); setPipelineProjectId(null); }}
+      />
+    );
+  }
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -456,6 +483,7 @@ export function DiagnosticsScreen() {
                 key={`${s.projectId}-${s.startedAt}-${i}`}
                 sample={s}
                 project={projectMap.get(s.projectId)}
+                onViewPipeline={() => { setPipelineProjectId(s.projectId); setViewMode("pipeline"); }}
               />
             ))}
           </div>
