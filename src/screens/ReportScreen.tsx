@@ -351,7 +351,7 @@ export function ReportScreen() {
                 </p>
               )}
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400 font-mono pt-1">
-                <span className="text-slate-400 dark:text-slate-600">{project.id.slice(0, 8)}</span>
+                <span className="text-slate-400 dark:text-slate-600">{project.id}</span>
                 {report.providerSnapshot?.name && (
                   <span>来源 · {report.providerSnapshot.name}</span>
                 )}

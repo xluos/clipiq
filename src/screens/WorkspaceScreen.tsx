@@ -228,6 +228,7 @@ export function WorkspaceScreen() {
           <div className="h-4 w-px bg-slate-200 dark:bg-slate-800" />
           <div className="flex items-center gap-3 min-w-0">
             <span className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate max-w-[180px] md:max-w-xs">{project.videoName}</span>
+            <span className="text-[10px] font-mono text-slate-400 dark:text-slate-600 shrink-0">{project.id}</span>
             <span className="px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-[10px] border border-indigo-100 dark:border-indigo-500/20 shrink-0">
               {project.orientation === "portrait" ? "竖屏" : project.orientation === "square" ? "方形" : "横屏"}
             </span>
