@@ -48,7 +48,7 @@ export const StageShotMerge: FunctionComponent<Props> = ({ shots, meta }) => {
         )}
       </div>
 
-      <div className="space-y-1.5">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-1.5">
         {displayed.map((sc) => {
           const hero = sc.representativeFrames?.[0] || sc.frames?.[0];
           const dur = sc.endSec - sc.startSec;

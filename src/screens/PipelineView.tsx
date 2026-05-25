@@ -196,7 +196,7 @@ export const PipelineView: FunctionComponent<Props> = ({ projectId, project, onB
         )}
 
         {!loading && !error && data && (
-          <div className="space-y-2 max-w-4xl">
+          <div className="space-y-2">
             {/* Stage 1: Extract Frames */}
             <PipelineStagePanel
               index={1} name="抽帧" color="bg-blue-500"
