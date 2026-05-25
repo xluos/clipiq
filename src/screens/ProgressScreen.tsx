@@ -9,6 +9,7 @@ const STAGES = [
   "检测镜头切换",
   "挑选关键画面",
   "识别字幕",
+  "镜头合并",
   "整理分析素材",
   "模型分析画面",
   "整理结果",
@@ -17,13 +18,14 @@ const STAGES = [
 
 const STAGE_KEYWORDS: [number, RegExp][] = [
   [0, /读取视频|校验视频|视频信息|下载视频/],
-  [1, /镜头切换|镜头合并|shot-merger/],
+  [1, /镜头切换/],
   [2, /关键画面|抽取|抽帧|画面去重|本地初筛|本地推理预检|prefilter/],
   [3, /字幕|音轨|whisper|识别字幕|提取音轨/],
-  [4, /准备分析|整理.*素材|全局聚合|summarizer|识别视频类型|类型识别|detect-genre/],
-  [5, /模型分析|主分析|main-analysis|弹幕|danmaku|拉取弹幕|分析失败|^失败$/],
-  [6, /整理结果|保存|title-gen|生成标题/],
-  [7, /生成.*报告|完成|已结束/],
+  [4, /镜头合并|镜头缩略图|shot-merger/],
+  [5, /准备分析|整理.*素材|全局聚合|summarizer|识别视频类型|类型识别|detect-genre/],
+  [6, /模型分析|主分析|main-analysis|弹幕|danmaku|拉取弹幕|分析失败|^失败$/],
+  [7, /整理结果|保存|title-gen|生成标题/],
+  [8, /生成.*报告|完成|已结束/],
 ];
 
 function mapStageToIndex(stage: string, message?: string): number {
