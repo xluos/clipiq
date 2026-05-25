@@ -306,6 +306,8 @@ function downloadModel(modelId, onProgress) {
           } else if (eventType === "done") {
             if (payload.ok) {
               resolve({ ok: true });
+            } else if (payload.cancelled) {
+              resolve({ ok: false, cancelled: true });
             } else {
               reject(new Error(payload.error || "下载失败"));
             }
@@ -319,7 +321,13 @@ function downloadModel(modelId, onProgress) {
       });
     });
 
-    req.on("error", reject);
+    req.on("error", (err) => {
+      if (/cancel|abort|socket hang up/i.test(err?.message)) {
+        resolve({ ok: false, cancelled: true });
+      } else {
+        reject(err);
+      }
+    });
     req.end();
   });
 }

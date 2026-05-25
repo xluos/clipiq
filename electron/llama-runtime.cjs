@@ -395,7 +395,7 @@ async function doEnsureModel(modelKey, onProgress, options = {}) {
 
   onProgress({ stage: "start", label: meta.name, message: `开始下载 ${meta.name}` });
 
-  await daemonClient.downloadModel(modelKey, (p) => {
+  const result = await daemonClient.downloadModel(modelKey, (p) => {
     const label = roleLabels[p.fileRole] || p.fileRole || meta.name;
     const pct = p.pct || 0;
     const mb = (n) => (n / 1024 / 1024).toFixed(1);
@@ -413,6 +413,10 @@ async function doEnsureModel(modelKey, onProgress, options = {}) {
     });
   });
 
+  if (result?.cancelled) {
+    onProgress({ stage: "cancelled", label: meta.name, message: `${meta.name} 下载已取消` });
+    return { ok: false, cancelled: true, modelKey };
+  }
   onProgress({ stage: "done", label: meta.name, message: `${meta.name} 下载完成` });
   return { ok: true, modelKey };
 }
