@@ -4172,23 +4172,11 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       throw new Error("未检测到 ffmpeg/ffprobe，无法生成关键帧和媒体清单。");
     }
 
-    send(2, "读取视频信息", "正在校验视频时长、分辨率、音轨。");
-    ensureNotCancelled(handle);
-    const inputFileSize = await fs.stat(inputPath).then((s) => s.size).catch(() => 0);
-    const inspected = await inspectVideo(inputPath, handle);
-    handle.attachStageMeta({ fileSizeBytes: inputFileSize, durationSec: inspected.durationSec, width: inspected.width, height: inspected.height });
     const projectDir = getProjectDir(project.id);
     const artifactDir = path.join(projectDir, "artifacts");
     await fs.mkdir(artifactDir, { recursive: true });
-    const projectMeta = { ...project, ...inspected, hasAudio: inspected.hasAudio };
 
-    send(6, "检测镜头切换", "扫描视频中的镜头切换点。");
-    ensureNotCancelled(handle);
-    const sceneThreshold = sceneThresholdFor(options);
-    const scenes = await detectScenes(ffmpeg, inputPath, sceneThreshold, handle);
-    handle.attachStageMeta({ scenesCount: scenes.length, durationSec: inspected.durationSec });
-    // 本地初筛预检: 检查"用户配了模型 + 二进制装了 + 模型下完",通过即可走初筛。
-    // 真正的 server start / model 切换由 llamaManager.acquire 在 tagFrames 时按需触发。
+    // 本地初筛预检(始终重新评估,不从 checkpoint 恢复)
     let localPrefilterReady = false;
     let prefilterModelKey = null;
     {
@@ -4210,13 +4198,73 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         }
       }
     }
-    const finalCount = targetFrameCount(inspected.durationSec || project.durationSec || 1, options);
-    const candidateCount = candidateFrameCount(
-      inspected.durationSec || project.durationSec || 1,
-      options,
-      localPrefilterReady,
-    );
-    const plan = planFramePlan(scenes, inspected.durationSec || project.durationSec || 1, candidateCount);
+
+    // --- Checkpoint Phase 1: 视频检测 + 场景分析 + 帧计划 ---
+    const manifestPath = path.join(projectDir, "media-manifest.json");
+    const savedManifest = await readJson(manifestPath, null).catch(() => null);
+    const manifestValid = savedManifest
+      && savedManifest.pipelineVersion === PIPELINE_VERSION
+      && savedManifest.scenes?.length > 0
+      && savedManifest.plan?.length > 0;
+
+    let inspected, scenes, plan, finalCount, candidateCount, inputFileSize;
+    if (manifestValid) {
+      send(2, "恢复进度", "检测到上次的视频检测和场景分析结果,跳过重复阶段。");
+      inspected = {
+        durationSec: savedManifest.durationSec,
+        width: savedManifest.width,
+        height: savedManifest.height,
+        orientation: savedManifest.orientation,
+        hasAudio: savedManifest.hasAudio,
+      };
+      scenes = savedManifest.scenes;
+      inputFileSize = await fs.stat(inputPath).then((s) => s.size).catch(() => 0);
+      handle.attachStageMeta({ fileSizeBytes: inputFileSize, durationSec: inspected.durationSec, width: inspected.width, height: inspected.height, resumed: true });
+      // prefilter 状态可能变了,重新算帧数和计划
+      finalCount = targetFrameCount(inspected.durationSec || project.durationSec || 1, options);
+      candidateCount = candidateFrameCount(inspected.durationSec || project.durationSec || 1, options, localPrefilterReady);
+      if (savedManifest.localPrefilterReady === localPrefilterReady && savedManifest.candidateFrameCount === candidateCount) {
+        plan = savedManifest.plan;
+      } else {
+        plan = planFramePlan(scenes, inspected.durationSec || project.durationSec || 1, candidateCount);
+      }
+    } else {
+      send(2, "读取视频信息", "正在校验视频时长、分辨率、音轨。");
+      ensureNotCancelled(handle);
+      inputFileSize = await fs.stat(inputPath).then((s) => s.size).catch(() => 0);
+      inspected = await inspectVideo(inputPath, handle);
+      handle.attachStageMeta({ fileSizeBytes: inputFileSize, durationSec: inspected.durationSec, width: inspected.width, height: inspected.height });
+
+      send(6, "检测镜头切换", "扫描视频中的镜头切换点。");
+      ensureNotCancelled(handle);
+      const sceneThreshold = sceneThresholdFor(options);
+      scenes = await detectScenes(ffmpeg, inputPath, sceneThreshold, handle);
+      handle.attachStageMeta({ scenesCount: scenes.length, durationSec: inspected.durationSec });
+
+      finalCount = targetFrameCount(inspected.durationSec || project.durationSec || 1, options);
+      candidateCount = candidateFrameCount(inspected.durationSec || project.durationSec || 1, options, localPrefilterReady);
+      plan = planFramePlan(scenes, inspected.durationSec || project.durationSec || 1, candidateCount);
+
+      await writeJson(manifestPath, {
+        source: project.source,
+        filePath: inputPath,
+        durationSec: inspected.durationSec,
+        width: inspected.width,
+        height: inspected.height,
+        orientation: inspected.orientation,
+        hasAudio: inspected.hasAudio,
+        scenes,
+        plan,
+        sceneThreshold,
+        finalFrameCount: finalCount,
+        candidateFrameCount: candidateCount,
+        localPrefilterReady,
+        pipelineVersion: PIPELINE_VERSION,
+        schemaVersion: SCHEMA_VERSION,
+        generatedAt: new Date().toISOString(),
+      });
+    }
+    const projectMeta = { ...project, ...inspected, hasAudio: inspected.hasAudio };
     send(
       8,
       "挑选关键画面",
@@ -4225,38 +4273,33 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         : `从 ${scenes.length} 个镜头里挑出 ${plan.length} 张关键画面。`,
     );
 
-    await writeJson(path.join(projectDir, "media-manifest.json"), {
-      source: project.source,
-      filePath: inputPath,
-      durationSec: inspected.durationSec,
-      width: inspected.width,
-      height: inspected.height,
-      orientation: inspected.orientation,
-      hasAudio: inspected.hasAudio,
-      scenes,
-      plan,
-      sceneThreshold,
-      finalFrameCount: finalCount,
-      candidateFrameCount: candidateCount,
-      localPrefilterReady,
-      pipelineVersion: PIPELINE_VERSION,
-      schemaVersion: SCHEMA_VERSION,
-      generatedAt: new Date().toISOString(),
-    });
-
-    send(8, "抽取关键画面", `准备抽取 ${plan.length} 张关键画面,会自动去掉相似画面。`);
-    handle.attachStageMeta({ planned: plan.length, durationSec: inspected.durationSec });
-    const { frames: candidateFrames, skipped } = await buildFrames(
-      ffmpeg,
-      inputPath,
-      plan,
-      artifactDir,
-      handle,
-      (i, total, sec) => {
-        send(8 + Math.round((i / total) * 14), "抽取关键画面", `已抽 ${i + 1} / ${total} 张 · 第 ${sec.toFixed(1)} 秒`);
-      },
-      { withPrefilterFrame: localPrefilterReady },
-    );
+    // --- Checkpoint Phase 2: 抽帧 ---
+    const framesCheckpointPath = path.join(projectDir, "frames-checkpoint.json");
+    const savedFrames = await readJson(framesCheckpointPath, null).catch(() => null);
+    const framesValid = savedFrames?.frames?.length > 0
+      && savedFrames.pipelineVersion === PIPELINE_VERSION
+      && savedFrames.frames.every((f) => fsSync.existsSync(f.framePath));
+    let candidateFrames, skipped;
+    if (framesValid) {
+      send(8, "恢复进度", `跳过抽帧,复用 ${savedFrames.frames.length} 张已有关键画面。`);
+      candidateFrames = savedFrames.frames;
+      skipped = savedFrames.skipped || 0;
+    } else {
+      send(8, "抽取关键画面", `准备抽取 ${plan.length} 张关键画面,会自动去掉相似画面。`);
+      handle.attachStageMeta({ planned: plan.length, durationSec: inspected.durationSec });
+      ({ frames: candidateFrames, skipped } = await buildFrames(
+        ffmpeg,
+        inputPath,
+        plan,
+        artifactDir,
+        handle,
+        (i, total, sec) => {
+          send(8 + Math.round((i / total) * 14), "抽取关键画面", `已抽 ${i + 1} / ${total} 张 · 第 ${sec.toFixed(1)} 秒`);
+        },
+        { withPrefilterFrame: localPrefilterReady },
+      ));
+      await writeJson(framesCheckpointPath, { frames: candidateFrames, skipped, pipelineVersion: PIPELINE_VERSION });
+    }
     handle.attachStageMeta({ candidateFrames: candidateFrames.length, skipped });
     if (skipped > 0) {
       send(22, "画面去重", `去掉 ${skipped} 张相似画面,保留 ${candidateFrames.length} 张。`);
@@ -4346,10 +4389,16 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       }
     }
 
-    // 音频转录（可选）
+    // --- Checkpoint Phase 3: 音频转录 ---
     let transcript = null;
     let transcriptError = null;
-    const audioReady = audioProvider && inspected.hasAudio && (
+    const transcriptPath = path.join(artifactDir, "transcript.json");
+    const savedTranscript = await readJson(transcriptPath, null).catch(() => null);
+    if (savedTranscript?.segments?.length > 0) {
+      transcript = savedTranscript;
+      send(50, "恢复进度", `跳过字幕识别,复用 ${transcript.segments.length} 段已有字幕。`);
+    }
+    const audioReady = !transcript && audioProvider && inspected.hasAudio && (
       audioProvider.source === "local_whisper" ||
       audioProvider.endpointType === "local_whisper_cpp" ||
       audioProvider.endpointType === "local_whisper_wasm" ||
