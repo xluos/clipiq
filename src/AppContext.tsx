@@ -13,6 +13,16 @@ function detectLogTone(stage: string, message: string): "info" | "ok" | "warn" {
 
 const PROGRESS_LOG_LIMIT = 30;
 
+export type ModelDownloadProgress = {
+  modelKey: string;
+  label: string;
+  stage: string;
+  percent: number;
+  receivedBytes: number;
+  totalBytes: number;
+  speed: number;
+};
+
 export type AccountFetchUiState = {
   stage: string;
   progress: number;
@@ -93,6 +103,8 @@ interface AppState {
   budgetByProject: Record<string, AnalysisBudget>;
   // attach 模式重连时, ProgressScreen 调 getLastAnalysisBudget 拉一次后用这个写回 cache。
   setBudgetForProject: (projectId: string, budget: AnalysisBudget) => void;
+  // 模型下载进度,全局订阅 llama:progress (scope=model) 写入,任务队列和设置页共享读取
+  modelDownloads: Record<string, ModelDownloadProgress>;
 }
 
 const AppContext = createContext<AppState | undefined>(undefined);
@@ -258,6 +270,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [progressByProject, setProgressByProject] = useState<Record<string, AnalysisProgressEvent>>({});
   const [logsByProject, setLogsByProject] = useState<Record<string, ProgressLogEntry[]>>({});
   const [budgetByProject, setBudgetByProject] = useState<Record<string, AnalysisBudget>>({});
+  const [modelDownloads, setModelDownloads] = useState<Record<string, ModelDownloadProgress>>({});
 
   const upsertAccount = useCallback((a: Account) => {
     setAccounts((prev) => {
@@ -646,6 +659,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return off;
   }, []);
 
+  // 全局订阅 llama:progress — 模型下载进度写入 modelDownloads,任务队列和设置页共享
+  useEffect(() => {
+    if (!window.videoAnalyzer?.llama?.onProgress) return;
+    const off = window.videoAnalyzer.llama.onProgress((evt: any) => {
+      if (evt.scope !== "model" || !evt.modelKey) return;
+      if (evt.stage === "done" || evt.stage === "cancelled") {
+        setModelDownloads((prev) => {
+          const next = { ...prev };
+          delete next[evt.modelKey];
+          return next;
+        });
+        return;
+      }
+      setModelDownloads((prev) => ({
+        ...prev,
+        [evt.modelKey]: {
+          modelKey: evt.modelKey,
+          label: evt.label || evt.modelKey,
+          stage: evt.stage || "download",
+          percent: evt.percent ?? 0,
+          receivedBytes: evt.receivedBytes ?? 0,
+          totalBytes: evt.totalBytes ?? 0,
+          speed: evt.speed ?? 0,
+        },
+      }));
+    });
+    return off;
+  }, []);
+
   // 订阅 analyzeProject 起来时广播的 ETA budget — 全局只挂一次, 写进 budgetByProject。
   // ProgressScreen 读这里给出比线性外推更准的 ETA; attach 模式重连时通过
   // getLastAnalysisBudget IPC 拉一次补回 cache。
@@ -787,6 +829,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         logsByProject,
         budgetByProject,
         setBudgetForProject,
+        modelDownloads,
       }}
     >
       {children}

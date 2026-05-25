@@ -1,87 +1,107 @@
-// 全局任务队列面板 — sidebar 任务队列按钮浮出。
-// 数据源: AppContext.projects + AppContext.progressByProject (全局只挂一次的
-// analysis:progress 订阅, 见 AppContext.tsx)。drawer 打开时立即拿到最新进度,
-// 不再因为组件 mount 才订阅而错过之前的 events。
-// 单击任务行跳到对应项目的 progress / workspace 屏。
+// 全局任务队列面板 — 通用任务状态展示框架。
+// 每种任务类型是一个独立 section,各自维护状态互不影响。
+// 新增任务类型只需在 useTaskQueueData 里加一个数组 + drawer 里加一个 Section。
 
 import { type FunctionComponent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { useApp } from "../AppContext";
+import { useApp, type ModelDownloadProgress } from "../AppContext";
 import type { Project } from "../types";
-import { Cpu, X, ChevronRight, AlertTriangle, UserSquare2 } from "lucide-react";
+import { Cpu, X, ChevronRight, AlertTriangle, UserSquare2, Download } from "lucide-react";
 
-type RunningTask = {
-  projectId: string;
-  videoName: string;
-  progress: number;       // 0-100
-  stage: string;
-  message?: string;
-};
+// ─── 通用任务条目类型 ─────────────────────────────────
 
-type RunningAccountFetch = {
-  accountId: string;
-  accountName: string;
+type TaskEntry = {
+  id: string;
+  title: string;
   progress: number;
   stage: string;
   message?: string;
+  icon?: ReactNode;
+  onClick?: () => void;
 };
 
-export function useTaskQueueData() {
-  const { projects, accounts, accountFetchUi, progressByProject } = useApp();
+// ─── 数据汇聚 hook ────────────────────────────────────
 
-  const { running, queued, failed, accountFetches } = useMemo(() => {
-    const running: RunningTask[] = [];
-    const queued: Project[] = [];
-    const failed: Project[] = [];
+export function useTaskQueueData() {
+  const { projects, accounts, accountFetchUi, progressByProject, modelDownloads } = useApp();
+
+  return useMemo(() => {
+    // 视频分析任务
+    const analysisTasks: TaskEntry[] = [];
+    const failedProjects: Project[] = [];
     for (const p of projects) {
       if (p.status === "analyzing" || p.status === "downloading") {
         const evt = progressByProject[p.id];
         const isDownloading = p.status === "downloading";
-        running.push({
-          projectId: p.id,
-          videoName: p.videoName,
+        analysisTasks.push({
+          id: p.id,
+          title: p.videoName,
           progress: Math.round(evt?.progress ?? (isDownloading ? 5 : 50)),
           stage: evt?.stage || (isDownloading ? "下载视频" : "分析中"),
           message: evt?.message,
         });
       } else if (p.status === "failed" || p.status === "download_failed") {
-        failed.push(p);
-      } else if (p.status === "not_analyzed") {
-        // 不算队列(用户没主动 start),跳过
+        failedProjects.push(p);
       }
     }
-    const accountFetches: RunningAccountFetch[] = [];
+
+    // 账号拉取任务
+    const accountTasks: TaskEntry[] = [];
     for (const accountId of Object.keys(accountFetchUi)) {
       const ui = accountFetchUi[accountId];
       const acc = accounts.find((a) => a.id === accountId);
-      accountFetches.push({
-        accountId,
-        accountName: acc?.name || accountId,
+      accountTasks.push({
+        id: accountId,
+        title: acc?.name || accountId,
         progress: Math.round(ui.progress || 0),
         stage: ui.stage,
         message: ui.message,
+        icon: <UserSquare2 className="w-3.5 h-3.5 text-slate-500 shrink-0" strokeWidth={1.5} />,
       });
     }
-    return { running, queued, failed, accountFetches };
-  }, [projects, progressByProject, accounts, accountFetchUi]);
 
-  return { running, queued, failed, accountFetches };
+    // 模型下载任务
+    const downloadTasks: TaskEntry[] = Object.values(modelDownloads).map((d: ModelDownloadProgress) => ({
+      id: d.modelKey,
+      title: d.label || d.modelKey,
+      progress: d.percent,
+      stage: d.stage === "progress" ? "下载中" : d.stage,
+      message: fmtSize(d.receivedBytes) && fmtSize(d.totalBytes)
+        ? `${fmtSize(d.receivedBytes)} / ${fmtSize(d.totalBytes)} · ${fmtSpeed(d.speed)}`
+        : undefined,
+      icon: <Download className="w-3.5 h-3.5 text-slate-500 shrink-0" strokeWidth={1.5} />,
+    }));
+
+    const totalRunning = analysisTasks.length + accountTasks.length + downloadTasks.length;
+    return { analysisTasks, accountTasks, downloadTasks, failedProjects, totalRunning };
+  }, [projects, progressByProject, accounts, accountFetchUi, modelDownloads]);
 }
 
-// Sidebar 上的按钮 — 显示运行中数字徽章,点击切换浮层
+function fmtSize(n: number): string | null {
+  if (!n) return null;
+  if (n >= 1024 * 1024 * 1024) return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  return `${(n / 1024 / 1024).toFixed(0)} MB`;
+}
+
+function fmtSpeed(bps: number): string {
+  if (!bps || bps <= 0) return "—";
+  if (bps >= 1024 * 1024) return `${(bps / 1024 / 1024).toFixed(1)} MB/s`;
+  if (bps >= 1024) return `${Math.round(bps / 1024)} KB/s`;
+  return `${Math.round(bps)} B/s`;
+}
+
+// ─── Sidebar 按钮 ──────────────────────────────────────
+
 export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ collapsed }) => {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const { running, failed, accountFetches } = useTaskQueueData();
+  const { totalRunning, failedProjects } = useTaskQueueData();
   const sidebarWidth = collapsed ? 56 : 220;
-  const totalRunning = running.length + accountFetches.length;
 
-  // 点击外部关闭 — 用 mouseup + 下一帧 attach,避免和触发的 click 同一帧自杀
   useEffect(() => {
     if (!open) return;
     let attached = false;
     const onUp = (e: MouseEvent) => {
       const wrap = wrapRef.current;
-      // 同时检测 wrap (button) 和 drawer (fixed,在 wrap 之外)
       const drawer = document.querySelector('[data-task-queue-drawer="1"]');
       const target = e.target as Node;
       if (wrap?.contains(target)) return;
@@ -121,7 +141,7 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
               {totalRunning}
             </span>
           )}
-          {totalRunning === 0 && failed.length > 0 && (
+          {totalRunning === 0 && failedProjects.length > 0 && (
             <span
               className="absolute -top-1 -right-1.5 min-w-[14px] h-[14px] px-1 rounded-full bg-rose-500 text-white font-mono font-semibold flex items-center justify-center leading-none"
               style={{ fontSize: 9 }}
@@ -147,13 +167,13 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
   );
 };
 
+// ─── Drawer ────────────────────────────────────────────
+
 const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: number }> = ({ onClose, sidebarWidth }) => {
-  const { setLocation, setActiveProjectId } = useApp();
-  const { running, failed, accountFetches } = useTaskQueueData();
+  const { setLocation, setActiveProjectId, setCurrentScreen } = useApp();
+  const { analysisTasks, accountTasks, downloadTasks, failedProjects, totalRunning } = useTaskQueueData();
 
   const openProject = (projectId: string) => {
-    // running / failed 都跳 progress 屏:running 显示实时进度;failed 显示上次错误 + "重试"按钮
-    // (旧逻辑对 failed 直接 startAnalysisForProject 静默重跑,既看不到原因也很可能因同样问题再次失败)
     setActiveProjectId(projectId);
     setLocation({ module: "analysis", screen: "progress" });
     onClose();
@@ -165,7 +185,10 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
     onClose();
   };
 
-  const totalRunning = running.length + accountFetches.length;
+  const openSettings = () => {
+    setCurrentScreen("settings");
+    onClose();
+  };
 
   return (
     <div
@@ -181,61 +204,19 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
       </div>
 
       <div className="max-h-[460px] overflow-y-auto">
-        {/* 下载 + 分析 */}
-        {running.length > 0 && (
-          <Section title="视频任务" count={running.length}>
-            {running.map((t) => (
-              <button
-                key={t.projectId}
-                onClick={() => openProject(t.projectId)}
-                className="w-full text-left px-4 py-2.5 hover:bg-slate-50 dark:hover:bg-slate-800/40 border-b border-slate-100 dark:border-slate-800/60 last:border-b-0"
-              >
-                <div className="flex items-center gap-2">
-                  <div className="text-[12.5px] font-medium text-slate-900 dark:text-slate-100 truncate flex-1">{t.videoName}</div>
-                  <span className="text-[10.5px] font-mono text-indigo-700 dark:text-indigo-400">{t.progress}%</span>
-                </div>
-                <div className="mt-1.5 h-1 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-                  <div className="h-full bg-indigo-600 dark:bg-indigo-500 rounded-full transition-all duration-300" style={{ width: `${t.progress}%` }} />
-                </div>
-                <div className="mt-1 text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                  <span>{t.stage}</span>
-                  {t.message && <span className="truncate flex-1">· {t.message}</span>}
-                </div>
-              </button>
-            ))}
-          </Section>
-        )}
+        {/* 视频分析 */}
+        <TaskSection title="视频分析" entries={analysisTasks} onClickEntry={(t) => openProject(t.id)} />
+
+        {/* 模型下载 */}
+        <TaskSection title="模型下载" entries={downloadTasks} onClickEntry={() => openSettings()} />
 
         {/* 账号拉取 */}
-        {accountFetches.length > 0 && (
-          <Section title="账号拉取" count={accountFetches.length}>
-            {accountFetches.map((t) => (
-              <button
-                key={t.accountId}
-                onClick={() => openAccount(t.accountId)}
-                className="w-full text-left px-4 py-2.5 hover:bg-slate-50 dark:hover:bg-slate-800/40 border-b border-slate-100 dark:border-slate-800/60 last:border-b-0"
-              >
-                <div className="flex items-center gap-2">
-                  <UserSquare2 className="w-3.5 h-3.5 text-slate-500 shrink-0" strokeWidth={1.5} />
-                  <div className="text-[12.5px] font-medium text-slate-900 dark:text-slate-100 truncate flex-1">{t.accountName}</div>
-                  <span className="text-[10.5px] font-mono text-indigo-700 dark:text-indigo-400">{t.progress}%</span>
-                </div>
-                <div className="mt-1.5 h-1 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-                  <div className="h-full bg-indigo-600 dark:bg-indigo-500 rounded-full transition-all duration-300" style={{ width: `${t.progress}%` }} />
-                </div>
-                <div className="mt-1 text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-2">
-                  <span>{t.stage}</span>
-                  {t.message && <span className="truncate flex-1">· {t.message}</span>}
-                </div>
-              </button>
-            ))}
-          </Section>
-        )}
+        <TaskSection title="账号拉取" entries={accountTasks} onClickEntry={(t) => openAccount(t.id)} />
 
         {/* 失败 */}
-        {failed.length > 0 && (
-          <Section title="失败 · 可重试" count={failed.length} tone="danger">
-            {failed.map((p) => (
+        {failedProjects.length > 0 && (
+          <Section title="失败 · 可重试" count={failedProjects.length} tone="danger">
+            {failedProjects.map((p) => (
               <button
                 key={p.id}
                 onClick={() => openProject(p.id)}
@@ -249,7 +230,7 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
           </Section>
         )}
 
-        {totalRunning === 0 && failed.length === 0 && (
+        {totalRunning === 0 && failedProjects.length === 0 && (
           <div className="px-4 py-8 text-center">
             <p className="text-[12.5px] text-slate-500 dark:text-slate-400 leading-relaxed">
               当前没有任务在运行
@@ -260,6 +241,42 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
     </div>
   );
 };
+
+// ─── 通用任务 Section ──────────────────────────────────
+
+const TaskSection: FunctionComponent<{
+  title: string;
+  entries: TaskEntry[];
+  onClickEntry: (entry: TaskEntry) => void;
+}> = ({ title, entries, onClickEntry }) => {
+  if (entries.length === 0) return null;
+  return (
+    <Section title={title} count={entries.length}>
+      {entries.map((t) => (
+        <button
+          key={t.id}
+          onClick={() => onClickEntry(t)}
+          className="w-full text-left px-4 py-2.5 hover:bg-slate-50 dark:hover:bg-slate-800/40 border-b border-slate-100 dark:border-slate-800/60 last:border-b-0"
+        >
+          <div className="flex items-center gap-2">
+            {t.icon}
+            <div className="text-[12.5px] font-medium text-slate-900 dark:text-slate-100 truncate flex-1">{t.title}</div>
+            <span className="text-[10.5px] font-mono text-indigo-700 dark:text-indigo-400">{t.progress}%</span>
+          </div>
+          <div className="mt-1.5 h-1 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+            <div className="h-full bg-indigo-600 dark:bg-indigo-500 rounded-full transition-all duration-300" style={{ width: `${t.progress}%` }} />
+          </div>
+          <div className="mt-1 text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-2">
+            <span>{t.stage}</span>
+            {t.message && <span className="truncate flex-1">· {t.message}</span>}
+          </div>
+        </button>
+      ))}
+    </Section>
+  );
+};
+
+// ─── Section 容器 ──────────────────────────────────────
 
 const Section: FunctionComponent<{
   title: string;
@@ -280,4 +297,3 @@ const Section: FunctionComponent<{
     </div>
   );
 };
-

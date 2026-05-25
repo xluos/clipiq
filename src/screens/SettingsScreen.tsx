@@ -1675,7 +1675,8 @@ function LocalInferenceSection() {
   const [status, setStatus] = useState<LlamaStatus | null>(null);
   const [machine, setMachine] = useState<MachineInfo | null>(null);
   const [manifestModels, setManifestModels] = useState<ModelDescriptor[]>([]);
-  const [progressMap, setProgressMap] = useState<Record<string, LlamaProgress | null>>({});
+  const { modelDownloads } = useApp();
+  const [localProgressMap, setLocalProgressMap] = useState<Record<string, LlamaProgress | null>>({});
   const [busyMap, setBusyMap] = useState<Record<string, "binary" | "download" | "start" | "stop" | "selftest">>({});
   const setBusyFor = (key: string, action: "binary" | "download" | "start" | "stop" | "selftest") =>
     setBusyMap((prev) => ({ ...prev, [key]: action }));
@@ -1713,12 +1714,33 @@ function LocalInferenceSection() {
     }
   };
 
+  // 合并全局 modelDownloads (download 阶段) 和本地 progress (binary/start 阶段)
+  const progressMap = useMemo(() => {
+    const merged: Record<string, LlamaProgress | null> = { ...localProgressMap };
+    for (const [key, dl] of Object.entries(modelDownloads) as [string, { label: string; percent: number; receivedBytes: number; totalBytes: number; speed: number }][]) {
+      merged[key] = {
+        scope: "model",
+        modelKey: key,
+        stage: "progress",
+        label: dl.label,
+        percent: dl.percent,
+        receivedBytes: dl.receivedBytes,
+        totalBytes: dl.totalBytes,
+        speed: dl.speed,
+      } as any;
+    }
+    return merged;
+  }, [localProgressMap, modelDownloads]);
+
   useEffect(() => {
     refresh();
     if (!window.videoAnalyzer?.llama) return;
-    const unsub = window.videoAnalyzer.llama.onProgress((event) => {
+    const unsub = window.videoAnalyzer.llama.onProgress((event: any) => {
       const key = event.modelKey || "";
-      if (key) setProgressMap((prev) => ({ ...prev, [key]: event }));
+      // download 阶段由全局 modelDownloads 覆盖,本地只存 binary/start 等非下载进度
+      if (key && event.scope !== "model") {
+        setLocalProgressMap((prev) => ({ ...prev, [key]: event }));
+      }
     });
     return unsub;
   }, [refresh]);
@@ -1726,7 +1748,7 @@ function LocalInferenceSection() {
   const handleStart = async (modelKey: string) => {
     if (!window.videoAnalyzer?.llama) return;
     setError("");
-    setProgressMap((prev) => ({ ...prev, [modelKey]: null }));
+    setLocalProgressMap((prev) => ({ ...prev, [modelKey]: null }));
     setBusyFor(modelKey, "download");
     try {
       const currentStatus = await window.videoAnalyzer.llama.getStatus();
@@ -1779,7 +1801,7 @@ function LocalInferenceSection() {
       await window.videoAnalyzer.llama.cancelDownload(modelKey);
     } catch { /* daemon may have already finished */ }
     clearBusyFor(modelKey);
-    setProgressMap((prev) => { const next = { ...prev }; delete next[modelKey]; return next; });
+    setLocalProgressMap((prev) => { const next = { ...prev }; delete next[modelKey]; return next; });
     await refresh();
   };
 
