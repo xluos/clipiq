@@ -4,10 +4,11 @@ import { type FunctionComponent, useCallback, useEffect, useState } from "react"
 import type { FramesCheckpoint, TranscriptData } from "../electron-api";
 import type { AnalysisNode, AnalysisReport, Project, TokenUsageSummary } from "../types";
 import { PipelineStagePanel, fmtDuration, fmtTokens, type StageStat } from "./pipeline/PipelineStagePanel";
+import { StageSceneDetect } from "./pipeline/StageSceneDetect";
 import { StageExtractFrames } from "./pipeline/StageExtractFrames";
 import { StagePrefilter } from "./pipeline/StagePrefilter";
-import { StageShotMerge } from "./pipeline/StageShotMerge";
 import { StageTranscribe } from "./pipeline/StageTranscribe";
+import { StageShotMerge } from "./pipeline/StageShotMerge";
 import { StageSummarizer } from "./pipeline/StageSummarizer";
 import { StageMainAnalysis } from "./pipeline/StageMainAnalysis";
 import { StageMethodologyAudit } from "./pipeline/StageMethodologyAudit";
@@ -30,10 +31,11 @@ type PipelineData = {
 type TimingEntry = { stage: string; durationMs: number; meta?: Record<string, unknown>; tokenDelta?: Array<Record<string, unknown>> };
 
 const TIMING_STAGE_MAP: Record<string, string[]> = {
+  sceneDetect: ["检测镜头切换"],
   extract: ["抽取关键画面", "挑选关键画面"],
   prefilter: ["本地初筛"],
-  shotMerge: ["镜头合并"],
   transcribe: ["字幕识别"],
+  shotMerge: ["镜头合并"],
   summarizer: ["全局聚合"],
   mainAnalysis: ["模型分析画面", "主分析(分段)", "主分析(审计)"],
   audit: ["整理结果"],
@@ -197,9 +199,17 @@ export const PipelineView: FunctionComponent<Props> = ({ projectId, project, onB
 
         {!loading && !error && data && (
           <div className="space-y-2">
-            {/* Stage 1: Extract Frames */}
+            {/* Stage 1: Scene Detection */}
             <PipelineStagePanel
-              index={1} name="抽帧" color="bg-blue-500"
+              index={1} name="检测镜头切换" color="bg-slate-500"
+              stat={buildStat("sceneDetect", timings, tokenUsage)}
+            >
+              <StageSceneDetect meta={findTimings(timings, "sceneDetect").meta} />
+            </PipelineStagePanel>
+
+            {/* Stage 2: Extract Frames */}
+            <PipelineStagePanel
+              index={2} name="抽帧" color="bg-blue-500"
               stat={buildStat("extract", timings, tokenUsage)}
             >
               <StageExtractFrames
@@ -209,26 +219,15 @@ export const PipelineView: FunctionComponent<Props> = ({ projectId, project, onB
               />
             </PipelineStagePanel>
 
-            {/* Stage 2: Prefilter */}
+            {/* Stage 3: Prefilter */}
             <PipelineStagePanel
-              index={2} name="预筛选" color="bg-violet-500"
+              index={3} name="预筛选" color="bg-violet-500"
               stat={buildStat("prefilter", timings, tokenUsage)}
             >
               <StagePrefilter
                 projectId={projectId}
                 nodes={data.nodes}
                 meta={findTimings(timings, "prefilter").meta}
-              />
-            </PipelineStagePanel>
-
-            {/* Stage 3: Shot Merge */}
-            <PipelineStagePanel
-              index={3} name="镜头合并" color="bg-amber-500"
-              stat={buildStat("shotMerge", timings, tokenUsage)}
-            >
-              <StageShotMerge
-                shots={data.report?.shotContexts}
-                meta={findTimings(timings, "shotMerge").meta}
               />
             </PipelineStagePanel>
 
@@ -243,17 +242,28 @@ export const PipelineView: FunctionComponent<Props> = ({ projectId, project, onB
               />
             </PipelineStagePanel>
 
-            {/* Stage 5: Summarizer */}
+            {/* Stage 5: Shot Merge */}
             <PipelineStagePanel
-              index={5} name="全局摘要" color="bg-emerald-500"
+              index={5} name="镜头合并" color="bg-amber-500"
+              stat={buildStat("shotMerge", timings, tokenUsage)}
+            >
+              <StageShotMerge
+                shots={data.report?.shotContexts}
+                meta={findTimings(timings, "shotMerge").meta}
+              />
+            </PipelineStagePanel>
+
+            {/* Stage 6: Summarizer */}
+            <PipelineStagePanel
+              index={6} name="全局摘要" color="bg-emerald-500"
               stat={buildStat("summarizer", timings, tokenUsage)}
             >
               <StageSummarizer report={data.report} />
             </PipelineStagePanel>
 
-            {/* Stage 6: Main Analysis */}
+            {/* Stage 7: Main Analysis */}
             <PipelineStagePanel
-              index={6} name="主分析" color="bg-indigo-500"
+              index={7} name="主分析" color="bg-indigo-500"
               stat={buildStat("mainAnalysis", timings, tokenUsage)}
             >
               <StageMainAnalysis
@@ -262,9 +272,9 @@ export const PipelineView: FunctionComponent<Props> = ({ projectId, project, onB
               />
             </PipelineStagePanel>
 
-            {/* Stage 7: Methodology Audit */}
+            {/* Stage 8: Methodology Audit */}
             <PipelineStagePanel
-              index={7} name="方法论审计" color="bg-rose-500" isLast
+              index={8} name="方法论审计" color="bg-rose-500" isLast
               stat={buildStat("audit", timings, tokenUsage)}
             >
               <StageMethodologyAudit audit={data.report?.methodologyAudit} />
