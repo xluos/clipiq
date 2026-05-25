@@ -18,8 +18,10 @@ jobs:
         include:
           - os: macos-latest
             target: --mac
+            daemon-target: --mac
           - os: windows-latest
             target: --win
+            daemon-target: --win
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
 
@@ -33,6 +35,14 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Clone ai-model-daemon
+        run: git clone https://github.com/xushuaiwu/ai-model-daemon.git ../ai-model-daemon
+
       - name: Install dependencies
         timeout-minutes: 10
         env:
@@ -43,6 +53,9 @@ jobs:
 
       - name: Build renderer
         run: npm run build
+
+      - name: Build daemon
+        run: node scripts/build-daemon.cjs ${{ matrix.daemon-target }}
 
       - name: Build & publish (${{ matrix.os }})
         env:
