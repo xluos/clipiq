@@ -593,6 +593,11 @@ export type AppConfig = {
   cacheDir?: string | null;
   // 缓存总容量上限 (字节), 0 = 无上限, 默认 10 GB。
   cacheMaxBytes?: number;
+  // 缓存策略: enabled 总开关, stages 按阶段细控。缺省 = 全部启用。
+  cachePolicy?: {
+    enabled: boolean;
+    stages?: Record<string, boolean>;
+  };
   schemaVersion: 2;
   // v1 残留字段,仅在 migrateConfigV1ToV2 内读取,迁移后写回时不再产生
   /** @deprecated migrated to taskSlots.complex_vision */
