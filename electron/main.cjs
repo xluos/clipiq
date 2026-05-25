@@ -3750,13 +3750,19 @@ async function runChunkedAnalysis({
 
   sendProgress?.(chunks.length, chunks.length, "audit", null);
 
-  // audit pass
-  const auditResult = await runAuditPass({
-    effectiveProvider, project, methodology, globalContext,
-    nodes: allChunkNodes, transcript, options,
-    ctxSize, reserveOutput, safetyMargin,
-    handle,
-  });
+  // audit pass — 失败时降级为不带审计的结果,不丢弃已有的 chunk 节点
+  let auditResult = null;
+  try {
+    auditResult = await runAuditPass({
+      effectiveProvider, project, methodology, globalContext,
+      nodes: allChunkNodes, transcript, options,
+      ctxSize, reserveOutput, safetyMargin,
+      handle,
+    });
+  } catch (auditErr) {
+    if (auditErr instanceof AnalysisCancelledError) throw auditErr;
+    console.warn(`[analyze:main] audit pass 失败, 降级为不带审计的结果: ${auditErr?.message || auditErr}`);
+  }
 
   return mergeChunkedResult({
     chunkNodes: allChunkNodes, auditResult,
