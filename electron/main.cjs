@@ -1496,16 +1496,11 @@ function migrateConfigV1ToV2(raw) {
   }
 
   return {
+    ...cfg,
     providers,
     taskSlots,
     audioSlot,
-    lastLlamaModelKey: cfg.lastLlamaModelKey || null,
-    defaultAnalysis: cfg.defaultAnalysis || null,
     localModelOverrides,
-    pipelineConcurrency: cfg.pipelineConcurrency,
-    cacheDir: cfg.cacheDir,
-    cacheMaxBytes: cfg.cacheMaxBytes,
-    cachePolicy: cfg.cachePolicy || null,
     schemaVersion: 2,
   };
 }
@@ -6056,6 +6051,7 @@ app.whenReady().then(async () => {
     // 避免单字段更新打回时把别的字段抹掉。
     const cur = await readJson(getConfigPath(), null);
     const merged = {
+      ...cur,
       ...config,
       lastLlamaModelKey: config?.lastLlamaModelKey ?? cur?.lastLlamaModelKey ?? null,
       localModelOverrides: config?.localModelOverrides ?? cur?.localModelOverrides ?? {},
