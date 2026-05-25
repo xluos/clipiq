@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ClipIQ 分析管线 v2</title>
+    <style>
+      :root {
+        --paper: #f7f7f5;
+        --paper-edge: #efefea;
+        --ink: #1a1a1a;
+        --ink-soft: #4a4a4a;
+        --ink-faint: #7a7a7a;
+        --rule: #d8d8d2;
+        --rule-soft: #e8e8e2;
+        --accent: #6f9bb8;
+        --accent-soft: #d9e6f0;
+        --accent-faint: #eef4f8;
+        --warn: #b88a4a;
+        --warn-soft: #f5ecdc;
+        --danger: #a05050;
+        --code-bg: #ececea;
+        --brain: #6f9bb8;
+        --brain-bg: #eef4f8;
+        --hands: #b88a4a;
+        --hands-bg: #f5ecdc;
+        --session: #6b7560;
+        --session-bg: #ecede5;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html { font-size: 16px; }
+      body {
+        font-family: ui-serif, "Charter", "Iowan Old Style", "Source Serif Pro", Georgia, "Songti SC", "Source Han Serif SC", "Noto Serif CJK SC", serif;
+        background: var(--paper); color: var(--ink); line-height: 1.6;
+        -webkit-font-smoothing: antialiased; padding: 64px 24px 96px;
+      }
+      .doc { max-width: 840px; margin: 0 auto; }
+      .doc-header { border-bottom: 1px solid var(--rule); padding-bottom: 28px; margin-bottom: 48px; }
+      .doc-eyebrow { font-family: ui-monospace, "SF Mono", Menlo, "PingFang SC", monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 14px; }
+      .doc-title { font-family: ui-serif, Charter, Georgia, "Songti SC", "Source Han Serif SC", serif; font-size: 34px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.2; }
+      .doc-subtitle { font-size: 16px; color: var(--ink-soft); margin-top: 10px; font-style: italic; }
+      .doc-meta { font-family: ui-monospace, Menlo, "PingFang SC", monospace; font-size: 11px; color: var(--ink-faint); margin-top: 18px; display: flex; gap: 24px; }
+      .tldr { background: var(--accent-faint); border-left: 2px solid var(--accent); padding: 20px 24px; margin-bottom: 56px; font-size: 15px; }
+      .tldr-label { font-family: ui-monospace, Menlo, "PingFang SC", monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 8px; font-weight: 600; }
+      section { margin-bottom: 56px; }
+      h2 { font-size: 22px; font-weight: 600; margin-bottom: 18px; padding-bottom: 10px; border-bottom: 1px solid var(--rule); }
+      h2 .num { font-family: ui-monospace, Menlo, "PingFang SC", monospace; font-size: 12px; color: var(--ink-faint); font-weight: 500; margin-right: 14px; letter-spacing: 0.05em; }
+      h3 { font-size: 16px; font-weight: 600; margin: 28px 0 10px; }
+      p { margin-bottom: 14px; }
+      p + p { margin-top: -2px; }
+      code { font-family: ui-monospace, "SF Mono", Menlo, "PingFang SC", monospace; font-size: 13px; background: var(--code-bg); padding: 1px 5px; border-radius: 2px; }
+      ul, ol { margin: 8px 0 16px 22px; }
+      li { margin-bottom: 6px; }
+      strong { font-weight: 600; }
+      em { color: var(--ink-soft); }
+      table { width: 100%; border-collapse: collapse; margin: 14px 0 18px; font-size: 14px; }
+      th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+      th { font-weight: 600; font-family: ui-sans-serif, system-ui, "PingFang SC", sans-serif; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-faint); border-bottom: 1px solid var(--rule); }
+      tbody tr:hover { background: rgba(0,0,0,0.015); }
+      td.num { font-family: ui-monospace, Menlo, "PingFang SC", monospace; font-size: 13px; }
+      td.accent { color: var(--accent); font-weight: 500; }
+      .callout { border: 1px solid var(--rule); background: #fff; padding: 16px 18px; margin: 16px 0 20px; }
+      .callout.warn { border-color: #e6d4a8; background: var(--warn-soft); }
+      .callout-label { font-family: ui-monospace, Menlo, "PingFang SC", monospace; font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 8px; font-weight: 600; }
+      .callout.warn .callout-label { color: var(--warn); }
+      figure { margin: 28px 0 32px; border: 1px solid var(--rule); background: #fff; }
+      figure svg { display: block; width: 100%; height: auto; }
+      figcaption { font-family: ui-monospace, Menlo, "PingFang SC", monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); padding: 10px 16px; border-top: 1px solid var(--rule-soft); background: var(--paper-edge); }
+      figcaption .fig-num { color: var(--accent); margin-right: 10px; font-weight: 600; }
+      .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 20px 0 18px; }
+      .cards.cols-2 { grid-template-columns: repeat(2, 1fr); }
+      .card { border: 1px solid var(--rule); background: #fff; padding: 16px 16px 14px; }
+      .card-icon { font-family: ui-monospace, Menlo, "PingFang SC", monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px; font-weight: 600; color: var(--accent); }
+      .card-name { font-family: ui-serif, Charter, Georgia, "Songti SC", "Source Han Serif SC", serif; font-size: 17px; font-weight: 600; margin-bottom: 6px; }
+      .card-desc { font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
+      .card.tone-a .card-icon { color: var(--brain); }
+      .card.tone-b .card-icon { color: var(--hands); }
+      .card.tone-c .card-icon { color: var(--session); }
+      .mascot { display: inline-block; width: 8px; height: 8px; background: var(--accent); margin-right: 8px; vertical-align: middle; }
+      .stage-tag { display: inline-block; font-family: ui-monospace, Menlo, monospace; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; padding: 2px 6px; border-radius: 2px; margin-right: 6px; font-weight: 600; }
+      .stage-tag.free { background: var(--session-bg); color: var(--session); }
+      .stage-tag.local { background: var(--warn-soft); color: var(--warn); }
+      .stage-tag.cloud { background: var(--accent-faint); color: var(--accent); }
+      footer { margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--rule); font-size: 12px; color: var(--ink-faint); }
+      footer h4 { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; font-family: ui-monospace, Menlo, "PingFang SC", monospace; margin-bottom: 10px; color: var(--ink-soft); }
+      footer ul { list-style: none; margin-left: 0; }
+      footer li { margin-bottom: 4px; }
+      .delta { font-size: 12px; color: var(--accent); font-family: ui-monospace, Menlo, monospace; font-weight: 600; }
+      .delta.removed { color: var(--danger); text-decoration: line-through; }
+      @media (max-width: 720px) { body { padding: 32px 16px 64px; } .doc-title { font-size: 26px; } .cards, .cards.cols-2 { grid-template-columns: 1fr; } .doc-meta { flex-wrap: wrap; gap: 12px; } }
+    </style>
+  </head>
+  <body>
+    <article class="doc">
+
+      <header class="doc-header">
+        <div class="doc-eyebrow"><span class="mascot"></span>ClipIQ · Internal</div>
+        <h1 class="doc-title">分析管线全景 <span style="font-size:18px;color:var(--accent);font-weight:400;">v2</span></h1>
+        <p class="doc-subtitle">金字塔管线 — 从一段视频到结构化拉片报告的完整流程</p>
+        <div class="doc-meta">
+          <span>STATUS · Current</span>
+          <span>DATE · 2026-05-26</span>
+          <span>PIPELINE · v2 Pyramid</span>
+        </div>
+      </header>
+
+      <div class="tldr">
+        <div class="tldr-label">TL;DR</div>
+        管线共 8 个阶段。前 4 步在本地完成素材准备（零 API 成本），后 4 步调用云端模型产出分析结果（按 token 计费）。核心设计原则：<strong>抽帧尽量多（便宜），预筛选按时长动态预算（覆盖每一秒），叙事结构用大模型（准确），主分析按 context 自动分段（不丢信息）</strong>。
+      </div>
+
+      <!-- ── FIG 1: Pipeline overview ── -->
+      <section>
+        <h2><span class="num">00</span>管线总览</h2>
+        <p>八个阶段分两个区：素材准备区全部在本地运行（ffmpeg + 小模型），智能分析区调用云端大模型。每一层向上传递更浓缩的信息，这就是「金字塔」的含义。</p>
+
+        <figure>
+          <svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, Menlo, monospace" font-size="11">
+            <rect width="760" height="400" fill="#fff"/>
+            <defs>
+              <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#6f9bb8"/></marker>
+            </defs>
+
+            <!-- Row label: local -->
+            <text x="380" y="24" text-anchor="middle" fill="#5a5a3a" font-size="10" letter-spacing="0.1em" font-weight="600">素材准备 · 本地</text>
+            <line x1="60" y1="34" x2="700" y2="34" stroke="#e8e8e2"/>
+
+            <!-- S1 -->
+            <rect x="60" y="48" width="140" height="50" fill="#ecede5" stroke="#6b7560" stroke-width="1.2" rx="2"/>
+            <text x="130" y="68" text-anchor="middle" fill="#5a5a3a" font-weight="600" font-size="10">1 · 检测镜头</text>
+            <text x="130" y="84" text-anchor="middle" fill="#7a7a7a" font-size="9">ffmpeg scenedetect</text>
+            <path d="M200 73L218 73" fill="none" stroke="#6f9bb8" stroke-width="1.2" marker-end="url(#a)"/>
+
+            <!-- S2 -->
+            <rect x="222" y="48" width="140" height="50" fill="#ecede5" stroke="#6b7560" stroke-width="1.2" rx="2"/>
+            <text x="292" y="68" text-anchor="middle" fill="#5a5a3a" font-weight="600" font-size="10">2 · 抽帧</text>
+            <text x="292" y="84" text-anchor="middle" fill="#7a7a7a" font-size="9">≥1帧/秒 + dHash去重</text>
+            <path d="M362 73L380 73" fill="none" stroke="#6f9bb8" stroke-width="1.2" marker-end="url(#a)"/>
+
+            <!-- S3 -->
+            <rect x="384" y="48" width="140" height="50" fill="#f5ecdc" stroke="#b88a4a" stroke-width="1.2" rx="2"/>
+            <text x="454" y="68" text-anchor="middle" fill="#7a6420" font-weight="600" font-size="10">3 · 预筛选</text>
+            <text x="454" y="84" text-anchor="middle" fill="#7a7a7a" font-size="9">本地0.8B · 动态预算</text>
+
+            <!-- S4 (parallel) -->
+            <rect x="546" y="48" width="140" height="50" fill="#ecede5" stroke="#6b7560" stroke-width="1.2" rx="2"/>
+            <text x="616" y="68" text-anchor="middle" fill="#5a5a3a" font-weight="600" font-size="10">4 · 语音转写</text>
+            <text x="616" y="84" text-anchor="middle" fill="#7a7a7a" font-size="9">Whisper</text>
+            <path d="M524 73L544 73" fill="none" stroke="#6f9bb8" stroke-width="1.2" marker-end="url(#a)"/>
+
+            <!-- Connector down -->
+            <path d="M380 98L380 130" fill="none" stroke="#6f9bb8" stroke-width="1.2" marker-end="url(#a)"/>
+
+            <!-- Row label: cloud -->
+            <text x="380" y="148" text-anchor="middle" fill="#6f9bb8" font-size="10" letter-spacing="0.1em" font-weight="600">智能分析 · 云端 LLM</text>
+            <line x1="60" y1="158" x2="700" y2="158" stroke="#e8e8e2"/>
+
+            <!-- S5 -->
+            <rect x="60" y="170" width="140" height="50" fill="#eef4f8" stroke="#6f9bb8" stroke-width="1.2" rx="2"/>
+            <text x="130" y="190" text-anchor="middle" fill="#6f9bb8" font-weight="600" font-size="10">5 · 镜头合并</text>
+            <text x="130" y="206" text-anchor="middle" fill="#7a7a7a" font-size="9">中等文本模型</text>
+            <path d="M200 195L218 195" fill="none" stroke="#6f9bb8" stroke-width="1.2" marker-end="url(#a)"/>
+
+            <!-- S6 -->
+            <rect x="222" y="170" width="140" height="50" fill="#eef4f8" stroke="#6f9bb8" stroke-width="1.4" rx="2"/>
+            <text x="292" y="190" text-anchor="middle" fill="#6f9bb8" font-weight="600" font-size="10">6 · 全局摘要</text>
+            <text x="292" y="206" text-anchor="middle" fill="#7a7a7a" font-size="9">视觉大模型 ★</text>
+            <path d="M362 195L380 195" fill="none" stroke="#6f9bb8" stroke-width="1.2" marker-end="url(#a)"/>
+
+            <!-- S7 -->
+            <rect x="384" y="170" width="140" height="50" fill="#eef4f8" stroke="#6f9bb8" stroke-width="1.4" rx="2"/>
+            <text x="454" y="190" text-anchor="middle" fill="#6f9bb8" font-weight="600" font-size="10">7 · 主分析</text>
+            <text x="454" y="206" text-anchor="middle" fill="#7a7a7a" font-size="9">视觉大模型 · 自动分段</text>
+            <path d="M524 195L544 195" fill="none" stroke="#6f9bb8" stroke-width="1.2" marker-end="url(#a)"/>
+
+            <!-- S8 -->
+            <rect x="546" y="170" width="140" height="50" fill="#eef4f8" stroke="#6f9bb8" stroke-width="1.2" rx="2"/>
+            <text x="616" y="190" text-anchor="middle" fill="#6f9bb8" font-weight="600" font-size="10">8 · 方法论审计</text>
+            <text x="616" y="206" text-anchor="middle" fill="#7a7a7a" font-size="9">文本模型</text>
+
+            <!-- Output -->
+            <line x1="60" y1="250" x2="700" y2="250" stroke="#e8e8e2"/>
+            <text x="380" y="268" text-anchor="middle" fill="#7a7a7a" font-size="10" letter-spacing="0.1em">产出</text>
+            <rect x="120" y="280" width="160" height="38" fill="#fff" stroke="#6f9bb8" stroke-width="1.4" rx="2"/>
+            <text x="200" y="303" text-anchor="middle" fill="#1a1a1a" font-weight="600" font-size="11">节点时间轴</text>
+            <rect x="310" y="280" width="140" height="38" fill="#fff" stroke="#6f9bb8" stroke-width="1.4" rx="2"/>
+            <text x="380" y="303" text-anchor="middle" fill="#1a1a1a" font-weight="600" font-size="11">拉片报告</text>
+            <rect x="480" y="280" width="140" height="38" fill="#fff" stroke="#6f9bb8" stroke-width="1.4" rx="2"/>
+            <text x="550" y="303" text-anchor="middle" fill="#1a1a1a" font-weight="600" font-size="11">方法论审计</text>
+
+            <!-- Legend -->
+            <g transform="translate(60,340)" font-size="10" fill="#7a7a7a">
+              <rect width="12" height="10" fill="#ecede5" stroke="#6b7560"/><text x="18" y="9">本地（零成本）</text>
+              <rect x="140" width="12" height="10" fill="#f5ecdc" stroke="#b88a4a"/><text x="158" y="9">本地模型</text>
+              <rect x="250" width="12" height="10" fill="#eef4f8" stroke="#6f9bb8"/><text x="268" y="9">云端模型（按 token 计费）</text>
+              <text x="470" y="9" fill="#6f9bb8" font-weight="600">★ = 升级为大模型</text>
+            </g>
+          </svg>
+          <figcaption><span class="fig-num">FIG 1</span>八阶段金字塔管线 — ★ 标记本次升级的阶段</figcaption>
+        </figure>
+      </section>
+
+      <!-- ── Stage 1 ── -->
+      <section>
+        <h2><span class="num">01</span>检测镜头切换</h2>
+        <table>
+          <tbody>
+            <tr><th style="width:90px">做什么</th><td>用 ffmpeg 场景检测滤镜扫描视频，标记画面突变位置</td></tr>
+            <tr><th>输入</th><td>原始视频文件 + 场景阈值（密集档 0.18 / 标准档 0.3 / 稀疏档 0.45）</td></tr>
+            <tr><th>输出</th><td>时间戳数组——每个镜头的起始时刻</td></tr>
+            <tr><th>代价</th><td><span class="stage-tag free">FREE</span> ~2 秒（纯本地 ffmpeg）</td></tr>
+          </tbody>
+        </table>
+        <p>这是管线的第一步，也是后续所有阶段的基础。镜头数量直接影响抽帧数量、预筛选预算、镜头合并工作量。阈值越低越敏感——快剪混剪可能切出 100+ 个镜头，慢节奏纪录片只有十几个。</p>
+      </section>
+
+      <!-- ── Stage 2 ── -->
+      <section>
+        <h2><span class="num">02</span>抽取关键帧</h2>
+        <table>
+          <tbody>
+            <tr><th style="width:90px">做什么</th><td>从视频里按镜头结构抽出静态画面，作为后续分析的视觉素材</td></tr>
+            <tr><th>输入</th><td>镜头时间戳 + 目标帧数</td></tr>
+            <tr><th>输出</th><td>一组 JPEG 文件，标注所属镜头和精确秒数</td></tr>
+            <tr><th>代价</th><td><span class="stage-tag free">FREE</span> ~50ms/帧（ffmpeg seek）</td></tr>
+          </tbody>
+        </table>
+
+        <h3>抽帧策略</h3>
+        <ul>
+          <li><strong>每个镜头至少 1 帧</strong>（中点），不丢弃任何镜头</li>
+          <li><strong>每秒至少 1 帧</strong>——5 分钟视频至少抽 300 帧</li>
+          <li>长镜头按时长比例多分（贪心策略：总是给「时长/已分帧数」最大的镜头加一帧）</li>
+          <li>抽完做一轮 <strong>dHash 去重</strong>，画面几乎一样的帧自动合并</li>
+        </ul>
+
+        <div class="callout">
+          <div class="callout-label">设计原则</div>
+          抽帧是整条管线中最便宜的操作（300 帧 ≈ 15 秒），所以宁多勿少。多抽出来的帧有 dHash 去重和预筛选两道关卡，不会给后面造成负担。
+        </div>
+      </section>
+
+      <!-- ── Stage 3 ── -->
+      <section>
+        <h2><span class="num">03</span>预筛选</h2>
+        <table>
+          <tbody>
+            <tr><th style="width:90px">做什么</th><td>用本地小模型（0.8B）逐帧打标，标注场景类型、主体、信息量评分、视觉签名</td></tr>
+            <tr><th>输入</th><td>候选帧的缩略图（320px）</td></tr>
+            <tr><th>输出</th><td>每帧的结构化标签 + 精选后的帧子集</td></tr>
+            <tr><th>代价</th><td><span class="stage-tag local">LOCAL GPU</span> ~1.1 秒/帧，<strong>预算按视频时长动态计算</strong></td></tr>
+          </tbody>
+        </table>
+
+        <h3>动态预算</h3>
+        <p>预筛选时间预算不再是固定值，而是根据视频时长自动伸缩，<strong>保证每秒至少有 1 帧被预处理</strong>。密度档只影响倍率：</p>
+        <table>
+          <thead><tr><th>密度档</th><th>倍率</th><th>5 分钟视频预算</th><th>可标注帧数</th></tr></thead>
+          <tbody>
+            <tr><td>稀疏</td><td class="num">×0.5</td><td class="num">~165 秒</td><td class="num">~150 帧</td></tr>
+            <tr><td>标准</td><td class="num">×1.0</td><td class="num">~330 秒</td><td class="num">~300 帧</td></tr>
+            <tr><td>密集</td><td class="num">×1.5</td><td class="num">~495 秒</td><td class="num">~450 帧</td></tr>
+          </tbody>
+        </table>
+
+        <h3>均匀覆盖策略</h3>
+        <p>如果候选帧数超过预算：</p>
+        <ul>
+          <li>预算够覆盖所有镜头 → 每个镜头取 1 帧标注，剩余预算给长镜头的额外帧</li>
+          <li>预算不够覆盖所有镜头 → 按均匀间隔采样，保证标注的帧在时间轴上分布均匀</li>
+        </ul>
+
+        <h3>三轮精选</h3>
+        <p>标注完成后：① 删除空镜和极低信息帧 → ② 视觉签名去重（同一个场景不重复）→ ③ 按 salience 评分取 top N 送给主分析。</p>
+      </section>
+
+      <!-- ── Stage 4 ── -->
+      <section>
+        <h2><span class="num">04</span>语音转写</h2>
+        <table>
+          <tbody>
+            <tr><th style="width:90px">做什么</th><td>提取音轨，用 Whisper 识别带时间戳的逐句字幕</td></tr>
+            <tr><th>输入</th><td>视频音轨（WAV）</td></tr>
+            <tr><th>输出</th><td>字幕分段列表 <code>[{start, end, text}]</code></td></tr>
+            <tr><th>代价</th><td><span class="stage-tag local">LOCAL</span> 或 <span class="stage-tag cloud">CLOUD</span>，本地约为视频时长 × 0.3</td></tr>
+          </tbody>
+        </table>
+        <p>字幕对后续分析质量影响极大——告诉模型「画面里的人在说什么」。无音轨或纯音乐的视频跳过此步。</p>
+      </section>
+
+      <!-- ── Divider ── -->
+      <div class="callout">
+        <div class="callout-label">分界线</div>
+        到此为止所有素材已就绪：镜头边界、关键帧（含标签）、字幕。接下来进入 LLM 驱动的分析阶段。
+      </div>
+
+      <!-- ── Stage 5 ── -->
+      <section>
+        <h2><span class="num">05</span>镜头合并</h2>
+        <table>
+          <tbody>
+            <tr><th style="width:90px">做什么</th><td>把每个镜头的帧标签 + 字幕打包给中等文本模型，产出镜头级语义描述</td></tr>
+            <tr><th>输入</th><td>镜头时间区间、帧标签（caption / signature / salience）、对应字幕</td></tr>
+            <tr><th>输出</th><td>每个镜头的 <code>shotDescription</code> + 代表帧索引</td></tr>
+            <tr><th>代价</th><td><span class="stage-tag cloud">CLOUD</span> 中等文本模型，每 3 个镜头一批并发，100 个镜头 ≈ 3-5 万 token</td></tr>
+          </tbody>
+        </table>
+        <p>这是金字塔的中间层：把底层碎片（帧标签 + 字幕片段）压缩成镜头级语义描述，让后续的大模型不必逐帧看图。</p>
+      </section>
+
+      <!-- ── Stage 6 ── -->
+      <section>
+        <h2><span class="num">06</span>全局摘要与叙事结构</h2>
+        <table>
+          <tbody>
+            <tr><th style="width:90px">做什么</th><td>综合所有镜头描述 + 字幕全文，推断视频类型、生成全局摘要、提取叙事结构线索</td></tr>
+            <tr><th>输入</th><td>全部镜头描述、字幕全文、镜头统计</td></tr>
+            <tr><th>输出</th><td>视频类型、全局摘要（200-400 字）、叙事结构（开场 / 高潮 / 结尾）</td></tr>
+            <tr><th>代价</th><td><span class="stage-tag cloud">CLOUD</span> <strong>视觉大模型</strong>（优先），fallback 到中等文本模型。单次调用 ~1 万 token</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout warn">
+          <div class="callout-label">本次升级</div>
+          叙事结构线索（hook / climax / ending）从中等文本模型升级为视觉大模型。大模型对叙事弧线的判断更准确，直接影响主分析对每个片段在全局中定位的质量。
+        </div>
+      </section>
+
+      <!-- ── Stage 7 ── -->
+      <section>
+        <h2><span class="num">07</span>主分析</h2>
+        <table>
+          <tbody>
+            <tr><th style="width:90px">做什么</th><td>把关键帧图片 + 字幕 + 镜头描述 + 全局摘要送给视觉大模型，产出结构化节点时间轴</td></tr>
+            <tr><th>输入</th><td>精选帧（JPEG base64）、字幕分段、镜头描述、全局摘要、方法论规则集</td></tr>
+            <tr><th>输出</th><td>节点数组——每个节点含时间区间、标题、描述、情感、剪辑手法、镜头运动等</td></tr>
+            <tr><th>代价</th><td><span class="stage-tag cloud">CLOUD</span> <strong>视觉大模型（主力消耗）</strong>，图片 ~800 tok/帧</td></tr>
+          </tbody>
+        </table>
+
+        <h3>自动分段</h3>
+        <p>管线根据模型 context size 自动决定处理方式：</p>
+
+        <div class="cards cols-2">
+          <div class="card tone-a">
+            <div class="card-icon">SINGLE PASS</div>
+            <div class="card-name">单次模式</div>
+            <div class="card-desc">所有内容能装进一次请求 → 一次出完整结果（节点 + 报告）。适合短视频或大 context 模型。</div>
+          </div>
+          <div class="card tone-b">
+            <div class="card-icon">CHUNKED</div>
+            <div class="card-name">分段模式</div>
+            <div class="card-desc">内容超出 context → 按镜头边界切段，每段独立产出节点，最后拼接。单个 shot 超大时自动降级裁帧。</div>
+          </div>
+        </div>
+
+        <h3>每段帧数上限</h3>
+        <p>不再硬编码 12 帧。根据模型 context 动态计算，用 70% 的 token budget 留给图片：</p>
+        <table>
+          <thead><tr><th>模型 Context</th><th>每段预算</th><th>每段帧上限</th></tr></thead>
+          <tbody>
+            <tr><td>8k（本地小模型）</td><td class="num">~5k tok</td><td class="num">~12 帧（兜底值）</td></tr>
+            <tr><td>32k</td><td class="num">~22k tok</td><td class="num">~19 帧</td></tr>
+            <tr><td>128k（GPT-4o / Claude）</td><td class="num">~88k tok</td><td class="num">~77 帧</td></tr>
+            <tr><td>200k+</td><td class="num">~140k tok</td><td class="num">~120 帧</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ── Stage 8 ── -->
+      <section>
+        <h2><span class="num">08</span>方法论审计</h2>
+        <table>
+          <tbody>
+            <tr><th style="width:90px">做什么</th><td>拿到完整节点列表，按方法论规则集逐条审计，生成全局剪辑报告</td></tr>
+            <tr><th>输入</th><td>全部节点、全局摘要、字幕、规则集</td></tr>
+            <tr><th>输出</th><td>每节点的方法论标签（命中 / 违反）+ 全局报告（节奏 / 结构 / 改进建议）</td></tr>
+            <tr><th>代价</th><td><span class="stage-tag cloud">CLOUD</span> 文本模型，单次 ~1-2 万 token</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ── Cost summary ── -->
+      <section>
+        <h2><span class="num">09</span>成本速查</h2>
+        <p>以 5 分钟视频、60 个镜头、标准密度档为例：</p>
+        <table>
+          <thead><tr><th>阶段</th><th>执行方</th><th>耗时</th><th>Token</th></tr></thead>
+          <tbody>
+            <tr><td>检测镜头切换</td><td class="num">ffmpeg</td><td class="num">~2s</td><td class="num">0</td></tr>
+            <tr><td>抽取关键帧</td><td class="num">ffmpeg</td><td class="num">~15s</td><td class="num">0</td></tr>
+            <tr><td>预筛选</td><td class="num">本地 0.8B</td><td class="num">~5.5 min</td><td class="num">0</td></tr>
+            <tr><td>语音转写</td><td class="num">Whisper</td><td class="num">~1.5 min</td><td class="num">0</td></tr>
+            <tr style="background:var(--accent-faint)"><td><strong>镜头合并</strong></td><td class="num">中等文本</td><td class="num">~15s</td><td class="num accent">~30k</td></tr>
+            <tr style="background:var(--accent-faint)"><td><strong>全局摘要</strong></td><td class="num">视觉大模型</td><td class="num">~5s</td><td class="num accent">~10k</td></tr>
+            <tr style="background:var(--accent-faint)"><td><strong>主分析</strong></td><td class="num">视觉大模型</td><td class="num">~20s</td><td class="num accent">~40k</td></tr>
+            <tr><td>方法论审计</td><td class="num">文本模型</td><td class="num">~8s</td><td class="num accent">~12k</td></tr>
+            <tr style="border-top:2px solid var(--rule)"><td><strong>合计</strong></td><td></td><td class="num"><strong>~8 min</strong></td><td class="num accent"><strong>~92k tok</strong></td></tr>
+          </tbody>
+        </table>
+        <p><em>耗时瓶颈在本地预筛选（~5.5 分钟），但零成本。云端 token 消耗中主分析占约 43%。</em></p>
+      </section>
+
+      <!-- ── Design principles ── -->
+      <section>
+        <h2><span class="num">10</span>设计原则</h2>
+        <div class="cards">
+          <div class="card tone-a">
+            <div class="card-icon">CHEAP FIRST</div>
+            <div class="card-name">便宜的多做</div>
+            <div class="card-desc">抽帧（50ms/帧）和 dHash 去重几乎免费，所以宁可多抽再筛，不在便宜层丢信息。每秒至少 1 帧，每个镜头至少 1 帧。</div>
+          </div>
+          <div class="card tone-b">
+            <div class="card-icon">BUDGET SCALES</div>
+            <div class="card-name">预算跟内容走</div>
+            <div class="card-desc">预筛选预算按视频时长伸缩，主分析帧数按模型 context 动态算。不用固定数字卡住高密度视频或浪费大 context 模型的能力。</div>
+          </div>
+          <div class="card tone-c">
+            <div class="card-icon">PYRAMID</div>
+            <div class="card-name">向上压缩</div>
+            <div class="card-desc">每一层只传精华给上层。帧标签 → 镜头描述 → 全局摘要 → 节点。大模型只看最浓缩的信息，token 不浪费在碎片上。</div>
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        <h4>备注</h4>
+        <ul>
+          <li>耗时基于 Apple Silicon M 系列 + GPT-4o 云端典型场景，实际因模型和网络波动。</li>
+          <li>预筛选为可选阶段（需要本地 GPU + 已下载模型），跳过时退化为 dHash 去重 + 时长公式选帧。</li>
+          <li>缓存层覆盖所有 LLM 阶段，重新分析同一视频时未变化的阶段直接复用。</li>
+        </ul>
+      </footer>
+
+    </article>
+  </body>
+</html>
