@@ -453,7 +453,7 @@ export function WorkspaceScreen() {
               {([
                 { key: "timeline", label: "逻辑节点", count: nodes.length },
                 { key: "shots", label: "镜头", count: shotContexts.length },
-                { key: "insights", label: "概览" },
+                { key: "insights", label: "概览", count: undefined as number | undefined },
               ] as const).map((item) => {
                 const isActive = tab === item.key;
                 return (

@@ -526,9 +526,7 @@ export type AnalysisProgressEvent = {
   progress: number;
   stage: string;
   message?: string;
-  // 该 stage 整段命中缓存 (没真跑 LLM/重计算)。UI 在 log 里加 "(缓存)" 标记。
-  // 只在 stage-level 整段缓存场景标 (summarizer / main-analysis / detectGenre 这类);
-  // prefilter / shot-merger 这种逐 item 部分缓存场景在 message 文案里自己写"命中 N 张"。
+  stageIndex?: number;
   fromCache?: boolean;
 };
 
@@ -560,16 +558,34 @@ export type AnalysisBudgetEvent = {
   budget: AnalysisBudget;
 };
 
-// 进度屏的"实时日志"一条。absoluteMs 是 Date.now() 记录瞬间, 显示时按当前
-// project.analysisStartedAt 算相对偏移 (m:ss) — 这样同一条 log 跨退出再进 /
-// 切 project 都不需要重算时基。
-export type ProgressLogEntry = {
-  absoluteMs: number;
-  stage: string;
-  message: string;
-  tone: "info" | "ok" | "warn";
-  // 跟 AnalysisProgressEvent.fromCache 同源, UI 渲染时加 "(缓存)" 标记
+export const PIPELINE_STAGE_DEFS = [
+  { key: "read_video", label: "读取视频信息" },
+  { key: "detect_scenes", label: "检测镜头切换" },
+  { key: "extract_frames", label: "挑选关键画面" },
+  { key: "transcribe", label: "识别字幕" },
+  { key: "shot_merge", label: "镜头合并" },
+  { key: "prepare", label: "整理分析素材" },
+  { key: "analyze", label: "模型分析画面" },
+  { key: "finalize", label: "整理结果" },
+  { key: "report", label: "生成最终报告" },
+] as const;
+
+export type PipelineStageStatus = "pending" | "active" | "done" | "failed";
+
+export type PipelineStage = {
+  key: string;
+  label: string;
+  status: PipelineStageStatus;
+  detail?: string;
+  startedAt?: number;
+  completedAt?: number;
   fromCache?: boolean;
+};
+
+export type PipelineState = {
+  projectId: string;
+  progress: number;
+  stages: PipelineStage[];
 };
 
 export type AppConfig = {

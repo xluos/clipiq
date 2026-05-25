@@ -2,44 +2,7 @@ import { useApp } from "../AppContext";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { generateMockNodes, generateMockReport } from "../mockData";
 import { ArrowRight, CheckCircle2, Settings } from "lucide-react";
-import type { AnalysisOptions } from "../types";
-
-const STAGES = [
-  "读取视频信息",
-  "检测镜头切换",
-  "挑选关键画面",
-  "识别字幕",
-  "镜头合并",
-  "整理分析素材",
-  "模型分析画面",
-  "整理结果",
-  "生成最终报告",
-];
-
-const STAGE_KEYWORDS: [number, RegExp][] = [
-  [0, /读取视频|校验视频|视频信息|下载视频/],
-  [1, /镜头切换/],
-  [2, /关键画面|抽取|抽帧|画面去重|本地初筛|本地推理预检|prefilter/],
-  [3, /字幕|音轨|whisper|识别字幕|提取音轨/],
-  [4, /镜头合并|镜头缩略图|shot-merger/],
-  [5, /准备分析|整理.*素材|全局聚合|summarizer|识别视频类型|类型识别|detect-genre/],
-  [6, /模型分析|主分析|main-analysis|弹幕|danmaku|拉取弹幕|分析失败|^失败$/],
-  [7, /整理结果|保存|title-gen|生成标题/],
-  [8, /生成.*报告|完成|已结束/],
-];
-
-function mapStageToIndex(stage: string, message?: string): number {
-  if (stage === "恢复进度" && message) {
-    if (/视频检测|场景分析/.test(message)) return 1;
-    if (/抽帧|关键画面/.test(message)) return 2;
-    if (/字幕/.test(message)) return 3;
-    return 0;
-  }
-  for (const [idx, re] of STAGE_KEYWORDS) {
-    if (re.test(stage)) return idx;
-  }
-  return -1;
-}
+import { PIPELINE_STAGE_DEFS, type AnalysisOptions } from "../types";
 
 function formatElapsed(ms: number) {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -62,22 +25,18 @@ export function ProgressScreen() {
   const {
     setCurrentScreen, activeProjectId, projects, setProjects,
     providers, activeVideoProviderId, activeAudioProviderId,
-    setNodesForProject, setReportForProject, progressByProject, logsByProject,
+    setNodesForProject, setReportForProject, progressByProject, pipelineByProject,
     budgetByProject, setBudgetForProject, startAnalysisForProject,
   } = useApp();
 
   const project = projects.find(p => p.id === activeProjectId);
 
-  // 全局快照: AppContext 一直在订阅 analysis:progress, 这里读最新值做初始 / 切换 reset。
-  // 不再依赖组件 mount 后才订阅, 避免"打开屏 → 看到 0% 读取视频信息 → 几百 ms 后突跳到真实阶段"。
   const liveSnapshot = project ? progressByProject[project.id] : undefined;
-  // 实时日志也是按 projectId 全局存的, 切 project / 退出再进都能跟着 project 走。
-  const logs = (project && logsByProject[project.id]) || [];
-  // ETA budget: main 在 analyzeProject 开头算一次广播给 renderer。订阅在 AppContext, 这里直接读。
+  const pipeline = project ? pipelineByProject[project.id] : undefined;
   const budget = project ? budgetByProject[project.id] : undefined;
 
   const [progress, setProgress] = useState(liveSnapshot?.progress ?? 0);
-  const [stageLabel, setStageLabel] = useState(liveSnapshot?.stage ?? STAGES[0]);
+  const [stageLabel, setStageLabel] = useState(liveSnapshot?.stage ?? PIPELINE_STAGE_DEFS[0].label);
   const [detail, setDetail] = useState(liveSnapshot?.message ?? "");
   const [error, setError] = useState("");
   const [isCancelling, setIsCancelling] = useState(false);
@@ -98,14 +57,11 @@ export function ProgressScreen() {
   const completionHandledRef = useRef(false);
   const failureHandledRef = useRef(false);
 
-  // 切换 project 时 reset 本地 useState (progress/stage/detail/error/refs), 用全局快照
-  // 初始化。logs 不在这里清 — 它已经按 projectId 存在 AppContext.logsByProject 里,
-  // 切回同一个 project 自动恢复, 切到另一个 project 自然显示另一份。
   useEffect(() => {
     if (!project) return;
     const snap = progressByProject[project.id];
     setProgress(snap?.progress ?? 0);
-    setStageLabel(snap?.stage ?? STAGES[0]);
+    setStageLabel(snap?.stage ?? PIPELINE_STAGE_DEFS[0].label);
     setDetail(snap?.message ?? "");
     setError("");
     setIsCancelling(false);
@@ -153,7 +109,7 @@ export function ProgressScreen() {
         const remainingAfter = budget.stages.slice(idx + 1).reduce((sum, s) => sum + s.estMs, 0);
         return remainingInCurrent + remainingAfter;
       }
-      // stage label 还没在 budget 里出现 (例: 刚启动, label 是占位的 STAGES[0]) → 给总预算
+      // stage label 还没在 budget 里出现 (例: 刚启动, label 是占位的 PIPELINE_STAGE_DEFS[0].label) → 给总预算
       if (progress < 1) return budget.totalMs;
     }
     // fallback: 老的线性外推 (没 budget 或者 stage label 完全对不上)
@@ -162,10 +118,6 @@ export function ProgressScreen() {
     return Math.max(0, total - elapsedMs);
   }, [budget, stageLabel, progress, elapsedMs, nowTick]);
 
-  // 下载阶段下方的"分析流水线"还没开始,所以强制 currentStageIndex = -1,所有 stages 灰色。
-  const currentStageIndex = project?.status === "downloading"
-    ? -1
-    : Math.min(STAGES.length - 1, Math.floor((progress / 100) * STAGES.length));
 
   const handleCancel = async () => {
     if (!project || cancelledRef.current) {
@@ -198,7 +150,7 @@ export function ProgressScreen() {
       setProgress(event.progress);
       setStageLabel(event.stage);
       setDetail(event.message || "");
-      // 日志由 AppContext 全局订阅统一写到 logsByProject, 这里不再 recordLog 避免重复。
+      // 阶段进度由 AppContext 全局订阅统一写到 pipelineByProject。
 
       // attach 模式下,完成 / 失败要走广播兜底——kickoff 路径已通过 await 结果自己处理。
       if (!inAttachMode.current || !window.videoAnalyzer) return;
@@ -245,7 +197,7 @@ export function ProgressScreen() {
     if (project.status === "downloading") {
       // 下载进度通过 onAnalysisProgress (stage="下载视频") 已经在另一个 effect 里订阅。
       // 这里只把 UI 初始 stage label 设好,等 status 切换后 effect 重跑进入分析 kickoff。
-      if (!stageLabel || stageLabel === STAGES[0]) setStageLabel("下载视频");
+      if (!stageLabel || stageLabel === PIPELINE_STAGE_DEFS[0].label) setStageLabel("下载视频");
       return;
     }
     if (project.status === "download_failed") {
@@ -261,7 +213,7 @@ export function ProgressScreen() {
     hasStarted.current = true;
     // 从 downloading 切到 analyzing 时,把进度重置回 0,避免下载条 100% 直接接到分析条 0%。
     setProgress(0);
-    setStageLabel(STAGES[0]);
+    setStageLabel(PIPELINE_STAGE_DEFS[0].label);
     // startedAt 不在这里重置 — 它从 project.analysisStartedAt 派生 (持久化), HomeScreen
     // 创建 downloading 项目时就写了, 整段 download → analyze 共用同一起点。
 
@@ -273,22 +225,21 @@ export function ProgressScreen() {
       const progressStep = 100 / (totalTime / intervalTime);
 
       // 浏览器预览模式 (没有 window.videoAnalyzer) 不经 main 进程 broadcast,
-      // 因此不写 logsByProject —— 实时日志区域会留空, 这是预期 (mock 流程无真实分析)。
+      // 浏览器预览模式不经 main 进程 broadcast, pipelineByProject 不更新。
       const timer = setInterval(() => {
         currentProgress += progressStep;
         if (currentProgress >= 100) {
           clearInterval(timer);
           setProgress(100);
-          setStageLabel(STAGES[STAGES.length - 1]);
+          setStageLabel(PIPELINE_STAGE_DEFS[PIPELINE_STAGE_DEFS.length - 1].label);
           setNodesForProject(project.id, generateMockNodes(project.durationSec));
           setReportForProject(project.id, generateMockReport());
           setProjects(prev => prev.map(p => p.id === project.id ? { ...p, status: "completed", updatedAt: new Date().toISOString() } : p));
           setTimeout(() => setCurrentScreen("workspace"), 500);
         } else {
           setProgress(currentProgress);
-          const nextIndex = Math.min(STAGES.length - 1, Math.floor((currentProgress / 100) * STAGES.length));
-          const label = STAGES[nextIndex];
-          setStageLabel(label);
+          const nextIndex = Math.min(PIPELINE_STAGE_DEFS.length - 1, Math.floor((currentProgress / 100) * PIPELINE_STAGE_DEFS.length));
+          setStageLabel(PIPELINE_STAGE_DEFS[nextIndex].label);
         }
       }, intervalTime);
 
@@ -306,7 +257,7 @@ export function ProgressScreen() {
       setProgress(snap.progress);
       setStageLabel(snap.stage);
       setDetail(snap.message || "");
-      // 这是 main 端的 lastProgress 一次性回灌, 真实事件流走 AppContext 全局订阅 → logsByProject。
+      // 这是 main 端的 lastProgress 一次性回灌, 真实事件流走 AppContext 全局订阅 → pipelineByProject。
     };
 
     const launchOrAttach = async () => {
@@ -420,7 +371,7 @@ export function ProgressScreen() {
             </div>
           </div>
           <div className="flex justify-between font-mono text-[11px] uppercase tracking-wider text-slate-500">
-            <span>已完成 <strong className="font-medium text-slate-900 dark:text-slate-100">{currentStageIndex + 1} / {STAGES.length}</strong> 步</span>
+            <span>已完成 <strong className="font-medium text-slate-900 dark:text-slate-100">{pipeline ? pipeline.stages.filter(s => s.status === "done").length : 0} / {PIPELINE_STAGE_DEFS.length}</strong> 步</span>
             <span><strong className="font-medium text-slate-900 dark:text-slate-100 tabular-nums">{Math.round(progress)}%</strong></span>
           </div>
         </section>
@@ -445,20 +396,28 @@ export function ProgressScreen() {
           )
         )}
 
-        {/* Pipeline with inline logs */}
+        {/* Pipeline stages */}
         <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-4 md:p-5">
           <div className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 mb-3 font-medium">流水线</div>
           <ul className="space-y-1">
-            {STAGES.map((s, idx) => {
+            {(pipeline?.stages ?? PIPELINE_STAGE_DEFS).map((s, idx) => {
               const isDownloading = project.status === "downloading";
-              const done = !isDownloading && (idx < currentStageIndex || progress >= 100);
-              const active = !isDownloading && idx === currentStageIndex && progress < 100;
-              const stageLogs = logs.filter(l => mapStageToIndex(l.stage, l.message) === idx);
+              const stage = pipeline?.stages[idx];
+              const done = !isDownloading && (stage?.status === "done" || progress >= 100);
+              const active = !isDownloading && stage?.status === "active" && progress < 100;
+              const failed = stage?.status === "failed";
+              const elapsed = stage?.startedAt
+                ? formatElapsed((stage.completedAt || Date.now()) - stage.startedAt)
+                : undefined;
               return (
-                <li key={s}>
+                <li key={s.key ?? idx}>
                   <div className="flex items-center gap-2 font-mono text-[11.5px] py-0.5">
                     {done ? (
                       <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                    ) : failed ? (
+                      <span className="w-3.5 h-3.5 grid place-items-center shrink-0">
+                        <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                      </span>
                     ) : active ? (
                       <span className="w-3.5 h-3.5 grid place-items-center shrink-0">
                         <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
@@ -468,25 +427,24 @@ export function ProgressScreen() {
                         <span className="w-1.5 h-1.5 rounded-full bg-slate-300 dark:bg-slate-700" />
                       </span>
                     )}
-                    <span className={done ? "text-slate-700 dark:text-slate-300" : active ? "text-slate-900 dark:text-slate-100 font-medium" : "text-slate-400 dark:text-slate-600"}>
-                      {s}
+                    <span className={
+                      done ? "text-slate-700 dark:text-slate-300" :
+                      failed ? "text-rose-600 dark:text-rose-400" :
+                      active ? "text-slate-900 dark:text-slate-100 font-medium" :
+                      "text-slate-400 dark:text-slate-600"
+                    }>
+                      {s.label}
                     </span>
+                    {(done || failed) && elapsed && (
+                      <span className="text-slate-400 dark:text-slate-600 text-[10px] tabular-nums">{elapsed}</span>
+                    )}
+                    {stage?.fromCache && (
+                      <span className="text-emerald-600 dark:text-emerald-400 text-[10px]">(缓存)</span>
+                    )}
                   </div>
-                  {stageLogs.length > 0 && (
-                    <div className="ml-[22px] border-l border-slate-100 dark:border-slate-800 pl-3 pb-1 space-y-0.5">
-                      {stageLogs.map((log, li) => (
-                        <div key={li} className="flex gap-2 font-mono text-[11px] leading-relaxed">
-                          <span className="text-slate-400 dark:text-slate-600 shrink-0 tabular-nums w-10">{formatElapsed(log.absoluteMs - startedAt)}</span>
-                          <span className={
-                            log.tone === "ok" ? "text-emerald-600 dark:text-emerald-400" :
-                            log.tone === "warn" ? "text-amber-600 dark:text-amber-400" :
-                            "text-slate-600 dark:text-slate-400"
-                          }>
-                            {log.fromCache && <span className="text-emerald-600 dark:text-emerald-400 mr-1">(缓存)</span>}
-                            {log.message || log.stage}
-                          </span>
-                        </div>
-                      ))}
+                  {stage?.detail && (stage.status === "active" || stage.status === "done" || stage.status === "failed") && (
+                    <div className="ml-[22px] pl-3 pb-0.5">
+                      <span className="font-mono text-[11px] text-slate-500 dark:text-slate-500">{stage.detail}</span>
                     </div>
                   )}
                 </li>

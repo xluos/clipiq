@@ -4166,6 +4166,23 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   const tokenLedger = createTokenLedger();
   handle.tokenLedger = tokenLedger;
 
+  // stageIndex 映射: stage 中文名 → 流水线 UI 阶段索引 (0-8), 与 renderer PIPELINE_STAGE_DEFS 对齐。
+  // timing 系统仍用细粒度的 stage 字符串做 key (eta-samples / DiagnosticsScreen 依赖它)。
+  const STAGE_INDEX_MAP = {
+    "读取视频信息": 0, "校验视频": 0,
+    "检测镜头切换": 1,
+    "挑选关键画面": 2, "抽取关键画面": 2, "画面去重": 2,
+    "本地推理预检": 2, "本地初筛": 2, "本地初筛失败": 2,
+    "提取音轨": 3, "字幕识别": 3, "字幕识别完成": 3, "字幕识别失败": 3,
+    "镜头合并": 4, "镜头缩略图": 4, "镜头缩略图就绪": 4, "镜头合并完成": 4, "镜头合并失败": 4,
+    "全局聚合": 5, "全局聚合跳过": 5, "全局聚合失败": 5,
+    "准备分析素材": 5, "识别视频类型": 5, "类型识别跳过": 5, "类型识别完成": 5,
+    "模型分析画面": 6, "主分析(分段)": 6, "主分析(审计)": 6, "分析失败": 6,
+    "拉取弹幕": 6, "弹幕情绪聚合": 6, "弹幕情绪聚合完成": 6, "弹幕分析完成": 6, "弹幕分析失败": 6,
+    "整理结果": 7, "保存失败快照": 7,
+    "完成": 8, "已结束": 8, "生成最终报告": 8,
+  };
+
   const send = (progress, stage, message, meta = {}) => {
     if (handle.cancelled) return;
     if (stage !== currentStage) {
@@ -4174,8 +4191,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       currentStageStartedAt = Date.now();
     }
     const payload = { projectId: project.id, progress, stage, message };
-    // 整段命中缓存的 stage 在 message 之外加 fromCache 标记,
-    // UI 渲染 log 时加 "(缓存)" 标记 (省了真跑 LLM 的时间)。
+    const si = STAGE_INDEX_MAP[stage];
+    if (si != null) payload.stageIndex = si;
     if (meta && meta.fromCache) payload.fromCache = true;
     handle.lastProgress = payload;
     handle.lastProgressAt = Date.now();
@@ -4279,7 +4296,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
 
     let inspected, scenes, plan, finalCount, candidateCount, inputFileSize;
     if (manifestValid) {
-      send(2, "恢复进度", "检测到上次的视频检测和场景分析结果,跳过重复阶段。");
+      send(2, "读取视频信息", "命中缓存，复用上次的视频检测结果。", { fromCache: true });
+      send(4, "检测镜头切换", "命中缓存，复用上次的场景分析结果。", { fromCache: true });
       inspected = {
         durationSec: savedManifest.durationSec,
         width: savedManifest.width,
@@ -4351,7 +4369,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       && savedFrames.frames.every((f) => fsSync.existsSync(f.framePath));
     let candidateFrames, skipped;
     if (framesValid) {
-      send(8, "恢复进度", `跳过抽帧,复用 ${savedFrames.frames.length} 张已有关键画面。`);
+      send(8, "挑选关键画面", `命中缓存，复用 ${savedFrames.frames.length} 张已有关键画面。`, { fromCache: true });
       candidateFrames = savedFrames.frames;
       skipped = savedFrames.skipped || 0;
     } else {
@@ -4466,7 +4484,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     const savedTranscript = await readJson(transcriptPath, null).catch(() => null);
     if (savedTranscript?.segments?.length > 0) {
       transcript = savedTranscript;
-      send(50, "恢复进度", `跳过字幕识别,复用 ${transcript.segments.length} 段已有字幕。`);
+      send(50, "字幕识别", `命中缓存，复用 ${transcript.segments.length} 段已有字幕。`, { fromCache: true });
     }
     const audioReady = !transcript && audioProvider && inspected.hasAudio && (
       audioProvider.source === "local_whisper" ||

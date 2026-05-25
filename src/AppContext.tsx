@@ -1,17 +1,14 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, AnalysisBudget, ProgressLogEntry, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, AnalysisBudget, PIPELINE_STAGE_DEFS, PipelineState, PipelineStage, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
 import type { DownloadedVideo } from "./electron-api";
 
-// 进度日志的 tone 推断 — 跟原 ProgressScreen.detectTone 一致, 提到全局是因为
-// 订阅 onAnalysisProgress 在 AppContext 里就要落 logsByProject。
-function detectLogTone(stage: string, message: string): "info" | "ok" | "warn" {
-  const blob = `${stage} ${message}`.toLowerCase();
-  if (/failed|error|skip|warn|超时|失败/.test(blob)) return "warn";
-  if (/done|complete|ok|完成/.test(blob)) return "ok";
-  return "info";
+function createEmptyPipeline(projectId: string): PipelineState {
+  return {
+    projectId,
+    progress: 0,
+    stages: PIPELINE_STAGE_DEFS.map((d) => ({ key: d.key, label: d.label, status: "pending" as const })),
+  };
 }
-
-const PROGRESS_LOG_LIMIT = 80;
 
 export type ModelDownloadProgress = {
   modelKey: string;
@@ -94,10 +91,7 @@ interface AppState {
   // TaskQueueDrawer / ProgressScreen 都直接读, 避免各自挂 listener 导致 drawer
   // 在打开瞬间订阅 → 错过之前事件 → 显示停留在很旧的 stage。
   progressByProject: Record<string, AnalysisProgressEvent>;
-  // 进度屏实时日志, 按 projectId 分组保存最近 N 条 (N=30)。
-  // 跟 progressByProject 一样走全局订阅 → 写入, 这样切 project 时各自累积,
-  // 同一 project 退出再进 ProgressScreen 时也能恢复历史日志。
-  logsByProject: Record<string, ProgressLogEntry[]>;
+  pipelineByProject: Record<string, PipelineState>;
   // ETA baseline budget: main 在 analyzeProject 开头算一次 broadcast, 这里 cache 给
   // ProgressScreen 用做精准 ETA 估算 (替代之前的 elapsed/progress 线性外推)。
   budgetByProject: Record<string, AnalysisBudget>;
@@ -269,7 +263,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [accountVideosByAccountId, setAccountVideosByAccountId] = useState<Record<string, AccountVideo[]>>({});
   const [accountFetchUi, setAccountFetchUi] = useState<Record<string, AccountFetchUiState>>({});
   const [progressByProject, setProgressByProject] = useState<Record<string, AnalysisProgressEvent>>({});
-  const [logsByProject, setLogsByProject] = useState<Record<string, ProgressLogEntry[]>>({});
+  const [pipelineByProject, setPipelineByProject] = useState<Record<string, PipelineState>>({});
   const [budgetByProject, setBudgetByProject] = useState<Record<string, AnalysisBudget>>({});
   const [modelDownloads, setModelDownloads] = useState<Record<string, ModelDownloadProgress>>({});
 
@@ -367,10 +361,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         delete next[projectId];
         return next;
       });
-      // 也清 logs / progress / budget 缓存,避免 progress 屏的实时日志区把上次跑的
-      // 7 条 stage log 跟这次新跑的混在一起 (用户看到 "本地初筛→精挑画面→提取音轨"
-      // alternation 重复就是这个原因 — 旧 7 条 + 新 7 条 append 到同 projectId)。
-      setLogsByProject((prev) => {
+      setPipelineByProject((prev) => {
         if (!(projectId in prev)) return prev;
         const next = { ...prev };
         delete next[projectId];
@@ -441,7 +432,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       delete next[projectId];
       return next;
     });
-    setLogsByProject((prev) => {
+    setPipelineByProject((prev) => {
       if (!(projectId in prev)) return prev;
       const next = { ...prev };
       delete next[projectId];
@@ -618,7 +609,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // 订阅 main 进程的分析 / 下载进度事件 — 全局只挂一次, 同时写 progressByProject
-  // (最新一条快照) 和 logsByProject (按 projectId 累积 30 条历史)。
+  // (最新一条快照) 和 pipelineByProject (结构化阶段进度)。
   // 任何屏 (ProgressScreen / TaskQueueDrawer / 首屏卡片) 都从这两个全局 map 读,
   // 避免组件 mount 才订阅导致漏掉之前的 events, 也避免 ProgressScreen 切换 /
   // 退出再进时日志被清掉混在一起。
@@ -626,21 +617,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!window.videoAnalyzer?.onAnalysisProgress) return;
     const off = window.videoAnalyzer.onAnalysisProgress((evt) => {
       setProgressByProject((prev) => ({ ...prev, [evt.projectId]: evt }));
-      setLogsByProject((prev) => {
-        const list = prev[evt.projectId] || [];
-        const message = evt.message || "";
-        const last = list[list.length - 1];
-        if (last && last.stage === evt.stage && last.message === message && last.fromCache === !!evt.fromCache) return prev;
-        const entry: ProgressLogEntry = {
-          absoluteMs: Date.now(),
-          stage: evt.stage,
-          message,
-          tone: detectLogTone(evt.stage, message),
-          fromCache: !!evt.fromCache || undefined,
-        };
-        const next = [...list, entry].slice(-PROGRESS_LOG_LIMIT);
-        return { ...prev, [evt.projectId]: next };
-      });
+      if (evt.stageIndex != null) {
+        const si = evt.stageIndex;
+        const now = Date.now();
+        setPipelineByProject((prev) => {
+          const pipeline = prev[evt.projectId] || createEmptyPipeline(evt.projectId);
+          const stages: PipelineStage[] = pipeline.stages.map((s, i) => {
+            if (i < si) {
+              if (s.status === "done" || s.status === "failed") return s;
+              return { ...s, status: "done" as const, completedAt: s.completedAt || now };
+            }
+            if (i === si) {
+              const done = evt.progress >= 100;
+              return {
+                ...s,
+                status: done ? "done" as const : "active" as const,
+                detail: evt.message || s.detail,
+                startedAt: s.startedAt || now,
+                fromCache: evt.fromCache || s.fromCache,
+                ...(done ? { completedAt: now } : {}),
+              };
+            }
+            return s;
+          });
+          return { ...prev, [evt.projectId]: { ...pipeline, progress: evt.progress, stages } };
+        });
+      }
     });
     return off;
   }, []);
@@ -816,7 +818,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         upsertAccountVideoLocal,
         accountFetchUi,
         progressByProject,
-        logsByProject,
+        pipelineByProject,
         budgetByProject,
         setBudgetForProject,
         modelDownloads,
