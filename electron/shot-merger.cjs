@@ -253,7 +253,7 @@ async function mergeShots({ shots, provider, batchSize, concurrency: concurrency
           for (let j = 0; j < batch.length; j++) result[startIdx + j] = hit.entries[j];
           cacheHits += batch.length;
           completedShots += batch.length;
-          if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, mode: "cache-hit" });
+          if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, batchSize: size, mode: "cache-hit" });
           return;
         }
       } catch { /* 缓存读失败 → 走 LLM */ }
@@ -262,7 +262,7 @@ async function mergeShots({ shots, provider, batchSize, concurrency: concurrency
     if (givenUp) {
       fillBatchWithFallback(batch, result, startIdx);
       completedShots += batch.length;
-      if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, mode: "fallback-shortcut" });
+      if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, batchSize: size, mode: "fallback-shortcut" });
       return;
     }
 
@@ -304,7 +304,7 @@ async function mergeShots({ shots, provider, batchSize, concurrency: concurrency
           catch { /* 写缓存失败不阻塞 */ }
         }
         completedShots += batch.length;
-        if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, mode: "ok" });
+        if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, batchSize: size, mode: "ok" });
         return;
       } catch (error) {
         if (handle?.cancelled) throw error;
@@ -316,7 +316,7 @@ async function mergeShots({ shots, provider, batchSize, concurrency: concurrency
         console.warn(`[shot-merger] batch ${batchNum} 重试 ${MAX_BATCH_RETRIES} 次仍失败 (#${consecutiveFail} 连续), 走 fallback:`, error?.message || error);
         fillBatchWithFallback(batch, result, startIdx);
         completedShots += batch.length;
-        if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, mode: "fallback-batch" });
+        if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, batchSize: size, mode: "fallback-batch" });
         if (consecutiveFail >= GIVE_UP_AFTER_CONSECUTIVE_FAIL) {
           givenUp = true;
           console.warn(`[shot-merger] 连续 ${consecutiveFail} 个 batch 失败, 放弃 LLM 路径, 后续直接 fallback`);
