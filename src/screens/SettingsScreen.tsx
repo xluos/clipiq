@@ -2209,7 +2209,7 @@ const ModelCard: FunctionComponent<ModelCardProps> = ({
               <button
                 type="button"
                 onClick={() => onCancelDownload(model.id)}
-                className="text-[11px] text-slate-400 hover:text-red-500 transition-colors px-1"
+                className="text-[11px] text-slate-400 hover:text-red-500 transition-colors px-1 whitespace-nowrap shrink-0"
                 title="取消下载"
               >
                 取消
