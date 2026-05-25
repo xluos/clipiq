@@ -218,6 +218,7 @@ function fillBatchWithFallback(batch, result, baseIndex) {
 }
 
 const GIVE_UP_AFTER_CONSECUTIVE_FAIL = 3;
+const MAX_BATCH_RETRIES = 2;
 
 async function mergeShots({ shots, provider, batchSize, handle, onProgress, cache }) {
   // batchSize 显式传入 → 用显式值; 不传 → 按 provider.contextSize + 实际 prompt 长度动态算
@@ -260,60 +261,70 @@ async function mergeShots({ shots, provider, batchSize, handle, onProgress, cach
       continue;
     }
     const { system, user } = buildMergePrompt(batch);
-    try {
-      const callResult = await callMediumText(provider, system, user, handle?.abortController?.signal);
-      const parsed = callResult.parsed;
-      if (callResult.usage) {
-        usageAgg.promptTokens += callResult.usage.promptTokens;
-        usageAgg.completionTokens += callResult.usage.completionTokens;
-        usageAgg.totalTokens += callResult.usage.totalTokens;
-        usageAgg.callCount += 1;
-      } else {
-        usageAgg.callCount += 1;
-      }
-      if (callResult.model) echoedModel = callResult.model;
-      const out = Array.isArray(parsed?.shots) ? parsed.shots : [];
-      if (out.length === 0) {
-        // parsed 拿到了 JSON 但没 shots 字段, 视为本批次失败
-        throw new Error("parsed JSON 缺少 shots 字段");
-      }
-      consecutiveFail = 0;
-      const batchEntries = [];
-      for (let j = 0; j < batch.length; j++) {
-        const local = batch[j];
-        const match = out.find((s) => Number(s.shotIndex) === j) || out[j];
-        const frameCount = Array.isArray(local.frames) ? local.frames.length : 0;
-        const rawIdxs = Array.isArray(match?.representativeFrameIndex)
-          ? match.representativeFrameIndex
-          : [];
-        const repIdxs = rawIdxs
-          .map((n) => Math.floor(Number(n)))
-          .filter((n) => Number.isFinite(n) && n >= 0 && n < frameCount);
-        const desc =
-          typeof match?.shotDescription === "string" && match.shotDescription.trim()
-            ? match.shotDescription.trim().slice(0, 240)
-            : fallbackShotDescription(local);
-        const entry = {
-          shotDescription: desc,
-          representativeFrameIndex: repIdxs.length > 0 ? repIdxs : frameCount > 0 ? [0] : [],
-        };
-        result[i + j] = entry;
-        batchEntries.push(entry);
-      }
-      if (cache) {
-        try { await cache.store(batch, { entries: batchEntries }, { batchIndex }); }
-        catch { /* 写缓存失败不阻塞 */ }
-      }
-    } catch (error) {
-      if (handle?.cancelled) throw error;
-      consecutiveFail += 1;
-      // eslint-disable-next-line no-console
-      console.warn(`[shot-merger] batch ${batchIndex} 失败 (#${consecutiveFail} 连续), 走 fallback:`, error?.message || error);
-      fillBatchWithFallback(batch, result, i);
-      if (consecutiveFail >= GIVE_UP_AFTER_CONSECUTIVE_FAIL) {
-        givenUp = true;
+    let batchOk = false;
+    for (let attempt = 0; attempt <= MAX_BATCH_RETRIES; attempt++) {
+      if (handle?.cancelled) throw new Error("cancelled");
+      try {
+        const callResult = await callMediumText(provider, system, user, handle?.abortController?.signal);
+        const parsed = callResult.parsed;
+        if (callResult.usage) {
+          usageAgg.promptTokens += callResult.usage.promptTokens;
+          usageAgg.completionTokens += callResult.usage.completionTokens;
+          usageAgg.totalTokens += callResult.usage.totalTokens;
+          usageAgg.callCount += 1;
+        } else {
+          usageAgg.callCount += 1;
+        }
+        if (callResult.model) echoedModel = callResult.model;
+        const out = Array.isArray(parsed?.shots) ? parsed.shots : [];
+        if (out.length === 0) {
+          throw new Error("parsed JSON 缺少 shots 字段");
+        }
+        consecutiveFail = 0;
+        const batchEntries = [];
+        for (let j = 0; j < batch.length; j++) {
+          const local = batch[j];
+          const match = out.find((s) => Number(s.shotIndex) === j) || out[j];
+          const frameCount = Array.isArray(local.frames) ? local.frames.length : 0;
+          const rawIdxs = Array.isArray(match?.representativeFrameIndex)
+            ? match.representativeFrameIndex
+            : [];
+          const repIdxs = rawIdxs
+            .map((n) => Math.floor(Number(n)))
+            .filter((n) => Number.isFinite(n) && n >= 0 && n < frameCount);
+          const desc =
+            typeof match?.shotDescription === "string" && match.shotDescription.trim()
+              ? match.shotDescription.trim().slice(0, 240)
+              : fallbackShotDescription(local);
+          const entry = {
+            shotDescription: desc,
+            representativeFrameIndex: repIdxs.length > 0 ? repIdxs : frameCount > 0 ? [0] : [],
+          };
+          result[i + j] = entry;
+          batchEntries.push(entry);
+        }
+        if (cache) {
+          try { await cache.store(batch, { entries: batchEntries }, { batchIndex }); }
+          catch { /* 写缓存失败不阻塞 */ }
+        }
+        batchOk = true;
+        break;
+      } catch (error) {
+        if (handle?.cancelled) throw error;
+        if (attempt < MAX_BATCH_RETRIES) {
+          // eslint-disable-next-line no-console
+          console.warn(`[shot-merger] batch ${batchIndex} 第 ${attempt + 1} 次失败, 重试:`, error?.message || error);
+          continue;
+        }
+        consecutiveFail += 1;
         // eslint-disable-next-line no-console
-        console.warn(`[shot-merger] 连续 ${consecutiveFail} 个 batch 失败, 放弃 LLM 路径, 后续 batch 直接走 fallback (medium_text 模型可能是 reasoning 类型导致 content 为空)`);
+        console.warn(`[shot-merger] batch ${batchIndex} 重试 ${MAX_BATCH_RETRIES} 次仍失败 (#${consecutiveFail} 连续), 走 fallback:`, error?.message || error);
+        fillBatchWithFallback(batch, result, i);
+        if (consecutiveFail >= GIVE_UP_AFTER_CONSECUTIVE_FAIL) {
+          givenUp = true;
+          // eslint-disable-next-line no-console
+          console.warn(`[shot-merger] 连续 ${consecutiveFail} 个 batch 失败, 放弃 LLM 路径, 后续 batch 直接走 fallback`);
+        }
       }
     }
     if (onProgress) {

@@ -3716,52 +3716,69 @@ async function runChunkedAnalysis({
     chunks.map((c, i) => `#${i + 1}[${c.startSec.toFixed(0)}-${c.endSec.toFixed(0)}s shots=${c.shots.length} frames=${c.frames.length} ~${c.estTokens}tok]`).join(" "),
   );
 
-  // chunk pass 串行跑(保留每段在管理器内的 model 一致性)
+  const CHUNK_MAX_RETRIES = 2;
   const allChunkNodes = [];
   for (let i = 0; i < chunks.length; i++) {
     if (handle?.cancelled) throw new AnalysisCancelledError();
     const chunk = chunks[i];
     sendProgress?.(i, chunks.length, "chunk", chunk);
-    try {
-      const nodes = await runChunkPass({
-        effectiveProvider, project, methodology, globalContext, chunk,
-        totalChunks: chunks.length, options, reserveOutput, handle,
-      });
-      // 给每个 node 标记来源 chunk + 临时 id, 后面合并
-      nodes.forEach((n, j) => {
-        n._originalId = n.id || `chunk-${i + 1}-node-${j + 1}`;
-      });
-      allChunkNodes.push(...nodes);
-    } catch (err) {
-      if (err instanceof AnalysisCancelledError) throw err;
-      console.warn(`[analyze:main] chunk ${i + 1}/${chunks.length} 失败: ${err?.message || err}`);
-      // 单段失败标记一个占位 node, 不阻断
-      allChunkNodes.push({
-        _originalId: `chunk-${i + 1}-failed`,
-        startSec: chunk.startSec,
-        endSec: chunk.endSec,
-        title: `第 ${i + 1} 段分析失败`,
-        nodeTypes: ["shot_change"],
-        shotDescription: `本段 ${chunks.length} 段分析失败: ${err?.message || err}`,
-        narrativeFunction: "Other",
-      });
+    let chunkOk = false;
+    for (let attempt = 0; attempt <= CHUNK_MAX_RETRIES; attempt++) {
+      if (handle?.cancelled) throw new AnalysisCancelledError();
+      try {
+        const nodes = await runChunkPass({
+          effectiveProvider, project, methodology, globalContext, chunk,
+          totalChunks: chunks.length, options, reserveOutput, handle,
+        });
+        nodes.forEach((n, j) => {
+          n._originalId = n.id || `chunk-${i + 1}-node-${j + 1}`;
+        });
+        allChunkNodes.push(...nodes);
+        chunkOk = true;
+        break;
+      } catch (err) {
+        if (err instanceof AnalysisCancelledError) throw err;
+        if (attempt < CHUNK_MAX_RETRIES) {
+          console.warn(`[analyze:main] chunk ${i + 1}/${chunks.length} 第 ${attempt + 1} 次失败, 重试: ${err?.message || err}`);
+          continue;
+        }
+        console.warn(`[analyze:main] chunk ${i + 1}/${chunks.length} 重试 ${CHUNK_MAX_RETRIES} 次仍失败: ${err?.message || err}`);
+        allChunkNodes.push({
+          _originalId: `chunk-${i + 1}-failed`,
+          startSec: chunk.startSec,
+          endSec: chunk.endSec,
+          title: `第 ${i + 1} 段分析失败`,
+          nodeTypes: ["shot_change"],
+          shotDescription: `本段分析失败: ${err?.message || err}`,
+          narrativeFunction: "Other",
+        });
+      }
     }
   }
 
   sendProgress?.(chunks.length, chunks.length, "audit", null);
 
-  // audit pass — 失败时降级为不带审计的结果,不丢弃已有的 chunk 节点
+  // audit pass — 最多重试 2 次,全部失败则降级为不带审计的结果
+  const AUDIT_MAX_RETRIES = 2;
   let auditResult = null;
-  try {
-    auditResult = await runAuditPass({
-      effectiveProvider, project, methodology, globalContext,
-      nodes: allChunkNodes, transcript, options,
-      ctxSize, reserveOutput, safetyMargin,
-      handle,
-    });
-  } catch (auditErr) {
-    if (auditErr instanceof AnalysisCancelledError) throw auditErr;
-    console.warn(`[analyze:main] audit pass 失败, 降级为不带审计的结果: ${auditErr?.message || auditErr}`);
+  for (let attempt = 0; attempt <= AUDIT_MAX_RETRIES; attempt++) {
+    if (handle?.cancelled) throw new AnalysisCancelledError();
+    try {
+      auditResult = await runAuditPass({
+        effectiveProvider, project, methodology, globalContext,
+        nodes: allChunkNodes, transcript, options,
+        ctxSize, reserveOutput, safetyMargin,
+        handle,
+      });
+      break;
+    } catch (auditErr) {
+      if (auditErr instanceof AnalysisCancelledError) throw auditErr;
+      if (attempt < AUDIT_MAX_RETRIES) {
+        console.warn(`[analyze:main] audit pass 第 ${attempt + 1} 次失败, 重试: ${auditErr?.message || auditErr}`);
+        continue;
+      }
+      console.warn(`[analyze:main] audit pass 重试 ${AUDIT_MAX_RETRIES} 次仍失败, 降级为不带审计的结果: ${auditErr?.message || auditErr}`);
+    }
   }
 
   return mergeChunkedResult({
