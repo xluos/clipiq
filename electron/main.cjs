@@ -1195,6 +1195,30 @@ function localLlamaEntryToDescriptor(entry) {
   };
 }
 
+// daemon recommendedModel → localLlamaEntryToDescriptor 输入格式
+function daemonModelToLlamaEntry(dm) {
+  return {
+    key: dm.id,
+    family: dm.family,
+    params: dm.params,
+    name: dm.name,
+    description: dm.desc,
+    primaryCapabilities: dm.primaryCapabilities || [],
+    secondaryTags: dm.secondaryTags || [],
+    available: dm.available !== false,
+    contextSize: dm.contextSize,
+    nativeContextSize: dm.nativeContextSize,
+    quantizations: dm.quantizations || [],
+    fit: dm.fit,
+    memPercent: dm.memPercent,
+    tps: dm.tps,
+    downloaded: !!dm.ready,
+    isThinking: !!dm.isThinking,
+    llmBytes: 0,
+    mmprojBytes: 0,
+  };
+}
+
 // 本地 whisper 模型 (whisperCppRuntime.MODELS / listModels) → ModelDescriptor
 function localWhisperEntryToDescriptor(entry) {
   if (!entry) return null;
@@ -5094,8 +5118,17 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
 
 // ETA 埋点 jsonl 落盘 helper - 每次 analyzeProject 结束 append 一行 (ok/failed/cancelled 都写)
 async function appendEtaSample({ project, analysisStartedAt, outcome, failureMsg, timings, providers }) {
-  const machineDetect = require("./machine-detect.cjs");
-  const machine = machineDetect.detectMachine();
+  let machine;
+  try {
+    const daemonClient = require("./daemon-client.cjs");
+    machine = await daemonClient.getHardware();
+  } catch {
+    machine = {
+      platform: process.platform, arch: process.arch,
+      cpuModel: os.cpus()?.[0]?.model || "unknown", backend: "cpu",
+      totalMemoryBytes: os.totalmem(), availableMemoryBytes: os.totalmem() - 6 * 1024 ** 3,
+    };
+  }
   const summarizeProvider = (p) => p ? {
     id: p.id,
     name: p.name,
@@ -7182,22 +7215,11 @@ app.whenReady().then(async () => {
 
   // listModels 与 listManifest 共用同一映射,差别只在不带 machine 字段
   ipcMain.handle("llama:listModels", async () => {
-    const machineDetect = require("./machine-detect.cjs");
-    const machine = machineDetect.detectMachine();
+    const daemonClient = require("./daemon-client.cjs");
     const ctxOverrides = await readCtxOverrides();
-    const annotated = machineDetect.annotateManifest(llamaRuntime.getManifest(), machine, ctxOverrides);
-    const installed = await llamaRuntime.listModels();
-    const installedMap = Object.fromEntries(installed.map((m) => [m.key, m]));
-    return Object.values(annotated)
-      .map((entry) => {
-        const inst = installedMap[entry.key] || {};
-        return localLlamaEntryToDescriptor({
-          ...entry,
-          downloaded: !!inst.downloaded,
-          llmBytes: inst.llmBytes || 0,
-          mmprojBytes: inst.mmprojBytes || 0,
-        });
-      })
+    const { models } = await daemonClient.getRecommendedModels("clipiq", ctxOverrides);
+    return (models || [])
+      .map((dm) => localLlamaEntryToDescriptor(daemonModelToLlamaEntry(dm)))
       .filter(Boolean);
   });
 
@@ -7207,36 +7229,17 @@ app.whenReady().then(async () => {
   // 返回 { fit, memPercent, tps, totalMemBytes, weightBytes, kvBytes, memCapBytes }。
   // 不持久化 — slider 改完用户点保存才会写到 config.localModelOverrides。
   ipcMain.handle("llama:recomputeFit", async (_evt, { modelKey, contextSize }) => {
-    const machineDetect = require("./machine-detect.cjs");
-    const machine = machineDetect.detectMachine();
-    const manifest = llamaRuntime.getManifest();
-    const entry = manifest?.[modelKey];
-    if (!entry) return null;
-    const paramsB = machineDetect.parseParams(entry.params);
-    const defaultQuant = entry.quantizations?.[0];
-    if (!defaultQuant) return null;
-    return machineDetect.computeQuantFit(defaultQuant, machine, paramsB, contextSize, entry);
+    const daemonClient = require("./daemon-client.cjs");
+    return daemonClient.recomputeFit(modelKey, contextSize);
   });
 
-  // 返回 ModelDescriptor[] + 机器规格. annotated manifest 合并 downloaded 状态后投影成统一 schema
+  // 返回 ModelDescriptor[] + 机器规格. daemon 统一算 fit + 下载状态
   ipcMain.handle("llama:listManifest", async () => {
-    const machineDetect = require("./machine-detect.cjs");
-    const machine = machineDetect.detectMachine();
-    const manifest = llamaRuntime.getManifest();
+    const daemonClient = require("./daemon-client.cjs");
     const ctxOverrides = await readCtxOverrides();
-    const annotated = machineDetect.annotateManifest(manifest, machine, ctxOverrides);
-    const installed = await llamaRuntime.listModels();
-    const installedMap = Object.fromEntries(installed.map((m) => [m.key, m]));
-    const descriptors = Object.values(annotated)
-      .map((entry) => {
-        const inst = installedMap[entry.key] || {};
-        return localLlamaEntryToDescriptor({
-          ...entry,
-          downloaded: !!inst.downloaded,
-          llmBytes: inst.llmBytes || 0,
-          mmprojBytes: inst.mmprojBytes || 0,
-        });
-      })
+    const { machine, models } = await daemonClient.getRecommendedModels("clipiq", ctxOverrides);
+    const descriptors = (models || [])
+      .map((dm) => localLlamaEntryToDescriptor(daemonModelToLlamaEntry(dm)))
       .filter(Boolean);
     return { machine, models: descriptors };
   });

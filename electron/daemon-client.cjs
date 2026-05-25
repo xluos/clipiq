@@ -216,6 +216,30 @@ async function setMirrorPreference(mirror) {
   return res.data;
 }
 
+async function getHardware() {
+  await ensureDaemon();
+  const res = await request("GET", "/hardware");
+  return res.data;
+}
+
+async function getRecommendedModels(appFilter, ctxOverrides = {}) {
+  await ensureDaemon();
+  const params = [];
+  if (appFilter) params.push(`app=${encodeURIComponent(appFilter)}`);
+  for (const [key, val] of Object.entries(ctxOverrides)) {
+    if (Number(val) > 0) params.push(`ctx.${encodeURIComponent(key)}=${val}`);
+  }
+  const qs = params.length ? `?${params.join("&")}` : "";
+  const res = await request("GET", `/models/recommended${qs}`);
+  return res.data;
+}
+
+async function recomputeFit(modelId, contextSize) {
+  await ensureDaemon();
+  const res = await request("POST", `/models/${encodeURIComponent(modelId)}/recompute-fit`, { contextSize });
+  return res.data;
+}
+
 // SSE 下载,解析 event stream 回调 onProgress / onSkip / onDone。
 // 返回 Promise<{ok, error?}>
 function downloadModel(modelId, onProgress) {
@@ -299,6 +323,9 @@ module.exports = {
   downloadModel,
   deleteModel,
   setMirrorPreference,
+  getHardware,
+  getRecommendedModels,
+  recomputeFit,
   socketPath,
   daemonStorageDir,
 };
