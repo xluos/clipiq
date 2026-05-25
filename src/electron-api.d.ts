@@ -344,6 +344,7 @@ declare global {
         getStatus: () => Promise<LlamaStatus>;
         ensureBinary: () => Promise<{ ok: true; binaryPath: string }>;
         ensureModel: (modelKey: string) => Promise<{ ok: true; modelKey: string }>;
+        cancelDownload: (modelKey: string) => Promise<{ status: string }>;
         start: (modelKey: string) => Promise<{ ok: true; port: number; reused: boolean }>;
         stop: () => Promise<{ ok: true }>;
         selfTest: (payload: { imageDataUrl?: string; prompt?: string }) => Promise<LlamaSelfTestResult>;

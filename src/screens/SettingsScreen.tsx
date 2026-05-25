@@ -1773,6 +1773,16 @@ function LocalInferenceSection() {
     setSelfTestResult(null);
   };
 
+  const handleCancelDownload = async (modelKey: string) => {
+    if (!window.videoAnalyzer?.llama) return;
+    try {
+      await window.videoAnalyzer.llama.cancelDownload(modelKey);
+    } catch { /* daemon may have already finished */ }
+    clearBusyFor(modelKey);
+    setProgressMap((prev) => { const next = { ...prev }; delete next[modelKey]; return next; });
+    await refresh();
+  };
+
   const handleSelfTest = async () => {
     if (!window.videoAnalyzer?.llama) return;
     if (!selfTestImage) {
@@ -1909,6 +1919,7 @@ function LocalInferenceSection() {
             progressMap={progressMap}
             onStart={handleStart}
             onStop={handleStop}
+            onCancelDownload={handleCancelDownload}
           />
           <ModelGroup
             title="纯文本"
@@ -1920,6 +1931,7 @@ function LocalInferenceSection() {
             progressMap={progressMap}
             onStart={handleStart}
             onStop={handleStop}
+            onCancelDownload={handleCancelDownload}
           />
         </div>
 
@@ -2006,10 +2018,11 @@ type ModelGroupProps = {
   progressMap: Record<string, LlamaProgress | null>;
   onStart: (modelKey: string) => void;
   onStop: () => void;
+  onCancelDownload: (modelKey: string) => void;
 };
 
 const ModelGroup: FunctionComponent<ModelGroupProps> = ({
-  title, subtitle, models, runningKey, busyMap, isAnyBusy, progressMap, onStart, onStop,
+  title, subtitle, models, runningKey, busyMap, isAnyBusy, progressMap, onStart, onStop, onCancelDownload,
 }) => {
   if (models.length === 0) return null;
   return (
@@ -2029,6 +2042,7 @@ const ModelGroup: FunctionComponent<ModelGroupProps> = ({
             progress={progressMap[m.id] || null}
             onStart={onStart}
             onStop={onStop}
+            onCancelDownload={onCancelDownload}
           />
         ))}
       </div>
@@ -2137,10 +2151,11 @@ type ModelCardProps = {
   progress: LlamaProgress | null;
   onStart: (modelKey: string) => void;
   onStop: () => void;
+  onCancelDownload: (modelKey: string) => void;
 };
 
 const ModelCard: FunctionComponent<ModelCardProps> = ({
-  model, runningKey, busyAction, isAnyBusy, progress, onStart, onStop,
+  model, runningKey, busyAction, isAnyBusy, progress, onStart, onStop, onCancelDownload,
 }) => {
   const isRunning = runningKey === model.id;
   const isDownloaded = !!model.local?.downloaded;
@@ -2189,7 +2204,19 @@ const ModelCard: FunctionComponent<ModelCardProps> = ({
         <span className="flex-1" />
         <FitChip fit={model.local?.fit} />
         {action.kind === "progress" ? (
-          <ProgressButton progress={progress} busyAction={busyAction} />
+          <div className="flex items-center gap-1">
+            {busyAction === "download" && (
+              <button
+                type="button"
+                onClick={() => onCancelDownload(model.id)}
+                className="text-[11px] text-slate-400 hover:text-red-500 transition-colors px-1"
+                title="取消下载"
+              >
+                取消
+              </button>
+            )}
+            <ProgressButton progress={progress} busyAction={busyAction} />
+          </div>
         ) : (
           <button
             type="button"

@@ -118,6 +118,7 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
     getStatus: () => ipcRenderer.invoke("llama:getStatus"),
     ensureBinary: () => ipcRenderer.invoke("llama:ensureBinary"),
     ensureModel: (modelKey) => ipcRenderer.invoke("llama:ensureModel", modelKey),
+    cancelDownload: (modelKey) => ipcRenderer.invoke("llama:cancelDownload", modelKey),
     start: (modelKey) => ipcRenderer.invoke("llama:start", modelKey),
     stop: () => ipcRenderer.invoke("llama:stop"),
     selfTest: (payload) => ipcRenderer.invoke("llama:selfTest", payload),

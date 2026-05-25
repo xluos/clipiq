@@ -209,6 +209,12 @@ async function getModelPaths(modelId) {
   return res.data?.paths || null;
 }
 
+async function cancelDownload(modelId) {
+  await ensureDaemon();
+  const res = await request("POST", `/models/${encodeURIComponent(modelId)}/cancel-download`);
+  return res.data;
+}
+
 async function deleteModel(modelId) {
   await ensureDaemon();
   const res = await request("DELETE", `/models/${encodeURIComponent(modelId)}`);
@@ -326,6 +332,7 @@ module.exports = {
   getModelStatus,
   getModelPaths,
   downloadModel,
+  cancelDownload,
   deleteModel,
   setMirrorPreference,
   getHardware,

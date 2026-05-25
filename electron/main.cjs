@@ -7353,6 +7353,11 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("llama:stop", async () => llamaRuntime.stop());
 
+  ipcMain.handle("llama:cancelDownload", async (_event, modelKey) => {
+    const daemonClient = require("./daemon-client.cjs");
+    return daemonClient.cancelDownload(modelKey);
+  });
+
   ipcMain.handle("llama:selfTest", async (_event, payload) => {
     return llamaRuntime.selfTest(payload || {});
   });
