@@ -195,6 +195,11 @@ export type CacheScopeStats = {
   lastUsedAt: number;
 };
 
+export type CachePolicy = {
+  enabled: boolean;
+  stages?: Record<string, boolean>;
+};
+
 export type CacheStats = {
   totalEntries: number;
   totalBytes: number;
@@ -445,6 +450,8 @@ declare global {
         setDir: (dir: string) => Promise<CacheSetDirResult>;
         browseDir: () => Promise<{ canceled: boolean; dir?: string }>;
         openDir: () => Promise<{ ok: boolean; path: string }>;
+        getPolicy: () => Promise<CachePolicy>;
+        setPolicy: (policy: CachePolicy) => Promise<{ ok: true }>;
       };
     };
   }

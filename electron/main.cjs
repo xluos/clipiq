@@ -61,10 +61,21 @@ async function initializeCacheStore() {
   cacheStore.configure({ dir, maxBytes });
 }
 
+// 当前管线运行期间生效的 cachePolicy 快照, analyzeProject 入口设置, 结束清除。
+let _activeCachePolicy = null;
+
+function isCacheEnabledForScope(scope) {
+  if (!_activeCachePolicy) return true;
+  if (!_activeCachePolicy.enabled) return false;
+  const stages = _activeCachePolicy.stages;
+  if (stages && typeof stages[scope] === "boolean") return stages[scope];
+  return true;
+}
+
 // 包一个"输入 → output"的纯函数 LLM 调用为 cache-aware 版本。
 // scope/key 由 main.cjs 各调用点构造, run 是命中失败时实际跑的副作用函数。
 async function runWithCache(scope, key, run, meta = {}) {
-  if (!cacheStore.isConfigured() || !key) return run();
+  if (!cacheStore.isConfigured() || !key || !isCacheEnabledForScope(scope)) return run();
   try {
     const hit = await cacheStore.get(scope, key);
     if (hit) return hit.payload;
@@ -153,7 +164,7 @@ function createTokenLedger() {
 
 // 给 prefilter.tagFrames 用的逐帧 cache injector
 function makePrefilterCache(modelKey) {
-  if (!cacheStore.isConfigured()) return null;
+  if (!cacheStore.isConfigured() || !isCacheEnabledForScope("prefilter")) return null;
   return {
     lookup: async (frame) => {
       try {
@@ -192,7 +203,7 @@ function normalizeShotMergerBatch(batch) {
 }
 
 function makeShotMergerCache(provider) {
-  if (!cacheStore.isConfigured() || !provider?.model) return null;
+  if (!cacheStore.isConfigured() || !provider?.model || !isCacheEnabledForScope("shot-merger")) return null;
   return {
     lookup: async (batch) => {
       try {
@@ -230,7 +241,7 @@ function normalizeDanmakuBatch(batch) {
 }
 
 function makeDanmakuEmotionCache(provider) {
-  if (!cacheStore.isConfigured() || !provider?.model) return null;
+  if (!cacheStore.isConfigured() || !provider?.model || !isCacheEnabledForScope("danmaku-emotion")) return null;
   return {
     lookup: async (batch) => {
       try {
@@ -455,6 +466,7 @@ function clearAnalysis(projectId) {
   const handle = activeAnalyses.get(projectId);
   if (handle?.heartbeat) clearInterval(handle.heartbeat);
   activeAnalyses.delete(projectId);
+  _activeCachePolicy = null;
 }
 
 function cancelAnalysis(projectId) {
@@ -4053,6 +4065,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   // 在管线开始时一次性快照 config + 从 taskSlots/audioSlot 解析各任务的 effective provider,
   // 避免运行中用户改设置导致竞争。renderer 传入的 provider/audioProvider 入参作废。
   const cfgSnapshot = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+  _activeCachePolicy = cfgSnapshot?.cachePolicy || null;
   const complexVisionProvider = resolveSlotProvider(cfgSnapshot, "complex_vision");
   const mediumTextProvider = resolveSlotProvider(cfgSnapshot, "medium_text");
   const audioProvider = resolveAudioProvider(cfgSnapshot);
@@ -5820,6 +5833,19 @@ app.whenReady().then(async () => {
     await fs.mkdir(target, { recursive: true });
     await shell.openPath(target);
     return { ok: true, path: target };
+  });
+
+  ipcMain.handle("cache:getPolicy", async () => {
+    const cfg = await readJson(getConfigPath(), null);
+    return cfg?.cachePolicy || { enabled: true, stages: {} };
+  });
+
+  ipcMain.handle("cache:setPolicy", async (_event, policy) => {
+    const cur = await readJson(getConfigPath(), null) || {};
+    cur.cachePolicy = policy;
+    cur.savedAt = new Date().toISOString();
+    await writeJson(getConfigPath(), cur);
+    return { ok: true };
   });
 
   ipcMain.handle("runtime:getStatus", async () => {

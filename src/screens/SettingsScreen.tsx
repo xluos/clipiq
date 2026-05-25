@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -43,7 +44,7 @@ import {
   TaskSlotKey,
   VideoGenre,
 } from "../types";
-import type { CacheScopeStats, CacheStats, ExtensionBridgeStatus, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
+import type { CachePolicy, CacheScopeStats, CacheStats, ExtensionBridgeStatus, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
 
 type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "bridge" | "data";
 
@@ -2425,6 +2426,8 @@ function AnalysisDefaultsSection() {
   );
 }
 
+const CACHE_STAGE_KEYS = ["transcript", "prefilter", "shot-merger", "summarizer", "detect-genre", "main-analysis", "danmaku-emotion"] as const;
+
 function CacheSection() {
   const confirm = useConfirm();
   const [stats, setStats] = useState<CacheStats | null>(null);
@@ -2432,6 +2435,19 @@ function CacheSection() {
   const [statusMessage, setStatusMessage] = useState("");
   const [maxBytesInput, setMaxBytesInput] = useState<string>("");
   const [maxBytesDirty, setMaxBytesDirty] = useState(false);
+  const [policy, setPolicy] = useState<CachePolicy>({ enabled: true, stages: {} });
+
+  const refreshPolicy = useCallback(async () => {
+    if (!window.videoAnalyzer?.cache?.getPolicy) return;
+    const p = await window.videoAnalyzer.cache.getPolicy().catch(() => null);
+    if (p) setPolicy(p);
+  }, []);
+
+  const updatePolicy = useCallback(async (next: CachePolicy) => {
+    setPolicy(next);
+    if (!window.videoAnalyzer?.cache?.setPolicy) return;
+    await window.videoAnalyzer.cache.setPolicy(next).catch(() => {});
+  }, []);
 
   const refresh = useCallback(async () => {
     if (!window.videoAnalyzer) return;
@@ -2444,7 +2460,8 @@ function CacheSection() {
 
   useEffect(() => {
     refresh();
-  }, [refresh]);
+    refreshPolicy();
+  }, [refresh, refreshPolicy]);
 
   const handleClearScope = async (scope: string) => {
     if (!window.videoAnalyzer) return;
@@ -2541,7 +2558,17 @@ function CacheSection() {
 
   return (
     <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4 text-sm">
-      <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">分析缓存</h3>
+      <div className="flex items-center justify-between">
+        <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">分析缓存</h3>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-500">{policy.enabled ? "已启用" : "已禁用"}</span>
+          <Switch
+            size="sm"
+            checked={policy.enabled}
+            onCheckedChange={(checked: boolean) => updatePolicy({ ...policy, enabled: checked })}
+          />
+        </div>
+      </div>
       <Stat label="总占用" value={stats ? `${formatBytes(stats.totalBytes)} · ${stats.totalEntries} 条` : "—"} />
       <Stat label="容量上限" value={stats ? (stats.maxBytes > 0 ? formatBytes(stats.maxBytes) : "不限") : "—"} />
       <Stat label="缓存目录" value={stats?.cacheDir ?? "—"} mono />
@@ -2594,29 +2621,56 @@ function CacheSection() {
         </Button>
       </div>
 
-      {scopeEntries.length > 0 && (
-        <div className="pt-2 space-y-2 border-t border-slate-200 dark:border-slate-800">
-          <div className="text-xs text-slate-500 dark:text-slate-400 pt-2">按阶段</div>
-          {scopeEntries.map(([scope, info]) => (
-            <div key={scope} className="grid grid-cols-[160px_1fr_auto] items-center gap-3">
-              <span className="text-slate-700 dark:text-slate-300">{SCOPE_LABELS_ZH[scope] || scope}</span>
-              <span className="font-mono text-xs text-slate-500">{formatBytes(info.bytes)} · {info.count} 条</span>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={busy === scope}
-                onClick={() => handleClearScope(scope)}
-                className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+      <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
+        <div className="text-xs text-slate-500 dark:text-slate-400 pt-2 mb-2">按阶段</div>
+        <div className="flex flex-wrap gap-2">
+          {CACHE_STAGE_KEYS.map((scope) => {
+            const info = stats?.byScope?.[scope];
+            const stageEnabled = policy.stages?.[scope] !== false;
+            const active = policy.enabled && stageEnabled;
+            return (
+              <button
+                key={scope}
+                type="button"
+                disabled={!policy.enabled}
+                onClick={() => updatePolicy({ ...policy, stages: { ...policy.stages, [scope]: !stageEnabled } })}
+                className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border text-xs transition-colors ${
+                  active
+                    ? "border-slate-300 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                    : "border-slate-200 bg-slate-50 text-slate-400 dark:border-slate-800 dark:bg-[#0A0A0B] dark:text-slate-600"
+                } ${!policy.enabled ? "opacity-50 cursor-not-allowed" : "hover:border-slate-400 dark:hover:border-slate-600"}`}
               >
-                清除
-              </Button>
-            </div>
-          ))}
+                <span className={`w-1.5 h-1.5 rounded-full ${active ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-700"}`} />
+                {SCOPE_LABELS_ZH[scope] || scope}
+                {info && info.count > 0 && (
+                  <span className="font-mono text-[10px] text-slate-400 dark:text-slate-600">{info.count}</span>
+                )}
+              </button>
+            );
+          })}
         </div>
-      )}
-      {scopeEntries.length === 0 && stats && (
-        <p className="text-xs text-slate-500">还没有缓存数据。下次跑分析时会自动写入。</p>
-      )}
+        {scopeEntries.length > 0 && (
+          <div className="mt-3 space-y-1">
+            {scopeEntries.map(([scope, info]) => (
+              <div key={scope} className="flex items-center justify-between gap-3">
+                <span className="text-xs text-slate-500">{SCOPE_LABELS_ZH[scope] || scope}</span>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[11px] text-slate-400">{formatBytes(info.bytes)} · {info.count} 条</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy === scope}
+                    onClick={() => handleClearScope(scope)}
+                    className="h-6 px-2 text-[11px] text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+                  >
+                    清除
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
       {statusMessage && <p className="text-xs text-slate-500">{statusMessage}</p>}
     </section>
   );

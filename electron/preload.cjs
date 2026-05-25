@@ -166,5 +166,7 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
     setDir: (dir) => ipcRenderer.invoke("cache:setDir", dir),
     browseDir: () => ipcRenderer.invoke("cache:browseDir"),
     openDir: () => ipcRenderer.invoke("cache:openDir"),
+    getPolicy: () => ipcRenderer.invoke("cache:getPolicy"),
+    setPolicy: (policy) => ipcRenderer.invoke("cache:setPolicy", policy),
   },
 });
