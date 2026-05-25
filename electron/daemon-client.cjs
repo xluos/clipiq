@@ -263,7 +263,7 @@ function downloadModel(modelId, onProgress) {
 
     const opts = {
       socketPath: socketPath(),
-      path: `/models/${encodeURIComponent(modelId)}/download`,
+      path: `/models/${encodeURIComponent(modelId)}/download?progressInterval=3000`,
       method: "POST",
       headers: { ...authHeaders(), "Accept": "text/event-stream" },
     };
