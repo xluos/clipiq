@@ -1675,9 +1675,12 @@ function LocalInferenceSection() {
   const [status, setStatus] = useState<LlamaStatus | null>(null);
   const [machine, setMachine] = useState<MachineInfo | null>(null);
   const [manifestModels, setManifestModels] = useState<ModelDescriptor[]>([]);
-  const [progress, setProgress] = useState<LlamaProgress | null>(null);
-  const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [busyAction, setBusyAction] = useState<"binary" | "download" | "start" | "stop" | "selftest" | null>(null);
+  const [progressMap, setProgressMap] = useState<Record<string, LlamaProgress | null>>({});
+  const [busyMap, setBusyMap] = useState<Record<string, "binary" | "download" | "start" | "stop" | "selftest">>({});
+  const setBusyFor = (key: string, action: "binary" | "download" | "start" | "stop" | "selftest") =>
+    setBusyMap((prev) => ({ ...prev, [key]: action }));
+  const clearBusyFor = (key: string) =>
+    setBusyMap((prev) => { const next = { ...prev }; delete next[key]; return next; });
   const [error, setError] = useState<string>("");
   const [mirror, setMirror] = useState<"hf-mirror" | "modelscope">("hf-mirror");
   const [selfTestImage, setSelfTestImage] = useState<{ name: string; dataUrl: string } | null>(null);
@@ -1714,7 +1717,8 @@ function LocalInferenceSection() {
     refresh();
     if (!window.videoAnalyzer?.llama) return;
     const unsub = window.videoAnalyzer.llama.onProgress((event) => {
-      setProgress(event);
+      const key = event.modelKey || "";
+      if (key) setProgressMap((prev) => ({ ...prev, [key]: event }));
     });
     return unsub;
   }, [refresh]);
@@ -1722,39 +1726,39 @@ function LocalInferenceSection() {
   const handleStart = async (modelKey: string) => {
     if (!window.videoAnalyzer?.llama) return;
     setError("");
-    setProgress(null);
-    setBusyKey(modelKey);
+    setProgressMap((prev) => ({ ...prev, [modelKey]: null }));
+    setBusyFor(modelKey, "download");
     try {
       const currentStatus = await window.videoAnalyzer.llama.getStatus();
       if (!currentStatus.binaryFound) {
-        setBusyAction("binary");
+        setBusyFor(modelKey, "binary");
         await window.videoAnalyzer.llama.ensureBinary();
       }
       const target = manifestModels.find((m) => m.id === modelKey);
       if (target && !target.local?.downloaded) {
-        setBusyAction("download");
+        setBusyFor(modelKey, "download");
         await window.videoAnalyzer.llama.ensureModel(modelKey);
       }
-      setBusyAction("start");
+      setBusyFor(modelKey, "start");
       await window.videoAnalyzer.llama.start(modelKey);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       await refresh();
     } finally {
-      setBusyAction(null);
-      setBusyKey(null);
+      clearBusyFor(modelKey);
     }
   };
 
   const handleStop = async () => {
     if (!window.videoAnalyzer?.llama) return;
-    setBusyAction("stop");
+    const runKey = status?.modelKey;
+    if (runKey) setBusyFor(runKey, "stop");
     try {
       await window.videoAnalyzer.llama.stop();
       await refresh();
     } finally {
-      setBusyAction(null);
+      if (runKey) clearBusyFor(runKey);
     }
   };
 
@@ -1775,7 +1779,7 @@ function LocalInferenceSection() {
       setError("请先选择一张图片");
       return;
     }
-    setBusyAction("selftest");
+    setBusyFor("__selftest__", "selftest");
     setError("");
     setSelfTestResult(null);
     try {
@@ -1791,7 +1795,7 @@ function LocalInferenceSection() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusyAction(null);
+      clearBusyFor("__selftest__");
     }
   };
 
@@ -1807,17 +1811,20 @@ function LocalInferenceSection() {
   }
 
   const runningKey = status?.running ? status.modelKey : null;
-  const isAnyBusy = busyAction !== null && busyAction !== "selftest";
+  const busyEntries = Object.entries(busyMap);
+  const isAnyBusy = busyEntries.some(([k, a]) => k !== "__selftest__" && a !== "selftest");
+  const busyAction = busyEntries.length > 0 ? busyEntries[0][1] : null;
 
   const visionModels = manifestModels.filter((m) => m.capabilities.includes("vision"));
   const textModels = manifestModels.filter((m) =>
     !m.capabilities.includes("vision") && m.capabilities.includes("text")
   );
 
-  // model 阶段的进度由各卡片自己的圆环承担; 横条只在 binary 阶段显示, 因为
-  // binary 不挂在任何卡片上, 需要一个全局位置告诉用户"在下推理引擎"。
+  // binary 阶段的横条进度(不属于某个卡片)
+  const binaryBusyKey = busyEntries.find(([, a]) => a === "binary")?.[0];
+  const binaryProgress = binaryBusyKey ? progressMap[binaryBusyKey] : null;
   const showProgress =
-    progress && busyAction === "binary" && progress.percent != null;
+    binaryProgress && binaryProgress.percent != null;
 
   const totalMemoryGB = machine ? machine.totalMemoryBytes / 1024 / 1024 / 1024 : 0;
   const availMemoryGB = machine ? machine.availableMemoryBytes / 1024 / 1024 / 1024 : 0;
@@ -1897,10 +1904,9 @@ function LocalInferenceSection() {
             subtitle="用于 simple_vision / medium_vision / complex_vision · 也可被 text 槽位选"
             models={visionModels}
             runningKey={runningKey}
-            busyKey={busyKey}
-            busyAction={busyAction}
+            busyMap={busyMap}
             isAnyBusy={isAnyBusy}
-            progress={progress}
+            progressMap={progressMap}
             onStart={handleStart}
             onStop={handleStop}
           />
@@ -1909,10 +1915,9 @@ function LocalInferenceSection() {
             subtitle="仅用于 simple_text / medium_text / complex_text"
             models={textModels}
             runningKey={runningKey}
-            busyKey={busyKey}
-            busyAction={busyAction}
+            busyMap={busyMap}
             isAnyBusy={isAnyBusy}
-            progress={progress}
+            progressMap={progressMap}
             onStart={handleStart}
             onStop={handleStop}
           />
@@ -1920,8 +1925,8 @@ function LocalInferenceSection() {
 
         {showProgress && (
           <div className="border-t border-slate-200 dark:border-slate-800 px-5 py-2.5 bg-slate-50/60 dark:bg-slate-900/20">
-            <Progress value={progress!.percent || 0} className="h-1.5" />
-            <div className="text-[11px] text-slate-500 mt-1.5">{progress!.message}</div>
+            <Progress value={binaryProgress!.percent || 0} className="h-1.5" />
+            <div className="text-[11px] text-slate-500 mt-1.5">{binaryProgress!.message}</div>
           </div>
         )}
 
@@ -1960,11 +1965,11 @@ function LocalInferenceSection() {
           )}
           <Button
             size="sm"
-            disabled={!selfTestImage || !status?.running || busyAction === "selftest"}
+            disabled={!selfTestImage || !status?.running || !!busyMap["__selftest__"]}
             onClick={handleSelfTest}
             className="h-8"
           >
-            {busyAction === "selftest" && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
+            {busyMap["__selftest__"] && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
             运行自检
           </Button>
         </div>
@@ -1989,21 +1994,22 @@ function LocalInferenceSection() {
   );
 }
 
+type BusyActionType = "binary" | "download" | "start" | "stop" | "selftest";
+
 type ModelGroupProps = {
   title: string;
   subtitle: string;
   models: ModelDescriptor[];
   runningKey: string | null | undefined;
-  busyKey: string | null;
-  busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
+  busyMap: Record<string, BusyActionType>;
   isAnyBusy: boolean;
-  progress: LlamaProgress | null;
+  progressMap: Record<string, LlamaProgress | null>;
   onStart: (modelKey: string) => void;
   onStop: () => void;
 };
 
 const ModelGroup: FunctionComponent<ModelGroupProps> = ({
-  title, subtitle, models, runningKey, busyKey, busyAction, isAnyBusy, progress, onStart, onStop,
+  title, subtitle, models, runningKey, busyMap, isAnyBusy, progressMap, onStart, onStop,
 }) => {
   if (models.length === 0) return null;
   return (
@@ -2018,10 +2024,9 @@ const ModelGroup: FunctionComponent<ModelGroupProps> = ({
             key={m.id}
             model={m}
             runningKey={runningKey}
-            busyKey={busyKey}
-            busyAction={busyAction}
+            busyAction={busyMap[m.id] || null}
             isAnyBusy={isAnyBusy}
-            progress={progress}
+            progress={progressMap[m.id] || null}
             onStart={onStart}
             onStop={onStop}
           />
@@ -2152,8 +2157,7 @@ const ProgressButton: FunctionComponent<ProgressButtonProps> = ({ progress, busy
 type ModelCardProps = {
   model: ModelDescriptor;
   runningKey: string | null | undefined;
-  busyKey: string | null;
-  busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
+  busyAction: BusyActionType | null;
   isAnyBusy: boolean;
   progress: LlamaProgress | null;
   onStart: (modelKey: string) => void;
@@ -2161,11 +2165,11 @@ type ModelCardProps = {
 };
 
 const ModelCard: FunctionComponent<ModelCardProps> = ({
-  model, runningKey, busyKey, busyAction, isAnyBusy, progress, onStart, onStop,
+  model, runningKey, busyAction, isAnyBusy, progress, onStart, onStop,
 }) => {
   const isRunning = runningKey === model.id;
   const isDownloaded = !!model.local?.downloaded;
-  const isBusy = busyKey === model.id && isAnyBusy;
+  const isBusy = busyAction !== null;
   const defaultQuant = model.local?.quantizations?.[0];
   const isComingSoon = model.availability.state === "coming_soon";
 
