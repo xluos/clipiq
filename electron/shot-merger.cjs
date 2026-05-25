@@ -220,48 +220,53 @@ function fillBatchWithFallback(batch, result, baseIndex) {
 const GIVE_UP_AFTER_CONSECUTIVE_FAIL = 3;
 const MAX_BATCH_RETRIES = 2;
 
-async function mergeShots({ shots, provider, batchSize, handle, onProgress, cache }) {
-  // batchSize 显式传入 → 用显式值; 不传 → 按 provider.contextSize + 实际 prompt 长度动态算
+async function mergeShots({ shots, provider, batchSize, concurrency: concurrencyOpt, handle, onProgress, cache }) {
   const size = batchSize == null ? chooseBatchSize(provider, shots) : clampBatchSize(batchSize);
+  const concurrency = Math.max(1, Math.min(12, Number(concurrencyOpt) || 1));
   // eslint-disable-next-line no-console
   console.log(
-    `[shot-merger] batchSize=${size} (${batchSize == null ? "auto" : "explicit"}) · ctx=${provider?.contextSize ?? "?"} · shots=${shots.length}`,
+    `[shot-merger] batchSize=${size} concurrency=${concurrency} (${batchSize == null ? "auto" : "explicit"}) · ctx=${provider?.contextSize ?? "?"} · shots=${shots.length}`,
   );
   const result = new Array(shots.length);
-  let batchIndex = 0;
+  let completedShots = 0;
   let consecutiveFail = 0;
   let cacheHits = 0;
-  let givenUp = false; // 连续失败 N 次 → 视为 provider 不可用, 余下 batch 直接 fallback (节省长视频几分钟空转)
-  // 按 batch 聚合 token 消耗 (caller 按"阶段"维度记总账, 这里只汇总)
+  let givenUp = false;
   const usageAgg = { promptTokens: 0, completionTokens: 0, totalTokens: 0, callCount: 0 };
   let echoedModel = null;
-  for (let i = 0; i < shots.length; i += size) {
-    if (handle?.cancelled) throw new Error("cancelled");
-    batchIndex += 1;
-    const batch = shots.slice(i, i + size);
 
-    // 缓存查询: batch 命中时直接铺到 result, 不调 LLM
+  // 把所有 batch 预切好
+  const batches = [];
+  for (let i = 0; i < shots.length; i += size) {
+    batches.push({ startIdx: i, batch: shots.slice(i, i + size), batchNum: batches.length + 1 });
+  }
+
+  // 单 batch 处理逻辑 (含缓存查询 + 重试)
+  const processBatch = async ({ startIdx, batch, batchNum }) => {
+    if (handle?.cancelled) throw new Error("cancelled");
+
+    // 缓存查询
     if (cache) {
       try {
         const hit = await cache.lookup(batch);
         if (Array.isArray(hit?.entries) && hit.entries.length === batch.length) {
-          for (let j = 0; j < batch.length; j++) result[i + j] = hit.entries[j];
+          for (let j = 0; j < batch.length; j++) result[startIdx + j] = hit.entries[j];
           cacheHits += batch.length;
-          if (onProgress) onProgress({ done: Math.min(i + size, shots.length), total: shots.length, batchIndex, mode: "cache-hit" });
-          continue;
+          completedShots += batch.length;
+          if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, mode: "cache-hit" });
+          return;
         }
-      } catch {
-        // 缓存读失败 → 走 LLM 路径
-      }
+      } catch { /* 缓存读失败 → 走 LLM */ }
     }
 
     if (givenUp) {
-      fillBatchWithFallback(batch, result, i);
-      if (onProgress) onProgress({ done: Math.min(i + size, shots.length), total: shots.length, batchIndex, mode: "fallback-shortcut" });
-      continue;
+      fillBatchWithFallback(batch, result, startIdx);
+      completedShots += batch.length;
+      if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, mode: "fallback-shortcut" });
+      return;
     }
+
     const { system, user } = buildMergePrompt(batch);
-    let batchOk = false;
     for (let attempt = 0; attempt <= MAX_BATCH_RETRIES; attempt++) {
       if (handle?.cancelled) throw new Error("cancelled");
       try {
@@ -277,63 +282,67 @@ async function mergeShots({ shots, provider, batchSize, handle, onProgress, cach
         }
         if (callResult.model) echoedModel = callResult.model;
         const out = Array.isArray(parsed?.shots) ? parsed.shots : [];
-        if (out.length === 0) {
-          throw new Error("parsed JSON 缺少 shots 字段");
-        }
+        if (out.length === 0) throw new Error("parsed JSON 缺少 shots 字段");
+
         consecutiveFail = 0;
         const batchEntries = [];
         for (let j = 0; j < batch.length; j++) {
           const local = batch[j];
           const match = out.find((s) => Number(s.shotIndex) === j) || out[j];
           const frameCount = Array.isArray(local.frames) ? local.frames.length : 0;
-          const rawIdxs = Array.isArray(match?.representativeFrameIndex)
-            ? match.representativeFrameIndex
-            : [];
-          const repIdxs = rawIdxs
-            .map((n) => Math.floor(Number(n)))
-            .filter((n) => Number.isFinite(n) && n >= 0 && n < frameCount);
-          const desc =
-            typeof match?.shotDescription === "string" && match.shotDescription.trim()
-              ? match.shotDescription.trim().slice(0, 240)
-              : fallbackShotDescription(local);
-          const entry = {
-            shotDescription: desc,
-            representativeFrameIndex: repIdxs.length > 0 ? repIdxs : frameCount > 0 ? [0] : [],
-          };
-          result[i + j] = entry;
+          const rawIdxs = Array.isArray(match?.representativeFrameIndex) ? match.representativeFrameIndex : [];
+          const repIdxs = rawIdxs.map((n) => Math.floor(Number(n))).filter((n) => Number.isFinite(n) && n >= 0 && n < frameCount);
+          const desc = typeof match?.shotDescription === "string" && match.shotDescription.trim()
+            ? match.shotDescription.trim().slice(0, 240)
+            : fallbackShotDescription(local);
+          const entry = { shotDescription: desc, representativeFrameIndex: repIdxs.length > 0 ? repIdxs : frameCount > 0 ? [0] : [] };
+          result[startIdx + j] = entry;
           batchEntries.push(entry);
         }
         if (cache) {
-          try { await cache.store(batch, { entries: batchEntries }, { batchIndex }); }
+          try { await cache.store(batch, { entries: batchEntries }, { batchIndex: batchNum }); }
           catch { /* 写缓存失败不阻塞 */ }
         }
-        batchOk = true;
-        break;
+        completedShots += batch.length;
+        if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, mode: "ok" });
+        return;
       } catch (error) {
         if (handle?.cancelled) throw error;
         if (attempt < MAX_BATCH_RETRIES) {
-          // eslint-disable-next-line no-console
-          console.warn(`[shot-merger] batch ${batchIndex} 第 ${attempt + 1} 次失败, 重试:`, error?.message || error);
+          console.warn(`[shot-merger] batch ${batchNum} 第 ${attempt + 1} 次失败, 重试:`, error?.message || error);
           continue;
         }
         consecutiveFail += 1;
-        // eslint-disable-next-line no-console
-        console.warn(`[shot-merger] batch ${batchIndex} 重试 ${MAX_BATCH_RETRIES} 次仍失败 (#${consecutiveFail} 连续), 走 fallback:`, error?.message || error);
-        fillBatchWithFallback(batch, result, i);
+        console.warn(`[shot-merger] batch ${batchNum} 重试 ${MAX_BATCH_RETRIES} 次仍失败 (#${consecutiveFail} 连续), 走 fallback:`, error?.message || error);
+        fillBatchWithFallback(batch, result, startIdx);
+        completedShots += batch.length;
+        if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, mode: "fallback-batch" });
         if (consecutiveFail >= GIVE_UP_AFTER_CONSECUTIVE_FAIL) {
           givenUp = true;
-          // eslint-disable-next-line no-console
-          console.warn(`[shot-merger] 连续 ${consecutiveFail} 个 batch 失败, 放弃 LLM 路径, 后续 batch 直接走 fallback`);
+          console.warn(`[shot-merger] 连续 ${consecutiveFail} 个 batch 失败, 放弃 LLM 路径, 后续直接 fallback`);
         }
+        return;
       }
     }
-    if (onProgress) {
-      onProgress({
-        done: Math.min(i + size, shots.length),
-        total: shots.length,
-        batchIndex,
-        mode: givenUp ? "fallback-after-give-up" : consecutiveFail > 0 ? "fallback-batch" : "ok",
-      });
+  };
+
+  // 并发池: 同时最多 concurrency 个 batch 在飞
+  if (concurrency <= 1) {
+    for (const b of batches) await processBatch(b);
+  } else {
+    let cursor = 0;
+    const inflight = new Set();
+    const launch = () => {
+      while (inflight.size < concurrency && cursor < batches.length) {
+        const b = batches[cursor++];
+        const p = processBatch(b).finally(() => { inflight.delete(p); });
+        inflight.add(p);
+      }
+    };
+    launch();
+    while (inflight.size > 0) {
+      await Promise.race(inflight);
+      launch();
     }
   }
   if (typeof result.cacheHits === "undefined") {

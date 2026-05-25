@@ -4557,10 +4557,14 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             midSec: f.midSec,
           })),
         }));
+        // 并发数: 在线模型用 config 配置(默认 3),本地模型强制 1
+        const isLocalMedium = mediumTextProvider.source === "local_llama";
+        const cfgConcurrency = Number(cfgSnapshot?.pipelineConcurrency) || 0;
+        const mergeConcurrency = isLocalMedium ? 1 : (cfgConcurrency > 0 ? cfgConcurrency : 3);
         const mergeResults = await shotMerger.mergeShots({
           shots: mergeInputs,
           provider: mediumTextProvider,
-          // batchSize 不传 → shot-merger 按 provider.contextSize 动态算
+          concurrency: mergeConcurrency,
           handle,
           cache: makeShotMergerCache(mediumTextProvider),
           onProgress: ({ done, total, batchIndex, mode }) => {
@@ -5996,6 +6000,18 @@ app.whenReady().then(async () => {
   ipcMain.handle("config:load", async () => {
     const raw = await readJson(getConfigPath(), null);
     return migrateConfigV1ToV2(raw);
+  });
+
+  ipcMain.handle("config:getField", async (_event, key) => {
+    const cfg = await readJson(getConfigPath(), null);
+    return cfg?.[key] ?? null;
+  });
+
+  ipcMain.handle("config:setField", async (_event, key, value) => {
+    const cfg = (await readJson(getConfigPath(), null)) || {};
+    cfg[key] = value;
+    await writeJson(getConfigPath(), { ...cfg, savedAt: new Date().toISOString() });
+    return { ok: true };
   });
 
   ipcMain.handle("config:save", async (_event, config) => {

@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   },
   loadConfig: () => ipcRenderer.invoke("config:load"),
   saveConfig: (config) => ipcRenderer.invoke("config:save", config),
+  getConfigField: (key) => ipcRenderer.invoke("config:getField", key),
+  saveConfigField: (key, value) => ipcRenderer.invoke("config:setField", key, value),
   listProjects: () => ipcRenderer.invoke("projects:list"),
   upsertProject: (project) => ipcRenderer.invoke("projects:upsert", project),
   deleteProject: (projectId) => ipcRenderer.invoke("projects:delete", projectId),

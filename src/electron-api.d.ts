@@ -239,6 +239,8 @@ declare global {
       onDownloadComplete: (callback: (payload: DownloadCompleteEvent) => void) => () => void;
       loadConfig: () => Promise<AppConfig | null>;
       saveConfig: (config: AppConfig) => Promise<{ ok: true }>;
+      getConfigField: (key: string) => Promise<unknown>;
+      saveConfigField: (key: string, value: unknown) => Promise<{ ok: true }>;
       listProjects: () => Promise<Project[]>;
       upsertProject: (project: Project) => Promise<{ ok: true }>;
       deleteProject: (projectId: string) => Promise<{ ok: true }>;

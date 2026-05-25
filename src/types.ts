@@ -585,6 +585,9 @@ export type AppConfig = {
   // 本地 llama 模型 ctx 覆盖, 启动 server 时 --ctx-size 用这里的值; 缺省走 manifest。
   // 调大需要更多内存 (主要是 KV cache), 小机器跑大 ctx 容易 OOM。
   localModelOverrides?: Record<string, { contextSize?: number }>;
+  // 在线模型 LLM 并发数,控制 shot-merger 等批量阶段同时发几个请求。
+  // 本地模型始终为 1 (单 server 实例)。0/缺省 = 自动 (在线 3, 本地 1)。
+  pipelineConcurrency?: number;
   // 分析阶段结果缓存目录, null/缺省 → userData/cache;
   // 可在设置里改到外部盘 (改路径会触发整目录迁移)。
   cacheDir?: string | null;

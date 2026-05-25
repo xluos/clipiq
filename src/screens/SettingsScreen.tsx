@@ -302,6 +302,59 @@ const PIPELINE_STAGES: Array<{
   { num: "04", title: "主分析", badges: ["complex · vision"], desc: "基于镜头描述 + 字幕 + 关键帧,产出节点评审、方法论审计、情绪曲线。", slot: "complex_vision", isKey: true },
 ];
 
+function ConcurrencyControl() {
+  const [value, setValue] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    window.videoAnalyzer?.getConfigField?.("pipelineConcurrency").then((v: any) => {
+      setValue(Number(v) || 0);
+      setLoaded(true);
+    }).catch(() => setLoaded(true));
+  }, []);
+
+  const handleChange = (next: number) => {
+    setValue(next);
+    window.videoAnalyzer?.saveConfigField?.("pipelineConcurrency", next).catch(() => {});
+  };
+
+  if (!loaded) return null;
+
+  const options = [
+    { value: 0, label: "自动" },
+    { value: 1, label: "1" },
+    { value: 2, label: "2" },
+    { value: 3, label: "3" },
+    { value: 4, label: "4" },
+    { value: 6, label: "6" },
+  ];
+
+  return (
+    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] px-4 py-3 flex items-center justify-between">
+      <div>
+        <div className="text-[13px] font-medium text-slate-900 dark:text-slate-100">在线模型并发</div>
+        <div className="text-[11.5px] text-slate-500 dark:text-slate-400 mt-0.5">镜头合并等批量阶段同时发几个请求,本地模型始终为 1</div>
+      </div>
+      <div className="flex gap-1 shrink-0">
+        {options.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => handleChange(opt.value)}
+            className={`px-2.5 py-1 text-[11.5px] rounded border transition-colors ${
+              value === opt.value
+                ? "bg-indigo-50 border-indigo-300 text-indigo-700 dark:bg-indigo-500/15 dark:border-indigo-500/40 dark:text-indigo-300 font-medium"
+                : "border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800"
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function TaskAssignmentSection() {
   const { providers, taskSlots, setTaskSlot, audioSlot, setAudioSlot } = useApp();
   // 本地 llama 已下载且可启动的 model id 集合; 任务分配 dropdown 据此过滤未下载项
@@ -345,6 +398,8 @@ function TaskAssignmentSection() {
       <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
         每一步绑定独立模型。
       </p>
+
+      <ConcurrencyControl />
 
       <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] overflow-hidden">
         {PIPELINE_STAGES.map((stage, idx) => {
