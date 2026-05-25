@@ -2121,17 +2121,17 @@ async function inspectVideo(filePath, handle = null) {
   };
 }
 
-// 用户接受的本地初筛 (prefilter) 时间预算 (秒), 按 density 档分级。
-// candidateCount 由此推回, 而不是写死的帧数 —— 长视频自然扩张, 短视频不变,
-// prefilter 时间被 budget 而非帧数硬顶。
-const PREFILTER_BUDGET_SEC = {
-  sparse: 30,
-  standard: 60,
-  dense: 120,
-};
 // 本地初筛单帧推理时间 (Qwen3.5-0.8B @ Apple Silicon Metal 实测 ~1.1s)。
-// 后续可以改成基于 prefilterStats 滚动 EMA, 自适应不同模型 / 机器。
 const PREFILTER_PER_FRAME_MS = 1100;
+
+// 预筛选时间预算: 按视频时长动态计算, 保证每秒至少 1 帧被预处理。
+// density 只影响倍率 (稀疏档可以少看点, 密集档多看点), 不再是固定秒数。
+function prefilterBudgetSec(durationSec, options) {
+  const density = options?.density || "standard";
+  const multiplier = density === "dense" ? 1.5 : density === "sparse" ? 0.5 : 1.0;
+  const framesToCover = Math.ceil(durationSec * multiplier);
+  return Math.max(15, framesToCover * PREFILTER_PER_FRAME_MS / 1000);
+}
 
 // 精筛后(送时间轴 + 主分析)的目标帧/节点数。
 // 旧版死 cap 32, 长视频节点密度 ≤ 1/min 体感跳; 改成跟时长线性,
@@ -2148,16 +2148,16 @@ function targetFrameCount(durationSec, options) {
   return Math.max(6, Math.min(upper, target));
 }
 
-// 候选抽帧数。本地初筛 ready 时多抽, 给初筛更多选材。
-// 旧版死 cap 30 长视频被压扁; 改成 budget driven, 仍保 ≥ finalCount + 8 留去重空间。
-function candidateFrameCount(durationSec, options, hasLocalPrefilter) {
+// 候选抽帧数。抽帧很便宜 (~50ms/帧), 后面有 dHash 去重兜底, 所以宁可多抽。
+// 下限 = max(时长公式, 镜头数, 每秒 1 帧), prefilter 预算约束在标注阶段而非抽帧阶段。
+// 无 prefilter 时仍走时长公式 (全部帧直接送主分析, 抽太多会超 token 预算)。
+function candidateFrameCount(durationSec, options, hasLocalPrefilter, scenesCount) {
   const finalCount = targetFrameCount(durationSec, options);
   if (!hasLocalPrefilter) return finalCount;
-  const density = options?.density || "standard";
-  const budgetSec = PREFILTER_BUDGET_SEC[density] ?? PREFILTER_BUDGET_SEC.standard;
-  const capByBudget = Math.floor((budgetSec * 1000) / PREFILTER_PER_FRAME_MS);
-  const desired = Math.max(Math.round(finalCount * 2.5), finalCount + 8);
-  return Math.max(finalCount, Math.min(desired, capByBudget));
+  const perSecFloor = Math.ceil(durationSec);
+  const floor = Math.max(finalCount, scenesCount || 0, perSecFloor);
+  const desired = Math.max(Math.round(floor * 1.5), floor + 8);
+  return Math.max(floor, desired);
 }
 
 function sceneThresholdFor(options) {
@@ -2195,10 +2195,9 @@ async function detectScenes(ffmpeg, inputPath, threshold, handle) {
 
 // 根据 scene 时间戳 + 目标帧数，分配最终抽帧时刻。
 // 策略:
-//   1. 每个 shot 先分 1 张(锚帧,中点)
-//   2. 剩余配额按 "duration/(count+1)" 最大的 shot 不断加点(长镜头多分)
+//   1. 每个 shot 至少 1 张(锚帧,中点), 不丢弃任何镜头
+//   2. 配额 > 镜头数时, 剩余按 "duration/(count+1)" 最大的 shot 不断加点(长镜头多分)
 //   3. shot 内多张时按等距均分
-//   4. shot 数本身 > target 时,挑 duration 最长的 target 个
 function planFramePlan(scenes, durationSec, targetCount) {
   const safeDuration = Math.max(durationSec, 1);
   const sorted = [...new Set(scenes)].filter((t) => t < safeDuration).sort((a, b) => a - b);
@@ -2211,32 +2210,18 @@ function planFramePlan(scenes, durationSec, targetCount) {
     })
     .filter((s) => s.duration >= 0.4);
 
-  // 兜底:没有合理 shot,均匀分布
   if (shots.length === 0) {
-    return Array.from({ length: targetCount }, (_, i) => {
-      const sec = (safeDuration * (i + 1)) / (targetCount + 1);
+    const count = Math.max(1, targetCount);
+    return Array.from({ length: count }, (_, i) => {
+      const sec = (safeDuration * (i + 1)) / (count + 1);
       return { index: i, startSec: sec, endSec: sec, midSec: Math.min(safeDuration - 0.1, sec) };
     });
   }
 
-  // shot 数已 >= target,挑 duration 最长的
-  if (shots.length >= targetCount) {
-    const chosen = [...shots]
-      .sort((a, b) => b.duration - a.duration)
-      .slice(0, targetCount)
-      .map((shot) => ({ shot, sec: shot.start + shot.duration / 2 }));
-    chosen.sort((a, b) => a.sec - b.sec);
-    return chosen.map((p, index) => ({
-      index,
-      startSec: p.shot.start,
-      endSec: p.shot.end,
-      midSec: Math.min(safeDuration - 0.1, Math.max(0, p.sec)),
-    }));
-  }
-
-  // 每 shot 分配采样数: 先各 1,剩余按 "duration / (count+1)" 贪心
+  // 每个 shot 至少 1 帧; 实际配额 = max(targetCount, shots.length)
+  const effectiveTarget = Math.max(targetCount, shots.length);
   const counts = shots.map(() => 1);
-  let remaining = targetCount - shots.length;
+  let remaining = effectiveTarget - shots.length;
   while (remaining > 0) {
     let bestIdx = 0;
     let bestScore = shots[0].duration / (counts[0] + 1);
@@ -3011,7 +2996,7 @@ async function buildAnalysisPrompt(project, frames, transcript, scenes, options)
 const VISION_TOKENS_PER_FRAME_LOCAL = 280;
 const VISION_TOKENS_PER_FRAME_REMOTE = 800;
 let VISION_TOKENS_PER_FRAME = VISION_TOKENS_PER_FRAME_REMOTE;
-const HARD_FRAME_CAP = 12;
+const HARD_FRAME_CAP_FALLBACK = 12;
 const HARD_FRAME_MIN = 1;
 
 const CHUNK_SYSTEM_PROMPT =
@@ -3337,6 +3322,9 @@ function planAnalysisChunks({
     throw new Error(`模型 ctx ${ctxSize} 太小, 扣掉输出 reserve / 全局上下文 / safety margin 后预算 ${budget} token, 无法分段。`);
   }
 
+  // 每段帧数上限: 用 budget 的 70% 留给图片 (剩余给字幕+shot 描述), 至少 HARD_FRAME_CAP_FALLBACK
+  const frameCapByBudget = Math.max(HARD_FRAME_CAP_FALLBACK, Math.floor((budget * 0.7) / VISION_TOKENS_PER_FRAME));
+
   const chunks = [];
   // 没有 shotContexts: 退化按时间等分。先估总 token, 算需要多少段。
   if (!Array.isArray(shotContexts) || shotContexts.length === 0) {
@@ -3356,7 +3344,7 @@ function planAnalysisChunks({
         startSec: start,
         endSec: end,
         shots: [],
-        frames: chunkFrames.slice(0, HARD_FRAME_CAP),
+        frames: chunkFrames.slice(0, frameCapByBudget),
         transcriptSegments: chunkSegs,
         estTokens: est,
       });
@@ -3435,10 +3423,9 @@ function planAnalysisChunks({
   }
   flush();
 
-  // frames 在每个 chunk 内也限制总数, 避免单段 frames 暴涨
   for (const c of chunks) {
-    if (c.frames.length > HARD_FRAME_CAP) {
-      c.frames = c.frames.slice(0, HARD_FRAME_CAP);
+    if (c.frames.length > frameCapByBudget) {
+      c.frames = c.frames.slice(0, frameCapByBudget);
     }
   }
 
@@ -4292,7 +4279,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       handle.attachStageMeta({ fileSizeBytes: inputFileSize, durationSec: inspected.durationSec, width: inspected.width, height: inspected.height, resumed: true });
       // prefilter 状态可能变了,重新算帧数和计划
       finalCount = targetFrameCount(inspected.durationSec || project.durationSec || 1, options);
-      candidateCount = candidateFrameCount(inspected.durationSec || project.durationSec || 1, options, localPrefilterReady);
+      candidateCount = candidateFrameCount(inspected.durationSec || project.durationSec || 1, options, localPrefilterReady, scenes.length);
       if (savedManifest.localPrefilterReady === localPrefilterReady && savedManifest.candidateFrameCount === candidateCount) {
         plan = savedManifest.plan;
       } else {
@@ -4312,7 +4299,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       handle.attachStageMeta({ scenesCount: scenes.length, durationSec: inspected.durationSec });
 
       finalCount = targetFrameCount(inspected.durationSec || project.durationSec || 1, options);
-      candidateCount = candidateFrameCount(inspected.durationSec || project.durationSec || 1, options, localPrefilterReady);
+      candidateCount = candidateFrameCount(inspected.durationSec || project.durationSec || 1, options, localPrefilterReady, scenes.length);
       plan = planFramePlan(scenes, inspected.durationSec || project.durationSec || 1, candidateCount);
 
       await writeJson(manifestPath, {
@@ -4376,16 +4363,75 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     }
 
     // 本地初筛 + 精筛:让 Qwen3.5-0.8B 给每帧打标,据此 dedup / 删空镜 / cap 总数。
-    // 本地模型未启动时直接走老路径,行为与之前一致。
+    // 候选帧数可能远超 prefilter 时间预算 (每个镜头至少 1 帧, 高密度视频帧很多),
+    // 预算内均匀覆盖镜头: 优先每镜头 1 帧, 剩余预算给长镜头多帧。
     let frames = candidateFrames;
     let prefilterStats = null;
     if (localPrefilterReady && candidateFrames.length > 0) {
       try {
-        send(23, "本地初筛", `让本地模型给 ${candidateFrames.length} 张候选画面快速打标。`);
-        // server 由 llamaManager.acquire 在 tagFrames 内部按需起, 这里只持有 model key。
-        handle.attachStageMeta({ candidateFrames: candidateFrames.length, modelKey: prefilterModelKey });
+        const pfBudgetSec = prefilterBudgetSec(inspected.durationSec || project.durationSec || 1, options);
+        const prefilterCap = Math.floor((pfBudgetSec * 1000) / PREFILTER_PER_FRAME_MS);
+
+        let framesToTag = candidateFrames;
+        if (candidateFrames.length > prefilterCap) {
+          // 按镜头分组 (startSec-endSec 唯一标识一个镜头)
+          const shotGroups = new Map();
+          for (const f of candidateFrames) {
+            const key = `${f.startSec}-${f.endSec}`;
+            if (!shotGroups.has(key)) shotGroups.set(key, []);
+            shotGroups.get(key).push(f);
+          }
+          const shotKeys = [...shotGroups.keys()];
+          const selected = [];
+          const selectedSet = new Set();
+
+          if (shotKeys.length <= prefilterCap) {
+            // 预算够覆盖所有镜头: 每镜头取中点帧, 剩余给长镜头
+            for (const key of shotKeys) {
+              const group = shotGroups.get(key);
+              const mid = (group[0].startSec + group[0].endSec) / 2;
+              const best = group.reduce((a, b) =>
+                Math.abs(a.midSec - mid) < Math.abs(b.midSec - mid) ? a : b
+              );
+              selected.push(best);
+              selectedSet.add(best.index);
+            }
+            // 剩余预算给长镜头的额外帧
+            const extras = candidateFrames
+              .filter((f) => !selectedSet.has(f.index))
+              .sort((a, b) => (b.endSec - b.startSec) - (a.endSec - a.startSec));
+            for (const f of extras) {
+              if (selected.length >= prefilterCap) break;
+              selected.push(f);
+              selectedSet.add(f.index);
+            }
+          } else {
+            // 预算不够覆盖所有镜头: 均匀间隔采样镜头
+            const stride = shotKeys.length / prefilterCap;
+            for (let i = 0; i < prefilterCap; i++) {
+              const shotIdx = Math.min(shotKeys.length - 1, Math.floor(i * stride));
+              const group = shotGroups.get(shotKeys[shotIdx]);
+              const mid = (group[0].startSec + group[0].endSec) / 2;
+              const best = group.reduce((a, b) =>
+                Math.abs(a.midSec - mid) < Math.abs(b.midSec - mid) ? a : b
+              );
+              if (!selectedSet.has(best.index)) {
+                selected.push(best);
+                selectedSet.add(best.index);
+              }
+            }
+          }
+          selected.sort((a, b) => (a.midSec ?? 0) - (b.midSec ?? 0));
+          framesToTag = selected;
+        }
+
+        send(23, "本地初筛", framesToTag.length < candidateFrames.length
+          ? `让本地模型给 ${framesToTag.length} / ${candidateFrames.length} 张候选画面快速打标 (预算覆盖)。`
+          : `让本地模型给 ${candidateFrames.length} 张候选画面快速打标。`
+        );
+        handle.attachStageMeta({ candidateFrames: candidateFrames.length, framesToTag: framesToTag.length, modelKey: prefilterModelKey });
         const prefilterStartedAt = Date.now();
-        const tagResult = await prefilter.tagFrames(candidateFrames, {
+        const tagResult = await prefilter.tagFrames(framesToTag, {
           modelKey: prefilterModelKey,
           acquireSlot: (mk, opts) => llamaManager.acquire(mk, opts),
           perFrameTimeoutMs: 30_000,
@@ -4402,7 +4448,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         });
         const refined = prefilter.refineByTags(tagResult.frames, {
           maxKeep: finalCount,
-          minKeep: Math.min(4, candidateFrames.length),
+          minKeep: Math.min(4, framesToTag.length),
           similarityThreshold: 0.7,
         });
         frames = refined.kept;
@@ -4410,13 +4456,11 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           totalElapsedMs: tagResult.totalElapsedMs,
           totalTokens: tagResult.totalTokens,
           candidate: candidateFrames.length,
+          tagged: framesToTag.length,
           kept: refined.kept.length,
           dropped: refined.dropped.length,
         };
-        // 记 token: prefilter 走本地 llama-server, 单帧 usage 已在 prefilter.cjs 聚合成 totalTokens。
-        // prompt/completion 拆分拿不到 (逐帧调用没汇总), 整体放 totalTokens 字段。
-        // cacheHits 数也一并记上, 让上层看出本次跑了多少真实推理。
-        const callCount = Math.max(0, candidateFrames.length - tagResult.cacheHits);
+        const callCount = Math.max(0, framesToTag.length - tagResult.cacheHits);
         if (callCount > 0) {
           tokenLedger.record({
             stage: "prefilter",
@@ -4441,13 +4485,13 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             source: "local_llama",
           });
         }
-        handle.attachStageMeta({ kept: refined.kept.length, dropped: refined.dropped.length, totalElapsedMs: tagResult.totalElapsedMs, totalTokens: tagResult.totalTokens });
+        handle.attachStageMeta({ tagged: framesToTag.length, kept: refined.kept.length, dropped: refined.dropped.length, totalElapsedMs: tagResult.totalElapsedMs, totalTokens: tagResult.totalTokens });
         {
-          const allCached = (tagResult.cacheHits || 0) >= candidateFrames.length && candidateFrames.length > 0;
+          const allCached = (tagResult.cacheHits || 0) >= framesToTag.length && framesToTag.length > 0;
           send(
             34,
             "精挑画面",
-            `从 ${candidateFrames.length} 张候选里精选 ${refined.kept.length} 张送给视觉模型 · 本地初筛用时 ${(tagResult.totalElapsedMs / 1000).toFixed(1)}s`,
+            `从 ${framesToTag.length} 张标注帧里精选 ${refined.kept.length} 张送给视觉模型 · 本地初筛用时 ${(tagResult.totalElapsedMs / 1000).toFixed(1)}s`,
             { fromCache: allCached },
           );
         }
@@ -4715,17 +4759,21 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         shotContexts = null;
       }
 
-      // 全局聚合 (genre + summary): shotContexts 在手时做, 否则跳过让 detectGenreLightweight 兜底
+      // 全局聚合 (genre + summary + 叙事结构): 优先用大模型以提高叙事结构线索的准确度,
+      // 大模型不可用时 fallback 到中等文本模型。
       if (shotContexts && shotContexts.length > 0) {
+        const summarizerProvider = (complexVisionProvider?.apiKeyRef && complexVisionProvider?.baseUrl && complexVisionProvider?.model)
+          ? complexVisionProvider
+          : mediumTextProvider;
         try {
           ensureNotCancelled(handle);
-          send(69, "全局聚合", `综合 ${shotContexts.length} 个镜头描述 + 字幕推断视频类型和摘要。`);
+          send(69, "全局聚合", `综合 ${shotContexts.length} 个镜头描述 + 字幕推断视频类型和摘要 (${summarizerProvider.name})。`);
           const sumStart = Date.now();
           const stats = computeShotStats(
             buildShotListFromScenes(scenes, projectMeta.durationSec, []),
             projectMeta.durationSec,
           );
-          const summarizerCacheKey = cacheStore.isConfigured() && mediumTextProvider?.model
+          const summarizerCacheKey = cacheStore.isConfigured() && summarizerProvider?.model
             ? cacheStore.makeKey({
                 shots: shotContexts.map((c) => ({
                   idx: c.shotIndex,
@@ -4736,8 +4784,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
                 transcriptText: (transcript?.text || "").slice(0, 4000),
                 stats,
                 allowedGenres: [...ALLOWED_GENRES],
-                model: mediumTextProvider.model,
-                baseUrl: mediumTextProvider.baseUrl,
+                model: summarizerProvider.model,
+                baseUrl: summarizerProvider.baseUrl,
                 version: CACHE_VERSIONS.summarizer,
               })
             : null;
@@ -4746,23 +4794,23 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             transcript,
             shotStats: stats,
             project: projectMeta,
-            provider: mediumTextProvider,
+            provider: summarizerProvider,
             genreCatalog: GENRE_CATALOG,
             allowedGenres: [...ALLOWED_GENRES],
             handle,
-          }), { model: mediumTextProvider?.model });
+          }), { model: summarizerProvider?.model });
           globalContext = summarizerTraced.payload;
           if (summarizerTraced.fromCache) {
             tokenLedger.cacheHit({
               stage: "summarizer",
-              provider: mediumTextProvider,
-              model: mediumTextProvider.model,
+              provider: summarizerProvider,
+              model: summarizerProvider.model,
             });
           } else if (globalContext?.usage) {
             tokenLedger.record({
               stage: "summarizer",
-              provider: mediumTextProvider,
-              model: globalContext.echoedModel || mediumTextProvider.model,
+              provider: summarizerProvider,
+              model: globalContext.echoedModel || summarizerProvider.model,
               usage: globalContext.usage,
             });
           }
