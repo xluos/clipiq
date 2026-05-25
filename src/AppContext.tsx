@@ -11,7 +11,7 @@ function detectLogTone(stage: string, message: string): "info" | "ok" | "warn" {
   return "info";
 }
 
-const PROGRESS_LOG_LIMIT = 30;
+const PROGRESS_LOG_LIMIT = 80;
 
 export type ModelDownloadProgress = {
   modelKey: string;
@@ -629,35 +629,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setLogsByProject((prev) => {
         const list = prev[evt.projectId] || [];
         const message = evt.message || "";
-        const head = list[0];
-        // dedup: 同 stage 就地更新, 不 append。
-        // 先检查 head (最常见: 同 stage 连续更新), 再扫全列表 (stage 循环出现时)。
-        if (head && head.stage === evt.stage) {
-          if (head.message === message && head.fromCache === !!evt.fromCache) return prev;
-          const updated: ProgressLogEntry = {
-            absoluteMs: head.absoluteMs,
-            stage: evt.stage,
-            message,
-            tone: detectLogTone(evt.stage, message),
-            fromCache: !!evt.fromCache || undefined,
-          };
-          return { ...prev, [evt.projectId]: [updated, ...list.slice(1)] };
-        }
-        const existingIdx = list.findIndex((e) => e.stage === evt.stage);
-        if (existingIdx >= 0) {
-          const existing = list[existingIdx];
-          if (existing.message === message && existing.fromCache === !!evt.fromCache) return prev;
-          const updated: ProgressLogEntry = {
-            absoluteMs: existing.absoluteMs,
-            stage: evt.stage,
-            message,
-            tone: detectLogTone(evt.stage, message),
-            fromCache: !!evt.fromCache || undefined,
-          };
-          const next = [...list];
-          next[existingIdx] = updated;
-          return { ...prev, [evt.projectId]: next };
-        }
+        const last = list[list.length - 1];
+        if (last && last.stage === evt.stage && last.message === message && last.fromCache === !!evt.fromCache) return prev;
         const entry: ProgressLogEntry = {
           absoluteMs: Date.now(),
           stage: evt.stage,
@@ -665,7 +638,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           tone: detectLogTone(evt.stage, message),
           fromCache: !!evt.fromCache || undefined,
         };
-        const next = [entry, ...list].slice(0, PROGRESS_LOG_LIMIT);
+        const next = [...list, entry].slice(-PROGRESS_LOG_LIMIT);
         return { ...prev, [evt.projectId]: next };
       });
     });

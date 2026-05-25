@@ -15,6 +15,30 @@ const STAGES = [
   "生成最终报告",
 ];
 
+const STAGE_KEYWORDS: [number, RegExp][] = [
+  [0, /读取视频|校验视频|视频信息|下载视频/],
+  [1, /镜头切换|镜头合并|shot-merger/],
+  [2, /关键画面|抽取|抽帧|画面去重|本地初筛|本地推理预检|prefilter/],
+  [3, /字幕|音轨|whisper|识别字幕|提取音轨/],
+  [4, /准备分析|整理.*素材|全局聚合|summarizer|识别视频类型|类型识别|detect-genre/],
+  [5, /模型分析|主分析|main-analysis|弹幕|danmaku|拉取弹幕|分析失败|^失败$/],
+  [6, /整理结果|保存|title-gen|生成标题/],
+  [7, /生成.*报告|完成|已结束/],
+];
+
+function mapStageToIndex(stage: string, message?: string): number {
+  if (stage === "恢复进度" && message) {
+    if (/视频检测|场景分析/.test(message)) return 1;
+    if (/抽帧|关键画面/.test(message)) return 2;
+    if (/字幕/.test(message)) return 3;
+    return 0;
+  }
+  for (const [idx, re] of STAGE_KEYWORDS) {
+    if (re.test(stage)) return idx;
+  }
+  return -1;
+}
+
 function formatElapsed(ms: number) {
   const s = Math.max(0, Math.floor(ms / 1000));
   const m = Math.floor(s / 60);
@@ -419,29 +443,18 @@ export function ProgressScreen() {
           )
         )}
 
-        {/* Stage cards */}
-        <section className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-          <div className="rounded-xl border border-indigo-200 dark:border-indigo-900 bg-indigo-50 dark:bg-indigo-950/30 p-4 md:p-5">
-            <div className="font-mono text-[10.5px] uppercase tracking-wider text-indigo-700 dark:text-indigo-300 mb-1.5 font-medium">当前步骤</div>
-            <div className="text-[15px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">
-              {stageLabel}
-            </div>
-            {detail && (
-              <div className="font-mono text-[11.5px] text-slate-700 dark:text-slate-300 mt-2 leading-relaxed">
-                {detail}
-              </div>
-            )}
-          </div>
-
-          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-4 md:p-5">
-            <div className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 mb-2 font-medium">流水线</div>
-            <ul className="space-y-1.5">
-              {STAGES.map((s, idx) => {
-                const isDownloading = project.status === "downloading";
-                const done = !isDownloading && (idx < currentStageIndex || progress >= 100);
-                const active = !isDownloading && idx === currentStageIndex && progress < 100;
-                return (
-                  <li key={s} className="flex items-center gap-2 font-mono text-[11.5px]">
+        {/* Pipeline with inline logs */}
+        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-4 md:p-5">
+          <div className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 mb-3 font-medium">流水线</div>
+          <ul className="space-y-1">
+            {STAGES.map((s, idx) => {
+              const isDownloading = project.status === "downloading";
+              const done = !isDownloading && (idx < currentStageIndex || progress >= 100);
+              const active = !isDownloading && idx === currentStageIndex && progress < 100;
+              const stageLogs = logs.filter(l => mapStageToIndex(l.stage, l.message) === idx);
+              return (
+                <li key={s}>
+                  <div className="flex items-center gap-2 font-mono text-[11.5px] py-0.5">
                     {done ? (
                       <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
                     ) : active ? (
@@ -456,39 +469,28 @@ export function ProgressScreen() {
                     <span className={done ? "text-slate-700 dark:text-slate-300" : active ? "text-slate-900 dark:text-slate-100 font-medium" : "text-slate-400 dark:text-slate-600"}>
                       {s}
                     </span>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-        </section>
-
-        {/* Live log */}
-        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0e0e10] p-4 md:px-5 md:py-4">
-          <div className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 mb-2 font-medium">实时日志</div>
-          {logs.length === 0 ? (
-            <div className="font-mono text-[11.5px] text-slate-400">等待第一条日志…</div>
-          ) : (
-            <div className="space-y-0.5 max-h-[140px] overflow-y-auto">
-              {logs.map((log, idx) => (
-                <div key={idx} className="flex gap-3 font-mono text-[11.5px] leading-relaxed">
-                  <span className="text-slate-400 shrink-0 tabular-nums w-12">{formatElapsed(log.absoluteMs - startedAt)}</span>
-                  <span className={
-                    log.tone === "ok" ? "text-emerald-600 dark:text-emerald-400" :
-                    log.tone === "warn" ? "text-amber-600 dark:text-amber-400" :
-                    "text-slate-700 dark:text-slate-300"
-                  }>
-                    <span className="text-slate-500 dark:text-slate-500">{log.stage}</span>
-                    {log.fromCache && (
-                      <span className="ml-1 text-emerald-600 dark:text-emerald-400">(缓存)</span>
-                    )}
-                    {log.message && <span className="text-slate-400 mx-1">·</span>}
-                    {log.message}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
+                  </div>
+                  {stageLogs.length > 0 && (
+                    <div className="ml-[22px] border-l border-slate-100 dark:border-slate-800 pl-3 pb-1 space-y-0.5">
+                      {stageLogs.map((log, li) => (
+                        <div key={li} className="flex gap-2 font-mono text-[11px] leading-relaxed">
+                          <span className="text-slate-400 dark:text-slate-600 shrink-0 tabular-nums w-10">{formatElapsed(log.absoluteMs - startedAt)}</span>
+                          <span className={
+                            log.tone === "ok" ? "text-emerald-600 dark:text-emerald-400" :
+                            log.tone === "warn" ? "text-amber-600 dark:text-amber-400" :
+                            "text-slate-600 dark:text-slate-400"
+                          }>
+                            {log.fromCache && <span className="text-emerald-600 dark:text-emerald-400 mr-1">(缓存)</span>}
+                            {log.message || log.stage}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
         </section>
 
         {/* Actions */}
