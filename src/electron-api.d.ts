@@ -213,6 +213,52 @@ export type CacheEntry = {
   meta: Record<string, unknown> | null;
 };
 
+export type AnalysisSampleStageTokenDelta = {
+  stage: string;
+  providerId: string | null;
+  model: string | null;
+  source: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  callCount: number;
+};
+
+export type AnalysisSampleStage = {
+  stage: string;
+  durationMs: number;
+  note?: string;
+  meta?: Record<string, unknown>;
+  tokenDelta?: AnalysisSampleStageTokenDelta[];
+};
+
+export type AnalysisSample = {
+  schemaVersion: number;
+  projectId: string;
+  startedAt: string;
+  totalDurationMs: number;
+  outcome: "ok" | "failed" | "cancelled";
+  failureMsg?: string;
+  machine: {
+    platform: string;
+    arch: string;
+    cpuModel: string;
+    backend: string;
+    totalMemoryGB: number;
+    availableMemoryGB: number;
+  };
+  project: {
+    platform: string;
+    sourceType?: string;
+  };
+  providers: {
+    complexVision: { id: string; name: string; model: string; source?: string; contextSize?: number } | null;
+    mediumText: { id: string; name: string; model: string; source?: string; contextSize?: number } | null;
+    audio: { id: string; name: string; model: string; source?: string } | null;
+  };
+  stages: AnalysisSampleStage[];
+};
+
 export type CacheClearResult = { freedBytes: number; freedEntries: number };
 export type CacheSetDirResult =
   | { ok: true; cacheDir: string; mode: "rename" | "merge" | "copy" | "fresh" | "noop" }
@@ -361,6 +407,10 @@ declare global {
         stop: () => Promise<{ ok: true }>;
         onProgress: (callback: (event: WhisperCppProgress) => void) => () => void;
         onLog: (callback: (event: WhisperCppLogEntry) => void) => () => void;
+      };
+      diagnostics: {
+        getAnalysisSamples: () => Promise<{ ok: boolean; samples: AnalysisSample[]; error?: string }>;
+        getTokenUsage: (projectId: string) => Promise<{ ok: boolean; data: import("./types").TokenUsageSummary | null }>;
       };
       cache: {
         getStats: () => Promise<CacheStats>;

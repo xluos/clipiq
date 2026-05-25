@@ -603,14 +603,15 @@ export type AppConfig = {
 
 // v2: 两层路由结构,替代扁平 ScreenState。
 // 老的 7 屏全部归到 module: "analysis" 下。新模块作为并列入口。
-export type AppModule = "analysis" | "library" | "account" | "studio" | "settings";
+export type AppModule = "analysis" | "library" | "account" | "studio" | "settings" | "diagnostics";
 
 export type AppLocation =
   | { module: "analysis";  screen: "home" | "progress" | "workspace" | "report" | "url_pull" }
   | { module: "library";   screen: "list" | "upload" | "shot-list" | "shot-detail" }
   | { module: "account";   screen: "list" | "detail" | "methodology" }
   | { module: "studio";    screen: "list" | "editor" }
-  | { module: "settings" };
+  | { module: "settings" }
+  | { module: "diagnostics" };
 
 // v1 兼容:老 ScreenState 字符串仍在部分调用点出现,逐步迁移到 AppLocation
 export type ScreenState =
@@ -629,6 +630,7 @@ export function legacyScreenToLocation(s: ScreenState): AppLocation {
 
 export function locationToLegacyScreen(loc: AppLocation): ScreenState {
   if (loc.module === "settings") return "settings";
+  if (loc.module === "diagnostics") return "settings";
   if (loc.module === "analysis") return loc.screen as ScreenState;
   return "home";
 }

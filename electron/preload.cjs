@@ -152,6 +152,10 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
       return () => ipcRenderer.removeListener("whisperCpp:log", listener);
     },
   },
+  diagnostics: {
+    getAnalysisSamples: () => ipcRenderer.invoke("diagnostics:getAnalysisSamples"),
+    getTokenUsage: (projectId) => ipcRenderer.invoke("diagnostics:getTokenUsage", projectId),
+  },
   cache: {
     getStats: () => ipcRenderer.invoke("cache:getStats"),
     list: (params) => ipcRenderer.invoke("cache:list", params || {}),
