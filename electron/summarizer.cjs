@@ -11,6 +11,7 @@
 // main.cjs 会回退到旧的 detectGenreLightweight 路径。
 
 const { callJsonCompletion } = require("./openai-client.cjs");
+const log = require("./logger.cjs");
 
 async function callMediumText(provider, systemText, userText, schema, signal) {
   if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
@@ -134,8 +135,7 @@ async function summarizeVideo({
       handle?.abortController?.signal,
     );
     const parsed = callResult.parsed;
-    // eslint-disable-next-line no-console
-    console.log("[summarizer] LLM raw keys:", Object.keys(parsed || {}), "summaryLen:", String(parsed?.globalSummary || "").length, "genre:", parsed?.detectedGenre);
+    log.info("summarizer", "LLM raw keys:", Object.keys(parsed || {}), "summaryLen:", String(parsed?.globalSummary || "").length, "genre:", parsed?.detectedGenre);
     // genre 不在 catalog 里 (用 json_object 没强约束 enum) → 兜底到 other,
     // 而不是整段 return null 让 globalSummary 也丢掉。
     const rawGenre = String(parsed?.detectedGenre || "").trim().toLowerCase();
@@ -145,8 +145,7 @@ async function summarizeVideo({
       typeof parsed?.globalSummary === "string" ? parsed.globalSummary.trim() : "";
     // 只要有 globalSummary 或 detectedGenre 就视作成功 (放宽: 不再强求 structureHint)
     if (!globalSummary && !rawGenre) {
-      // eslint-disable-next-line no-console
-      console.warn("[summarizer] parsed 看不出 globalSummary/detectedGenre:", JSON.stringify(parsed).slice(0, 300));
+      log.warn("summarizer", "parsed 看不出 globalSummary/detectedGenre:", JSON.stringify(parsed).slice(0, 300));
       return null;
     }
     return {
@@ -159,8 +158,7 @@ async function summarizeVideo({
     };
   } catch (error) {
     if (handle?.cancelled) throw error;
-    // eslint-disable-next-line no-console
-    console.warn("[summarizer] 全局聚合失败:", error?.message || error);
+    log.warn("summarizer", "全局聚合失败:", error?.message || error);
     return null;
   }
 }

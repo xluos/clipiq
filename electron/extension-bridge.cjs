@@ -13,6 +13,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { WebSocketServer } = require("ws");
+const log = require("./logger.cjs");
 
 const PORT = 58713;
 const HOST = "127.0.0.1";
@@ -54,7 +55,7 @@ function loadOrCreateToken(userDataDir) {
       mode: 0o600,
     });
   } catch (e) {
-    console.warn("[extension-bridge] 写 token 文件失败:", e?.message || String(e));
+    log.warn("extension-bridge", "写 token 文件失败:", e?.message || String(e));
   }
   cachedToken = token;
   return token;
@@ -168,7 +169,7 @@ async function start(userDataDir) {
         else pending.reject(new Error(String(msg.error || "插件返回错误")));
       } else if (msg.type === "log") {
         // 插件可选地推日志, 仅打到 main 进程 console
-        console.log(`[ext-bridge] ${msg.level || "info"}: ${msg.message}`);
+        log.info("ext-bridge", `${msg.level || "info"}: ${msg.message}`);
       }
     };
 

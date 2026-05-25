@@ -15,6 +15,7 @@
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const log = require("./logger.cjs");
 
 const VIEW_API = "https://api.bilibili.com/x/web-interface/view";
 const DANMAKU_API = "https://api.bilibili.com/x/v2/dm/web/seg.so";
@@ -258,7 +259,7 @@ async function writeDanmakuCache(userDataDir, cache) {
     await fs.writeFile(getDanmakuCachePath(userDataDir), JSON.stringify(cache, null, 2), "utf8");
   } catch (err) {
     // 缓存写失败不影响主流程
-    console.warn("[danmaku-cache] write failed:", err?.message || err);
+    log.warn("danmaku-cache", "write failed:", err?.message || err);
   }
 }
 

@@ -20,6 +20,7 @@
 //   代理下必须走 responses + SSE 才能拿到 content)。
 
 const { callJsonCompletion } = require("./openai-client.cjs");
+const log = require("./logger.cjs");
 
 const ALLOWED_BATCH_SIZE = { min: 1, max: 12, default: 3 };
 
@@ -223,9 +224,8 @@ const MAX_BATCH_RETRIES = 2;
 async function mergeShots({ shots, provider, batchSize, concurrency: concurrencyOpt, handle, onProgress, cache }) {
   const size = batchSize == null ? chooseBatchSize(provider, shots) : clampBatchSize(batchSize);
   const concurrency = Math.max(1, Math.min(12, Number(concurrencyOpt) || 1));
-  // eslint-disable-next-line no-console
-  console.log(
-    `[shot-merger] batchSize=${size} concurrency=${concurrency} (${batchSize == null ? "auto" : "explicit"}) · ctx=${provider?.contextSize ?? "?"} · shots=${shots.length}`,
+  log.info("shot-merger",
+    `batchSize=${size} concurrency=${concurrency} (${batchSize == null ? "auto" : "explicit"}) · ctx=${provider?.contextSize ?? "?"} · shots=${shots.length}`,
   );
   const result = new Array(shots.length);
   let completedShots = 0;
@@ -309,17 +309,17 @@ async function mergeShots({ shots, provider, batchSize, concurrency: concurrency
       } catch (error) {
         if (handle?.cancelled) throw error;
         if (attempt < MAX_BATCH_RETRIES) {
-          console.warn(`[shot-merger] batch ${batchNum} 第 ${attempt + 1} 次失败, 重试:`, error?.message || error);
+          log.warn("shot-merger", `batch ${batchNum} 第 ${attempt + 1} 次失败, 重试:`, error?.message || error);
           continue;
         }
         consecutiveFail += 1;
-        console.warn(`[shot-merger] batch ${batchNum} 重试 ${MAX_BATCH_RETRIES} 次仍失败 (#${consecutiveFail} 连续), 走 fallback:`, error?.message || error);
+        log.warn("shot-merger", `batch ${batchNum} 重试 ${MAX_BATCH_RETRIES} 次仍失败 (#${consecutiveFail} 连续), 走 fallback:`, error?.message || error);
         fillBatchWithFallback(batch, result, startIdx);
         completedShots += batch.length;
         if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, batchSize: size, mode: "fallback-batch" });
         if (consecutiveFail >= GIVE_UP_AFTER_CONSECUTIVE_FAIL) {
           givenUp = true;
-          console.warn(`[shot-merger] 连续 ${consecutiveFail} 个 batch 失败, 放弃 LLM 路径, 后续直接 fallback`);
+          log.warn("shot-merger", `连续 ${consecutiveFail} 个 batch 失败, 放弃 LLM 路径, 后续直接 fallback`);
         }
         return;
       }

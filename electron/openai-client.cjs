@@ -17,6 +17,8 @@
 //   model 是 server 实际返回的 model (代理可能改写, 用它做账单更准)。
 //   无 usage 时 (老式 server / 拒绝 include_usage) 字段为 null, 不要假设一定有值。
 
+const log = require("./logger.cjs");
+
 // 本地 llama 适配器: main.cjs 在 app ready 时调 setLocalProviderAdapter 注入。
 // adapter 签名: (modelKey, { signal }) => Promise<{ baseUrl, apiKey, model, contextSize, release }>。
 // 当 provider.source === "local_llama" 时, openai-client 在请求前自动 acquire,
@@ -195,8 +197,8 @@ async function callOpenAIChatCompletionsRaw(provider, opts) {
     };
     // 诊断: 把请求关键字段打到 stdout, 用户报"thinking 没关掉"时拿来对账
     // (rawLen=0 reasoningLen>0 应该意味着 body 里没 chat_template_kwargs, 或者 server 不接受)
-    console.log(
-      `[openai-client] POST ${endpoint} | model=${body.model} max_tokens=${body.max_tokens} ` +
+    log.info("openai-client",
+      `POST ${endpoint} | model=${body.model} max_tokens=${body.max_tokens} ` +
       `temp=${body.temperature} response_format=${body.response_format?.type || "none"} ` +
       `enable_thinking=${body.chat_template_kwargs?.enable_thinking} ` +
       `(enableThinkingOpt=${enableThinking} providerEnableThinking=${provider.enableThinking})`,

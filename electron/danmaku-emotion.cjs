@@ -11,6 +11,7 @@
 //   - LLM 失败一律返回 neutral 兜底, 不阻断主流程
 
 const { callJsonCompletion } = require("./openai-client.cjs");
+const log = require("./logger.cjs");
 
 const FIXED_BUCKET_SEC = 5;
 const SAMPLES_PER_WINDOW = 6;        // 喂 LLM 时每桶最多这些条
@@ -258,7 +259,7 @@ async function aggregateEmotions({
       }
     } catch (err) {
       // 这一批失败保持 neutral, 继续下一批
-      console.warn("[danmaku-emotion] batch failed:", err?.message || err);
+      log.warn("danmaku-emotion", "batch failed:", err?.message || err);
     }
 
     done += slice.length;

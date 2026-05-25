@@ -13,6 +13,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const log = require("./logger.cjs");
 
 function pidAlive(pid) {
   if (!pid || !Number.isFinite(pid)) return false;
@@ -90,8 +91,7 @@ function writePidFile(filePath, info) {
       JSON.stringify({ ...info, writtenAt: Date.now() }, null, 2),
     );
   } catch (e) {
-    // eslint-disable-next-line no-console
-    console.warn("[sidecar-utils] writePidFile failed:", e.message);
+    log.warn("sidecar-utils", "writePidFile failed:", e.message);
   }
 }
 

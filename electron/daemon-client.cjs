@@ -8,6 +8,7 @@ const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
+const log = require("./logger.cjs");
 
 function daemonStorageDir() {
   if (process.platform === "darwin") {
@@ -178,8 +179,7 @@ async function ensureDaemon() {
 
   child.unref();
   daemonProcess = child;
-  // eslint-disable-next-line no-console
-  console.log(`[daemon-client] daemon started pid=${child.pid}`);
+  log.info("daemon-client", `daemon started pid=${child.pid}`);
 }
 
 async function getStatus() {

@@ -13,6 +13,7 @@ const path = require("node:path");
 const { createServer } = require("node:net");
 const sidecarUtils = require("./sidecar-utils.cjs");
 const daemonClient = require("./daemon-client.cjs");
+const log = require("./logger.cjs");
 
 function pidFilePath() {
   return path.join(app.getPath("userData"), "sidecars", "llama.json");
@@ -559,7 +560,7 @@ async function start(modelKey, { onLog, contextSize } = {}) {
       const fromHook = await contextResolver(modelKey);
       if (Number(fromHook) > 0) effectiveCtx = Number(fromHook);
     } catch (err) {
-      console.warn(`[llama-runtime] contextResolver(${modelKey}) 失败:`, err?.message || err);
+      log.warn("llama-runtime", `contextResolver(${modelKey}) 失败:`, err?.message || err);
     }
   }
   if (!effectiveCtx) effectiveCtx = Number(meta.contextSize) > 0 ? Number(meta.contextSize) : 8192;
@@ -605,8 +606,7 @@ async function start(modelKey, { onLog, contextSize } = {}) {
       const line = raw.trimEnd();
       if (!line) continue;
       pushLog(channel, line);
-      // eslint-disable-next-line no-console
-      console.log(`[llama-server:${channel}]`, line);
+      log.info(`llama-server:${channel}`, line);
       if (onLog) onLog({ channel, line });
     }
   };
@@ -614,8 +614,7 @@ async function start(modelKey, { onLog, contextSize } = {}) {
   child.stderr.on("data", handleLine("stderr"));
 
   child.once("exit", (code, signal) => {
-    // eslint-disable-next-line no-console
-    console.log(`[llama-server] exit code=${code} signal=${signal}`);
+    log.info("llama-server", `exit code=${code} signal=${signal}`);
     const wasStopping = state.status === "stopping";
     state.process = null;
     state.port = null;
@@ -685,8 +684,7 @@ async function selfTest({ imageDataUrl, prompt } = {}) {
 async function init() {
   state.binaryPath = await resolveLlamaServerPath();
   try { await daemonClient.ensureDaemon(); } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn("[llama-runtime] daemon 未启动:", err?.message || err);
+    log.warn("llama-runtime", "daemon 未启动:", err?.message || err);
   }
   await reapOrAdopt();
 }
@@ -699,15 +697,13 @@ async function reapOrAdopt() {
   const { info } = result;
   if (result.mode === "stale") {
     // pid 已死 (上次进程 clean exit 但没清文件, 或机器重启过)
-    // eslint-disable-next-line no-console
-    console.log("[llama-runtime] PID file stale, clearing");
+    log.info("llama-runtime", "PID file stale, clearing");
     sidecarUtils.clearPidFile(filePath);
     return;
   }
   if (result.mode === "kill") {
     // pid 活但 HTTP 不响应 —— 僵尸状态, 杀掉
-    // eslint-disable-next-line no-console
-    console.log(`[llama-runtime] orphan pid ${info.pid} unresponsive on :${info.port}, killing`);
+    log.info("llama-runtime", `orphan pid ${info.pid} unresponsive on :${info.port}, killing`);
     await sidecarUtils.killPidAsyncWait(info.pid, 1500);
     sidecarUtils.clearPidFile(filePath);
     return;
@@ -715,8 +711,7 @@ async function reapOrAdopt() {
   // adopt: pid + port 都活, 接管
   if (!MODELS[info.modelKey]) {
     // 配置变了 / 不认识的 modelKey → 杀掉, 不接管
-    // eslint-disable-next-line no-console
-    console.log(`[llama-runtime] orphan modelKey ${info.modelKey} not in current MODELS map, killing`);
+    log.info("llama-runtime", `orphan modelKey ${info.modelKey} not in current MODELS map, killing`);
     await sidecarUtils.killPidAsyncWait(info.pid, 1500);
     sidecarUtils.clearPidFile(filePath);
     return;
@@ -730,8 +725,7 @@ async function reapOrAdopt() {
     : (Number(MODELS[info.modelKey]?.contextSize) > 0 ? Number(MODELS[info.modelKey].contextSize) : 8192);
   state.startedAt = info.startedAt || Date.now();
   state.status = "ready";
-  // eslint-disable-next-line no-console
-  console.log(`[llama-runtime] adopted orphan pid=${info.pid} port=${info.port} model=${info.modelKey}`);
+  log.info("llama-runtime", `adopted orphan pid=${info.pid} port=${info.port} model=${info.modelKey}`);
 }
 
 // 同步退出路径 (process.exit / SIGTERM hook) 调用。要尽快释放 sidecar, 不能用 async。

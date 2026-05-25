@@ -25,6 +25,7 @@
 //   }
 
 const llamaRuntime = require("./llama-runtime.cjs");
+const log = require("./logger.cjs");
 
 const state = {
   // queue 元素: { modelKey, resolve, reject, signal, onAbort, queuedAt }
@@ -97,7 +98,7 @@ function schedule() {
   Promise.resolve()
     .then(processQueue)
     .catch((err) => {
-      console.error("[llama-manager] processQueue 异常:", err);
+      log.error("llama-manager", "processQueue 异常:", err);
     })
     .finally(() => {
       state.processing = false;
@@ -147,15 +148,15 @@ async function processQueue() {
     const targetModel = head.modelKey;
     state.switchingTo = targetModel;
     try {
-      console.log(
-        `[llama-manager] 切换 ${currentModel || "(空)"} → ${targetModel} (queue=${state.queue.length})`,
+      log.info("llama-manager",
+        `切换 ${currentModel || "(空)"} → ${targetModel} (queue=${state.queue.length})`,
       );
       const result = await llamaRuntime.start(targetModel);
-      console.log(
-        `[llama-manager] 切换完成 model=${targetModel} port=${result.port} ctx=${result.contextSize} reused=${!!result.reused}`,
+      log.info("llama-manager",
+        `切换完成 model=${targetModel} port=${result.port} ctx=${result.contextSize} reused=${!!result.reused}`,
       );
     } catch (err) {
-      console.error(`[llama-manager] 切换 ${targetModel} 失败:`, err?.message || err);
+      log.error("llama-manager", `切换 ${targetModel} 失败:`, err?.message || err);
       // 这个 target 的所有 pending 都拒掉
       for (let i = state.queue.length - 1; i >= 0; i--) {
         if (state.queue[i].modelKey === targetModel) {
@@ -243,7 +244,7 @@ async function shutdown() {
   try {
     await llamaRuntime.stop();
   } catch (err) {
-    console.warn("[llama-manager] shutdown stop 失败:", err?.message || err);
+    log.warn("llama-manager", "shutdown stop 失败:", err?.message || err);
   }
 }
 

@@ -22,6 +22,7 @@ const etaEstimator = require("./eta-estimator.cjs");
 const etaLearner = require("./eta-learner.cjs");
 const cacheStore = require("./cache-store.cjs");
 const extensionBridge = require("./extension-bridge.cjs");
+const log = require("./logger.cjs");
 const { getTranscriber } = require("./transcribe/index.cjs");
 const OpenCC = require("opencc-js");
 
@@ -963,7 +964,7 @@ function getDb() {
       }
     }
   } catch (e) {
-    console.warn("[migration] account_video → account_videos 失败:", e?.message || e);
+    log.warn("migration", "account_video → account_videos 失败:", e?.message || e);
   }
 
   // 上次进程退出时还停在 fetchPhase=fetching 的账号 → 改 idle (避免 UI 一直转)
@@ -977,7 +978,7 @@ function getDb() {
       db.prepare("UPDATE accounts SET data = ? WHERE id = ?").run(JSON.stringify(patched), row.id);
     }
   } catch (e) {
-    console.warn("[boot] reset fetching → idle 失败:", e?.message || e);
+    log.warn("boot", "reset fetching → idle 失败:", e?.message || e);
   }
 
   _db = db;
@@ -1530,7 +1531,7 @@ async function writeUrlCache(cache) {
   try {
     await fs.writeFile(getUrlCachePath(), JSON.stringify(cache, null, 2), "utf8");
   } catch (err) {
-    console.warn("[url-cache] write failed", err);
+    log.warn("url-cache", "write failed", err);
   }
 }
 
@@ -1541,8 +1542,8 @@ async function writeUrlCache(cache) {
 // 失败 / 信息都缺 / provider 未配置 都返回 null, 让调用方 fallback。
 async function generateProjectTitle(provider, sources = {}) {
   if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) {
-    console.warn(
-      `[title-gen] short-circuit: provider 不完整 apiKeyRef=${!!provider?.apiKeyRef} ` +
+    log.warn("title-gen",
+      `short-circuit: provider 不完整 apiKeyRef=${!!provider?.apiKeyRef} ` +
       `baseUrl=${!!provider?.baseUrl} model=${!!provider?.model}`,
     );
     return null;
@@ -1552,8 +1553,8 @@ async function generateProjectTitle(provider, sources = {}) {
   const haveYtdlp = !!(ytdlpInfo && (ytdlpInfo.title || ytdlpInfo.description));
   const haveSummary = !!(summary && summary.length >= 10);
   if (rawTextOnly.length < 5 && !haveYtdlp && !haveSummary) {
-    console.warn(
-      `[title-gen] short-circuit: 信息源都不够 rawTextLen=${rawTextOnly.length} ` +
+    log.warn("title-gen",
+      `short-circuit: 信息源都不够 rawTextLen=${rawTextOnly.length} ` +
       `haveYtdlp=${haveYtdlp} haveSummary=${haveSummary} summaryLen=${summary?.length || 0}`,
     );
     return null;
@@ -1601,8 +1602,8 @@ async function generateProjectTitle(provider, sources = {}) {
       parsedTitleLen: t.length,
     };
     if (!t || t.length > 30) {
-      console.warn(
-        `[title-gen] 模型返回 title 不合规: title=${JSON.stringify(t)} len=${t.length} ` +
+      log.warn("title-gen",
+        `模型返回 title 不合规: title=${JSON.stringify(t)} len=${t.length} ` +
         `rawLen=${diagnostic.rawLen} reasoningLen=${diagnostic.reasoningLen} ` +
         `parsedSource=${result.parsedSource} raw=${JSON.stringify(diagnostic.rawHead)}`,
       );
@@ -1611,7 +1612,7 @@ async function generateProjectTitle(provider, sources = {}) {
     }
     return { title: t, usage: result.usage, echoedModel: result.model, _diagnostic: diagnostic };
   } catch (err) {
-    console.warn("[title-gen] 失败:", err.message || err);
+    log.warn("title-gen", "失败:", err.message || err);
     return null;
   }
 }
@@ -1940,7 +1941,7 @@ async function fetchBilibiliSpaceVideos(mid, limit = 20) {
   if (incomplete.length > 0) {
     const enriched = await Promise.all(
       incomplete.map((v) => fetchBilibiliVideoView(v.id, cookie).catch((err) => {
-        console.warn(`[bili-view] ${v.id} failed:`, err?.message || String(err));
+        log.warn("bili-view", `${v.id} failed:`, err?.message || String(err));
         return null;
       }))
     );
@@ -3494,8 +3495,8 @@ async function runSinglePassAnalysis({
   const parsed = callResult.parsed;
   // Layer 3 reasoning fallback 命中时这里能看到, 顺便记入 token-usage 让用户察觉异常
   if (callResult.parsedSource === "reasoning") {
-    console.warn(
-      `[main-analysis] Layer 3 fallback: content 没出 JSON, 已从 reasoning 末尾兜底提到 (reasoningLen=${callResult.reasoning?.length || 0})。` +
+    log.warn("main-analysis",
+      `Layer 3 fallback: content 没出 JSON, 已从 reasoning 末尾兜底提到 (reasoningLen=${callResult.reasoning?.length || 0})。` +
       `检查 model.isThinking / slot.enableThinking 配置, 或 server 不接受 chat_template_kwargs.enable_thinking=false。`,
     );
   }
@@ -3509,16 +3510,16 @@ async function runSinglePassAnalysis({
     const raw = typeof callResult.raw === "string" ? callResult.raw : "";
     const reasoning = typeof callResult.reasoning === "string" ? callResult.reasoning : "";
     const usage = callResult.usage || null;
-    console.error(
-      `[main-analysis] parse 失败诊断: rawLen=${raw.length} reasoningLen=${reasoning.length} ` +
+    log.error("main-analysis",
+      `parse 失败诊断: rawLen=${raw.length} reasoningLen=${reasoning.length} ` +
       `usage=${usage ? JSON.stringify(usage) : "n/a"} model=${callResult.model || effectiveProvider.model}`,
     );
     if (raw.length > 0) {
-      console.error(`[main-analysis] raw head: ${JSON.stringify(raw.slice(0, 200))}`);
-      console.error(`[main-analysis] raw tail: ${JSON.stringify(raw.slice(-200))}`);
+      log.error("main-analysis", `raw head: ${JSON.stringify(raw.slice(0, 200))}`);
+      log.error("main-analysis", `raw tail: ${JSON.stringify(raw.slice(-200))}`);
     }
     if (reasoning.length > 0) {
-      console.error(`[main-analysis] reasoning head: ${JSON.stringify(reasoning.slice(0, 200))}`);
+      log.error("main-analysis", `reasoning head: ${JSON.stringify(reasoning.slice(0, 200))}`);
     }
     const completionTokens = usage?.completionTokens ?? 0;
     const hint =
@@ -3619,7 +3620,7 @@ async function runAuditPass({ effectiveProvider, project, methodology, globalCon
     throw new Error(`audit pass 无法装入 ctx=${ctxSize}: ${lastDecision}`);
   }
 
-  console.log(`[analyze:main] audit pass prompt=${promptTokens}tok budget=${budget} compactNodes=${compactNodes} attempts=${attempt}`);
+  log.info("analyze:main", `audit pass prompt=${promptTokens}tok budget=${budget} compactNodes=${compactNodes} attempts=${attempt}`);
 
   const useResponses = effectiveProvider.endpointType === "openai_responses";
   // 同 chunk-pass: json_schema strict:false。audit 输出 { nodeTags, report } 两个 optional 顶层字段。
@@ -3712,8 +3713,8 @@ async function runChunkedAnalysis({
     throw new Error("planAnalysisChunks 切出 0 段, 检查 shotContexts/frames 是否为空。");
   }
 
-  console.log(
-    `[analyze:main] chunked: ctx=${ctxSize} overhead=${overheadTokens}tok 切 ${chunks.length} 段; ` +
+  log.info("analyze:main",
+    `chunked: ctx=${ctxSize} overhead=${overheadTokens}tok 切 ${chunks.length} 段; ` +
     chunks.map((c, i) => `#${i + 1}[${c.startSec.toFixed(0)}-${c.endSec.toFixed(0)}s shots=${c.shots.length} frames=${c.frames.length} ~${c.estTokens}tok]`).join(" "),
   );
 
@@ -3740,10 +3741,10 @@ async function runChunkedAnalysis({
       } catch (err) {
         if (err instanceof AnalysisCancelledError) throw err;
         if (attempt < CHUNK_MAX_RETRIES) {
-          console.warn(`[analyze:main] chunk ${i + 1}/${chunks.length} 第 ${attempt + 1} 次失败, 重试: ${err?.message || err}`);
+          log.warn("analyze:main", `chunk ${i + 1}/${chunks.length} 第 ${attempt + 1} 次失败, 重试: ${err?.message || err}`);
           continue;
         }
-        console.warn(`[analyze:main] chunk ${i + 1}/${chunks.length} 重试 ${CHUNK_MAX_RETRIES} 次仍失败: ${err?.message || err}`);
+        log.warn("analyze:main", `chunk ${i + 1}/${chunks.length} 重试 ${CHUNK_MAX_RETRIES} 次仍失败: ${err?.message || err}`);
         allChunkNodes.push({
           _originalId: `chunk-${i + 1}-failed`,
           startSec: chunk.startSec,
@@ -3775,10 +3776,10 @@ async function runChunkedAnalysis({
     } catch (auditErr) {
       if (auditErr instanceof AnalysisCancelledError) throw auditErr;
       if (attempt < AUDIT_MAX_RETRIES) {
-        console.warn(`[analyze:main] audit pass 第 ${attempt + 1} 次失败, 重试: ${auditErr?.message || auditErr}`);
+        log.warn("analyze:main", `audit pass 第 ${attempt + 1} 次失败, 重试: ${auditErr?.message || auditErr}`);
         continue;
       }
-      console.warn(`[analyze:main] audit pass 重试 ${AUDIT_MAX_RETRIES} 次仍失败, 降级为不带审计的结果: ${auditErr?.message || auditErr}`);
+      log.warn("analyze:main", `audit pass 重试 ${AUDIT_MAX_RETRIES} 次仍失败, 降级为不带审计的结果: ${auditErr?.message || auditErr}`);
     }
   }
 
@@ -3840,8 +3841,8 @@ async function callOpenAICompatible(provider, project, frames, transcript, scene
     const singleTotal = singleSystemTokens + singlePromptTokens + singleImageTokens;
     const singleBudget = ctxSize - reserveForOutput - safetyMargin;
 
-    console.log(
-      `[analyze:main] provider=${effectiveProvider.id} model=${effectiveProvider.model} ctx=${ctxSize} ` +
+    log.info("analyze:main",
+      `provider=${effectiveProvider.id} model=${effectiveProvider.model} ctx=${ctxSize} ` +
       `single-pass=${singleTotal}tok (sys=${singleSystemTokens} user=${singlePromptTokens} images=${frames.length}*${VISION_TOKENS_PER_FRAME}=${singleImageTokens}) ` +
       `budget=${singleBudget} → ${singleTotal <= singleBudget ? "走单次" : "走分段"}`,
     );
@@ -4193,7 +4194,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       broadcastToWindows("analysis:budget", handle.budget);
     }
   } catch (err) {
-    console.warn("[analyze:budget] 计算 ETA budget 失败:", err?.message || err);
+    log.warn("analyze:budget", "计算 ETA budget 失败:", err?.message || err);
   }
 
   // 心跳:某些阶段(本地 whisper 加载/推理)单次任务 30s+,
@@ -4936,16 +4937,14 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
         const stackOrMsg = error?.stack || error?.message || String(error);
         const shortMsg = error?.message || String(error);
-        console.error(
-          `[analyze:main] provider=${provider?.id} model=${provider?.model} 主分析失败:\n${stackOrMsg}`,
-        );
+        log.error("analyze:main", `provider=${provider?.id} model=${provider?.model} 主分析失败:\n${stackOrMsg}`);
         try {
           await fs.appendFile(
             path.join(projectDir, "analysis-error.log"),
             `[${new Date().toISOString()}] [main-analysis] provider=${provider?.id} model=${provider?.model}\n${stackOrMsg}\n\n`,
           );
         } catch (writeErr) {
-          console.warn("[analyze:main] 写 analysis-error.log 失败:", writeErr?.message || writeErr);
+          log.warn("analyze:main", "写 analysis-error.log 失败:", writeErr?.message || writeErr);
         }
         nodes = markFallbackNodesAsFailed(fallbackNodes);
         report = markFallbackReportAsFailed(fallbackReport, shortMsg, provider);
@@ -5100,7 +5099,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       `hasSummary=${!!globalContext?.globalSummary} summaryLen=${globalContext?.globalSummary?.length || 0} ` +
       `hasProvider=${!!mediumTextProvider?.apiKeyRef} providerModel=${mediumTextProvider?.model || "n/a"} ` +
       `→ canRun=${titleCanRun}`;
-    console.log(`[analyze:title-gen] ${gateLine}`);
+    log.info("analyze:title-gen", gateLine);
     await appendTitleGenLog(gateLine);
     if (titleCanRun) {
       try {
@@ -5114,7 +5113,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           `reasoningLen=${(titleResult?._diagnostic?.reasoningLen) ?? "n/a"} ` +
           `parsedSource=${titleResult?._diagnostic?.parsedSource ?? "n/a"} ` +
           `rawHead=${JSON.stringify(titleResult?._diagnostic?.rawHead || "")}`;
-        console.log(`[analyze:title-gen] ${resultLine}`);
+        log.info("analyze:title-gen", resultLine);
         await appendTitleGenLog(resultLine);
         generatedTitle = titleResult?.title || null;
         if (titleResult?.usage) {
@@ -5127,7 +5126,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         }
       } catch (err) {
         const errLine = `失败: ${err?.message || err}`;
-        console.warn(`[analyze:title-gen] ${errLine}`);
+        log.warn("analyze:title-gen", errLine);
         await appendTitleGenLog(errLine);
       }
     }
@@ -5187,7 +5186,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     } catch (persistError) {
       // 不阻断返回:JSON 文件已经写了, report:get / nodes:get 会自动 fallback 到文件。
       // 把错误也落盘 (console 在 packaged app 里没 stdout), 事后能查为啥 SQLite 没写。
-      console.warn("[clipiq] main 端 SQLite 持久化失败,JSON 会兜底:", persistError);
+      log.warn("clipiq", "main 端 SQLite 持久化失败,JSON 会兜底:", persistError);
       await appendPersistErrorLog(project.id, "analyzeProject finalize", persistError);
     }
     // 主分析失败的兜底路径也走到这里 return failed result, 但 outcome 保留 "failed" —
@@ -5214,13 +5213,13 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         try {
           learnedBaselines = await etaLearner.updateAndSave(app.getPath("userData"));
           const count = Object.keys(learnedBaselines.providers || {}).length;
-          if (count > 0) console.log(`[eta-learner] baseline 更新, 当前 ${count} 个 provider`);
+          if (count > 0) log.info("eta-learner", `baseline 更新, 当前 ${count} 个 provider`);
         } catch (learnErr) {
-          console.warn("[eta-learner] 学习失败:", learnErr?.message || learnErr);
+          log.warn("eta-learner", "学习失败:", learnErr?.message || learnErr);
         }
       }
     } catch (sampleErr) {
-      console.warn("[eta-samples] 写埋点失败:", sampleErr?.message || sampleErr);
+      log.warn("eta-samples", "写埋点失败:", sampleErr?.message || sampleErr);
     }
     clearAnalysis(project.id);
   }
@@ -5443,7 +5442,7 @@ function createTray() {
     const tplPath = path.join(__dirname, "assets", "tray-iconTemplate.png");
     const tplImg = nativeImage.createFromPath(tplPath);
     if (tplImg.isEmpty()) {
-      console.warn("[tray] tray-iconTemplate.png 不可用,跳过托盘创建");
+      log.warn("tray", "tray-iconTemplate.png 不可用,跳过托盘创建");
       return;
     }
     tplImg.setTemplateImage(true);
@@ -5452,7 +5451,7 @@ function createTray() {
     const sourcePath = path.join(__dirname, "assets", "icon-256.png");
     let trayImg = nativeImage.createFromPath(sourcePath);
     if (trayImg.isEmpty()) {
-      console.warn("[tray] icon-256.png 不可用,跳过托盘创建");
+      log.warn("tray", "icon-256.png 不可用,跳过托盘创建");
       return;
     }
     trayImg = trayImg.resize({ width: 16, height: 16, quality: "best" });
@@ -5493,7 +5492,7 @@ function notifyIfBackground({ title, body, urgency } = {}) {
     });
     n.show();
   } catch (err) {
-    console.warn("[notify] 通知失败:", err?.message || err);
+    log.warn("notify", "通知失败:", err?.message || err);
   }
 }
 
@@ -5547,6 +5546,8 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  log.init(app.getPath("userData"));
+
   // macOS Dock 图标
   if (process.platform === "darwin" && app.dock) {
     const icon = getAppIcon();
@@ -5558,9 +5559,9 @@ app.whenReady().then(async () => {
   try {
     learnedBaselines = await etaLearner.loadBaselines(app.getPath("userData"));
     const count = Object.keys(learnedBaselines.providers || {}).length;
-    if (count > 0) console.log(`[eta-learner] 加载 ${count} 个 provider baseline`);
+    if (count > 0) log.info("eta-learner", `加载 ${count} 个 provider baseline`);
   } catch (err) {
-    console.warn("[eta-learner] 加载 baseline 失败:", err?.message || err);
+    log.warn("eta-learner", "加载 baseline 失败:", err?.message || err);
   }
 
   // 生产环境注入严格 CSP — dev 下 Vite HMR 需要 unsafe-eval,跳过。
@@ -5588,7 +5589,7 @@ app.whenReady().then(async () => {
   try {
     await initializeCacheStore();
   } catch (err) {
-    console.warn("[cache-store] 初始化失败:", err?.message || err);
+    log.warn("cache-store", "初始化失败:", err?.message || err);
   }
 
   // 本地 llama 接线: ctx override 解析 + openai-client 自动 acquire/release。
@@ -5614,9 +5615,9 @@ app.whenReady().then(async () => {
         try { win.webContents.send("extensionBridge:status", s); } catch { /* noop */ }
       }
     });
-    console.log("[extension-bridge] 已启动 ws://127.0.0.1:58713/agent");
+    log.info("extension-bridge", "已启动 ws://127.0.0.1:58713/agent");
   } catch (err) {
-    console.warn("[extension-bridge] 启动失败:", err?.message || err);
+    log.warn("extension-bridge", "启动失败:", err?.message || err);
   }
 
   protocol.handle("media", async (request) => {
@@ -6038,7 +6039,7 @@ app.whenReady().then(async () => {
         cacheStore.configure({ dir: cacheStore.getCacheDir(), maxBytes });
       }
     } catch (err) {
-      console.warn("[cache-store] 同步 maxBytes 失败:", err?.message || err);
+      log.warn("cache-store", "同步 maxBytes 失败:", err?.message || err);
     }
     return { ok: true };
   });
@@ -6524,7 +6525,7 @@ app.whenReady().then(async () => {
           } catch { stmtDel.run(row.id); }
         }
       } catch (e) {
-        console.warn("[accounts:fetch] 清理旧 av 失败:", e?.message || e);
+        log.warn("accounts:fetch", "清理旧 av 失败:", e?.message || e);
       }
       const existsStmt = db.prepare("SELECT id FROM account_videos WHERE id = ?");
       const insertStmt = db.prepare(
@@ -6590,7 +6591,7 @@ app.whenReady().then(async () => {
             "INSERT INTO accounts (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
           ).run(accountId, JSON.stringify(patched), Date.now());
         } catch (e) {
-          console.warn("[accounts:fetch] update Account 失败", e?.message || e);
+          log.warn("accounts:fetch", "update Account 失败", e?.message || e);
         }
       }
 
@@ -6648,7 +6649,7 @@ app.whenReady().then(async () => {
     } catch { /* noop */ }
     // fire-and-forget
     runAccountFetch({ accountId, url, range }).catch((err) => {
-      console.warn("[accounts:startFetch] runAccountFetch unhandled", err?.message || err);
+      log.warn("accounts:startFetch", "runAccountFetch unhandled", err?.message || err);
     });
     return { ok: true, accepted: true };
   });
@@ -7390,7 +7391,7 @@ app.whenReady().then(async () => {
     });
     // 持久化最近一次启动的模型,下次开应用时自动恢复
     persistLastLlamaModelKey(modelKey).catch((e) =>
-      console.warn("[clipiq] 持久化 lastLlamaModelKey 失败:", e),
+      log.warn("clipiq", "持久化 lastLlamaModelKey 失败:", e),
     );
     return result;
   });
@@ -7494,25 +7495,25 @@ function scheduleLlamaAutoResume() {
       if (!lastKey) return;
       const status = llamaRuntime.getStatus();
       if (!status.binaryFound) {
-        console.log("[clipiq] llama auto-resume 跳过:推理引擎未安装");
+        log.info("clipiq", "llama auto-resume 跳过:推理引擎未安装");
         return;
       }
       const models = await llamaRuntime.listModels();
       const target = models.find((m) => m.key === lastKey);
       if (!target) {
-        console.log(`[clipiq] llama auto-resume 跳过:未知模型 ${lastKey}`);
+        log.info("clipiq", `llama auto-resume 跳过:未知模型 ${lastKey}`);
         return;
       }
       if (!target.downloaded) {
-        console.log(`[clipiq] llama auto-resume 跳过:模型 ${lastKey} 未下载完成`);
+        log.info("clipiq", `llama auto-resume 跳过:模型 ${lastKey} 未下载完成`);
         return;
       }
-      console.log(`[clipiq] llama auto-resume: 启动 ${lastKey}`);
+      log.info("clipiq", `llama auto-resume: 启动 ${lastKey}`);
       await llamaRuntime.start(lastKey, {
         onLog: (entry) => {
           // 自启动期间日志只走主进程 stdout,不打扰 renderer
           if (entry.channel === "stderr" && /error|fatal/i.test(entry.line)) {
-            console.warn("[llama auto-resume]", entry.line);
+            log.warn("llama auto-resume", entry.line);
           }
         },
       });
@@ -7526,9 +7527,9 @@ function scheduleLlamaAutoResume() {
           message: `自动恢复模型 ${lastKey}`,
         });
       }
-      console.log(`[clipiq] llama auto-resume 完成`);
+      log.info("clipiq", "llama auto-resume 完成");
     } catch (error) {
-      console.warn(`[clipiq] llama auto-resume 失败: ${error?.message || error}`);
+      log.warn("clipiq", `llama auto-resume 失败: ${error?.message || error}`);
     }
   }, 1500);
 }
@@ -7556,7 +7557,7 @@ let _cleanedUp = false;
 function cleanupSidecars(reason) {
   if (_cleanedUp) return;
   _cleanedUp = true;
-  try { console.log(`[clipiq] cleanupSidecars: ${reason}`); } catch {}
+  try { log.info("clipiq", `cleanupSidecars: ${reason}`); } catch {}
   try { llamaRuntime.shutdownSync(); } catch {}
   try { whisperCppRuntime.shutdownSync(); } catch {}
 }

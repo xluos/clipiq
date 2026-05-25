@@ -22,6 +22,7 @@ const fsSync = require("node:fs");
 const path = require("node:path");
 const { createServer } = require("node:net");
 const sidecarUtils = require("./sidecar-utils.cjs");
+const log = require("./logger.cjs");
 
 function pidFilePath() {
   return path.join(app.getPath("userData"), "sidecars", "whisper.json");
@@ -443,8 +444,7 @@ async function start(modelKey, { onLog } = {}) {
       const line = raw.trimEnd();
       if (!line) continue;
       pushLog(channel, line);
-      // eslint-disable-next-line no-console
-      console.log(`[whisper-server:${channel}]`, line);
+      log.info(`whisper-server:${channel}`, line);
       if (onLog) onLog({ channel, line });
     }
   };
@@ -452,8 +452,7 @@ async function start(modelKey, { onLog } = {}) {
   child.stderr.on("data", handleLine("stderr"));
 
   child.once("exit", (code, signal) => {
-    // eslint-disable-next-line no-console
-    console.log(`[whisper-server] exit code=${code} signal=${signal}`);
+    log.info("whisper-server", `exit code=${code} signal=${signal}`);
     const wasStopping = state.status === "stopping";
     state.process = null;
     state.port = null;
@@ -491,21 +490,18 @@ async function reapOrAdopt() {
   if (result.mode === "none") return;
   const { info } = result;
   if (result.mode === "stale") {
-    // eslint-disable-next-line no-console
-    console.log("[whisper-runtime] PID file stale, clearing");
+    log.info("whisper-runtime", "PID file stale, clearing");
     sidecarUtils.clearPidFile(filePath);
     return;
   }
   if (result.mode === "kill") {
-    // eslint-disable-next-line no-console
-    console.log(`[whisper-runtime] orphan pid ${info.pid} unresponsive on :${info.port}, killing`);
+    log.info("whisper-runtime", `orphan pid ${info.pid} unresponsive on :${info.port}, killing`);
     await sidecarUtils.killPidAsyncWait(info.pid, 1500);
     sidecarUtils.clearPidFile(filePath);
     return;
   }
   if (!MODELS[info.modelKey]) {
-    // eslint-disable-next-line no-console
-    console.log(`[whisper-runtime] orphan modelKey ${info.modelKey} not in MODELS map, killing`);
+    log.info("whisper-runtime", `orphan modelKey ${info.modelKey} not in MODELS map, killing`);
     await sidecarUtils.killPidAsyncWait(info.pid, 1500);
     sidecarUtils.clearPidFile(filePath);
     return;
@@ -515,8 +511,7 @@ async function reapOrAdopt() {
   state.modelKey = info.modelKey;
   state.startedAt = info.startedAt || Date.now();
   state.status = "ready";
-  // eslint-disable-next-line no-console
-  console.log(`[whisper-runtime] adopted orphan pid=${info.pid} port=${info.port} model=${info.modelKey}`);
+  log.info("whisper-runtime", `adopted orphan pid=${info.pid} port=${info.port} model=${info.modelKey}`);
 }
 
 function shutdownSync() {
