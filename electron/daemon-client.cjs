@@ -27,13 +27,36 @@ function pidPath() {
   return path.join(daemonStorageDir(), ".daemon.pid");
 }
 
+function tokenPath() {
+  return path.join(daemonStorageDir(), ".daemon.token");
+}
+
+let cachedToken = null;
+
+function readToken() {
+  if (cachedToken) return cachedToken;
+  try {
+    cachedToken = fsSync.readFileSync(tokenPath(), "utf8").trim();
+    return cachedToken;
+  } catch {
+    return null;
+  }
+}
+
+function authHeaders() {
+  const headers = { "Content-Type": "application/json" };
+  const token = readToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
+
 function request(method, urlPath, body) {
   return new Promise((resolve, reject) => {
     const opts = {
       socketPath: socketPath(),
       path: urlPath,
       method,
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders(),
     };
     const req = http.request(opts, (res) => {
       let data = "";
@@ -55,6 +78,12 @@ function request(method, urlPath, body) {
 async function isDaemonRunning() {
   try {
     const res = await request("GET", "/status");
+    if (res.status === 401) {
+      // daemon 在跑但 token 对不上,重新从文件读
+      cachedToken = null;
+      const res2 = await request("GET", "/status");
+      return res2.status === 200 && res2.data?.ready === true;
+    }
     return res.status === 200 && res.data?.ready === true;
   } catch {
     return false;
@@ -127,6 +156,7 @@ async function ensureDaemon() {
       try {
         const ready = JSON.parse(stdout.trim());
         if (ready.socket || ready.pid) {
+          if (ready.token) cachedToken = ready.token;
           child.stdout.removeListener("data", onData);
           resolve(ready);
         }
@@ -200,7 +230,7 @@ function downloadModel(modelId, onProgress) {
       socketPath: socketPath(),
       path: `/models/${encodeURIComponent(modelId)}/download`,
       method: "POST",
-      headers: { "Accept": "text/event-stream" },
+      headers: { ...authHeaders(), "Accept": "text/event-stream" },
     };
 
     const req = http.request(opts, (res) => {
