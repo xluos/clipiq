@@ -1502,6 +1502,10 @@ function migrateConfigV1ToV2(raw) {
     lastLlamaModelKey: cfg.lastLlamaModelKey || null,
     defaultAnalysis: cfg.defaultAnalysis || null,
     localModelOverrides,
+    pipelineConcurrency: cfg.pipelineConcurrency,
+    cacheDir: cfg.cacheDir,
+    cacheMaxBytes: cfg.cacheMaxBytes,
+    cachePolicy: cfg.cachePolicy || null,
     schemaVersion: 2,
   };
 }
