@@ -2994,10 +2994,11 @@ async function buildAnalysisPrompt(project, frames, transcript, scenes, options)
   return { userText, methodology };
 }
 
-// 每帧 vision token 的保守估算。Qwen-VL / 大多数开源 VLM 在 480-720p 范围
-// mmproj 编码下实际 600-1200 token/帧, 取 800 作中位数。云端模型 (GPT-4o 等) 实际
-// 更低 (~250), 但用 800 估算只会少送几张图, 不会把 ctx 撑爆 -> 安全方向。
-const VISION_TOKENS_PER_FRAME = 800;
+// 每帧 vision token 估算: 本地 llama.cpp mmproj 520px 实测 ~250 tok/帧,
+// 云端模型 (GPT-4o / Gemini / Claude) tile 编码 ~600-1200, 取 800 保守估算。
+const VISION_TOKENS_PER_FRAME_LOCAL = 280;
+const VISION_TOKENS_PER_FRAME_REMOTE = 800;
+let VISION_TOKENS_PER_FRAME = VISION_TOKENS_PER_FRAME_REMOTE;
 const HARD_FRAME_CAP = 12;
 const HARD_FRAME_MIN = 1;
 
@@ -3810,6 +3811,10 @@ async function callOpenAICompatible(provider, project, frames, transcript, scene
   }
 
   try {
+    VISION_TOKENS_PER_FRAME = effectiveProvider.source === "local_llama"
+      ? VISION_TOKENS_PER_FRAME_LOCAL
+      : VISION_TOKENS_PER_FRAME_REMOTE;
+
     const ctxSize = Number(effectiveProvider?.contextSize) > 0 ? Number(effectiveProvider.contextSize) : 8192;
     // reserveForOutput 跟 ctx 走 (×0.25, 下限 1500, **无上限**):settings 里 ctx slider 调多大就给多大 output 预算。
     // 在线大模型 (Claude 200K / Gemini 1M / Qwen3.5 256K) 和本地大 ctx 模型都按比例伸缩,
