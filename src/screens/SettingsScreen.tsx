@@ -1652,7 +1652,7 @@ function FitChip({ fit }: { fit?: string }) {
     tight: "bg-red-50 border-red-200 text-red-700 dark:bg-red-900/20 dark:border-red-800 dark:text-red-300",
   } as Record<string, string>)[fit] || "border-slate-200 text-slate-600";
   return (
-    <span className={`inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-2 py-0.5 rounded border ${cls}`}>
+    <span className={`inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-2 py-0.5 rounded border whitespace-nowrap shrink-0 ${cls}`}>
       <span className="w-1.5 h-1.5 rounded-full bg-current" />
       {FIT_LABELS[fit] || fit}
     </span>
