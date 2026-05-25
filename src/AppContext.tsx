@@ -672,18 +672,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
-      setModelDownloads((prev) => ({
-        ...prev,
-        [evt.modelKey]: {
-          modelKey: evt.modelKey,
-          label: evt.label || evt.modelKey,
-          stage: evt.stage || "download",
-          percent: evt.percent ?? 0,
-          receivedBytes: evt.receivedBytes ?? 0,
-          totalBytes: evt.totalBytes ?? 0,
-          speed: evt.speed ?? 0,
-        },
-      }));
+      setModelDownloads((prev) => {
+        const existing = prev[evt.modelKey];
+        const isStart = evt.stage === "start";
+        return {
+          ...prev,
+          [evt.modelKey]: {
+            modelKey: evt.modelKey,
+            label: isStart ? (evt.label || evt.modelKey) : (existing?.label || evt.label || evt.modelKey),
+            stage: evt.stage || "download",
+            percent: evt.percent ?? 0,
+            receivedBytes: evt.receivedBytes ?? 0,
+            totalBytes: evt.totalBytes ?? 0,
+            speed: evt.speed ?? 0,
+          },
+        };
+      });
     });
     return off;
   }, []);
