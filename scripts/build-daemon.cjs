@@ -10,6 +10,7 @@
 const { execSync } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
+const os = require("node:os");
 
 const DAEMON_SRC = process.env.AI_MODEL_DAEMON_SRC
   || path.resolve(__dirname, "../../ai-model-daemon");
@@ -62,27 +63,58 @@ function build(targetKey) {
   console.log(`[build-daemon] ${targetKey} done`);
 }
 
+function killRunningDaemon() {
+  const storageDir = process.platform === "darwin"
+    ? path.join(os.homedir(), "Library", "Application Support", "AIModels")
+    : process.platform === "win32"
+      ? path.join(process.env.LOCALAPPDATA || "", "AIModels")
+      : path.join(os.homedir(), ".local", "share", "AIModels");
+  const pidFile = path.join(storageDir, ".daemon.pid");
+  try {
+    const pid = parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+    if (!pid) return;
+    process.kill(pid, "SIGTERM");
+    console.log(`[build-daemon] 已停止旧 daemon (pid=${pid}),下次调用时自动拉起新版本`);
+    try { fs.unlinkSync(pidFile); } catch {}
+    try { fs.unlinkSync(path.join(storageDir, ".daemon.token")); } catch {}
+    try { fs.unlinkSync(path.join(storageDir, ".daemon.sock")); } catch {}
+  } catch {
+    // pid 文件不存在或进程已退出
+  }
+}
+
 const args = process.argv.slice(2);
+let builtCurrentPlatform = false;
+const cur = currentTarget();
+
 if (args.length === 0) {
-  build(currentTarget());
+  build(cur);
+  builtCurrentPlatform = true;
 } else if (args.includes("--all")) {
   for (const key of Object.keys(TARGETS)) build(key);
+  builtCurrentPlatform = true;
 } else if (args.includes("--mac")) {
   build("mac-arm64");
   build("mac-x64");
+  if (cur.startsWith("mac-")) builtCurrentPlatform = true;
 } else if (args.includes("--win")) {
   build("win-x64");
+  if (cur.startsWith("win-")) builtCurrentPlatform = true;
 } else if (args.includes("--linux")) {
   build("linux-x64");
   build("linux-arm64");
+  if (cur.startsWith("linux-")) builtCurrentPlatform = true;
 } else {
   for (const arg of args) {
     const key = arg.replace(/^--/, "");
     if (TARGETS[key]) {
       build(key);
+      if (key === cur) builtCurrentPlatform = true;
     } else {
       console.error(`Unknown target: ${arg}`);
       process.exit(1);
     }
   }
 }
+
+if (builtCurrentPlatform) killRunningDaemon();
