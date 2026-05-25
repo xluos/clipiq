@@ -29,6 +29,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout ai-model-daemon
+        uses: actions/checkout@v4
+        with:
+          repository: xluos/ai-model-daemon
+          path: daemon-src
+          token: ${{ secrets.DAEMON_REPO_TOKEN || github.token }}
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -39,9 +46,6 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-
-      - name: Clone ai-model-daemon
-        run: git clone https://github.com/xluos/ai-model-daemon.git ../ai-model-daemon
 
       - name: Install dependencies
         timeout-minutes: 10
@@ -55,6 +59,8 @@ jobs:
         run: npm run build
 
       - name: Build daemon
+        env:
+          AI_MODEL_DAEMON_SRC: ${{ github.workspace }}/daemon-src
         run: node scripts/build-daemon.cjs ${{ matrix.daemon-target }}
 
       - name: Build & publish (${{ matrix.os }})
