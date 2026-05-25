@@ -12,9 +12,9 @@
     "preview": "vite preview",
     "clean": "rm -rf dist release",
     "lint": "tsc --noEmit",
-    "dist": "npm run build && electron-builder",
-    "dist:mac": "npm run build && electron-builder --mac",
-    "dist:win": "npm run build && electron-builder --win",
+    "dist": "npm run build && node scripts/build-daemon.cjs && electron-builder",
+    "dist:mac": "npm run build && node scripts/build-daemon.cjs --mac && electron-builder --mac",
+    "dist:win": "npm run build && node scripts/build-daemon.cjs --win && electron-builder --win",
     "dist:extension": "node scripts/pack-extension.cjs"
   },
   "build": {
@@ -30,6 +30,13 @@
       "electron/**",
       "src/electron-api.d.ts",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/daemon/${os}-${arch}/",
+        "to": "daemon",
+        "filter": ["**/*"]
+      }
     ],
     "asarUnpack": [
       "node_modules/@ffmpeg-installer/**",

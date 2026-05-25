@@ -62,18 +62,29 @@ async function isDaemonRunning() {
 }
 
 async function findDaemonBinary() {
+  // 1. Electron 打包内置
+  if (process.resourcesPath) {
+    const exe = process.platform === "win32" ? "ai-model-daemon.exe" : "ai-model-daemon";
+    const bundled = path.join(process.resourcesPath, "daemon", exe);
+    if (fsSync.existsSync(bundled)) return bundled;
+  }
+
+  // 2. 环境变量
   const envPath = process.env.AI_MODEL_DAEMON_PATH;
   if (envPath && fsSync.existsSync(envPath)) return envPath;
 
+  // 3. 常见安装位置
+  const exe = process.platform === "win32" ? "ai-model-daemon.exe" : "ai-model-daemon";
   const candidates = [
-    path.join(os.homedir(), ".local", "bin", "ai-model-daemon"),
-    path.join(os.homedir(), "go", "bin", "ai-model-daemon"),
-    "/usr/local/bin/ai-model-daemon",
+    path.join(os.homedir(), ".local", "bin", exe),
+    path.join(os.homedir(), "go", "bin", exe),
+    `/usr/local/bin/${exe}`,
   ];
   for (const c of candidates) {
     if (fsSync.existsSync(c)) return c;
   }
 
+  // 4. PATH
   return new Promise((resolve) => {
     const which = process.platform === "win32" ? "where" : "which";
     const child = spawn(which, ["ai-model-daemon"], { stdio: ["ignore", "pipe", "ignore"] });
