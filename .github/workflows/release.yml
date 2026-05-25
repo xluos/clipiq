@@ -29,12 +29,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Checkout ai-model-daemon
-        uses: actions/checkout@v4
-        with:
-          repository: xluos/ai-model-daemon
-          path: daemon-src
-          token: ${{ secrets.DAEMON_REPO_TOKEN || github.token }}
+      - name: Clone ai-model-daemon
+        run: git clone --depth 1 https://github.com/xluos/ai-model-daemon.git daemon-src
 
       - name: Setup Node
         uses: actions/setup-node@v4
