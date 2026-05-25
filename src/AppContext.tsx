@@ -630,11 +630,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const list = prev[evt.projectId] || [];
         const message = evt.message || "";
         const head = list[0];
-        // dedup 规则升级 (2026-05):
-        // - head.stage === evt.stage → 就地替换 head, 不 append (同 stage 的状态更新, 例如
-        //   "镜头合并 · 已等待 5s" → "...已等待 34s", 体验上是同一条日志的时间在变)。
-        //   absoluteMs 保留 head 原值, 让相对偏移 (m:ss) 锁在 stage 开始时刻不跳。
-        // - stage 切换才 append 新条。
+        // dedup: 同 stage 就地更新, 不 append。
+        // 先检查 head (最常见: 同 stage 连续更新), 再扫全列表 (stage 循环出现时)。
         if (head && head.stage === evt.stage) {
           if (head.message === message && head.fromCache === !!evt.fromCache) return prev;
           const updated: ProgressLogEntry = {
@@ -645,6 +642,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
             fromCache: !!evt.fromCache || undefined,
           };
           return { ...prev, [evt.projectId]: [updated, ...list.slice(1)] };
+        }
+        const existingIdx = list.findIndex((e) => e.stage === evt.stage);
+        if (existingIdx >= 0) {
+          const existing = list[existingIdx];
+          if (existing.message === message && existing.fromCache === !!evt.fromCache) return prev;
+          const updated: ProgressLogEntry = {
+            absoluteMs: existing.absoluteMs,
+            stage: evt.stage,
+            message,
+            tone: detectLogTone(evt.stage, message),
+            fromCache: !!evt.fromCache || undefined,
+          };
+          const next = [...list];
+          next[existingIdx] = updated;
+          return { ...prev, [evt.projectId]: next };
         }
         const entry: ProgressLogEntry = {
           absoluteMs: Date.now(),
