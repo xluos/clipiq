@@ -31,6 +31,9 @@ export function ProgressScreen() {
 
   const project = projects.find(p => p.id === activeProjectId);
 
+  const isUrlSource = project?.source?.type === "url";
+  const visibleStageDefs = PIPELINE_STAGE_DEFS.filter((s) => s.key !== "download" || isUrlSource);
+
   const liveSnapshot = project ? progressByProject[project.id] : undefined;
   const pipeline = project ? pipelineByProject[project.id] : undefined;
   const budget = project ? budgetByProject[project.id] : undefined;
@@ -61,7 +64,7 @@ export function ProgressScreen() {
     if (!project) return;
     const snap = progressByProject[project.id];
     setProgress(snap?.progress ?? 0);
-    setStageLabel(snap?.stage ?? PIPELINE_STAGE_DEFS[0].label);
+    setStageLabel(snap?.stage ?? visibleStageDefs[0].label);
     setDetail(snap?.message ?? "");
     setError("");
     setIsCancelling(false);
@@ -213,7 +216,7 @@ export function ProgressScreen() {
     hasStarted.current = true;
     // 从 downloading 切到 analyzing 时,把进度重置回 0,避免下载条 100% 直接接到分析条 0%。
     setProgress(0);
-    setStageLabel(PIPELINE_STAGE_DEFS[0].label);
+    setStageLabel(visibleStageDefs[0].label);
     // startedAt 不在这里重置 — 它从 project.analysisStartedAt 派生 (持久化), HomeScreen
     // 创建 downloading 项目时就写了, 整段 download → analyze 共用同一起点。
 
@@ -371,7 +374,7 @@ export function ProgressScreen() {
             </div>
           </div>
           <div className="flex justify-between font-mono text-[11px] uppercase tracking-wider text-slate-500">
-            <span>已完成 <strong className="font-medium text-slate-900 dark:text-slate-100">{pipeline ? pipeline.stages.filter(s => s.status === "done").length : 0} / {PIPELINE_STAGE_DEFS.length}</strong> 步</span>
+            <span>已完成 <strong className="font-medium text-slate-900 dark:text-slate-100">{pipeline ? pipeline.stages.filter((s) => (s.key !== "download" || isUrlSource) && s.status === "done").length : 0} / {visibleStageDefs.length}</strong> 步</span>
             <span><strong className="font-medium text-slate-900 dark:text-slate-100 tabular-nums">{Math.round(progress)}%</strong></span>
           </div>
         </section>
@@ -400,7 +403,8 @@ export function ProgressScreen() {
         <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-4 md:p-5">
           <div className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 mb-3 font-medium">流水线</div>
           <ul className="space-y-1">
-            {(pipeline?.stages ?? PIPELINE_STAGE_DEFS).map((s, idx) => {
+            {(pipeline?.stages ?? PIPELINE_STAGE_DEFS).filter((s) => s.key !== "download" || isUrlSource).map((s) => {
+              const idx = (pipeline?.stages ?? PIPELINE_STAGE_DEFS).indexOf(s);
               const isDownloading = project.status === "downloading";
               const stage = pipeline?.stages[idx];
               const done = !isDownloading && (stage?.status === "done" || progress >= 100);
