@@ -7838,6 +7838,37 @@ app.whenReady().then(async () => {
     }
   });
 
+  ipcMain.handle("diagnostics:deleteSample", async (_event, projectId, startedAt) => {
+    const filePath = path.join(app.getPath("userData"), "eta-samples.jsonl");
+    try {
+      const raw = await fs.readFile(filePath, "utf-8");
+      const lines = raw.trim().split("\n").filter(Boolean);
+      const kept = [];
+      let removed = 0;
+      for (const line of lines) {
+        try {
+          const obj = JSON.parse(line);
+          if (obj.projectId === projectId && obj.startedAt === startedAt) { removed++; continue; }
+        } catch { /* keep malformed lines as-is */ }
+        kept.push(line);
+      }
+      await fs.writeFile(filePath, kept.length > 0 ? kept.join("\n") + "\n" : "");
+      return { ok: true, removed };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err), removed: 0 };
+    }
+  });
+
+  ipcMain.handle("diagnostics:clearAllSamples", async () => {
+    const filePath = path.join(app.getPath("userData"), "eta-samples.jsonl");
+    try {
+      await fs.writeFile(filePath, "");
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
+  });
+
   await createWindow();
   createTray();
 
