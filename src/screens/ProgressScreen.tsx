@@ -25,8 +25,9 @@ export function ProgressScreen() {
   const {
     setCurrentScreen, activeProjectId, projects, setProjects,
     providers, activeVideoProviderId, activeAudioProviderId,
-    setNodesForProject, setReportForProject, progressByProject, pipelineByProject,
+    setNodesForAnalysis, setReportForAnalysis, progressByProject, pipelineByProject,
     budgetByProject, setBudgetForProject, startAnalysisForProject,
+    analysisRecordsByProject, refreshAnalysisRecords,
   } = useApp();
 
   const project = projects.find(p => p.id === activeProjectId);
@@ -45,12 +46,16 @@ export function ProgressScreen() {
   const [isCancelling, setIsCancelling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
 
-  // 分析启动时间从 project.analysisStartedAt 读 (持久化到 SQLite, 退出再进 / 重启都能恢复)。
-  // 老数据没有该字段 → fallback 到 mount 时刻; 完成后字段保留, Workspace 能看历史耗时。
+  const currentAnalysisRecord = useMemo(() => {
+    if (!project?.currentAnalysisId) return undefined;
+    const records = analysisRecordsByProject[project.id] || [];
+    return records.find((r) => r.id === project.currentAnalysisId);
+  }, [project?.id, project?.currentAnalysisId, analysisRecordsByProject]);
+
   const startedAt = useMemo(() => {
-    if (project?.analysisStartedAt) return new Date(project.analysisStartedAt).getTime();
+    if (currentAnalysisRecord?.startedAt) return new Date(currentAnalysisRecord.startedAt).getTime();
     return Date.now();
-  }, [project?.analysisStartedAt]);
+  }, [currentAnalysisRecord?.startedAt]);
 
   const hasStarted = useRef(false);
   const cancelledRef = useRef(false);
@@ -74,7 +79,7 @@ export function ProgressScreen() {
     cancelledRef.current = false;
     inAttachMode.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project?.id, project?.analysisStartedAt]);
+  }, [project?.id, project?.currentAnalysisId]);
 
   useEffect(() => {
     if (progress >= 100) return;
@@ -159,17 +164,20 @@ export function ProgressScreen() {
       if (!inAttachMode.current || !window.videoAnalyzer) return;
       if (event.stage === "完成" && event.progress >= 100 && !completionHandledRef.current) {
         completionHandledRef.current = true;
+        const aid = event.analysisId || project.currentAnalysisId;
+        if (!aid) return;
         void (async () => {
           try {
             const [nodes, report] = await Promise.all([
-              window.videoAnalyzer!.getNodes(project.id),
-              window.videoAnalyzer!.getReport(project.id),
+              window.videoAnalyzer!.getNodes(aid),
+              window.videoAnalyzer!.getReport(aid),
             ]);
-            if (nodes && nodes.length) setNodesForProject(project.id, nodes);
-            if (report) setReportForProject(project.id, report);
+            if (nodes && nodes.length) setNodesForAnalysis(aid, nodes);
+            if (report) setReportForAnalysis(aid, report);
             setProjects(prev => prev.map(p => p.id === project.id
-              ? { ...p, status: "completed", updatedAt: new Date().toISOString() }
+              ? { ...p, status: "completed", currentAnalysisId: aid, updatedAt: new Date().toISOString() }
               : p));
+            refreshAnalysisRecords(project.id);
             window.setTimeout(() => setCurrentScreen("workspace"), 800);
           } catch (err) {
             console.warn("attach completion fetch 失败", err);
@@ -181,8 +189,9 @@ export function ProgressScreen() {
         setError(msg);
         const now = new Date().toISOString();
         setProjects(prev => prev.map(p => p.id === project.id
-          ? { ...p, status: "failed", updatedAt: now, lastErrorMessage: msg, lastErrorAt: now }
+          ? { ...p, status: "failed", updatedAt: now }
           : p));
+        refreshAnalysisRecords(project.id);
       }
     });
     return unsubscribe;
@@ -204,12 +213,11 @@ export function ProgressScreen() {
       return;
     }
     if (project.status === "download_failed") {
-      setError(project.lastErrorMessage || "视频下载失败,请检查链接或换一个再试。");
+      setError("视频下载失败,请检查链接或换一个再试。");
       return;
     }
     if (project.status === "failed") {
-      // 不再自动 kickoff:从 HomeScreen 点 failed 项目进来时,先显示上次失败原因,等用户点重试。
-      setError(project.lastErrorMessage || "上次分析失败。点击下方'重试'重新运行。");
+      setError(currentAnalysisRecord?.lastErrorMessage || "上次分析失败。点击下方'重试'重新运行。");
       setStageLabel("已结束 · 失败");
       return;
     }
@@ -217,8 +225,7 @@ export function ProgressScreen() {
     // 从 downloading 切到 analyzing 时,把进度重置回 0,避免下载条 100% 直接接到分析条 0%。
     setProgress(0);
     setStageLabel(visibleStageDefs[0].label);
-    // startedAt 不在这里重置 — 它从 project.analysisStartedAt 派生 (持久化), HomeScreen
-    // 创建 downloading 项目时就写了, 整段 download → analyze 共用同一起点。
+    // startedAt 从当前 AnalysisRecord.startedAt 派生, main 进程创建分析记录时写入。
 
     if (!window.videoAnalyzer) {
       // Browser preview: simulate progress
@@ -235,8 +242,9 @@ export function ProgressScreen() {
           clearInterval(timer);
           setProgress(100);
           setStageLabel(PIPELINE_STAGE_DEFS[PIPELINE_STAGE_DEFS.length - 1].label);
-          setNodesForProject(project.id, generateMockNodes(project.durationSec));
-          setReportForProject(project.id, generateMockReport());
+          const mockAnalysisId = `mock-${project.id}`;
+          setNodesForAnalysis(mockAnalysisId, generateMockNodes(project.durationSec));
+          setReportForAnalysis(mockAnalysisId, generateMockReport());
           setProjects(prev => prev.map(p => p.id === project.id ? { ...p, status: "completed", updatedAt: new Date().toISOString() } : p));
           setTimeout(() => setCurrentScreen("workspace"), 500);
         } else {
@@ -249,11 +257,11 @@ export function ProgressScreen() {
       return () => clearInterval(timer);
     }
 
-    const provider = providers.find(p => p.id === (project.providerId || activeVideoProviderId)) || providers.find(p => p.kind === "video") || providers[0];
+    const provider = providers.find(p => p.id === activeVideoProviderId) || providers.find(p => p.kind === "video") || providers[0];
     const audioProvider = activeAudioProviderId
       ? providers.find(p => p.id === activeAudioProviderId && p.kind === "audio")
       : undefined;
-    const options: AnalysisOptions = project.analysisOptions || { mode: "standard", density: "standard", focus: "all" };
+    const options: AnalysisOptions = currentAnalysisRecord?.analysisOptions || { mode: "standard", density: "standard", focus: "all" };
 
     const applyProgressSnapshot = (snap: { progress: number; stage: string; message?: string } | null | undefined) => {
       if (!snap) return;
@@ -289,9 +297,10 @@ export function ProgressScreen() {
       try {
         const result = await window.videoAnalyzer!.analyzeProject({ project, provider, audioProvider, options });
         if (cancelledRef.current) return;
-        setNodesForProject(project.id, result.nodes);
-        setReportForProject(project.id, result.report);
+        setNodesForAnalysis(result.analysisId, result.nodes);
+        setReportForAnalysis(result.analysisId, result.report);
         setProjects(prev => prev.map(p => p.id === project.id ? result.project : p));
+        refreshAnalysisRecords(project.id);
         setProgress(100);
         setStageLabel("完成");
         // 完成 / 失败 log 由 main 进程的 "完成" event 走 AppContext 统一记录, 不在这里重复。
@@ -304,8 +313,9 @@ export function ProgressScreen() {
         setError(message);
         const now = new Date().toISOString();
         setProjects(prev => prev.map(p => p.id === project.id
-          ? { ...p, status: "failed", updatedAt: now, lastErrorMessage: message, lastErrorAt: now }
+          ? { ...p, status: "failed", updatedAt: now }
           : p));
+        refreshAnalysisRecords(project.id);
       }
     };
     launchOrAttach();
@@ -315,7 +325,7 @@ export function ProgressScreen() {
   if (!project) return null;
 
   const presetLabel = (() => {
-    const opts = project.analysisOptions;
+    const opts = currentAnalysisRecord?.analysisOptions;
     if (!opts) return "标准拉片";
     if (opts.mode === "quick" && opts.density === "sparse") return "轻拉片";
     if (opts.mode === "detailed" && opts.density === "dense") return "深度拉片";

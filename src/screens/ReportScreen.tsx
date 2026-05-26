@@ -110,15 +110,17 @@ function formatDuration(ms: number) {
 }
 
 export function ReportScreen() {
-  const { setCurrentScreen, reportByProject, activeProjectId, projects, setProjects, nodesByProject, providers, startAnalysisForProject } = useApp();
+  const { setCurrentScreen, reportByAnalysis, activeProjectId, projects, setProjects, nodesByAnalysis, providers, startAnalysisForProject, analysisRecordsByProject } = useApp();
   const [exportStatus, setExportStatus] = useState("");
   const [activeSection, setActiveSection] = useState<string>("summary");
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const project = projects.find(p => p.id === activeProjectId);
-  const report = reportByProject[activeProjectId || ""];
-  const nodes = nodesByProject[activeProjectId || ""] || [];
-  const provider = providers.find(p => p.id === project?.providerId);
+  const currentAnalysisId = project?.currentAnalysisId || "";
+  const report = reportByAnalysis[currentAnalysisId];
+  const nodes = nodesByAnalysis[currentAnalysisId] || [];
+  const currentRecord = (analysisRecordsByProject[project?.id || ""] || []).find((r) => r.id === currentAnalysisId);
+  const provider = providers.find(p => p.id === currentRecord?.providerId);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -264,7 +266,7 @@ export function ReportScreen() {
   const handleReanalyzeWithGenre = (genre: VideoGenre | "auto") => {
     if (!project) return;
     const nextOptions = {
-      ...(project.analysisOptions || { mode: "standard" as const, density: "standard" as const, focus: "all" as const }),
+      ...(currentRecord?.analysisOptions || { mode: "standard" as const, density: "standard" as const, focus: "all" as const }),
       manualGenre: genre,
     };
     startAnalysisForProject(project.id, nextOptions);
@@ -475,7 +477,7 @@ export function ReportScreen() {
             <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">方法论诊断</h2>
             <MethodologyDiagnostics
               audit={audit}
-              currentManualGenre={project.analysisOptions?.manualGenre || "auto"}
+              currentManualGenre={currentRecord?.analysisOptions?.manualGenre || "auto"}
               onReanalyze={handleReanalyzeWithGenre}
               onSeekToNode={(time) => {
                 window.sessionStorage.setItem(
