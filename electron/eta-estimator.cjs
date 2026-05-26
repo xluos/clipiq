@@ -163,17 +163,26 @@ function estimateShotsCount(durationSec) {
   return Math.max(1, Math.round(durationSec / 7.5));
 }
 
-// candidateFrames: 跟 main.cjs candidateFrameCount 大致对齐
-// density: dense=6, standard=4, sparse=2 张/分钟基础; 开 prefilter 时 ~2.5x
-function estimateCandidateFrames(durationSec, options, hasPrefilter) {
+// candidateFrames: 与 main.cjs targetFrameCount + candidateFrameCount 对齐
+function estimateTargetFrameCount(durationSec, options) {
   const density = options?.density || "standard";
   const mode = options?.mode || "standard";
   const base = density === "dense" ? 6 : density === "sparse" ? 2 : 4;
   const detailBoost = mode === "detailed" ? 1 : mode === "quick" ? -1 : 0;
   const durationMin = Math.max(0.5, durationSec / 60);
-  let n = Math.round(durationMin * (base + detailBoost));
-  if (hasPrefilter) n = Math.round(n * 2.5);
-  return Math.max(8, Math.min(300, n));
+  const target = Math.round(durationMin * (base + detailBoost));
+  const upper = Math.max(32, Math.round(durationMin * 4));
+  return Math.max(6, Math.min(upper, target));
+}
+
+function estimateCandidateFrames(durationSec, options, hasPrefilter, scenesCount) {
+  const target = estimateTargetFrameCount(durationSec, options);
+  if (!hasPrefilter) return target;
+  const sc = scenesCount || estimateShotsCount(durationSec);
+  const perSecFloor = Math.ceil(durationSec);
+  const floor = Math.max(target, sc, perSecFloor);
+  const desired = Math.max(Math.round(floor * 1.5), floor + 8);
+  return Math.max(floor, desired);
 }
 
 // keptFrames: prefilter 之后留给主分析的帧数 (经验保留率 ~40%)
@@ -182,9 +191,18 @@ function estimateKeptFrames(candidateFrames, hasPrefilter) {
   return Math.max(4, Math.round(candidateFrames * 0.4));
 }
 
-// chunks: 主分析 chunked split. ctx 越大单 chunk 装越多 → chunks 越少
-// 经验 secPerChunk: 8K→144s, 16K→288s, 32K→576s
-function estimateChunksCount(durationSec, contextSize) {
+// chunks: token 预算近似 — 与 main.cjs planAnalysisChunks 对齐
+function estimateChunksCount(durationSec, contextSize, keptFrames, shotsCount, transcriptChars, isLocalProvider) {
+  if (keptFrames != null && shotsCount != null) {
+    const ctxSize = contextSize || 8192;
+    const reserveOutput = Math.max(1500, Math.floor(ctxSize * 0.25));
+    const safetyMargin = Math.max(256, Math.floor(ctxSize * 0.05));
+    const budget = ctxSize - reserveOutput - 800 - safetyMargin;
+    const tokPerFrame = isLocalProvider ? 280 : 800;
+    const totalTok = keptFrames * tokPerFrame + shotsCount * 300
+      + Math.round((transcriptChars || 0) * 1.5);
+    if (budget > 0) return Math.max(1, Math.ceil(totalTok / budget));
+  }
   const ctxK = (contextSize || 8192) / 1024;
   const secPerChunk = Math.max(60, ctxK * 18);
   return Math.max(1, Math.ceil(durationSec / secPerChunk));
@@ -207,6 +225,17 @@ function estimateAudioMs(durationSec, audioProvider) {
   return Math.round(durationSec * 50 + 2000);
 }
 
+// shot-merger batch size: 与 shot-merger.cjs ctxToBatchCap 对齐
+function estimateShotMergerBatchSize(contextSize) {
+  const ctx = contextSize || 8192;
+  if (ctx <= 2048) return 2;
+  if (ctx <= 4096) return 3;
+  if (ctx <= 8192) return 4;
+  if (ctx <= 16384) return 6;
+  if (ctx <= 32768) return 8;
+  return 12;
+}
+
 // ---------- 主入口 ----------
 function computeBudget({
   durationSec,
@@ -220,19 +249,28 @@ function computeBudget({
   contextSize,
   options,
   learnedBaselines,
+  actualScenesCount,
+  actualCandidateFrames,
 } = {}) {
   if (!durationSec || durationSec <= 0) {
     return { totalMs: 0, stages: [], note: "missing durationSec" };
   }
 
-  const candidateFrames = estimateCandidateFrames(durationSec, options, prefilterEnabled);
+  const shotsCount = actualScenesCount || estimateShotsCount(durationSec);
+  const candidateFrames = actualCandidateFrames
+    || estimateCandidateFrames(durationSec, options, prefilterEnabled, shotsCount);
   const keptFrames = estimateKeptFrames(candidateFrames, prefilterEnabled);
-  const shotsCount = estimateShotsCount(durationSec);
-  const chunksCount = estimateChunksCount(durationSec, contextSize ?? complexVisionProvider?.contextSize);
-  const framesPerChunk = chunksCount > 0 ? Math.ceil(keptFrames / chunksCount) : keptFrames;
   const transcriptChars = estimateTranscriptChars(durationSec, hasAudio);
+  const effectiveCtx = contextSize ?? complexVisionProvider?.contextSize;
+  const isLocal = complexVisionProvider?.source === "local_llama";
+  const chunksCount = estimateChunksCount(
+    durationSec, effectiveCtx, keptFrames, shotsCount, transcriptChars, isLocal,
+  );
+  const framesPerChunk = chunksCount > 0 ? Math.ceil(keptFrames / chunksCount) : keptFrames;
   const transcriptCharsPerChunk = chunksCount > 0 ? Math.round(transcriptChars / chunksCount) : transcriptChars;
-  const shotMergerBatchSize = 6;
+  const shotMergerBatchSize = estimateShotMergerBatchSize(
+    mediumTextProvider?.contextSize ?? effectiveCtx,
+  );
 
   const stages = [];
 
@@ -370,4 +408,5 @@ module.exports = {
   estimateLlmCallMs,
   estimateChunkPassCall,
   estimateShotMergerBatch,
+  estimateShotMergerBatchSize,
 };
