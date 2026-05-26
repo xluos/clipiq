@@ -4752,7 +4752,11 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             model: prefilterModelKey,
             source: "local_llama",
             usage: tagResult.totalTokens > 0
-              ? { promptTokens: 0, completionTokens: 0, totalTokens: tagResult.totalTokens }
+              ? {
+                  promptTokens: tagResult.totalPromptTokens || 0,
+                  completionTokens: tagResult.totalCompletionTokens || 0,
+                  totalTokens: tagResult.totalTokens,
+                }
               : null,
             callCount,
           });

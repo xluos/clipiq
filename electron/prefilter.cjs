@@ -173,6 +173,8 @@ async function tagFrames(frames, {
   try {
     const out = [];
     let totalTokens = 0;
+    let totalPromptTokens = 0;
+    let totalCompletionTokens = 0;
     let cacheHits = 0;
     const startedAt = Date.now();
     for (let i = 0; i < frames.length; i++) {
@@ -214,6 +216,8 @@ async function tagFrames(frames, {
           tag = result.tag;
           usage = result.usage;
           if (usage?.total_tokens) totalTokens += usage.total_tokens;
+          if (usage?.prompt_tokens) totalPromptTokens += usage.prompt_tokens;
+          if (usage?.completion_tokens) totalCompletionTokens += usage.completion_tokens;
         } catch (e) {
           if (abortSignal?.aborted) throw new Error("cancelled");
           error = e instanceof Error ? e.message : String(e);
@@ -240,6 +244,8 @@ async function tagFrames(frames, {
       frames: out,
       totalElapsedMs: Date.now() - startedAt,
       totalTokens,
+      totalPromptTokens,
+      totalCompletionTokens,
       cacheHits,
     };
   } finally {
