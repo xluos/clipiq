@@ -99,6 +99,8 @@ interface AppState {
   setBudgetForProject: (projectId: string, budget: AnalysisBudget) => void;
   // 模型下载进度,全局订阅 llama:progress (scope=model) 写入,任务队列和设置页共享读取
   modelDownloads: Record<string, ModelDownloadProgress>;
+  // whisper 模型下载进度,全局订阅 whisperCpp:progress 写入
+  whisperDownloads: Record<string, ModelDownloadProgress>;
 }
 
 const AppContext = createContext<AppState | undefined>(undefined);
@@ -268,6 +270,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [pipelineByProject, setPipelineByProject] = useState<Record<string, PipelineState>>({});
   const [budgetByProject, setBudgetByProject] = useState<Record<string, AnalysisBudget>>({});
   const [modelDownloads, setModelDownloads] = useState<Record<string, ModelDownloadProgress>>({});
+  const [whisperDownloads, setWhisperDownloads] = useState<Record<string, ModelDownloadProgress>>({});
 
   const upsertAccount = useCallback((a: Account) => {
     setAccounts((prev) => {
@@ -729,6 +732,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return off;
   }, []);
 
+  // 全局订阅 whisperCpp:progress — whisper 模型下载进度
+  useEffect(() => {
+    if (!window.videoAnalyzer?.whisperCpp?.onProgress) return;
+    const off = window.videoAnalyzer.whisperCpp.onProgress((evt: any) => {
+      if (evt.scope !== "model" || !evt.modelKey) return;
+      if (evt.stage === "done" || evt.stage === "cancelled" || evt.stage === "skip") {
+        setWhisperDownloads((prev) => {
+          const next = { ...prev };
+          delete next[evt.modelKey];
+          return next;
+        });
+        return;
+      }
+      setWhisperDownloads((prev) => ({
+        ...prev,
+        [evt.modelKey]: {
+          modelKey: evt.modelKey,
+          label: evt.label || evt.modelKey,
+          stage: evt.stage || "download",
+          percent: evt.percent ?? 0,
+          receivedBytes: evt.receivedBytes ?? 0,
+          totalBytes: evt.totalBytes ?? 0,
+          speed: 0,
+        },
+      }));
+    });
+    return off;
+  }, []);
+
   // 订阅 analyzeProject 起来时广播的 ETA budget — 全局只挂一次, 写进 budgetByProject。
   // ProgressScreen 读这里给出比线性外推更准的 ETA; attach 模式重连时通过
   // getLastAnalysisBudget IPC 拉一次补回 cache。
@@ -866,6 +898,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         budgetByProject,
         setBudgetForProject,
         modelDownloads,
+        whisperDownloads,
       }}
     >
       {children}

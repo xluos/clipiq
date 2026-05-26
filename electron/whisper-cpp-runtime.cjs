@@ -191,8 +191,11 @@ async function listModels() {
   return items;
 }
 
+// 每个 modelKey 正在下载时的 AbortController; cancelDownload 用它来中断 fetch。
+const activeAborts = new Map();
+
 // 断点续传: 同 llama-runtime.cjs 的实现。<dest>.part + <dest>.part.url 配对。
-async function downloadFile(url, destPath, onProgress) {
+async function downloadFile(url, destPath, onProgress, signal) {
   const tmp = `${destPath}.part`;
   const metaPath = `${destPath}.part.url`;
 
@@ -210,12 +213,15 @@ async function downloadFile(url, destPath, onProgress) {
     // first download or legacy .part without meta
   }
 
-  let response = await fetch(url, startBytes > 0 ? { headers: { Range: `bytes=${startBytes}-` } } : undefined);
+  const fetchOpts = {};
+  if (signal) fetchOpts.signal = signal;
+  if (startBytes > 0) fetchOpts.headers = { Range: `bytes=${startBytes}-` };
+  let response = await fetch(url, fetchOpts);
   if (response.status === 416) {
     await fs.unlink(tmp).catch(() => {});
     await fs.unlink(metaPath).catch(() => {});
     startBytes = 0;
-    response = await fetch(url);
+    response = await fetch(url, signal ? { signal } : undefined);
   }
   if (!response.ok || !response.body) {
     throw new Error(`下载失败 HTTP ${response.status} ${url}`);
@@ -242,6 +248,7 @@ async function downloadFile(url, destPath, onProgress) {
   try {
     // eslint-disable-next-line no-constant-condition
     while (true) {
+      if (signal && signal.aborted) break;
       const { done, value } = await reader.read();
       if (done) break;
       await fh.write(value);
@@ -249,9 +256,18 @@ async function downloadFile(url, destPath, onProgress) {
       if (onProgress) onProgress({ received, total });
     }
   } catch (e) {
-    streamError = e;
+    if (signal && signal.aborted) {
+      // AbortError from fetch / reader — treat as cancellation, not failure
+    } else {
+      streamError = e;
+    }
   } finally {
     await fh.close();
+  }
+  if (signal && signal.aborted) {
+    const err = new Error("download_cancelled");
+    err.code = "DOWNLOAD_CANCELLED";
+    throw err;
   }
   if (streamError) throw streamError;
   if (total > 0 && received !== total) {
@@ -290,26 +306,48 @@ async function doEnsureModel(modelKey, onProgress, options = {}) {
     onProgress({ stage: "skip", file: meta.file, label: meta.name, message: `${meta.name} 已就绪` });
     return { ok: true, modelKey };
   }
+  const ac = new AbortController();
+  activeAborts.set(modelKey, ac);
   const mirror = options.mirror === "modelscope" ? "modelscope" : "hf-mirror";
   const url = buildDownloadUrl(mirror, meta.file);
   onProgress({ stage: "start", file: meta.file, label: meta.name, message: `开始下载 ${meta.name}` });
-  await downloadFile(url, dest, (p) => {
-    const pct = p.total > 0 ? Math.floor((p.received / p.total) * 100) : 0;
-    const mb = (n) => (n / 1024 / 1024).toFixed(1);
-    onProgress({
-      stage: "progress",
-      file: meta.file,
-      label: meta.name,
-      receivedBytes: p.received,
-      totalBytes: p.total,
-      percent: pct,
-      message:
-        p.total > 0
-          ? `${meta.name} ${pct}% (${mb(p.received)}MB / ${mb(p.total)}MB)`
-          : `${meta.name} ${mb(p.received)}MB`,
-    });
-  });
+  try {
+    await downloadFile(url, dest, (p) => {
+      const pct = p.total > 0 ? Math.floor((p.received / p.total) * 100) : 0;
+      const mb = (n) => (n / 1024 / 1024).toFixed(1);
+      onProgress({
+        stage: "progress",
+        file: meta.file,
+        label: meta.name,
+        receivedBytes: p.received,
+        totalBytes: p.total,
+        percent: pct,
+        message:
+          p.total > 0
+            ? `${meta.name} ${pct}% (${mb(p.received)}MB / ${mb(p.total)}MB)`
+            : `${meta.name} ${mb(p.received)}MB`,
+      });
+    }, ac.signal);
+  } catch (e) {
+    if (e?.code === "DOWNLOAD_CANCELLED") {
+      onProgress({ stage: "cancelled", file: meta.file, label: meta.name, message: `${meta.name} 下载已取消` });
+      return { ok: false, modelKey, cancelled: true };
+    }
+    throw e;
+  } finally {
+    activeAborts.delete(modelKey);
+  }
   onProgress({ stage: "done", file: meta.file, label: meta.name, message: `${meta.name} 下载完成` });
+  return { ok: true, modelKey };
+}
+
+function cancelDownload(modelKey) {
+  const ac = activeAborts.get(modelKey);
+  if (ac) {
+    ac.abort();
+    activeAborts.delete(modelKey);
+  }
+  inflightEnsures.delete(modelKey);
   return { ok: true, modelKey };
 }
 
@@ -536,6 +574,7 @@ module.exports = {
   init,
   listModels,
   ensureModel,
+  cancelDownload,
   start,
   stop,
   getStatus,

@@ -141,6 +141,7 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
     listModels: () => ipcRenderer.invoke("whisperCpp:listModels"),
     getStatus: () => ipcRenderer.invoke("whisperCpp:getStatus"),
     ensureModel: (modelKey) => ipcRenderer.invoke("whisperCpp:ensureModel", modelKey),
+    cancelDownload: (modelKey) => ipcRenderer.invoke("whisperCpp:cancelDownload", modelKey),
     start: (modelKey) => ipcRenderer.invoke("whisperCpp:start", modelKey),
     stop: () => ipcRenderer.invoke("whisperCpp:stop"),
     onProgress: (callback) => {
