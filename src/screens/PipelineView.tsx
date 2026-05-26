@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, RefreshCw } from "lucide-react";
-import { type FunctionComponent, useCallback, useEffect, useState } from "react";
+import { Fragment, type FunctionComponent, useCallback, useEffect, useState } from "react";
 import type { FramesCheckpoint, TranscriptData } from "../electron-api";
 import type { AnalysisNode, AnalysisReport, Project, TokenUsageSummary } from "../types";
 import { PipelineStagePanel, fmtDuration, fmtTokens, type StageStat } from "./pipeline/PipelineStagePanel";
@@ -280,9 +280,138 @@ export const PipelineView: FunctionComponent<Props> = ({ projectId, project, onB
             >
               <StageMethodologyAudit audit={data.report?.methodologyAudit} />
             </PipelineStagePanel>
+
+            {/* Token breakdown */}
+            {tokenUsage && tokenUsage.stages.length > 0 && (
+              <TokenBreakdown tokenUsage={tokenUsage} />
+            )}
           </div>
         )}
       </div>
     </div>
   );
 };
+
+const TOKEN_STAGE_LABELS: Record<string, string> = {
+  prefilter: "本地初筛",
+  "shot-merger": "镜头合并",
+  summarizer: "镜头摘要",
+  "detect-genre": "类型识别",
+  "main-analysis": "主分析",
+  "danmaku-emotion": "弹幕情绪",
+  "title-gen": "标题生成",
+  transcribe: "语音转写",
+};
+
+function humanStage(stage: string) {
+  if (TOKEN_STAGE_LABELS[stage]) return TOKEN_STAGE_LABELS[stage];
+  for (const [k, v] of Object.entries(TOKEN_STAGE_LABELS)) {
+    if (stage.includes(k)) return v;
+  }
+  return stage;
+}
+
+function TokenBreakdown({ tokenUsage }: { tokenUsage: TokenUsageSummary }) {
+  const { totalPromptTokens, totalCompletionTokens, totalTokens, stages } = tokenUsage;
+  if (!stages.length) return null;
+
+  type Group = {
+    model: string; providerName: string | null; source: string;
+    promptTokens: number; completionTokens: number; totalTokens: number;
+    cacheReadTokens: number; cacheCreationTokens: number;
+    callCount: number; cacheHits: number;
+    stages: { stage: string; promptTokens: number; completionTokens: number; totalTokens: number; cacheReadTokens: number; cacheCreationTokens: number; callCount: number }[];
+  };
+  const byModel = new Map<string, Group>();
+  for (const s of stages) {
+    const key = `${s.providerName || ""}::${s.model || "unknown"}::${s.source}`;
+    const crt = (s as { cacheReadTokens?: number }).cacheReadTokens || 0;
+    const cct = (s as { cacheCreationTokens?: number }).cacheCreationTokens || 0;
+    const existing = byModel.get(key);
+    const row = { stage: s.stage, promptTokens: s.promptTokens, completionTokens: s.completionTokens, totalTokens: s.totalTokens, cacheReadTokens: crt, cacheCreationTokens: cct, callCount: s.callCount };
+    if (existing) {
+      existing.promptTokens += s.promptTokens;
+      existing.completionTokens += s.completionTokens;
+      existing.totalTokens += s.totalTokens;
+      existing.cacheReadTokens += crt;
+      existing.cacheCreationTokens += cct;
+      existing.callCount += s.callCount;
+      existing.cacheHits += s.cacheHits;
+      existing.stages.push(row);
+    } else {
+      byModel.set(key, {
+        model: s.model || "unknown", providerName: s.providerName, source: s.source,
+        promptTokens: s.promptTokens, completionTokens: s.completionTokens, totalTokens: s.totalTokens,
+        cacheReadTokens: crt, cacheCreationTokens: cct,
+        callCount: s.callCount, cacheHits: s.cacheHits, stages: [row],
+      });
+    }
+  }
+  const groups = Array.from(byModel.values()).sort((a, b) => b.totalTokens - a.totalTokens);
+  const promptPct = totalTokens > 0 ? (totalPromptTokens / totalTokens) * 100 : 0;
+
+  return (
+    <div className="mt-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] p-4">
+      <div className="flex items-baseline justify-between mb-2">
+        <span className="text-[11px] uppercase tracking-widest text-slate-500 dark:text-slate-400">Token 消耗明细</span>
+        <span className="font-mono text-xs text-slate-700 dark:text-slate-200">
+          总计 {fmtTokens(totalTokens)}
+          <span className="text-slate-400 dark:text-slate-500 ml-1.5">
+            输入 {fmtTokens(totalPromptTokens)} · 输出 {fmtTokens(totalCompletionTokens)}
+          </span>
+        </span>
+      </div>
+
+      <div className="flex h-2 rounded-full overflow-hidden bg-slate-100 dark:bg-slate-800 mb-3">
+        <div style={{ width: `${promptPct}%` }} className="bg-sky-500" title={`输入 ${promptPct.toFixed(1)}%`} />
+        <div style={{ width: `${100 - promptPct}%` }} className="bg-amber-500" title={`输出 ${(100 - promptPct).toFixed(1)}%`} />
+      </div>
+      <div className="flex gap-3 mb-3 text-[11px]">
+        <div className="flex items-center gap-1.5">
+          <span className="inline-block w-2 h-2 rounded-full bg-sky-500" />
+          <span className="text-slate-600 dark:text-slate-300">输入</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="inline-block w-2 h-2 rounded-full bg-amber-500" />
+          <span className="text-slate-600 dark:text-slate-300">输出</span>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        {groups.map((g) => {
+          const hasCache = g.cacheReadTokens > 0 || g.cacheCreationTokens > 0;
+          return (
+            <div key={`${g.providerName}::${g.model}::${g.source}`} className="rounded-lg border border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-white/[0.02] p-2.5">
+              <div className="flex items-baseline justify-between mb-1.5">
+                <span className="font-mono text-xs text-slate-800 dark:text-slate-200 truncate mr-2">
+                  {g.providerName ? `${g.providerName} · ` : ""}{g.model}
+                </span>
+                <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 shrink-0">
+                  {fmtTokens(g.totalTokens)}
+                  {g.callCount > 0 && <span className="ml-1.5">{g.callCount} 次调用</span>}
+                  {g.cacheHits > 0 && <span className="ml-1.5 text-emerald-600 dark:text-emerald-400">{g.cacheHits} 缓存</span>}
+                </span>
+              </div>
+              <div className={`grid gap-x-3 gap-y-0.5 text-[11px] ${hasCache ? "grid-cols-[1fr_auto_auto_auto_auto]" : "grid-cols-[1fr_auto_auto_auto]"}`}>
+                <span className="text-slate-400 dark:text-slate-600">阶段</span>
+                <span className="text-slate-400 dark:text-slate-600 text-right">输入</span>
+                <span className="text-slate-400 dark:text-slate-600 text-right">输出</span>
+                {hasCache && <span className="text-slate-400 dark:text-slate-600 text-right">缓存命中</span>}
+                <span className="text-slate-400 dark:text-slate-600 text-right">合计</span>
+                {g.stages.map((s) => (
+                  <Fragment key={s.stage}>
+                    <span className="text-slate-600 dark:text-slate-300 truncate">{humanStage(s.stage)}</span>
+                    <span className="font-mono text-slate-500 dark:text-slate-400 text-right">{fmtTokens(s.promptTokens)}</span>
+                    <span className="font-mono text-slate-500 dark:text-slate-400 text-right">{fmtTokens(s.completionTokens)}</span>
+                    {hasCache && <span className="font-mono text-emerald-600 dark:text-emerald-400 text-right">{s.cacheReadTokens > 0 ? fmtTokens(s.cacheReadTokens) : "—"}</span>}
+                    <span className="font-mono text-slate-700 dark:text-slate-200 text-right">{fmtTokens(s.totalTokens)}</span>
+                  </Fragment>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

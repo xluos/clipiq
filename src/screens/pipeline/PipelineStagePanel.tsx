@@ -78,7 +78,14 @@ export const PipelineStagePanel: FunctionComponent<Props> = ({
             <span className="text-emerald-500">{stat.cacheHits} 缓存</span>
           )}
           {stat?.totalTokens != null && stat.totalTokens > 0 && (
-            <span>{fmtTokens(stat.totalTokens)} tok</span>
+            <span>
+              {fmtTokens(stat.totalTokens)} tok
+              {(stat.promptTokens || stat.completionTokens) ? (
+                <span className="text-slate-300 dark:text-slate-600 ml-0.5">
+                  ({fmtTokens(stat.promptTokens || 0)} in · {fmtTokens(stat.completionTokens || 0)} out)
+                </span>
+              ) : null}
+            </span>
           )}
         </div>
       </button>

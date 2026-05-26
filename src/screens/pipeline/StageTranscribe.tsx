@@ -17,7 +17,20 @@ function fmtTimestamp(sec: number): string {
 export const StageTranscribe: FunctionComponent<Props> = ({ transcript, meta }) => {
   const [showAll, setShowAll] = useState(false);
 
-  if (!transcript) return <div className="text-[12px] text-slate-400">该阶段无数据</div>;
+  const skipped = meta?.transcriptSkipped as boolean | undefined;
+  const skipReason = meta?.transcriptSkipReason as string | undefined;
+
+  if (!transcript) {
+    return (
+      <div className="text-[12px] text-slate-400">
+        {skipped ? (
+          <span>已跳过 — <span className="text-amber-600 dark:text-amber-400">{skipReason || "未知原因"}</span></span>
+        ) : (
+          "该阶段无数据"
+        )}
+      </div>
+    );
+  }
 
   const segments = transcript.segments || [];
   const displayed = showAll ? segments : segments.slice(0, INITIAL_SHOW);

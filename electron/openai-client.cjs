@@ -97,16 +97,23 @@ function tryRescueJsonFromReasoning(reasoning) {
   return null;
 }
 
-// chat/completions 的 usage 字段: { prompt_tokens, completion_tokens, total_tokens }
-// responses API 的 usage 字段:    { input_tokens, output_tokens, total_tokens }
-// 归一化成统一的 { promptTokens, completionTokens, totalTokens }, 数字化失败一律 0
+// chat/completions 的 usage 字段: { prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details: { cached_tokens } }
+// responses API 的 usage 字段:    { input_tokens, output_tokens, total_tokens, cache_read_input_tokens, cache_creation_input_tokens }
+// 归一化成统一结构, 数字化失败一律 0
 function normalizeUsage(raw) {
   if (!raw || typeof raw !== "object") return null;
   const prompt = Number(raw.prompt_tokens ?? raw.input_tokens ?? 0) || 0;
   const completion = Number(raw.completion_tokens ?? raw.output_tokens ?? 0) || 0;
   const total = Number(raw.total_tokens ?? prompt + completion) || prompt + completion;
   if (prompt === 0 && completion === 0 && total === 0) return null;
-  return { promptTokens: prompt, completionTokens: completion, totalTokens: total };
+  const cacheReadTokens =
+    Number(raw.prompt_tokens_details?.cached_tokens ?? raw.cache_read_input_tokens ?? 0) || 0;
+  const cacheCreationTokens =
+    Number(raw.cache_creation_input_tokens ?? 0) || 0;
+  const result = { promptTokens: prompt, completionTokens: completion, totalTokens: total };
+  if (cacheReadTokens > 0) result.cacheReadTokens = cacheReadTokens;
+  if (cacheCreationTokens > 0) result.cacheCreationTokens = cacheCreationTokens;
+  return result;
 }
 
 async function streamSSE(response, onEvent) {

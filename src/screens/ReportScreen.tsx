@@ -1211,9 +1211,11 @@ type ModelGroup = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
   callCount: number;
   cacheHits: number;
-  stages: { stage: string; promptTokens: number; completionTokens: number; totalTokens: number; callCount: number }[];
+  stages: { stage: string; promptTokens: number; completionTokens: number; totalTokens: number; cacheReadTokens: number; cacheCreationTokens: number; callCount: number }[];
 };
 
 function TokenUsagePanel({ tokenUsage }: { tokenUsage: TokenUsageSummary }) {
@@ -1224,13 +1226,17 @@ function TokenUsagePanel({ tokenUsage }: { tokenUsage: TokenUsageSummary }) {
   for (const s of stages) {
     const key = `${s.providerName || ""}::${s.model || "unknown"}::${s.source}`;
     const existing = byModel.get(key);
+    const crt = (s as { cacheReadTokens?: number }).cacheReadTokens || 0;
+    const cct = (s as { cacheCreationTokens?: number }).cacheCreationTokens || 0;
     if (existing) {
       existing.promptTokens += s.promptTokens;
       existing.completionTokens += s.completionTokens;
       existing.totalTokens += s.totalTokens;
+      existing.cacheReadTokens += crt;
+      existing.cacheCreationTokens += cct;
       existing.callCount += s.callCount;
       existing.cacheHits += s.cacheHits;
-      existing.stages.push({ stage: s.stage, promptTokens: s.promptTokens, completionTokens: s.completionTokens, totalTokens: s.totalTokens, callCount: s.callCount });
+      existing.stages.push({ stage: s.stage, promptTokens: s.promptTokens, completionTokens: s.completionTokens, totalTokens: s.totalTokens, cacheReadTokens: crt, cacheCreationTokens: cct, callCount: s.callCount });
     } else {
       byModel.set(key, {
         model: s.model || "unknown",
@@ -1239,9 +1245,11 @@ function TokenUsagePanel({ tokenUsage }: { tokenUsage: TokenUsageSummary }) {
         promptTokens: s.promptTokens,
         completionTokens: s.completionTokens,
         totalTokens: s.totalTokens,
+        cacheReadTokens: crt,
+        cacheCreationTokens: cct,
         callCount: s.callCount,
         cacheHits: s.cacheHits,
-        stages: [{ stage: s.stage, promptTokens: s.promptTokens, completionTokens: s.completionTokens, totalTokens: s.totalTokens, callCount: s.callCount }],
+        stages: [{ stage: s.stage, promptTokens: s.promptTokens, completionTokens: s.completionTokens, totalTokens: s.totalTokens, cacheReadTokens: crt, cacheCreationTokens: cct, callCount: s.callCount }],
       });
     }
   }
@@ -1299,20 +1307,27 @@ function TokenUsagePanel({ tokenUsage }: { tokenUsage: TokenUsageSummary }) {
                 {g.cacheHits > 0 && <span className="ml-1.5 text-emerald-600 dark:text-emerald-400">{g.cacheHits} 缓存</span>}
               </span>
             </div>
-            <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-3 gap-y-0.5 text-[11px]">
-              <span className="text-slate-400 dark:text-slate-600">阶段</span>
-              <span className="text-slate-400 dark:text-slate-600 text-right">输入</span>
-              <span className="text-slate-400 dark:text-slate-600 text-right">输出</span>
-              <span className="text-slate-400 dark:text-slate-600 text-right">合计</span>
-              {g.stages.map((s) => (
-                <Fragment key={s.stage}>
-                  <span className="text-slate-600 dark:text-slate-300 truncate">{humanTokenStage(s.stage)}</span>
-                  <span className="font-mono text-slate-500 dark:text-slate-400 text-right">{formatTokenCount(s.promptTokens)}</span>
-                  <span className="font-mono text-slate-500 dark:text-slate-400 text-right">{formatTokenCount(s.completionTokens)}</span>
-                  <span className="font-mono text-slate-700 dark:text-slate-200 text-right">{formatTokenCount(s.totalTokens)}</span>
-                </Fragment>
-              ))}
-            </div>
+            {(() => {
+              const hasCache = g.cacheReadTokens > 0 || g.cacheCreationTokens > 0;
+              return (
+                <div className={`grid gap-x-3 gap-y-0.5 text-[11px] ${hasCache ? "grid-cols-[1fr_auto_auto_auto_auto]" : "grid-cols-[1fr_auto_auto_auto]"}`}>
+                  <span className="text-slate-400 dark:text-slate-600">阶段</span>
+                  <span className="text-slate-400 dark:text-slate-600 text-right">输入</span>
+                  <span className="text-slate-400 dark:text-slate-600 text-right">输出</span>
+                  {hasCache && <span className="text-slate-400 dark:text-slate-600 text-right">缓存命中</span>}
+                  <span className="text-slate-400 dark:text-slate-600 text-right">合计</span>
+                  {g.stages.map((s) => (
+                    <Fragment key={s.stage}>
+                      <span className="text-slate-600 dark:text-slate-300 truncate">{humanTokenStage(s.stage)}</span>
+                      <span className="font-mono text-slate-500 dark:text-slate-400 text-right">{formatTokenCount(s.promptTokens)}</span>
+                      <span className="font-mono text-slate-500 dark:text-slate-400 text-right">{formatTokenCount(s.completionTokens)}</span>
+                      {hasCache && <span className="font-mono text-emerald-600 dark:text-emerald-400 text-right">{s.cacheReadTokens > 0 ? formatTokenCount(s.cacheReadTokens) : "—"}</span>}
+                      <span className="font-mono text-slate-700 dark:text-slate-200 text-right">{formatTokenCount(s.totalTokens)}</span>
+                    </Fragment>
+                  ))}
+                </div>
+              );
+            })()}
           </div>
         ))}
       </div>
