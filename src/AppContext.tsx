@@ -381,8 +381,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setCurrentLocation({ module: "analysis", screen: "progress" });
         return;
       }
-      // 新分析由 main 进程创建 (analysisId 在 analyzeProject 里生成)，
-      // 这里只设 project.status 和导航
+      // 清掉上一轮分析的 progress/pipeline/budget，防止重试时短暂闪现旧缓存标记
+      const oldAid = currentProject?.currentAnalysisId;
+      if (oldAid) {
+        setProgressByAnalysis((prev) => { const n = { ...prev }; delete n[oldAid]; return n; });
+        setPipelineByAnalysis((prev) => { const n = { ...prev }; delete n[oldAid]; return n; });
+        setBudgetByAnalysis((prev) => { const n = { ...prev }; delete n[oldAid]; return n; });
+      }
+      setActiveAnalysisForProject((prev) => {
+        if (!(projectId in prev)) return prev;
+        const n = { ...prev }; delete n[projectId]; return n;
+      });
       setProjects((prev) =>
         prev.map((p) => {
           if (p.id !== projectId) return p;

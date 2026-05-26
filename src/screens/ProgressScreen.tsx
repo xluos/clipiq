@@ -35,12 +35,14 @@ export function ProgressScreen() {
   const isUrlSource = project?.source?.type === "url";
   const visibleStageDefs = PIPELINE_STAGE_DEFS.filter((s) => s.key !== "download" || isUrlSource);
 
+  const analysisActive = project?.status === "analyzing" || project?.status === "downloading";
+
   const activeAnalysisId = project
     ? (activeAnalysisForProject[project.id] || project.currentAnalysisId)
     : undefined;
-  const liveSnapshot = activeAnalysisId ? progressByAnalysis[activeAnalysisId] : undefined;
-  const pipeline = activeAnalysisId ? pipelineByAnalysis[activeAnalysisId] : undefined;
-  const budget = activeAnalysisId ? budgetByAnalysis[activeAnalysisId] : undefined;
+  const liveSnapshot = (activeAnalysisId && analysisActive) ? progressByAnalysis[activeAnalysisId] : undefined;
+  const pipeline = (activeAnalysisId && analysisActive) ? pipelineByAnalysis[activeAnalysisId] : undefined;
+  const budget = (activeAnalysisId && analysisActive) ? budgetByAnalysis[activeAnalysisId] : undefined;
 
   const [progress, setProgress] = useState(liveSnapshot?.progress ?? 0);
   const [stageLabel, setStageLabel] = useState(liveSnapshot?.stage ?? PIPELINE_STAGE_DEFS[0].label);
@@ -70,7 +72,7 @@ export function ProgressScreen() {
 
   useEffect(() => {
     if (!project) return;
-    const snap = activeAnalysisId ? progressByAnalysis[activeAnalysisId] : undefined;
+    const snap = (activeAnalysisId && analysisActive) ? progressByAnalysis[activeAnalysisId] : undefined;
     setProgress(snap?.progress ?? 0);
     setStageLabel(snap?.stage ?? visibleStageDefs[0].label);
     setDetail(snap?.message ?? "");
@@ -85,15 +87,16 @@ export function ProgressScreen() {
   }, [project?.id, project?.currentAnalysisId]);
 
   useEffect(() => {
-    if (progress >= 100) return;
+    if (progress >= 100 || !analysisActive) return;
     const id = setInterval(() => setNowTick(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [progress]);
+  }, [progress, analysisActive]);
 
   const elapsedMs = useMemo(() => {
+    if (!analysisActive) return 0;
     void progress; void nowTick;
     return Date.now() - startedAt;
-  }, [progress, nowTick, startedAt]);
+  }, [analysisActive, progress, nowTick, startedAt]);
 
   // 追踪当前 stage 进入时刻, 用于 budget-based ETA 算"当前 stage 剩余预算"。
   const stageStartedAtRef = useRef<{ stage: string; ts: number }>({ stage: stageLabel, ts: Date.now() });
@@ -105,6 +108,7 @@ export function ProgressScreen() {
 
   const etaMs = useMemo(() => {
     void nowTick;
+    if (!analysisActive) return null;
     if (progress >= 100) return 0;
     // 优先用 main 推过来的 budget: 剩余 = sum(后续 stages estMs) + max(0, currentStage estMs - elapsedInCurrent)
     // stage prefix 匹配从后往前找最长 (例: "主分析(审计)" 优先于 "主分析")
@@ -158,6 +162,7 @@ export function ProgressScreen() {
     if (!project || !window.videoAnalyzer) return;
     const unsubscribe = window.videoAnalyzer.onAnalysisProgress((event) => {
       if (event.projectId !== project.id) return;
+      if (!hasStarted.current) return;
       setProgress(event.progress);
       setStageLabel(event.stage);
       setDetail(event.message || "");
@@ -216,10 +221,12 @@ export function ProgressScreen() {
       return;
     }
     if (project.status === "download_failed") {
+      setProgress(0);
       setError("视频下载失败,请检查链接或换一个再试。");
       return;
     }
     if (project.status === "failed") {
+      setProgress(0);
       setError(currentAnalysisRecord?.lastErrorMessage || "上次分析失败。点击下方'重试'重新运行。");
       setStageLabel("已结束 · 失败");
       return;
@@ -349,10 +356,14 @@ export function ProgressScreen() {
         <div className="flex items-center justify-between">
           <div className="text-[11px] font-mono uppercase tracking-wider text-slate-500">Screen · Progress</div>
           <div className="flex items-center gap-3 text-[11px] font-mono uppercase tracking-wider text-slate-500">
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
-              {project.status === "downloading" ? "下载中" : "分析中"} · {presetLabel}
-            </span>
+            {analysisActive ? (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />
+                {project.status === "downloading" ? "下载中" : "分析中"} · {presetLabel}
+              </span>
+            ) : (
+              <span>{presetLabel}</span>
+            )}
             <span>已用 {formatElapsed(elapsedMs)}</span>
           </div>
         </div>

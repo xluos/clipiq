@@ -4428,8 +4428,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
 
     let inspected, scenes, plan, finalCount, candidateCount, inputFileSize;
     if (manifestValid) {
-      send(3, "读取视频信息", "命中缓存，复用上次的视频检测结果。", { fromCache: true });
-      send(5, "检测镜头切换", "命中缓存，复用上次的场景分析结果。", { fromCache: true });
+      send(3, "读取视频信息", "已有可复用的检测结果，跳过。");
+      send(5, "检测镜头切换", "已有可复用的场景分析结果，跳过。");
       inspected = {
         durationSec: savedManifest.durationSec,
         width: savedManifest.width,
@@ -4541,7 +4541,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       && savedFrames.frames.every((f) => fsSync.existsSync(f.framePath));
     let candidateFrames, skipped;
     if (framesValid) {
-      send(9, "挑选关键画面", `命中缓存，复用 ${savedFrames.frames.length} 张已有关键画面。`, { fromCache: true });
+      send(9, "挑选关键画面", `已有 ${savedFrames.frames.length} 张可复用的关键画面，跳过抽帧。`);
       candidateFrames = savedFrames.frames;
       skipped = savedFrames.skipped || 0;
     } else {
@@ -5342,7 +5342,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           onProgress: ({ segment, total, count, fromCache }) => {
             if (handle.cancelled) return;
             if (fromCache) {
-              send(pct("拉取弹幕", 1), "拉取弹幕", `命中缓存,直接使用 ${count} 条历史弹幕。`);
+              send(pct("拉取弹幕", 1), "拉取弹幕", `已有 ${count} 条可复用的历史弹幕，跳过拉取。`);
             } else {
               send(pct("拉取弹幕", segment / Math.max(total, 1)), "拉取弹幕", `已拉 ${segment}/${total} 段 · 累计 ${count} 条`);
             }
@@ -7468,7 +7468,7 @@ app.whenReady().then(async () => {
     if (cached?.filePath) {
       try {
         await fs.access(cached.filePath);
-        onProgress?.(85, "下载视频", "命中缓存");
+        onProgress?.(85, "下载视频", "已有本地文件，跳过下载。");
         const inspected = await inspectVideo(cached.filePath);
         let title = cached.title;
         if (!title) {
