@@ -159,7 +159,7 @@ export type WhisperCppStatus = {
 export type WhisperCppProgress = {
   scope: "model";
   modelKey?: string;
-  stage: "skip" | "start" | "progress" | "done";
+  stage: "skip" | "start" | "progress" | "done" | "cancelled";
   file?: string;
   label: string;
   message: string;
@@ -435,6 +435,7 @@ declare global {
         listModels: () => Promise<ModelDescriptor[]>;
         getStatus: () => Promise<WhisperCppStatus>;
         ensureModel: (modelKey: string) => Promise<{ ok: true; modelKey: string }>;
+        cancelDownload: (modelKey: string) => Promise<{ ok: boolean; modelKey: string }>;
         start: (modelKey: string) => Promise<{ ok: true; port: number; reused: boolean }>;
         stop: () => Promise<{ ok: true }>;
         onProgress: (callback: (event: WhisperCppProgress) => void) => () => void;

@@ -360,6 +360,7 @@ function TaskAssignmentSection() {
   const { providers, taskSlots, setTaskSlot, audioSlot, setAudioSlot } = useApp();
   // 本地 llama 已下载且可启动的 model id 集合; 任务分配 dropdown 据此过滤未下载项
   const [readyLocalIds, setReadyLocalIds] = useState<Set<string>>(new Set());
+  const [readyWhisperIds, setReadyWhisperIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (!window.videoAnalyzer?.llama) return;
@@ -374,6 +375,25 @@ function TaskAssignmentSection() {
     };
     refresh();
     const unsub = window.videoAnalyzer.llama.onProgress(() => refresh());
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!window.videoAnalyzer?.whisperCpp) return;
+    let cancelled = false;
+    const refresh = async () => {
+      const models = await window.videoAnalyzer!.whisperCpp.listModels().catch(() => null);
+      if (cancelled || !models) return;
+      const ready = new Set(
+        models.filter((m) => m.availability.state === "ready").map((m) => m.id),
+      );
+      setReadyWhisperIds(ready);
+    };
+    refresh();
+    const unsub = window.videoAnalyzer.whisperCpp.onProgress(() => refresh());
     return () => {
       cancelled = true;
       unsub();
@@ -421,6 +441,7 @@ function TaskAssignmentSection() {
               onChange={onChange}
               audioMode={isAudio}
               readyLocalIds={readyLocalIds}
+              readyWhisperIds={readyWhisperIds}
             />
           );
         })}
@@ -438,14 +459,16 @@ type PipelineRowProps = {
   onChange: (a: SlotAssignment) => void;
   audioMode?: boolean;
   readyLocalIds: Set<string>;
+  readyWhisperIds: Set<string>;
 };
 
 const PipelineRow: FunctionComponent<PipelineRowProps> = ({
-  stage, isFirst, providers, meta, assignment, onChange, audioMode, readyLocalIds,
+  stage, isFirst, providers, meta, assignment, onChange, audioMode, readyLocalIds, readyWhisperIds,
 }) => {
-  // 本地 llama provider 下未 ready (未下载) 的 model id 一律不出现在 dropdown
+  // 本地 llama / whisper provider 下未 ready (未下载) 的 model id 一律不出现在 dropdown
   const isModelEligible = (p: ModelProvider, m: ProviderModel) => {
     if (p.source === "local_llama" && !readyLocalIds.has(m.id)) return false;
+    if (p.source === "local_whisper" && !readyWhisperIds.has(m.id)) return false;
     return true;
   };
 
@@ -675,6 +698,7 @@ function ProviderCard({
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [whisperCache, setWhisperCache] = useState<{ cached: boolean; sizeBytes?: number } | null>(null);
+  const [whisperModelStatus, setWhisperModelStatus] = useState<Map<string, boolean>>(new Map());
   const [draft, setDraft] = useState<ModelProvider>(persisted);
   // 测试连接成功后,/models 返回的 ModelDescriptor 列表; combobox 下拉数据源
   const [fetchedModels, setFetchedModels] = useState<ModelDescriptor[]>([]);
@@ -773,6 +797,18 @@ function ProviderCard({
       cancelled = true;
     };
   }, [isLocalWhisper, modelKey]);
+
+  useEffect(() => {
+    if (!isLocalWhisper || !window.videoAnalyzer?.whisperCpp) return;
+    let cancelled = false;
+    window.videoAnalyzer.whisperCpp.listModels().then((models) => {
+      if (cancelled) return;
+      const map = new Map<string, boolean>();
+      models.forEach((m) => map.set(m.id, m.availability.state === "ready"));
+      setWhisperModelStatus(map);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [isLocalWhisper]);
 
   const handleTest = async () => {
     setIsTesting(true);
@@ -1058,6 +1094,8 @@ function ProviderCard({
         fetched={fetchedModels}
         readOnly={isLocalProvider}
         isLocalLlama={isLocalLlama}
+        isLocalWhisper={isLocalWhisper}
+        whisperModelStatus={whisperModelStatus}
         localModelOverrides={localModelOverrides}
         onLocalContextOverride={updateLocalModelOverride}
         onPersistModels={persistModels}
@@ -1096,6 +1134,8 @@ function ModelManagerDialog({
   fetched,
   readOnly,
   isLocalLlama,
+  isLocalWhisper,
+  whisperModelStatus,
   localModelOverrides,
   onLocalContextOverride,
   onPersistModels,
@@ -1109,6 +1149,8 @@ function ModelManagerDialog({
   readOnly: boolean;
   // 本地 llama provider 标识。即便 readOnly=true, 用户也可单独改 contextSize (走 localModelOverrides)
   isLocalLlama?: boolean;
+  isLocalWhisper?: boolean;
+  whisperModelStatus?: Map<string, boolean>;
   localModelOverrides?: Record<string, { contextSize?: number }>;
   onLocalContextOverride?: (modelKey: string, patch: { contextSize?: number } | null) => void;
   onPersistModels: (next: ProviderModel[]) => void;
@@ -1214,6 +1256,8 @@ function ModelManagerDialog({
                       readOnly={readOnly && !isLocalLlama}
                       localCtxOnly={!!isLocalLlama}
                       localCtxOverride={localOverrideCtx}
+                      isLocalWhisper={isLocalWhisper}
+                      whisperDownloaded={isLocalWhisper ? whisperModelStatus?.get(m.id) : undefined}
                       editing={editingId === m.id}
                       onEdit={() => setEditingId(m.id)}
                       onCancel={() => setEditingId(null)}
@@ -1392,6 +1436,8 @@ type ModelRowProps = {
   localCtxOnly?: boolean;
   // 当前生效的 override 值; 没有 override 时显 manifest 默认 (model.defaultContextSize)
   localCtxOverride?: number;
+  isLocalWhisper?: boolean;
+  whisperDownloaded?: boolean;
   editing: boolean;
   onEdit: () => void;
   onCancel: () => void;
@@ -1406,6 +1452,8 @@ const ModelRow: FunctionComponent<ModelRowProps> = ({
   readOnly,
   localCtxOnly,
   localCtxOverride,
+  isLocalWhisper,
+  whisperDownloaded,
   editing,
   onEdit,
   onCancel,
@@ -1457,6 +1505,12 @@ const ModelRow: FunctionComponent<ModelRowProps> = ({
             )}
             {usage.length > 0 && (
               <span className="text-indigo-500 dark:text-indigo-400">· {usage.length} 槽位在用</span>
+            )}
+            {isLocalWhisper && whisperDownloaded === true && (
+              <span className="text-emerald-600 dark:text-emerald-400">· 已下载</span>
+            )}
+            {isLocalWhisper && whisperDownloaded === false && (
+              <span className="text-amber-600 dark:text-amber-400">· 未下载</span>
             )}
           </div>
         </div>
@@ -2080,6 +2134,8 @@ function LocalInferenceSection() {
           </div>
         )}
       </section>
+
+      <LocalAudioSection mirror={mirror} onMirrorChange={handleMirrorChange} />
     </>
   );
 }
@@ -2342,6 +2398,253 @@ const ModelCard: FunctionComponent<ModelCardProps> = ({
     </div>
   );
 };
+
+type WhisperModelCardProps = {
+  model: ModelDescriptor;
+  runningKey: string | null | undefined;
+  busyAction: "download" | "start" | "stop" | null;
+  isAnyBusy: boolean;
+  progress: any;
+  onStart: (modelKey: string) => void;
+  onStop: () => void;
+  onCancelDownload: (modelKey: string) => void;
+};
+
+const WhisperModelCard: FunctionComponent<WhisperModelCardProps> = ({
+  model, runningKey, busyAction, isAnyBusy, progress, onStart, onStop, onCancelDownload,
+}) => {
+  const isRunning = runningKey === model.id;
+  const isDownloaded = !!model.local?.downloaded;
+  const isBusy = busyAction !== null;
+  const sizeBytes = model.availability.state === "needs_install"
+    ? (model.availability as any).sizeBytes
+    : model.local?.downloadedBytes;
+
+  type Action =
+    | { kind: "progress" }
+    | { kind: "label"; label: string; variant: "default" | "outline" | "ghost"; onClick?: () => void; disabled?: boolean };
+  let action: Action;
+  if (isBusy) {
+    action = { kind: "progress" };
+  } else if (isRunning) {
+    action = { kind: "label", label: "停止", variant: "outline", onClick: onStop };
+  } else if (!isDownloaded) {
+    action = { kind: "label", label: "下载", variant: "default", onClick: () => onStart(model.id) };
+  } else if (runningKey) {
+    action = { kind: "label", label: "切换", variant: "default", onClick: () => onStart(model.id) };
+  } else {
+    action = { kind: "label", label: "启动", variant: "default", onClick: () => onStart(model.id) };
+  }
+
+  const cardCls = isRunning
+    ? "border-indigo-300 bg-indigo-50/50 dark:border-indigo-500/40 dark:bg-indigo-500/10 shadow-[inset_2px_0_0] shadow-indigo-600"
+    : isDownloaded
+      ? "border-indigo-200 bg-indigo-50/30 dark:border-indigo-500/30 dark:bg-indigo-500/5"
+      : "border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10]";
+
+  const statusPill = isRunning
+    ? <span className="font-mono text-[9.5px] uppercase tracking-wide bg-emerald-100 border border-emerald-200 text-emerald-700 px-1.5 py-0.5 rounded dark:bg-emerald-900/30 dark:border-emerald-700 dark:text-emerald-300">运行中</span>
+    : isDownloaded
+      ? <span className="font-mono text-[9.5px] uppercase tracking-wide bg-indigo-100 border border-indigo-200 text-indigo-700 px-1.5 py-0.5 rounded dark:bg-indigo-900/30 dark:border-indigo-700 dark:text-indigo-300">已安装</span>
+      : null;
+
+  return (
+    <div className={`relative rounded-lg border ${cardCls} p-3 flex flex-col gap-1.5`}>
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="font-semibold text-[13px] text-slate-900 dark:text-slate-100 truncate">{model.label}</span>
+        {statusPill}
+        <span className="flex-1" />
+        {action.kind === "progress" ? (
+          <div className="flex items-center gap-1">
+            {busyAction === "download" && (
+              <button
+                type="button"
+                onClick={() => onCancelDownload(model.id)}
+                className="text-[11px] text-slate-400 hover:text-red-500 transition-colors px-1 whitespace-nowrap shrink-0"
+                title="取消下载"
+              >
+                取消
+              </button>
+            )}
+            <ProgressButton progress={progress} busyAction={busyAction} />
+          </div>
+        ) : (
+          <button
+            type="button"
+            disabled={action.disabled}
+            onClick={action.onClick}
+            className={
+              action.variant === "default"
+                ? "px-2.5 py-1 text-[11.5px] rounded border border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium shrink-0"
+                : action.variant === "outline"
+                  ? "px-2.5 py-1 text-[11.5px] rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                  : "px-2.5 py-1 text-[11.5px] rounded text-slate-400 disabled:cursor-not-allowed shrink-0"
+            }
+          >
+            {action.label}
+          </button>
+        )}
+      </div>
+
+      <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
+        {sizeBytes ? <span className="text-slate-700 dark:text-slate-300">{formatBytes(sizeBytes)}</span> : null}
+        {model.description && (
+          <>
+            {sizeBytes ? <span className="text-slate-300">·</span> : null}
+            <span>{model.description}</span>
+          </>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-1">
+        {model.capabilities.map((cap) => (
+          <span key={cap} className="text-[10.5px] px-1.5 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-500/10 dark:text-indigo-300">
+            {CAPABILITY_LABELS_ZH[cap] || cap}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+function LocalAudioSection({ mirror, onMirrorChange }: { mirror: "hf-mirror" | "modelscope"; onMirrorChange: (v: "hf-mirror" | "modelscope") => void }) {
+  const [whisperModels, setWhisperModels] = useState<ModelDescriptor[]>([]);
+  const [whisperStatus, setWhisperStatus] = useState<{ running: boolean; modelKey: string | null } | null>(null);
+  const { whisperDownloads } = useApp();
+  const [busyMap, setBusyMap] = useState<Record<string, "download" | "start" | "stop">>({});
+  const setBusyFor = (key: string, action: "download" | "start" | "stop") =>
+    setBusyMap((prev) => ({ ...prev, [key]: action }));
+  const clearBusyFor = (key: string) =>
+    setBusyMap((prev) => { const next = { ...prev }; delete next[key]; return next; });
+  const [error, setError] = useState("");
+
+  const refresh = useCallback(async () => {
+    if (!window.videoAnalyzer?.whisperCpp) return;
+    const [models, status] = await Promise.all([
+      window.videoAnalyzer.whisperCpp.listModels(),
+      window.videoAnalyzer.whisperCpp.getStatus(),
+    ]);
+    setWhisperModels(models);
+    setWhisperStatus({ running: status.running, modelKey: status.modelKey });
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    if (!window.videoAnalyzer?.whisperCpp) return;
+    const unsub = window.videoAnalyzer.whisperCpp.onProgress((evt: any) => {
+      if (evt.stage === "done" || evt.stage === "cancelled" || evt.stage === "skip") {
+        refresh();
+      }
+    });
+    return unsub;
+  }, [refresh]);
+
+  const progressMap = useMemo(() => {
+    const merged: Record<string, any> = {};
+    for (const [key, dl] of Object.entries(whisperDownloads) as [string, { label: string; percent: number; receivedBytes: number; totalBytes: number; speed: number }][]) {
+      merged[key] = {
+        scope: "model",
+        modelKey: key,
+        stage: "progress",
+        label: dl.label,
+        percent: dl.percent,
+        receivedBytes: dl.receivedBytes,
+        totalBytes: dl.totalBytes,
+        speed: dl.speed,
+      };
+    }
+    return merged;
+  }, [whisperDownloads]);
+
+  const handleStart = async (modelKey: string) => {
+    if (!window.videoAnalyzer?.whisperCpp) return;
+    setError("");
+    setBusyFor(modelKey, "download");
+    try {
+      const target = whisperModels.find((m) => m.id === modelKey);
+      if (target && !target.local?.downloaded) {
+        setBusyFor(modelKey, "download");
+        await window.videoAnalyzer.whisperCpp.ensureModel(modelKey);
+      }
+      setBusyFor(modelKey, "start");
+      await window.videoAnalyzer.whisperCpp.start(modelKey);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      await refresh();
+    } finally {
+      clearBusyFor(modelKey);
+    }
+  };
+
+  const handleStop = async () => {
+    if (!window.videoAnalyzer?.whisperCpp) return;
+    const runKey = whisperStatus?.modelKey;
+    if (runKey) setBusyFor(runKey, "stop");
+    try {
+      await window.videoAnalyzer.whisperCpp.stop();
+      await refresh();
+    } finally {
+      if (runKey) clearBusyFor(runKey);
+    }
+  };
+
+  const handleCancelDownload = async (modelKey: string) => {
+    if (!window.videoAnalyzer?.whisperCpp) return;
+    try {
+      await window.videoAnalyzer.whisperCpp.cancelDownload(modelKey);
+    } catch { /* may have already finished */ }
+    clearBusyFor(modelKey);
+    await refresh();
+  };
+
+  if (!window.videoAnalyzer?.whisperCpp) return null;
+
+  const runningKey = whisperStatus?.running ? whisperStatus.modelKey : null;
+  const isAnyBusy = Object.keys(busyMap).length > 0;
+
+  return (
+    <>
+      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">本地音频识别</h2>
+      <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
+        Whisper 语音识别模型,用于字幕提取。
+      </p>
+
+      <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-4 bg-slate-50/60 dark:bg-slate-900/20">
+          <div className="flex items-baseline gap-3 min-w-0">
+            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">音频模型库</h3>
+            <span className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500">下载源与上方共享</span>
+          </div>
+        </div>
+
+        <div className="p-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {whisperModels.map((m) => (
+              <WhisperModelCard
+                key={m.id}
+                model={m}
+                runningKey={runningKey}
+                busyAction={busyMap[m.id] || null}
+                isAnyBusy={isAnyBusy}
+                progress={progressMap[m.id] || null}
+                onStart={handleStart}
+                onStop={handleStop}
+                onCancelDownload={handleCancelDownload}
+              />
+            ))}
+          </div>
+        </div>
+
+        {error && (
+          <div className="border-t border-red-200 dark:border-red-500/20 bg-red-50 dark:bg-red-500/10 px-5 py-2 text-xs text-red-600 dark:text-red-400">
+            {error}
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
 
 const PRESET_OPTIONS: { key: DefaultAnalysisPreset; title: string; est: string; hint: string }[] = [
   { key: "quick", title: "轻拉片", est: "~ 45s", hint: "5-8 个节点;不跑方法论审计。" },

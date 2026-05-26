@@ -7763,6 +7763,10 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("whisperCpp:stop", async () => whisperCppRuntime.stop());
 
+  ipcMain.handle("whisperCpp:cancelDownload", async (_event, modelKey) => {
+    return whisperCppRuntime.cancelDownload(modelKey);
+  });
+
   // 诊断: 读 eta-samples.jsonl, 返回历史分析执行记录 (含 timing/token/provider 信息)
   ipcMain.handle("diagnostics:getAnalysisSamples", async () => {
     const filePath = path.join(app.getPath("userData"), "eta-samples.jsonl");
