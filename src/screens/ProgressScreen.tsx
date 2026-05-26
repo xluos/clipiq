@@ -420,10 +420,9 @@ export function ProgressScreen() {
           <ul className="space-y-1">
             {(pipeline?.stages ?? PIPELINE_STAGE_DEFS).filter((s) => s.key !== "download" || isUrlSource).map((s) => {
               const idx = (pipeline?.stages ?? PIPELINE_STAGE_DEFS).indexOf(s);
-              const isDownloading = project.status === "downloading";
               const stage = pipeline?.stages[idx];
-              const done = !isDownloading && (stage?.status === "done" || progress >= 100);
-              const active = !isDownloading && stage?.status === "active" && progress < 100;
+              const done = stage?.status === "done" || progress >= 100;
+              const active = stage?.status === "active" && progress < 100;
               const failed = stage?.status === "failed";
               const elapsed = stage?.startedAt
                 ? formatElapsed((stage.completedAt || Date.now()) - stage.startedAt)
