@@ -522,7 +522,7 @@ export function defaultPresetToAnalysisOptions(d: DefaultAnalysis): AnalysisOpti
 
 export type AnalysisProgressEvent = {
   projectId: string;
-  analysisId?: string;
+  analysisId: string;
   progress: number;
   stage: string;
   message?: string;
@@ -555,6 +555,7 @@ export type AnalysisBudget = {
 
 export type AnalysisBudgetEvent = {
   projectId: string;
+  analysisId: string;
   budget: AnalysisBudget;
 };
 
@@ -585,7 +586,7 @@ export type PipelineStage = {
 
 export type PipelineState = {
   projectId: string;
-  analysisId?: string;
+  analysisId: string;
   progress: number;
   stages: PipelineStage[];
 };

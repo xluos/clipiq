@@ -25,8 +25,8 @@ export function ProgressScreen() {
   const {
     setCurrentScreen, activeProjectId, projects, setProjects,
     providers, activeVideoProviderId, activeAudioProviderId,
-    setNodesForAnalysis, setReportForAnalysis, progressByProject, pipelineByProject,
-    budgetByProject, setBudgetForProject, startAnalysisForProject,
+    setNodesForAnalysis, setReportForAnalysis, progressByAnalysis, pipelineByAnalysis,
+    budgetByAnalysis, activeAnalysisForProject, setBudgetForAnalysis, startAnalysisForProject,
     analysisRecordsByProject, refreshAnalysisRecords,
   } = useApp();
 
@@ -35,9 +35,12 @@ export function ProgressScreen() {
   const isUrlSource = project?.source?.type === "url";
   const visibleStageDefs = PIPELINE_STAGE_DEFS.filter((s) => s.key !== "download" || isUrlSource);
 
-  const liveSnapshot = project ? progressByProject[project.id] : undefined;
-  const pipeline = project ? pipelineByProject[project.id] : undefined;
-  const budget = project ? budgetByProject[project.id] : undefined;
+  const activeAnalysisId = project
+    ? (activeAnalysisForProject[project.id] || project.currentAnalysisId)
+    : undefined;
+  const liveSnapshot = activeAnalysisId ? progressByAnalysis[activeAnalysisId] : undefined;
+  const pipeline = activeAnalysisId ? pipelineByAnalysis[activeAnalysisId] : undefined;
+  const budget = activeAnalysisId ? budgetByAnalysis[activeAnalysisId] : undefined;
 
   const [progress, setProgress] = useState(liveSnapshot?.progress ?? 0);
   const [stageLabel, setStageLabel] = useState(liveSnapshot?.stage ?? PIPELINE_STAGE_DEFS[0].label);
@@ -67,7 +70,7 @@ export function ProgressScreen() {
 
   useEffect(() => {
     if (!project) return;
-    const snap = progressByProject[project.id];
+    const snap = activeAnalysisId ? progressByAnalysis[activeAnalysisId] : undefined;
     setProgress(snap?.progress ?? 0);
     setStageLabel(snap?.stage ?? visibleStageDefs[0].label);
     setDetail(snap?.message ?? "");
@@ -142,7 +145,7 @@ export function ProgressScreen() {
       }
       setIsCancelling(false);
     }
-    setProjects(prev => prev.map(p => p.id === project.id ? { ...p, status: "not_analyzed", updatedAt: new Date().toISOString() } : p));
+    setProjects(prev => prev.map(p => p.id === project.id ? { ...p, status: "failed", updatedAt: new Date().toISOString() } : p));
     setCurrentScreen("home");
   };
 
@@ -158,7 +161,7 @@ export function ProgressScreen() {
       setProgress(event.progress);
       setStageLabel(event.stage);
       setDetail(event.message || "");
-      // 阶段进度由 AppContext 全局订阅统一写到 pipelineByProject。
+      // 阶段进度由 AppContext 全局订阅统一写到 pipelineByAnalysis。
 
       // attach 模式下,完成 / 失败要走广播兜底——kickoff 路径已通过 await 结果自己处理。
       if (!inAttachMode.current || !window.videoAnalyzer) return;
@@ -240,7 +243,7 @@ export function ProgressScreen() {
       const progressStep = 100 / (totalTime / intervalTime);
 
       // 浏览器预览模式 (没有 window.videoAnalyzer) 不经 main 进程 broadcast,
-      // 浏览器预览模式不经 main 进程 broadcast, pipelineByProject 不更新。
+      // 浏览器预览模式不经 main 进程 broadcast, pipelineByAnalysis 不更新。
       const timer = setInterval(() => {
         currentProgress += progressStep;
         if (currentProgress >= 100) {
@@ -273,7 +276,7 @@ export function ProgressScreen() {
       setProgress(snap.progress);
       setStageLabel(snap.stage);
       setDetail(snap.message || "");
-      // 这是 main 端的 lastProgress 一次性回灌, 真实事件流走 AppContext 全局订阅 → pipelineByProject。
+      // 这是 main 端的 lastProgress 一次性回灌, 真实事件流走 AppContext 全局订阅 → pipelineByAnalysis。
     };
 
     const launchOrAttach = async () => {
@@ -295,7 +298,7 @@ export function ProgressScreen() {
         // attach 模式: budget broadcast 已经在我们订阅前发完了, 拉一次补回 cache
         try {
           const budgetEvt = await window.videoAnalyzer!.getLastAnalysisBudget(project.id);
-          if (budgetEvt?.budget) setBudgetForProject(project.id, budgetEvt.budget);
+          if (budgetEvt?.budget && budgetEvt.analysisId) setBudgetForAnalysis(budgetEvt.analysisId, budgetEvt.budget);
         } catch { /* 老 main / 没装 handler → 静默 fallback 到线性外推 */ }
         return;
       }

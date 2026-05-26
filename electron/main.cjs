@@ -466,9 +466,11 @@ function registerAnalysis(projectId) {
   return handle;
 }
 
-function clearAnalysis(projectId) {
-  const handle = activeAnalyses.get(projectId);
-  if (handle?.heartbeat) clearInterval(handle.heartbeat);
+function clearAnalysis(projectId, expectedHandle) {
+  const current = activeAnalyses.get(projectId);
+  // 只清自己的 handle，防止旧分析的 finally 清掉新分析注册的 handle
+  if (expectedHandle && current !== expectedHandle) return;
+  if (current?.heartbeat) clearInterval(current.heartbeat);
   activeAnalyses.delete(projectId);
   _activeCachePolicy = null;
 }
@@ -3813,7 +3815,7 @@ async function runChunkedAnalysis({
         chunkOk = true;
         break;
       } catch (err) {
-        if (err instanceof AnalysisCancelledError) throw err;
+        if (err instanceof AnalysisCancelledError || err?.name === "AbortError") throw new AnalysisCancelledError();
         if (attempt < CHUNK_MAX_RETRIES) {
           log.warn("analyze:main", `chunk ${i + 1}/${chunks.length} 第 ${attempt + 1} 次失败, 重试: ${err?.message || err}`);
           continue;
@@ -3848,7 +3850,7 @@ async function runChunkedAnalysis({
       });
       break;
     } catch (auditErr) {
-      if (auditErr instanceof AnalysisCancelledError) throw auditErr;
+      if (auditErr instanceof AnalysisCancelledError || auditErr?.name === "AbortError") throw new AnalysisCancelledError();
       if (attempt < AUDIT_MAX_RETRIES) {
         log.warn("analyze:main", `audit pass 第 ${attempt + 1} 次失败, 重试: ${auditErr?.message || auditErr}`);
         continue;
@@ -4123,7 +4125,12 @@ async function warmupLocalWhisperCpp(audioProvider) {
 
 async function analyzeProject(event, { project, provider: _legacyProvider, audioProvider: _legacyAudio, options }) {
   if (activeAnalyses.has(project.id)) {
-    throw new Error("该项目已有分析任务在运行。");
+    const stale = activeAnalyses.get(project.id);
+    if (stale?.cancelled) {
+      clearAnalysis(project.id, stale);
+    } else {
+      throw new Error("该项目已有分析任务在运行。");
+    }
   }
   // 在管线开始时一次性快照 config + 从 taskSlots/audioSlot 解析各任务的 effective provider,
   // 避免运行中用户改设置导致竞争。renderer 传入的 provider/audioProvider 入参作废。
@@ -4245,6 +4252,11 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         ...(note ? { note } : {}),
       });
       currentStage = null; // 幂等: finally 路径会再 close 一次, 避免重复 push
+      try {
+        const db = getDb();
+        db.prepare("UPDATE analyses SET data = json_set(data, '$.stageSnapshot', json(?)) WHERE id = ?")
+          .run(JSON.stringify(timings), analysisId);
+      } catch { /* best-effort */ }
     }
     currentStageMeta = {};
   };
@@ -4315,7 +4327,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       learnedBaselines,
     });
     if (budget.totalMs > 0) {
-      handle.budget = { projectId: project.id, budget };
+      handle.budget = { projectId: project.id, analysisId, budget };
       broadcastToWindows("analysis:budget", handle.budget);
     }
   } catch (err) {
@@ -4450,7 +4462,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           actualCandidateFrames: candidateCount,
         });
         if (recomputed.totalMs > 0) {
-          handle.budget = { projectId: project.id, budget: recomputed };
+          handle.budget = { projectId: project.id, analysisId, budget: recomputed };
           broadcastToWindows("analysis:budget", handle.budget);
         }
       } catch (err) {
@@ -4486,7 +4498,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           actualCandidateFrames: candidateCount,
         });
         if (recomputed.totalMs > 0) {
-          handle.budget = { projectId: project.id, budget: recomputed };
+          handle.budget = { projectId: project.id, analysisId, budget: recomputed };
           broadcastToWindows("analysis:budget", handle.budget);
         }
       } catch (err) {
@@ -4586,7 +4598,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           cumMs += s.estMs;
         }
       }
-      handle.budget = { projectId: project.id, budget: pivotBudget };
+      handle.budget = { projectId: project.id, analysisId, budget: pivotBudget };
       broadcastToWindows("analysis:budget", handle.budget);
     } catch (err) {
       log.warn("analyze:pivot-budget", "计算后续阶段进度分配失败:", err?.message || err);
@@ -4695,6 +4707,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           perFrameTimeoutMs: 30_000,
           cache: makePrefilterCache(prefilterModelKey),
           analysisId,
+          abortSignal: handle.abortController?.signal,
           onProgress: (i, total, _tag, _elapsedMs, fromCache) => {
             ensureNotCancelled(handle);
             const avgMs = Math.round((Date.now() - prefilterStartedAt) / (i + 1));
@@ -5540,7 +5553,15 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     log.info("analyze", `[analysis:${analysisId}] 分析异常: ${analysisFailureMsg}`);
     throw err;
   } finally {
-    if (handle.cancelled) analysisOutcome = "cancelled";
+    if (handle.cancelled) {
+      analysisOutcome = "cancelled";
+      try {
+        const db = getDb();
+        const now = new Date().toISOString();
+        const cancelledRecord = { ...analysisRecord, status: "failed", completedAt: now, lastErrorMessage: "用户取消了分析。", lastErrorAt: now };
+        db.prepare("UPDATE analyses SET data = ? WHERE id = ?").run(JSON.stringify(cancelledRecord), analysisId);
+      } catch { /* best-effort */ }
+    }
     try {
       closeCurrentStage(); // 失败/取消路径保证最后一个 stage 也被 push
       await appendEtaSample({
@@ -5564,7 +5585,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     } catch (sampleErr) {
       log.warn("eta-samples", "写埋点失败:", sampleErr?.message || sampleErr);
     }
-    clearAnalysis(project.id);
+    clearAnalysis(project.id, handle);
   }
 }
 
@@ -7238,7 +7259,8 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("analysis:isActive", async (_event, projectId) => {
-    return activeAnalyses.has(projectId);
+    const handle = activeAnalyses.get(projectId);
+    return handle != null && !handle.cancelled;
   });
 
   ipcMain.handle("analysis:getLastProgress", async (_event, projectId) => {

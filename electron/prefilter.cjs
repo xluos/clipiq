@@ -163,6 +163,7 @@ async function tagFrames(frames, {
   onProgress,
   cache,
   analysisId,
+  abortSignal,
 } = {}) {
   if (!modelKey) throw new Error("prefilter: 缺少 modelKey");
   if (typeof acquireSlot !== "function") throw new Error("prefilter: 缺少 acquireSlot 回调");
@@ -175,6 +176,7 @@ async function tagFrames(frames, {
     let cacheHits = 0;
     const startedAt = Date.now();
     for (let i = 0; i < frames.length; i++) {
+      if (abortSignal?.aborted) throw new Error("cancelled");
       const f = frames[i];
       const t0 = Date.now();
       let tag;
@@ -198,6 +200,9 @@ async function tagFrames(frames, {
       if (!fromCache) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), perFrameTimeoutMs);
+        // 外部取消 → 也 abort 当前帧的请求
+        const onAbort = () => controller.abort();
+        abortSignal?.addEventListener("abort", onAbort, { once: true });
         try {
           const result = await tagOneFrame(
             slot.baseUrl,
@@ -210,10 +215,12 @@ async function tagFrames(frames, {
           usage = result.usage;
           if (usage?.total_tokens) totalTokens += usage.total_tokens;
         } catch (e) {
+          if (abortSignal?.aborted) throw new Error("cancelled");
           error = e instanceof Error ? e.message : String(e);
           tag = neutralTag(error);
         } finally {
           clearTimeout(timer);
+          abortSignal?.removeEventListener("abort", onAbort);
         }
         if (cache && !error) {
           try {
