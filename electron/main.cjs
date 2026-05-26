@@ -3834,6 +3834,7 @@ async function callOpenAICompatible(provider, project, frames, transcript, scene
   if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
     return { nodes: fallbackNodes, report: fallbackReport, usedModel: false };
   }
+  log.info("analyze:main", `[analysis:${handle?.analysisId || "?"}] 主分析开始, provider=${provider.id} model=${provider.model} frames=${frames.length}`);
 
   // 本地 llama: 显式 acquire 拿到 slot, 这样能读到 server 实际启动时的 --ctx-size,
   // 用真实 ctx 做预算才准。同时给 provider 打 _preacquired 标记, 让 openai-client 不再二次 acquire。
@@ -4133,6 +4134,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   const analysisId = _crypto.randomUUID();
   handle.analysisId = analysisId;
   const analysisStartedAt = Date.now();
+  log.info("analyze", `[analysis:${analysisId}] 开始分析 project=${project.id} title="${project.videoName || project.title || ""}"`);
 
   // 创建分析记录骨架
   const analysisRecord = {
@@ -4552,6 +4554,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           acquireSlot: (mk, opts) => llamaManager.acquire(mk, opts),
           perFrameTimeoutMs: 30_000,
           cache: makePrefilterCache(prefilterModelKey),
+          analysisId,
           onProgress: (i, total, _tag, _elapsedMs, fromCache) => {
             ensureNotCancelled(handle);
             const avgMs = Math.round((Date.now() - prefilterStartedAt) / (i + 1));
@@ -4739,6 +4742,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         const isLocalMedium = mediumTextProvider.source === "local_llama";
         const cfgConcurrency = Number(cfgSnapshot?.pipelineConcurrency) || 0;
         const mergeConcurrency = isLocalMedium ? 1 : (cfgConcurrency > 0 ? cfgConcurrency : 3);
+        log.info("shot-merger", `[analysis:${analysisId}] 开始合并 ${mergeInputs.length} 个镜头, concurrency=${mergeConcurrency}`);
         const mergeResults = await shotMerger.mergeShots({
           shots: mergeInputs,
           provider: mediumTextProvider,
@@ -5367,9 +5371,11 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       await appendPersistErrorLog(project.id, "analyzeProject finalize", persistError);
     }
     if (!mainAnalysisFailed) analysisOutcome = "ok";
+    log.info("analyze", `[analysis:${analysisId}] 分析完成, 耗时 ${formatDuration(Date.now() - analysisStartedAt)}, outcome=${analysisOutcome}`);
     return { analysisId, project: updatedProject, nodes, report };
   } catch (err) {
     analysisFailureMsg = String(err?.message || err).slice(0, 300);
+    log.info("analyze", `[analysis:${analysisId}] 分析异常: ${analysisFailureMsg}`);
     throw err;
   } finally {
     if (handle.cancelled) analysisOutcome = "cancelled";

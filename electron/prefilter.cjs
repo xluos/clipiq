@@ -9,6 +9,7 @@
 // - 每帧 30s 硬超时,失败的帧标 salience=5 中性值,不阻塞整体流程
 
 const fs = require("node:fs/promises");
+const log = require("./logger.cjs");
 
 const SCENE_TYPES = [
   "outdoor", "indoor", "transition", "text_card",
@@ -161,9 +162,12 @@ async function tagFrames(frames, {
   perFrameTimeoutMs = 30_000,
   onProgress,
   cache,
+  analysisId,
 } = {}) {
   if (!modelKey) throw new Error("prefilter: 缺少 modelKey");
   if (typeof acquireSlot !== "function") throw new Error("prefilter: 缺少 acquireSlot 回调");
+  const tag = analysisId ? `[analysis:${analysisId}]` : "";
+  log.info("prefilter", `${tag} 开始打标 ${frames.length} 帧, model=${modelKey}`);
   const slot = await acquireSlot(modelKey);
   try {
     const out = [];
@@ -224,6 +228,7 @@ async function tagFrames(frames, {
       out.push({ ...f, prefilterTag: tag, prefilterElapsedMs: elapsedMs, prefilterError: error, prefilterFromCache: fromCache });
       if (onProgress) onProgress(i, frames.length, tag, elapsedMs, fromCache);
     }
+    log.info("prefilter", `${tag} 打标完成 ${out.length} 帧, 耗时 ${Date.now() - startedAt}ms, cacheHits=${cacheHits}`);
     return {
       frames: out,
       totalElapsedMs: Date.now() - startedAt,
