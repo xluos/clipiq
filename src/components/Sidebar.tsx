@@ -6,6 +6,7 @@ import { type ReactNode } from "react";
 import { useApp } from "../AppContext";
 import { BrandLogo } from "./BrandLogo";
 import { TaskQueueButton } from "./TaskQueuePanel";
+import { useYtDlpUpdateStatus } from "../hooks/useYtDlpUpdateStatus";
 import type { AppModule } from "../types";
 import {
   BarChart3,
@@ -30,6 +31,8 @@ export function Sidebar() {
   const { currentLocation, goModule, sidebarCollapsed, setSidebarCollapsed } = useApp();
   const activeModule = currentLocation.module;
   const collapsed = sidebarCollapsed;
+  const ytDlpInfo = useYtDlpUpdateStatus();
+  const settingsBadge = ytDlpInfo && (!ytDlpInfo.installed || ytDlpInfo.updateAvailable);
 
   const items: Item[] = [
     { id: "analysis", label: "分析",     icon: <BarChart3 className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },
@@ -124,7 +127,12 @@ export function Sidebar() {
             : "border border-transparent text-slate-700 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800/60",
         ].join(" ")}
       >
-        <Settings className="w-4 h-4 shrink-0" strokeWidth={1.5} />
+        <span className="relative shrink-0">
+          <Settings className="w-4 h-4" strokeWidth={1.5} />
+          {settingsBadge && (
+            <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-slate-50 dark:ring-slate-900" />
+          )}
+        </span>
         {!collapsed && <span className="flex-1">设置</span>}
       </button>
 

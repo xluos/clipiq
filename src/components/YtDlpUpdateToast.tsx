@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
-import type { YtDlpProgress, YtDlpUpdateInfo } from "../electron-api";
+import type { YtDlpProgress } from "../electron-api";
+import { useYtDlpUpdateStatus } from "../hooks/useYtDlpUpdateStatus";
 import { Button } from "@/components/ui/button";
 import { CheckCircle2, DownloadCloud, Loader2, X } from "lucide-react";
 
 type Status = "idle" | "installing" | "installed";
 
 export function YtDlpUpdateToast() {
-  const [info, setInfo] = useState<YtDlpUpdateInfo | null>(null);
+  const info = useYtDlpUpdateStatus();
   const [dismissed, setDismissed] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [progress, setProgress] = useState<string>("");
@@ -14,17 +15,10 @@ export function YtDlpUpdateToast() {
 
   useEffect(() => {
     if (!window.videoAnalyzer) return;
-    const unsubStatus = window.videoAnalyzer.onYtDlpUpdateStatus((next) => {
-      setInfo(next);
-      setDismissed(false);
-    });
     const unsubProgress = window.videoAnalyzer.onYtDlpProgress((p: YtDlpProgress) => {
       setProgress(`${p.stage === "download" ? "下载中" : p.stage === "resolve" ? "查询版本" : "完成"}：${p.message}`);
     });
-    return () => {
-      unsubStatus();
-      unsubProgress();
-    };
+    return unsubProgress;
   }, []);
 
   const handleInstall = async () => {
@@ -33,15 +27,8 @@ export function YtDlpUpdateToast() {
     setErrorMessage("");
     setProgress("准备开始下载…");
     try {
-      const result = await window.videoAnalyzer.installYtDlp();
+      await window.videoAnalyzer.installYtDlp();
       setStatus("installed");
-      setInfo({
-        installed: true,
-        installedVersion: result.installedVersion,
-        isBundled: true,
-        latestVersion: result.latestVersion,
-        updateAvailable: false,
-      });
       window.setTimeout(() => setDismissed(true), 3000);
     } catch (error) {
       setStatus("idle");
