@@ -241,9 +241,16 @@ async function mergeShots({ shots, provider, batchSize, concurrency: concurrency
     batches.push({ startIdx: i, batch: shots.slice(i, i + size), batchNum: batches.length + 1 });
   }
 
+  const throwIfCancelled = () => {
+    if (!handle?.cancelled) return;
+    const err = new Error("cancelled");
+    err.name = "AbortError";
+    throw err;
+  };
+
   // 单 batch 处理逻辑 (含缓存查询 + 重试)
   const processBatch = async ({ startIdx, batch, batchNum }) => {
-    if (handle?.cancelled) throw new Error("cancelled");
+    throwIfCancelled();
 
     // 缓存查询
     if (cache) {
@@ -268,7 +275,7 @@ async function mergeShots({ shots, provider, batchSize, concurrency: concurrency
 
     const { system, user } = buildMergePrompt(batch);
     for (let attempt = 0; attempt <= MAX_BATCH_RETRIES; attempt++) {
-      if (handle?.cancelled) throw new Error("cancelled");
+      throwIfCancelled();
       try {
         const callResult = await callMediumText(provider, system, user, handle?.abortController?.signal);
         const parsed = callResult.parsed;
@@ -333,11 +340,14 @@ async function mergeShots({ shots, provider, batchSize, concurrency: concurrency
     for (const b of batches) await processBatch(b);
   } else {
     let cursor = 0;
+    let poolError = null;
     const inflight = new Set();
     const launchOne = () => {
       if (inflight.size >= concurrency || cursor >= batches.length) return false;
       const b = batches[cursor++];
-      const p = processBatch(b).finally(() => { inflight.delete(p); });
+      const p = processBatch(b)
+        .catch((err) => { if (!poolError) poolError = err; })
+        .finally(() => { inflight.delete(p); });
       inflight.add(p);
       return true;
     };
@@ -347,13 +357,15 @@ async function mergeShots({ shots, provider, batchSize, concurrency: concurrency
       launchOne();
       if (inflight.size < concurrency && cursor < batches.length) await sleep(STAGGER_MS);
     }
-    // 持续补充: 有请求完成就立即补一个新的
+    // 持续补充: 有请求完成就立即补一个新的; 出错后停止调度新 batch 并等待 inflight 排空
     while (inflight.size > 0) {
       await Promise.race(inflight);
+      if (poolError) continue;
       if (cursor < batches.length) {
         launchOne();
       }
     }
+    if (poolError) throw poolError;
   }
   if (typeof result.cacheHits === "undefined") {
     Object.defineProperty(result, "cacheHits", { value: cacheHits, enumerable: false });

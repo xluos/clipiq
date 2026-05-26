@@ -1551,7 +1551,7 @@ async function writeUrlCache(cache) {
 //   - ytdlpInfo:  yt-dlp --write-info-json 拿到的平台 metadata (title/description/uploader)
 //   - summary:    分析阶段产出的 globalSummary (本地视频场景, 没有外部文案时的兜底)
 // 失败 / 信息都缺 / provider 未配置 都返回 null, 让调用方 fallback。
-async function generateProjectTitle(provider, sources = {}) {
+async function generateProjectTitle(provider, sources = {}, handle = null) {
   if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) {
     log.warn("title-gen",
       `short-circuit: provider 不完整 apiKeyRef=${!!provider?.apiKeyRef} ` +
@@ -1598,9 +1598,7 @@ async function generateProjectTitle(provider, sources = {}) {
         "- 直接返回 JSON, 不要 markdown 围栏, 不要思考过程",
       userText: lines.join("\n"),
       temperature: 0.3,
-      // max_tokens 不再 hardcode, 走 openai-client deriveDefaultMaxTokens(ctx*0.25 clamp [1500,16000])
-      // thinking 模型在 settings 把 ctx 调大后, output 预算自动跟着大,
-      // thinking 用一半 + JSON title 出一半都装得下。
+      signal: handle?.abortController?.signal,
     });
     const t = String(result.parsed?.title || "").trim();
     const diagnostic = {
@@ -5183,7 +5181,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       try {
         const titleResult = await generateProjectTitle(mediumTextProvider, {
           summary: globalContext.globalSummary,
-        });
+        }, handle);
         const resultLine =
           `result: title=${JSON.stringify(titleResult?.title)} ` +
           `usage=${titleResult?.usage ? JSON.stringify(titleResult.usage) : "n/a"} ` +
@@ -5203,6 +5201,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           });
         }
       } catch (err) {
+        if (err instanceof AnalysisCancelledError || err?.name === "AbortError") throw new AnalysisCancelledError();
         const errLine = `失败: ${err?.message || err}`;
         log.warn("analyze:title-gen", errLine);
         await appendTitleGenLog(errLine);
