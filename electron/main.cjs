@@ -4294,11 +4294,11 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     "读取视频信息": 1, "校验视频": 1,
     "检测镜头切换": 2,
     "挑选关键画面": 3, "抽取关键画面": 3, "画面去重": 3,
-    "本地推理预检": 3, "本地初筛": 3, "本地初筛失败": 3,
-    "提取音轨": 4, "字幕识别": 4, "字幕识别完成": 4, "字幕识别失败": 4,
+    "本地推理预检": 3, "本地初筛": 3, "本地初筛失败": 3, "精挑画面": 3,
+    "提取音轨": 4, "字幕识别": 4, "字幕识别完成": 4, "字幕识别失败": 4, "字幕识别跳过": 4,
     "镜头合并": 5, "镜头缩略图": 5, "镜头缩略图就绪": 5, "镜头合并完成": 5, "镜头合并失败": 5,
-    "全局聚合": 6, "全局聚合跳过": 6, "全局聚合失败": 6,
-    "准备分析素材": 6, "识别视频类型": 6, "类型识别跳过": 6, "类型识别完成": 6,
+    "全局聚合": 6, "全局聚合完成": 6, "全局聚合跳过": 6, "全局聚合失败": 6,
+    "准备分析素材": 6, "识别视频类型": 6, "识别视频类型完成": 6, "类型识别跳过": 6, "类型识别完成": 6,
     "模型分析画面": 7, "主分析(分段)": 7, "主分析(审计)": 7, "分析失败": 7,
     "拉取弹幕": 7, "弹幕情绪聚合": 7, "弹幕情绪聚合完成": 7, "弹幕分析完成": 7, "弹幕分析失败": 7,
     "整理结果": 8, "保存失败快照": 8,
@@ -4448,8 +4448,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
 
     let inspected, scenes, plan, finalCount, candidateCount, inputFileSize;
     if (manifestValid) {
-      send(3, "读取视频信息", "已有可复用的检测结果，跳过。");
-      send(5, "检测镜头切换", "已有可复用的场景分析结果，跳过。");
+      send(3, "读取视频信息", "已有可复用的检测结果，跳过。", { fromCache: true });
+      send(5, "检测镜头切换", `${savedManifest.scenes.length} 个镜头 · 计划抽 ${savedManifest.candidateFrameCount || savedManifest.plan.length} 帧，复用缓存。`, { fromCache: true });
       inspected = {
         durationSec: savedManifest.durationSec,
         width: savedManifest.width,
@@ -4561,7 +4561,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       && savedFrames.frames.every((f) => fsSync.existsSync(f.framePath));
     let candidateFrames, skipped;
     if (framesValid) {
-      send(9, "挑选关键画面", `已有 ${savedFrames.frames.length} 张可复用的关键画面，跳过抽帧。`);
+      send(9, "挑选关键画面", `复用 ${savedFrames.frames.length} 张关键画面，跳过抽帧。`, { fromCache: true });
       candidateFrames = savedFrames.frames;
       skipped = savedFrames.skipped || 0;
     } else {
