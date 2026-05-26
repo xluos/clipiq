@@ -7,6 +7,7 @@ import type {
   AnalysisOptions,
   AnalysisProgressEvent,
   AnalysisBudgetEvent,
+  AnalysisRecord,
   AnalysisReport,
   AppConfig,
   LocalFitLevel,
@@ -76,6 +77,7 @@ export type DownloadCompleteEvent =
   | { projectId: string; success: false; cancelled?: boolean; error: string };
 
 export type AnalysisResult = {
+  analysisId: string;
   project: Project;
   nodes: AnalysisNode[];
   report: AnalysisReport;
@@ -353,17 +355,19 @@ declare global {
         ok: true;
         shots: Shot[];
       }>;
-      getNodes: (projectId: string) => Promise<AnalysisNode[]>;
-      setNodes: (projectId: string, nodes: AnalysisNode[]) => Promise<{ ok: true }>;
-      getReport: (projectId: string) => Promise<AnalysisReport | null>;
-      setReport: (projectId: string, report: AnalysisReport | null) => Promise<{ ok: true }>;
+      listAnalyses: (projectId: string) => Promise<AnalysisRecord[]>;
+      getAnalysis: (analysisId: string) => Promise<{ record: AnalysisRecord; nodes: AnalysisNode[]; report: AnalysisReport | null } | null>;
+      deleteAnalysis: (analysisId: string) => Promise<{ ok: true }>;
+      getNodes: (analysisId: string) => Promise<AnalysisNode[]>;
+      setNodes: (analysisId: string, nodes: AnalysisNode[]) => Promise<{ ok: true }>;
+      getReport: (analysisId: string) => Promise<AnalysisReport | null>;
+      setReport: (analysisId: string, report: AnalysisReport | null) => Promise<{ ok: true }>;
       analyzeProject: (payload: {
         project: Project;
         provider?: ModelProvider;
         audioProvider?: ModelProvider | null;
         options: AnalysisOptions;
       }) => Promise<AnalysisResult>;
-      resetAnalysis: (projectId: string) => Promise<{ ok: boolean; message?: string }>;
       cancelAnalysis: (projectId: string) => Promise<{ cancelled: boolean }>;
       isAnalysisActive: (projectId: string) => Promise<boolean>;
       getLastAnalysisProgress: (projectId: string) => Promise<AnalysisProgressEvent | null>;
@@ -438,7 +442,7 @@ declare global {
       };
       diagnostics: {
         getAnalysisSamples: () => Promise<{ ok: boolean; samples: AnalysisSample[]; error?: string }>;
-        getTokenUsage: (projectId: string) => Promise<{ ok: boolean; data: import("./types").TokenUsageSummary | null }>;
+        getTokenUsage: (analysisId: string) => Promise<{ ok: boolean; data: import("./types").TokenUsageSummary | null }>;
         getFramesCheckpoint: (projectId: string) => Promise<{ ok: boolean; data: FramesCheckpoint | null }>;
         getTranscript: (projectId: string) => Promise<{ ok: boolean; data: TranscriptData | null }>;
       };

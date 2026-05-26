@@ -155,7 +155,6 @@ export function HomeScreen() {
     setFocus(preset.options.focus);
   };
 
-  const analysisOptions: AnalysisOptions = { mode, density, focus, manualGenre };
 
   const source = useMemo(() => detectSource(inputValue), [inputValue]);
   const canSubmit = source.kind === "url" || source.kind === "file";
@@ -224,8 +223,7 @@ export function HomeScreen() {
       width: video.width,
       height: video.height,
       orientation: video.orientation,
-      status: "analyzing",
-      analysisOptions,
+      status: "analyzing" as const,
       createdAt: now,
       updatedAt: now,
     }, ...prev]);
@@ -265,8 +263,7 @@ export function HomeScreen() {
         width: videoEl.videoWidth,
         height: videoEl.videoHeight,
         orientation: videoEl.videoWidth > videoEl.videoHeight ? "landscape" : videoEl.videoWidth < videoEl.videoHeight ? "portrait" : "square",
-        status: "analyzing",
-        analysisOptions,
+        status: "analyzing" as const,
         createdAt: now,
         updatedAt: now,
       }, ...prev]);
@@ -317,14 +314,10 @@ export function HomeScreen() {
         durationSec: 0,
         width: 0,
         height: 0,
-        orientation: "landscape",
-        status: "downloading",
-        analysisOptions,
+        orientation: "landscape" as const,
+        status: "downloading" as const,
         createdAt: now,
         updatedAt: now,
-        // 整条 download → analyze 流水线从这里起算; 下载完成切 analyzing 时不再覆盖,
-        // 这样 ProgressScreen 的"已用"覆盖整段耗时, 退出再进也能恢复。
-        analysisStartedAt: now,
       }, ...prev]);
       setActiveProjectId(handle.projectId);
       setStatus("idle");
@@ -410,8 +403,7 @@ export function HomeScreen() {
         width: videoEl.videoWidth,
         height: videoEl.videoHeight,
         orientation: videoEl.videoWidth > videoEl.videoHeight ? "landscape" : videoEl.videoWidth < videoEl.videoHeight ? "portrait" : "square",
-        status: "analyzing",
-        analysisOptions,
+        status: "analyzing" as const,
         createdAt: now,
         updatedAt: now,
       }, ...prev]);

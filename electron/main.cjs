@@ -877,6 +877,10 @@ function getProjectDir(projectId) {
   return path.join(app.getPath("userData"), "projects", projectId);
 }
 
+function getAnalysisDir(projectId, analysisId) {
+  return path.join(getProjectDir(projectId), "analyses", analysisId);
+}
+
 let _db = null;
 function getDb() {
   if (_db) return _db;
@@ -891,14 +895,16 @@ function getDb() {
       data TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS analysis_nodes (
-      project_id TEXT PRIMARY KEY,
-      data TEXT NOT NULL
+    CREATE TABLE IF NOT EXISTS analyses (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      data TEXT NOT NULL,
+      nodes TEXT,
+      report TEXT,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
-    CREATE TABLE IF NOT EXISTS analysis_reports (
-      project_id TEXT PRIMARY KEY,
-      data TEXT NOT NULL
-    );
+    CREATE INDEX IF NOT EXISTS idx_analyses_project ON analyses(project_id);
     -- v2: 对标账号 (UP 主) 元数据 + 跨视频汇总出的 methodology manifest
     CREATE TABLE IF NOT EXISTS accounts (
       id TEXT PRIMARY KEY,
@@ -930,6 +936,46 @@ function getDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_account_videos_account ON account_videos(account_id);
   `);
+
+  // v3 迁移: 旧 1:1 分析表 → 新 1:N analyses 表
+  try {
+    const hasOldNodes = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='analysis_nodes'").get();
+    if (hasOldNodes) {
+      db.exec("DROP TABLE IF EXISTS analysis_nodes");
+      db.exec("DROP TABLE IF EXISTS analysis_reports");
+      // 清掉项目根目录下的旧分析文件 (现在放 analyses/<id>/ 子目录)
+      try {
+        const projectsDir = path.join(app.getPath("userData"), "projects");
+        const entries = fsSync.readdirSync(projectsDir, { withFileTypes: true }).filter(e => e.isDirectory());
+        for (const entry of entries) {
+          for (const name of ["analysis-result.json", "timings.json", "token-usage.json"]) {
+            try { fsSync.unlinkSync(path.join(projectsDir, entry.name, name)); } catch { /* noop */ }
+          }
+        }
+      } catch { /* noop */ }
+      // 清掉 projects 表里旧的分析字段
+      const allProjects = db.prepare("SELECT id, data FROM projects").all();
+      for (const row of allProjects) {
+        try {
+          const proj = JSON.parse(row.data);
+          delete proj.providerId;
+          delete proj.model;
+          delete proj.analysisOptions;
+          delete proj.analysisStartedAt;
+          delete proj.lastErrorMessage;
+          delete proj.lastErrorAt;
+          if (proj.status === "completed" || proj.status === "failed" || proj.status === "analyzing") {
+            proj.status = "not_analyzed";
+          }
+          proj.currentAnalysisId = undefined;
+          db.prepare("UPDATE projects SET data = ? WHERE id = ?").run(JSON.stringify(proj), row.id);
+        } catch { /* noop */ }
+      }
+      log.info("db", "v3 迁移完成: 旧 analysis_nodes/analysis_reports 表已清除");
+    }
+  } catch (migErr) {
+    log.warn("db", "v3 迁移失败:", migErr?.message || migErr);
+  }
 
   // v2.1 迁移: 旧的 projects(kind='account_video', status='not_analyzed', localVideoPath='')
   // 全部转到 account_videos 表;有 status=completed/analyzing 的保留 project (会被 analysisProjectId 链回去)。
@@ -1031,14 +1077,17 @@ async function writeJson(filePath, payload) {
 // 目的:分析后续阶段如果再 crash / Mac sleep 杀掉进程 / 用户关 app,
 // 至少 SQLite 和 JSON 都有这次跑的 failed report, 不会停在上次跑的旧数据上。
 // 不写 projects 表(让最终成功路径决定 status); 不更新 timings(timings 是 mutable 数组, 最终路径会再写一遍)。
-async function persistEarlySnapshot(project, projectDir, nodes, report, timings, analysisStartedAt) {
+async function persistEarlySnapshot(project, analysisId, nodes, report, timings, analysisStartedAt) {
   const snapshotReport = {
     ...report,
     timings: [...timings],
     totalDurationMs: Date.now() - analysisStartedAt,
   };
   try {
-    await writeJson(path.join(projectDir, "analysis-result.json"), {
+    const analysisDir = getAnalysisDir(project.id, analysisId);
+    await fs.mkdir(analysisDir, { recursive: true });
+    await writeJson(path.join(analysisDir, "analysis-result.json"), {
+      analysisId,
       project,
       nodes,
       report: snapshotReport,
@@ -1048,12 +1097,8 @@ async function persistEarlySnapshot(project, projectDir, nodes, report, timings,
   }
   try {
     const db = getDb();
-    db.prepare(
-      "INSERT INTO analysis_nodes (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
-    ).run(project.id, JSON.stringify(nodes));
-    db.prepare(
-      "INSERT INTO analysis_reports (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
-    ).run(project.id, JSON.stringify(snapshotReport));
+    db.prepare("UPDATE analyses SET nodes = ?, report = ? WHERE id = ?")
+      .run(JSON.stringify(nodes), JSON.stringify(snapshotReport), analysisId);
   } catch (err) {
     await appendPersistErrorLog(project.id, "persistEarlySnapshot SQLite", err);
   }
@@ -4085,7 +4130,37 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   }
 
   const handle = registerAnalysis(project.id);
+  const analysisId = _crypto.randomUUID();
+  handle.analysisId = analysisId;
   const analysisStartedAt = Date.now();
+
+  // 创建分析记录骨架
+  const analysisRecord = {
+    id: analysisId,
+    projectId: project.id,
+    status: "analyzing",
+    providerId: complexVisionProvider?.id,
+    model: complexVisionProvider?.model,
+    analysisOptions: options,
+    startedAt: new Date(analysisStartedAt).toISOString(),
+    createdAt: new Date(analysisStartedAt).toISOString(),
+  };
+  {
+    const db = getDb();
+    db.prepare(
+      "INSERT INTO analyses (id, project_id, data, created_at) VALUES (?, ?, ?, ?)"
+    ).run(analysisId, project.id, JSON.stringify(analysisRecord), analysisStartedAt);
+    // 更新 project.currentAnalysisId + status
+    const projRow = db.prepare("SELECT data FROM projects WHERE id = ?").get(project.id);
+    if (projRow) {
+      const proj = JSON.parse(projRow.data);
+      proj.currentAnalysisId = analysisId;
+      proj.status = "analyzing";
+      proj.updatedAt = new Date().toISOString();
+      db.prepare("UPDATE projects SET data = ?, updated_at = ? WHERE id = ?")
+        .run(JSON.stringify(proj), Date.now(), project.id);
+    }
+  }
 
   // 阶段耗时记录:每次 send 检测 stage 字符串变化,把上一个 stage 的 duration 推入
   // stage 内可通过 handle.attachStageMeta({...}) 注入额外元数据 (frames 数、shots 数、
@@ -4176,7 +4251,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       currentStage = stage;
       currentStageStartedAt = Date.now();
     }
-    const payload = { projectId: project.id, progress, stage, message };
+    const payload = { projectId: project.id, analysisId, progress, stage, message };
     const si = STAGE_INDEX_MAP[stage];
     if (si != null) payload.stageIndex = si;
     if (meta && meta.fromCache) payload.fromCache = true;
@@ -5058,7 +5133,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         // 立刻把 failed 快照写到 JSON + SQLite。
         // 后续弹幕情绪聚合 / 整理结果如果跑到一半 crash 或被 Mac sleep 杀进程,
         // 至少 ReportScreen 加载到的是这次的 failed report, 而不是上次跑的脏数据。
-        await persistEarlySnapshot(project, projectDir, nodes, report, timings, analysisStartedAt);
+        await persistEarlySnapshot(project, analysisId, nodes, report, timings, analysisStartedAt);
       }
     } else if (globalContext || shotContexts) {
       // 视觉主分析未配置, 但中间层有产物, 让 fallback report 至少能带上 globalSummary
@@ -5241,11 +5316,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       width: inspected.width || project.width,
       height: inspected.height || project.height,
       orientation: inspected.orientation || project.orientation,
-      // 主分析失败时 project.status 标 failed, Home 卡片 / Workspace 才能渲染 failed 态;
-      // 渲染屏在 catch 时也会 set failed, 这里多一道保险给 attach 模式 (kickoff await 直接收到 result)
       status: mainAnalysisFailed ? "failed" : "completed",
-      providerId: provider?.id,
-      model: provider?.model,
+      currentAnalysisId: analysisId,
       thumbnailUrl: frames[0]?.framePath ? createProjectMediaUrl(project.id, frames[0].framePath) : project.thumbnailUrl,
       ...(generatedTitle ? { videoName: generatedTitle, titleAutoGenerated: true } : {}),
       updatedAt: new Date().toISOString(),
@@ -5254,7 +5326,6 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     closeCurrentStage();
     const totalDurationMs = Date.now() - analysisStartedAt;
     const finalTimings = [...timings];
-    // 找出耗时 top 1 阶段(剔除 0ms 边界)
     const top = finalTimings
       .filter((t) => t.durationMs > 0 && t.stage !== "完成")
       .sort((a, b) => b.durationMs - a.durationMs)[0];
@@ -5262,6 +5333,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     if (!handle.cancelled) {
       broadcastToWindows("analysis:progress", {
         projectId: project.id,
+        analysisId,
         progress: 100,
         stage: mainAnalysisFailed ? "已结束" : "完成",
         message: `${mainAnalysisFailed ? "失败兜底耗时 " : "总耗时 "}${(totalDurationMs / 1000).toFixed(1)}s${topLabel}`,
@@ -5269,32 +5341,33 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     }
     const tokenUsage = tokenLedger.snapshot();
     report = { ...report, timings: finalTimings, totalDurationMs, tokenUsage };
-    await writeJson(path.join(projectDir, "analysis-result.json"), { project: updatedProject, nodes, report });
-    await writeJson(path.join(projectDir, "timings.json"), { totalDurationMs, timings: finalTimings });
-    await writeJson(path.join(projectDir, "token-usage.json"), tokenUsage);
-    // main 端直接落盘 SQLite,避免依赖 renderer 走 ProgressScreen 才能同步。
-    // 与 renderer 端 setNodesForProject/setReportForProject 的 IPC 写是幂等的(INSERT OR UPDATE)。
+    // 写到 per-analysis 目录
+    const analysisDir = getAnalysisDir(project.id, analysisId);
+    await fs.mkdir(analysisDir, { recursive: true });
+    await writeJson(path.join(analysisDir, "analysis-result.json"), { analysisId, project: updatedProject, nodes, report });
+    await writeJson(path.join(analysisDir, "timings.json"), { totalDurationMs, timings: finalTimings });
+    await writeJson(path.join(analysisDir, "token-usage.json"), tokenUsage);
     try {
       const db = getDb();
+      const now = new Date().toISOString();
+      const finalRecord = {
+        ...analysisRecord,
+        status: mainAnalysisFailed ? "failed" : "completed",
+        completedAt: now,
+        totalDurationMs,
+        ...(mainAnalysisFailed ? { lastErrorMessage: "主分析失败", lastErrorAt: now } : {}),
+      };
+      db.prepare("UPDATE analyses SET data = ?, nodes = ?, report = ? WHERE id = ?")
+        .run(JSON.stringify(finalRecord), JSON.stringify(nodes), JSON.stringify(report), analysisId);
       db.prepare(
         "INSERT INTO projects (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
       ).run(updatedProject.id, JSON.stringify(updatedProject), Date.now());
-      db.prepare(
-        "INSERT INTO analysis_nodes (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data",
-      ).run(project.id, JSON.stringify(nodes));
-      db.prepare(
-        "INSERT INTO analysis_reports (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data",
-      ).run(project.id, JSON.stringify(report));
     } catch (persistError) {
-      // 不阻断返回:JSON 文件已经写了, report:get / nodes:get 会自动 fallback 到文件。
-      // 把错误也落盘 (console 在 packaged app 里没 stdout), 事后能查为啥 SQLite 没写。
       log.warn("clipiq", "main 端 SQLite 持久化失败,JSON 会兜底:", persistError);
       await appendPersistErrorLog(project.id, "analyzeProject finalize", persistError);
     }
-    // 主分析失败的兜底路径也走到这里 return failed result, 但 outcome 保留 "failed" —
-    // ETA learner 只学 ok 样本, 避免失败 timing 污染 baseline。
     if (!mainAnalysisFailed) analysisOutcome = "ok";
-    return { project: updatedProject, nodes, report };
+    return { analysisId, project: updatedProject, nodes, report };
   } catch (err) {
     analysisFailureMsg = String(err?.message || err).slice(0, 300);
     throw err;
@@ -5841,7 +5914,7 @@ app.whenReady().then(async () => {
       await fs.rm(projectsDir, { recursive: true, force: true });
       await fs.mkdir(projectsDir, { recursive: true });
       const db = getDb();
-      db.exec("DELETE FROM analysis_nodes; DELETE FROM analysis_reports; DELETE FROM projects;");
+      db.exec("DELETE FROM analyses; DELETE FROM projects;");
       return { ok: true };
     } catch (error) {
       return { ok: false, message: error?.message || String(error) };
@@ -6188,9 +6261,8 @@ app.whenReady().then(async () => {
   ipcMain.handle("projects:delete", async (_event, projectId) => {
     if (!projectId) return { ok: false, message: "缺少 projectId" };
     const db = getDb();
+    db.prepare("DELETE FROM analyses WHERE project_id = ?").run(projectId);
     db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
-    db.prepare("DELETE FROM analysis_nodes WHERE project_id = ?").run(projectId);
-    db.prepare("DELETE FROM analysis_reports WHERE project_id = ?").run(projectId);
     try {
       await fs.rm(getProjectDir(projectId), { recursive: true, force: true });
     } catch {
@@ -6199,114 +6271,65 @@ app.whenReady().then(async () => {
     return { ok: true };
   });
 
-  // analysis-result.json 是分析管线落盘的 source of truth(写在 SQLite 之前)。
-  // 如果 SQLite 写盘失败被吞 / 没走到, JSON 文件就比 SQLite 新 —— 这里 fallback 到文件,
-  // 顺手把 SQLite 自愈回新内容, 下次直接命中 SQLite 不用读盘。
-  async function loadProjectResultJson(projectId) {
-    try {
-      const jsonPath = path.join(getProjectDir(projectId), "analysis-result.json");
-      const stat = await fs.stat(jsonPath);
-      const raw = await fs.readFile(jsonPath, "utf-8");
-      const parsed = JSON.parse(raw);
-      return { parsed, mtimeMs: stat.mtimeMs };
-    } catch {
-      return null;
-    }
-  }
-  function reportTimestamp(report, fallbackMtimeMs) {
-    if (!report) return 0;
-    const ts = report.generatedAt ? Date.parse(report.generatedAt) : NaN;
-    if (Number.isFinite(ts)) return ts;
-    return fallbackMtimeMs || 0;
-  }
+  // --- analyses (1:N per project) ---
 
-  ipcMain.handle("nodes:get", async (_event, projectId) => {
+  ipcMain.handle("analyses:list", async (_event, projectId) => {
     const db = getDb();
-    const row = db.prepare("SELECT data FROM analysis_nodes WHERE project_id = ?").get(projectId);
-    const sqliteNodes = row ? JSON.parse(row.data) : null;
-    // fallback: JSON 文件比 SQLite 新就用文件版 + 自愈写回 SQLite。
-    // 用 report.generatedAt 来判断新旧(nodes 自己没时间戳, 和 report 一起写所以可用)。
-    const fileSnap = await loadProjectResultJson(projectId);
-    if (fileSnap) {
-      const sqliteReportRow = db.prepare("SELECT data FROM analysis_reports WHERE project_id = ?").get(projectId);
-      const sqliteReport = sqliteReportRow ? JSON.parse(sqliteReportRow.data) : null;
-      const fileTs = reportTimestamp(fileSnap.parsed?.report, fileSnap.mtimeMs);
-      const sqlTs = reportTimestamp(sqliteReport, 0);
-      if (fileTs > sqlTs && Array.isArray(fileSnap.parsed?.nodes)) {
-        try {
-          db.prepare(
-            "INSERT INTO analysis_nodes (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
-          ).run(projectId, JSON.stringify(fileSnap.parsed.nodes));
-        } catch (err) {
-          await appendPersistErrorLog(projectId, "nodes:get self-heal", err);
-        }
-        return fileSnap.parsed.nodes;
-      }
-    }
-    return sqliteNodes || [];
+    const rows = db.prepare("SELECT data FROM analyses WHERE project_id = ? ORDER BY created_at DESC").all(projectId);
+    return rows.map((row) => JSON.parse(row.data));
   });
 
-  ipcMain.handle("nodes:set", async (_event, projectId, nodes) => {
+  ipcMain.handle("analyses:get", async (_event, analysisId) => {
     const db = getDb();
-    db.prepare(
-      "INSERT INTO analysis_nodes (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
-    ).run(projectId, JSON.stringify(Array.isArray(nodes) ? nodes : []));
-    return { ok: true };
+    const row = db.prepare("SELECT data, nodes, report FROM analyses WHERE id = ?").get(analysisId);
+    if (!row) return null;
+    const record = JSON.parse(row.data);
+    const nodes = row.nodes ? JSON.parse(row.nodes) : [];
+    const report = row.report ? JSON.parse(row.report) : null;
+    return { record, nodes, report };
   });
 
-  ipcMain.handle("report:get", async (_event, projectId) => {
+  ipcMain.handle("analyses:delete", async (_event, analysisId) => {
     const db = getDb();
-    const row = db.prepare("SELECT data FROM analysis_reports WHERE project_id = ?").get(projectId);
-    const sqliteReport = row ? JSON.parse(row.data) : null;
-    const fileSnap = await loadProjectResultJson(projectId);
-    if (fileSnap?.parsed?.report) {
-      const fileTs = reportTimestamp(fileSnap.parsed.report, fileSnap.mtimeMs);
-      const sqlTs = reportTimestamp(sqliteReport, 0);
-      if (fileTs > sqlTs) {
-        try {
-          db.prepare(
-            "INSERT INTO analysis_reports (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
-          ).run(projectId, JSON.stringify(fileSnap.parsed.report));
-        } catch (err) {
-          await appendPersistErrorLog(projectId, "report:get self-heal", err);
-        }
-        return fileSnap.parsed.report;
-      }
-    }
-    return sqliteReport;
-  });
-
-  // 重新分析前调用:清掉旧的 nodes/report SQLite 行 + analysis-result.json + timings.json,
-  // 让新跑的"失败 fallback report"不会被旧数据覆盖, 也不会让 ReportScreen 短暂展示上次的耗时图。
-  // artifacts/ 目录(关键帧 / 镜头缩略图 / audio / transcript) 保留 — 新分析可以复用避免重抽。
-  ipcMain.handle("analysis:reset", async (_event, projectId) => {
-    if (!projectId) return { ok: false, message: "缺少 projectId" };
-    const db = getDb();
-    try {
-      db.prepare("DELETE FROM analysis_nodes WHERE project_id = ?").run(projectId);
-      db.prepare("DELETE FROM analysis_reports WHERE project_id = ?").run(projectId);
-    } catch (err) {
-      await appendPersistErrorLog(projectId, "analysis:reset SQLite", err);
-    }
-    const dir = getProjectDir(projectId);
-    for (const name of ["analysis-result.json", "timings.json"]) {
+    const row = db.prepare("SELECT data FROM analyses WHERE id = ?").get(analysisId);
+    if (row) {
+      const record = JSON.parse(row.data);
+      db.prepare("DELETE FROM analyses WHERE id = ?").run(analysisId);
       try {
-        await fs.unlink(path.join(dir, name));
-      } catch {
-        // 不存在就跳过, best-effort
-      }
+        await fs.rm(getAnalysisDir(record.projectId, analysisId), { recursive: true, force: true });
+      } catch { /* best-effort */ }
     }
     return { ok: true };
   });
 
-  ipcMain.handle("report:set", async (_event, projectId, report) => {
+  ipcMain.handle("nodes:get", async (_event, analysisId) => {
+    const db = getDb();
+    const row = db.prepare("SELECT nodes FROM analyses WHERE id = ?").get(analysisId);
+    if (!row || !row.nodes) return [];
+    return JSON.parse(row.nodes);
+  });
+
+  ipcMain.handle("nodes:set", async (_event, analysisId, nodes) => {
+    const db = getDb();
+    db.prepare("UPDATE analyses SET nodes = ? WHERE id = ?")
+      .run(JSON.stringify(Array.isArray(nodes) ? nodes : []), analysisId);
+    return { ok: true };
+  });
+
+  ipcMain.handle("report:get", async (_event, analysisId) => {
+    const db = getDb();
+    const row = db.prepare("SELECT report FROM analyses WHERE id = ?").get(analysisId);
+    if (!row) return null;
+    return row.report ? JSON.parse(row.report) : null;
+  });
+
+  ipcMain.handle("report:set", async (_event, analysisId, report) => {
     const db = getDb();
     if (report === null || report === undefined) {
-      db.prepare("DELETE FROM analysis_reports WHERE project_id = ?").run(projectId);
+      db.prepare("UPDATE analyses SET report = NULL WHERE id = ?").run(analysisId);
     } else {
-      db.prepare(
-        "INSERT INTO analysis_reports (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
-      ).run(projectId, JSON.stringify(report));
+      db.prepare("UPDATE analyses SET report = ? WHERE id = ?")
+        .run(JSON.stringify(report), analysisId);
     }
     return { ok: true };
   });
@@ -7020,10 +7043,11 @@ app.whenReady().then(async () => {
       // 用户主动取消不弹通知,失败才弹
       if (!(err instanceof AnalysisCancelledError)) {
         const msg = String(err?.message || err).slice(0, 200);
-        // 广播失败,让 attach 模式的 renderer (关窗后重开) 也能感知
+        const handle = activeAnalyses.get(projectId);
         if (projectId) {
           broadcastToWindows("analysis:progress", {
             projectId,
+            analysisId: handle?.analysisId,
             progress: 0,
             stage: "失败",
             message: msg,
@@ -7584,11 +7608,15 @@ app.whenReady().then(async () => {
     }
   });
 
-  // 诊断: 按 projectId 读 token-usage.json (单个项目的详细 token 账本)
-  ipcMain.handle("diagnostics:getTokenUsage", async (_event, projectId) => {
-    const projectDir = path.join(app.getPath("userData"), "projects", projectId);
+  // 诊断: 按 analysisId 读 token-usage.json
+  ipcMain.handle("diagnostics:getTokenUsage", async (_event, analysisId) => {
+    const db = getDb();
+    const row = db.prepare("SELECT data FROM analyses WHERE id = ?").get(analysisId);
+    if (!row) return { ok: true, data: null };
+    const record = JSON.parse(row.data);
+    const analysisDir = getAnalysisDir(record.projectId, analysisId);
     try {
-      return { ok: true, data: await readJson(path.join(projectDir, "token-usage.json"), null) };
+      return { ok: true, data: await readJson(path.join(analysisDir, "token-usage.json"), null) };
     } catch {
       return { ok: true, data: null };
     }

@@ -28,11 +28,12 @@ const EMOTION_ZH: Record<DanmakuEmotionAxis | "neutral", string> = {
 };
 
 export function WorkspaceScreen() {
-  const { setCurrentScreen, projects, activeProjectId, nodesByProject, setNodesForProject, reportByProject, startAnalysisForProject } = useApp();
+  const { setCurrentScreen, projects, activeProjectId, nodesByAnalysis, setNodesForAnalysis, reportByAnalysis, startAnalysisForProject, analysisRecordsByProject, switchAnalysis } = useApp();
 
   const project = projects.find(p => p.id === activeProjectId);
-  const nodes = nodesByProject[activeProjectId || ""] || [];
-  const report = activeProjectId ? reportByProject[activeProjectId] : undefined;
+  const currentAnalysisId = project?.currentAnalysisId || "";
+  const nodes = nodesByAnalysis[currentAnalysisId] || [];
+  const report = currentAnalysisId ? reportByAnalysis[currentAnalysisId] : undefined;
   const shotContexts = report?.shotContexts || [];
   
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -175,7 +176,8 @@ export function WorkspaceScreen() {
 
   const updateNode = (nodeId: string, patch: Partial<AnalysisNode>) => {
     if (!activeProjectId) return;
-    setNodesForProject(activeProjectId, nodes.map(node => node.id === nodeId ? { ...node, ...patch } : node));
+    if (!currentAnalysisId) return;
+    setNodesForAnalysis(currentAnalysisId, nodes.map(node => node.id === nodeId ? { ...node, ...patch } : node));
   };
 
   const filteredNodes = nodes.filter(node => {
