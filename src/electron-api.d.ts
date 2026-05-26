@@ -446,6 +446,8 @@ declare global {
         getTokenUsage: (analysisId: string) => Promise<{ ok: boolean; data: import("./types").TokenUsageSummary | null }>;
         getFramesCheckpoint: (projectId: string) => Promise<{ ok: boolean; data: FramesCheckpoint | null }>;
         getTranscript: (projectId: string) => Promise<{ ok: boolean; data: TranscriptData | null }>;
+        deleteSample: (projectId: string, startedAt: string) => Promise<{ ok: boolean; removed: number; error?: string }>;
+        clearAllSamples: () => Promise<{ ok: boolean; error?: string }>;
       };
       cache: {
         getStats: () => Promise<CacheStats>;

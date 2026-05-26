@@ -1,7 +1,7 @@
 import { useApp } from "../AppContext";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, RefreshCw, ChevronDown, ChevronRight, Clock, Zap, Hash, Database, GitBranch } from "lucide-react";
+import { ArrowLeft, RefreshCw, ChevronDown, ChevronRight, Clock, Zap, Hash, Database, GitBranch, Trash2 } from "lucide-react";
 import { type FunctionComponent, useCallback, useEffect, useMemo, useState } from "react";
 import type { AnalysisSample, AnalysisSampleStage } from "../electron-api";
 import type { Project } from "../types";
@@ -119,7 +119,8 @@ const SampleCard: FunctionComponent<{
   sample: AnalysisSample;
   project?: Project;
   onViewPipeline?: () => void;
-}> = ({ sample, project, onViewPipeline }) => {
+  onDelete?: () => void;
+}> = ({ sample, project, onViewPipeline, onDelete }) => {
   const [expanded, setExpanded] = useState(false);
   const tokens = useMemo(() => aggregateStageTokens(sample.stages), [sample.stages]);
   const meta = useMemo(() => extractStageMeta(sample.stages), [sample.stages]);
@@ -176,6 +177,18 @@ const SampleCard: FunctionComponent<{
             >
               <GitBranch className="w-3 h-3" />
               管线
+            </span>
+          )}
+          {onDelete && (
+            <span
+              role="button"
+              tabIndex={0}
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); onDelete(); } }}
+              className="flex items-center gap-1 text-slate-400 hover:text-red-500 dark:hover:text-red-400 cursor-pointer transition-colors"
+              title="删除此记录"
+            >
+              <Trash2 className="w-3 h-3" />
             </span>
           )}
         </div>
@@ -358,6 +371,20 @@ export function DiagnosticsScreen() {
 
   useEffect(() => { load(); }, [load]);
 
+  const handleDeleteSample = useCallback(async (projectId: string, startedAt: string) => {
+    const api = window.videoAnalyzer;
+    if (!api?.diagnostics?.deleteSample) return;
+    const res = await api.diagnostics.deleteSample(projectId, startedAt);
+    if (res.ok) setSamples((prev) => prev.filter((s) => !(s.projectId === projectId && s.startedAt === startedAt)));
+  }, []);
+
+  const handleClearAll = useCallback(async () => {
+    const api = window.videoAnalyzer;
+    if (!api?.diagnostics?.clearAllSamples) return;
+    const res = await api.diagnostics.clearAllSamples();
+    if (res.ok) setSamples([]);
+  }, []);
+
   const filtered = useMemo(() => {
     if (filter === "all") return samples;
     return samples.filter((s) => s.outcome === filter);
@@ -411,6 +438,12 @@ export function DiagnosticsScreen() {
             </p>
           </div>
           <div className="flex-1" />
+          {samples.length > 0 && (
+            <Button size="sm" variant="ghost" onClick={handleClearAll} className="h-8 text-xs gap-1.5 text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300">
+              <Trash2 className="w-3.5 h-3.5" />
+              清除全部
+            </Button>
+          )}
           <Button size="sm" variant="ghost" onClick={load} className="h-8 text-xs gap-1.5">
             <RefreshCw className="w-3.5 h-3.5" />
             刷新
@@ -484,6 +517,7 @@ export function DiagnosticsScreen() {
                 sample={s}
                 project={projectMap.get(s.projectId)}
                 onViewPipeline={() => { setPipelineProjectId(s.projectId); setViewMode("pipeline"); }}
+                onDelete={() => handleDeleteSample(s.projectId, s.startedAt)}
               />
             ))}
           </div>

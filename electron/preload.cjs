@@ -160,6 +160,8 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
     getTokenUsage: (projectId) => ipcRenderer.invoke("diagnostics:getTokenUsage", projectId),
     getFramesCheckpoint: (projectId) => ipcRenderer.invoke("diagnostics:getFramesCheckpoint", projectId),
     getTranscript: (projectId) => ipcRenderer.invoke("diagnostics:getTranscript", projectId),
+    deleteSample: (projectId, startedAt) => ipcRenderer.invoke("diagnostics:deleteSample", projectId, startedAt),
+    clearAllSamples: () => ipcRenderer.invoke("diagnostics:clearAllSamples"),
   },
   cache: {
     getStats: () => ipcRenderer.invoke("cache:getStats"),
