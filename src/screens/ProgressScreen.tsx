@@ -221,6 +221,11 @@ export function ProgressScreen() {
       setStageLabel("已结束 · 失败");
       return;
     }
+    if (project.status === "completed") {
+      // 已完成的项目不应再触发分析 — 直接跳到 workspace
+      window.setTimeout(() => setCurrentScreen("workspace"), 0);
+      return;
+    }
     hasStarted.current = true;
     // 从 downloading 切到 analyzing 时,把进度重置回 0,避免下载条 100% 直接接到分析条 0%。
     setProgress(0);

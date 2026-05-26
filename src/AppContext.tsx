@@ -453,6 +453,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       delete next[projectId];
       return next;
     });
+    setBudgetByProject((prev) => {
+      if (!(projectId in prev)) return prev;
+      const next = { ...prev };
+      delete next[projectId];
+      return next;
+    });
     if (window.videoAnalyzer) {
       window.videoAnalyzer.deleteProject(projectId).catch((error) => {
         console.warn("deleteProject failed", error);
@@ -650,7 +656,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const si = evt.stageIndex;
         const now = Date.now();
         setPipelineByProject((prev) => {
-          const pipeline = prev[evt.projectId] || createEmptyPipeline(evt.projectId);
+          const existing = prev[evt.projectId];
+          const isNewAnalysis = existing && existing.analysisId && existing.analysisId !== evt.analysisId;
+          // analysisId 变化 → 新分析开始,丢弃旧 pipeline 避免状态混叠
+          const pipeline = (existing && !isNewAnalysis)
+            ? existing
+            : { ...createEmptyPipeline(evt.projectId), analysisId: evt.analysisId };
+          // 新分析 → 旧 budget 无效,一并清掉
+          if (isNewAnalysis) {
+            setBudgetByProject((bp) => {
+              if (!(evt.projectId in bp)) return bp;
+              const next = { ...bp };
+              delete next[evt.projectId];
+              return next;
+            });
+          }
           const stages: PipelineStage[] = pipeline.stages.map((s, i) => {
             if (i < si) {
               if (s.status === "done" || s.status === "failed") return s;

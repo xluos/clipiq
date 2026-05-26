@@ -1039,6 +1039,35 @@ function getDb() {
     log.warn("boot", "reset fetching → idle 失败:", e?.message || e);
   }
 
+  // 上次进程退出时还停在 status=analyzing 的项目 → 根据是否有 completed 分析记录
+  // 恢复到 completed 或 not_analyzed (避免重启后 UI 重新触发分析)
+  try {
+    const rows = db.prepare("SELECT id, data FROM projects").all();
+    for (const row of rows) {
+      let proj = null;
+      try { proj = JSON.parse(row.data); } catch { continue; }
+      if (!proj || proj.status !== "analyzing") continue;
+      // 检查是否有已完成的分析记录
+      const aid = proj.currentAnalysisId;
+      let hasCompleted = false;
+      if (aid) {
+        const ar = db.prepare("SELECT data FROM analyses WHERE id = ?").get(aid);
+        if (ar) {
+          try {
+            const rec = JSON.parse(ar.data);
+            hasCompleted = rec.status === "completed";
+          } catch { /* noop */ }
+        }
+      }
+      const newStatus = hasCompleted ? "completed" : "not_analyzed";
+      proj.status = newStatus;
+      db.prepare("UPDATE projects SET data = ? WHERE id = ?").run(JSON.stringify(proj), row.id);
+      log.info("boot", `project ${row.id} status analyzing → ${newStatus}`);
+    }
+  } catch (e) {
+    log.warn("boot", "reset analyzing projects 失败:", e?.message || e);
+  }
+
   _db = db;
   return db;
 }
@@ -6266,6 +6295,8 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("projects:delete", async (_event, projectId) => {
     if (!projectId) return { ok: false, message: "缺少 projectId" };
+    cancelAnalysis(projectId);
+    clearAnalysis(projectId);
     const db = getDb();
     db.prepare("DELETE FROM analyses WHERE project_id = ?").run(projectId);
     db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);

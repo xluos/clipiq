@@ -583,6 +583,7 @@ export type PipelineStage = {
 
 export type PipelineState = {
   projectId: string;
+  analysisId?: string;
   progress: number;
   stages: PipelineStage[];
 };
