@@ -259,6 +259,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const analysisRecordsByProjectRef = useRef<Record<string, AnalysisRecord[]>>({});
   useEffect(() => { analysisRecordsByProjectRef.current = analysisRecordsByProject; }, [analysisRecordsByProject]);
   const analysisRecordRefreshPending = useRef<Set<string>>(new Set());
+  const dismissedAnalysisIds = useRef<Set<string>>(new Set());
   // v2 状态
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [sessions, setSessions] = useState<StudioSession[]>([]);
@@ -385,6 +386,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       // 清掉上一轮分析的 progress/pipeline/budget，防止重试时短暂闪现旧缓存标记
       const oldAid = currentProject?.currentAnalysisId;
       if (oldAid) {
+        dismissedAnalysisIds.current.add(oldAid);
         setProgressByAnalysis((prev) => { const n = { ...prev }; delete n[oldAid]; return n; });
         setPipelineByAnalysis((prev) => { const n = { ...prev }; delete n[oldAid]; return n; });
         setBudgetByAnalysis((prev) => { const n = { ...prev }; delete n[oldAid]; return n; });
@@ -651,6 +653,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!window.videoAnalyzer?.onAnalysisProgress) return;
     const off = window.videoAnalyzer.onAnalysisProgress((evt) => {
       const key = evt.analysisId;
+      if (key && dismissedAnalysisIds.current.has(key)) {
+        console.debug("[AppContext] 忽略已 dismiss 的分析进度事件", key, evt.stage, evt.progress);
+        return;
+      }
       setProgressByAnalysis((prev) => ({ ...prev, [key]: evt }));
       setActiveAnalysisForProject((prev) => {
         if (prev[evt.projectId] === key) return prev;

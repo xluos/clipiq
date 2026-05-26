@@ -163,6 +163,10 @@ export function ProgressScreen() {
     const unsubscribe = window.videoAnalyzer.onAnalysisProgress((event) => {
       if (event.projectId !== project.id) return;
       if (!hasStarted.current) return;
+      if (activeAnalysisId && event.analysisId && event.analysisId !== activeAnalysisId) {
+        console.debug("[ProgressScreen] 忽略非当前分析的事件", event.analysisId, "期望", activeAnalysisId, event.stage);
+        return;
+      }
       setProgress(event.progress);
       setStageLabel(event.stage);
       setDetail(event.message || "");

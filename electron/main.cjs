@@ -457,6 +457,10 @@ class AnalysisCancelledError extends Error {
 }
 
 function registerAnalysis(projectId) {
+  const existing = activeAnalyses.get(projectId);
+  if (existing) {
+    log.warn("analyze:lifecycle", `registerAnalysis: 覆盖已有 handle project=${projectId} existingAnalysisId=${existing.analysisId || "?"} cancelled=${existing.cancelled}`);
+  }
   const handle = {
     abortController: new AbortController(),
     children: new Set(),
@@ -468,8 +472,11 @@ function registerAnalysis(projectId) {
 
 function clearAnalysis(projectId, expectedHandle) {
   const current = activeAnalyses.get(projectId);
-  // 只清自己的 handle，防止旧分析的 finally 清掉新分析注册的 handle
-  if (expectedHandle && current !== expectedHandle) return;
+  if (expectedHandle && current !== expectedHandle) {
+    log.info("analyze:lifecycle", `clearAnalysis: guard 阻止清除 project=${projectId} — expectedAnalysisId=${expectedHandle?.analysisId || "?"} currentAnalysisId=${current?.analysisId || "?"} (新分析已接管)`);
+    return;
+  }
+  log.info("analyze:lifecycle", `clearAnalysis: 清除 project=${projectId} analysisId=${current?.analysisId || "?"} cancelled=${current?.cancelled}`);
   if (current?.heartbeat) clearInterval(current.heartbeat);
   activeAnalyses.delete(projectId);
   _activeCachePolicy = null;
@@ -477,8 +484,13 @@ function clearAnalysis(projectId, expectedHandle) {
 
 function cancelAnalysis(projectId) {
   const handle = activeAnalyses.get(projectId);
-  if (!handle) return false;
+  if (!handle) {
+    log.warn("analyze:lifecycle", `cancelAnalysis: 无 handle project=${projectId}, 可能已被清理`);
+    return false;
+  }
+  log.info("analyze:lifecycle", `cancelAnalysis: 取消 project=${projectId} analysisId=${handle.analysisId || "?"} childCount=${handle.children.size}`);
   handle.cancelled = true;
+  handle.cancelledAt = Date.now();
   handle.abortController.abort();
   for (const child of handle.children) {
     try {
@@ -4127,8 +4139,10 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   if (activeAnalyses.has(project.id)) {
     const stale = activeAnalyses.get(project.id);
     if (stale?.cancelled) {
+      log.info("analyze:lifecycle", `analyzeProject: 发现已取消的旧 handle project=${project.id} staleAnalysisId=${stale.analysisId || "?"} cancelledAt=${stale.cancelledAt ? new Date(stale.cancelledAt).toISOString() : "?"}`);
       clearAnalysis(project.id, stale);
     } else {
+      log.warn("analyze:lifecycle", `analyzeProject: 拒绝启动 — 已有未取消的分析在运行 project=${project.id} analysisId=${stale?.analysisId || "?"}`);
       throw new Error("该项目已有分析任务在运行。");
     }
   }
@@ -4292,7 +4306,13 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   };
 
   const send = (progress, stage, message, meta = {}) => {
-    if (handle.cancelled) return;
+    if (handle.cancelled) {
+      if (!handle._cancelSkipLogged) {
+        handle._cancelSkipLogged = true;
+        log.info("analyze:lifecycle", `[analysis:${analysisId}] send() 首次跳过: 已取消, stage="${stage}" progress=${progress} (后续跳过不再打印)`);
+      }
+      return;
+    }
     if (stage !== currentStage) {
       closeCurrentStage();
       currentStage = stage;
@@ -5551,8 +5571,12 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   } catch (err) {
     analysisFailureMsg = String(err?.message || err).slice(0, 300);
     log.info("analyze", `[analysis:${analysisId}] 分析异常: ${analysisFailureMsg}`);
+    if (err && typeof err === "object") err._analysisId = analysisId;
     throw err;
   } finally {
+    const currentHandle = activeAnalyses.get(project.id);
+    const takenOver = currentHandle && currentHandle !== handle;
+    log.info("analyze:lifecycle", `[analysis:${analysisId}] finally: outcome=${analysisOutcome} cancelled=${handle.cancelled} takenOverByNew=${takenOver} newAnalysisId=${takenOver ? currentHandle.analysisId : "n/a"} elapsed=${formatDuration(Date.now() - analysisStartedAt)}`);
     if (handle.cancelled) {
       analysisOutcome = "cancelled";
       try {
@@ -5563,7 +5587,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       } catch { /* best-effort */ }
     }
     try {
-      closeCurrentStage(); // 失败/取消路径保证最后一个 stage 也被 push
+      closeCurrentStage();
       await appendEtaSample({
         project,
         analysisStartedAt,
@@ -7235,10 +7259,14 @@ app.whenReady().then(async () => {
       if (!(err instanceof AnalysisCancelledError)) {
         const msg = String(err?.message || err).slice(0, 200);
         const handle = activeAnalyses.get(projectId);
-        if (projectId) {
+        // 如果当前 handle 已经是一个新分析(重试触发的),不要用新的 analysisId 广播旧分析的失败
+        const failedAnalysisId = err?._analysisId || handle?.analysisId;
+        if (handle && !handle.cancelled && handle.analysisId !== failedAnalysisId) {
+          log.warn("analyze:lifecycle", `analysis:start catch: 旧分析失败但新分析已在跑, 跳过失败广播 failedId=${failedAnalysisId} currentId=${handle.analysisId}`);
+        } else if (projectId) {
           broadcastToWindows("analysis:progress", {
             projectId,
-            analysisId: handle?.analysisId,
+            analysisId: failedAnalysisId,
             progress: 0,
             stage: "失败",
             message: msg,
@@ -7249,6 +7277,8 @@ app.whenReady().then(async () => {
           body: `「${projectName}」: ${msg.slice(0, 140)}`,
           urgency: "critical",
         });
+      } else {
+        log.info("analyze:lifecycle", `analysis:start catch: AnalysisCancelledError project=${projectId}`);
       }
       throw err;
     }
