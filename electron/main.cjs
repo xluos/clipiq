@@ -4146,49 +4146,56 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       throw new Error("该项目已有分析任务在运行。");
     }
   }
-  // 在管线开始时一次性快照 config + 从 taskSlots/audioSlot 解析各任务的 effective provider,
-  // 避免运行中用户改设置导致竞争。renderer 传入的 provider/audioProvider 入参作废。
-  const cfgSnapshot = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
-  _activeCachePolicy = cfgSnapshot?.cachePolicy || null;
-  const complexVisionProvider = resolveSlotProvider(cfgSnapshot, "complex_vision");
-  const mediumTextProvider = resolveSlotProvider(cfgSnapshot, "medium_text");
-  const audioProvider = resolveAudioProvider(cfgSnapshot);
-  // 兼容旧主流程变量名
-  const provider = complexVisionProvider;
-
-  // 前置校验: 本地模型 provider 必须引擎已装 + 模型已下载,否则直接拦截
-  const localProviders = [complexVisionProvider, mediumTextProvider].filter(
-    (p) => p?.source === "local_llama",
-  );
-  if (localProviders.length > 0) {
-    const localStatus = llamaRuntime.getStatus();
-    if (!localStatus.binaryFound) {
-      const binaryPath = await llamaRuntime.resolveLlamaServerPath();
-      if (!binaryPath) {
-        const err = new Error("当前选择了本地模型,但推理引擎还没安装,需要先到设置页安装。");
-        err.code = "LOCAL_SETUP_REQUIRED";
-        throw err;
-      }
-    }
-    const manifest = llamaRuntime.getManifest();
-    const installedModels = await llamaRuntime.listModels();
-    const installedMap = new Map(installedModels.map((m) => [m.key, m]));
-    for (const lp of localProviders) {
-      const m = installedMap.get(lp.model);
-      if (!m || !m.downloaded) {
-        const displayName = manifest?.[lp.model]?.name || lp.model;
-        const err = new Error(`当前选择的本地模型「${displayName}」还没下载完成,需要先到设置页下载。`);
-        err.code = "LOCAL_SETUP_REQUIRED";
-        throw err;
-      }
-    }
-  }
-
+  // 立即注册 handle 占位, 在后续任何 await 之前——防止第二个并发 IPC 调用通过 has() 检查。
+  // 前置校验失败时在 catch 里 clearAnalysis 清掉。
   const handle = registerAnalysis(project.id);
   const analysisId = _crypto.randomUUID();
   handle.analysisId = analysisId;
   const analysisStartedAt = Date.now();
   log.info("analyze", `[analysis:${analysisId}] 开始分析 project=${project.id} title="${project.videoName || project.title || ""}"`);
+
+  // 在管线开始时一次性快照 config + 从 taskSlots/audioSlot 解析各任务的 effective provider,
+  // 避免运行中用户改设置导致竞争。renderer 传入的 provider/audioProvider 入参作废。
+  let cfgSnapshot, complexVisionProvider, mediumTextProvider, audioProvider, provider;
+  try {
+    cfgSnapshot = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+    _activeCachePolicy = cfgSnapshot?.cachePolicy || null;
+    complexVisionProvider = resolveSlotProvider(cfgSnapshot, "complex_vision");
+    mediumTextProvider = resolveSlotProvider(cfgSnapshot, "medium_text");
+    audioProvider = resolveAudioProvider(cfgSnapshot);
+    provider = complexVisionProvider;
+
+    // 前置校验: 本地模型 provider 必须引擎已装 + 模型已下载,否则直接拦截
+    const localProviders = [complexVisionProvider, mediumTextProvider].filter(
+      (p) => p?.source === "local_llama",
+    );
+    if (localProviders.length > 0) {
+      const localStatus = llamaRuntime.getStatus();
+      if (!localStatus.binaryFound) {
+        const binaryPath = await llamaRuntime.resolveLlamaServerPath();
+        if (!binaryPath) {
+          const err = new Error("当前选择了本地模型,但推理引擎还没安装,需要先到设置页安装。");
+          err.code = "LOCAL_SETUP_REQUIRED";
+          throw err;
+        }
+      }
+      const manifest = llamaRuntime.getManifest();
+      const installedModels = await llamaRuntime.listModels();
+      const installedMap = new Map(installedModels.map((m) => [m.key, m]));
+      for (const lp of localProviders) {
+        const m = installedMap.get(lp.model);
+        if (!m || !m.downloaded) {
+          const displayName = manifest?.[lp.model]?.name || lp.model;
+          const err = new Error(`当前选择的本地模型「${displayName}」还没下载完成,需要先到设置页下载。`);
+          err.code = "LOCAL_SETUP_REQUIRED";
+          throw err;
+        }
+      }
+    }
+  } catch (setupErr) {
+    clearAnalysis(project.id, handle);
+    throw setupErr;
+  }
 
   // 创建分析记录骨架
   const analysisRecord = {

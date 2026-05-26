@@ -62,7 +62,10 @@ export function ProgressScreen() {
     return Date.now();
   }, [currentAnalysisRecord?.startedAt]);
 
-  const hasStarted = useRef(false);
+  // launchedForKey 替代 hasStarted ref: 记录已经发起分析的 project+status 组合键。
+  // StrictMode 第二轮 key 相同直接跳过,避免发出两个 analyzeProject IPC。
+  // status 真正变化 (downloading→analyzing / failed→analyzing) 时 key 不同,允许重新启动。
+  const launchedForKey = useRef<string | null>(null);
   const cancelledRef = useRef(false);
   // attach 模式 = renderer 不是发起者,而是关窗后重开 / 切回 ProgressScreen,挂到已经在跑的分析上。
   // 完成 / 失败的"兜底处理"只在 attach 模式触发,避免跟 kickoff 路径的 await 结果重复。
@@ -70,6 +73,7 @@ export function ProgressScreen() {
   const completionHandledRef = useRef(false);
   const failureHandledRef = useRef(false);
 
+  // project 切换时重置 UI 状态和流程 ref。
   useEffect(() => {
     if (!project) return;
     const snap = (activeAnalysisId && analysisActive) ? progressByAnalysis[activeAnalysisId] : undefined;
@@ -80,11 +84,11 @@ export function ProgressScreen() {
     setIsCancelling(false);
     completionHandledRef.current = false;
     failureHandledRef.current = false;
-    hasStarted.current = false;
+    launchedForKey.current = null;
     cancelledRef.current = false;
     inAttachMode.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project?.id, project?.currentAnalysisId]);
+  }, [project?.id]);
 
   useEffect(() => {
     if (progress >= 100 || !analysisActive) return;
@@ -162,7 +166,7 @@ export function ProgressScreen() {
     if (!project || !window.videoAnalyzer) return;
     const unsubscribe = window.videoAnalyzer.onAnalysisProgress((event) => {
       if (event.projectId !== project.id) return;
-      if (!hasStarted.current) return;
+      if (!launchedForKey.current) return;
       if (activeAnalysisId && event.analysisId && event.analysisId !== activeAnalysisId) {
         console.debug("[ProgressScreen] 忽略非当前分析的事件", event.analysisId, "期望", activeAnalysisId, event.stage);
         return;
@@ -210,17 +214,15 @@ export function ProgressScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.id]);
 
-  // Kick off the analysis exactly once per project; survives StrictMode double-invoke via the ref guard.
-  // downloading 阶段不起分析,等异步下载完成 (AppContext 把 status 切到 analyzing) 后再触发。
+  // Kick off the analysis exactly once per project+status 组合。
+  // 用 launchedForKey 代替 hasStarted ref: StrictMode 第二轮 key 相同跳过,
+  // status 真正变化 (downloading→analyzing, failed→analyzing) 时 key 不同,允许重新启动。
   useEffect(() => {
-    if (!project || hasStarted.current) return;
-    // status 切换重跑 effect 时 (例: 重试时 failed → analyzing) 先清掉上次留下的 error,
-    // 只有真的走到 failed/download_failed 分支才再 setError。否则点重试后 UI 会一直显示
-    // "上次分析失败,点击重试" 这种残留提示。
+    if (!project) return;
+    const key = `${project.id}:${project.status}`;
+    if (launchedForKey.current === key) return;
     setError("");
     if (project.status === "downloading") {
-      // 下载进度通过 onAnalysisProgress (stage="下载视频") 已经在另一个 effect 里订阅。
-      // 这里只把 UI 初始 stage label 设好,等 status 切换后 effect 重跑进入分析 kickoff。
       if (!stageLabel || stageLabel === PIPELINE_STAGE_DEFS[0].label) setStageLabel("下载视频");
       return;
     }
@@ -236,11 +238,10 @@ export function ProgressScreen() {
       return;
     }
     if (project.status === "completed") {
-      // 已完成的项目不应再触发分析 — 直接跳到 workspace
       window.setTimeout(() => setCurrentScreen("workspace"), 0);
       return;
     }
-    hasStarted.current = true;
+    launchedForKey.current = key;
     // 从 downloading 切到 analyzing 时,把进度重置回 0,避免下载条 100% 直接接到分析条 0%。
     setProgress(0);
     setStageLabel(visibleStageDefs[0].label);
