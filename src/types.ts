@@ -481,6 +481,8 @@ export type StageTokenUsage = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  cacheReadTokens?: number;     // API 级 prompt cache 命中的 token 数
+  cacheCreationTokens?: number; // API 级 prompt cache 写入的 token 数
   callCount: number;   // 真正发起的 LLM 调用次数 (不含缓存命中)
   cacheHits: number;   // 该阶段命中分析缓存的次数
 };

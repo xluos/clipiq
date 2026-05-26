@@ -119,6 +119,8 @@ function createTokenLedger() {
         promptTokens: 0,
         completionTokens: 0,
         totalTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
         callCount: 0,
         cacheHits: 0,
       };
@@ -136,6 +138,8 @@ function createTokenLedger() {
         b.promptTokens += Number(usage.promptTokens) || 0;
         b.completionTokens += Number(usage.completionTokens) || 0;
         b.totalTokens += Number(usage.totalTokens) || 0;
+        b.cacheReadTokens += Number(usage.cacheReadTokens) || 0;
+        b.cacheCreationTokens += Number(usage.cacheCreationTokens) || 0;
       }
       b.callCount += callCount;
     },
@@ -4579,6 +4583,14 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           kept: refined.kept.length,
           dropped: refined.dropped.length,
         };
+        const droppedDetails = refined.dropped.map((f) => ({
+          index: f.index,
+          midSec: f.midSec,
+          reason: refined.reasons[f.index] || "未知",
+          salience: f.prefilterTag?.salience ?? null,
+          sceneType: f.prefilterTag?.sceneType ?? null,
+          caption: f.prefilterTag?.caption ?? null,
+        }));
         const callCount = Math.max(0, framesToTag.length - tagResult.cacheHits);
         if (callCount > 0) {
           tokenLedger.record({
@@ -4604,7 +4616,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             source: "local_llama",
           });
         }
-        handle.attachStageMeta({ tagged: framesToTag.length, kept: refined.kept.length, dropped: refined.dropped.length, totalElapsedMs: tagResult.totalElapsedMs, totalTokens: tagResult.totalTokens });
+        handle.attachStageMeta({ tagged: framesToTag.length, kept: refined.kept.length, dropped: refined.dropped.length, totalElapsedMs: tagResult.totalElapsedMs, totalTokens: tagResult.totalTokens, droppedDetails });
         {
           const allCached = (tagResult.cacheHits || 0) >= framesToTag.length && framesToTag.length > 0;
           send(
@@ -4637,6 +4649,21 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       audioProvider.endpointType === "local_whisper_wasm" ||
       audioProvider.apiKeyRef
     );
+    if (!audioReady && !transcript) {
+      const skipReasons = [];
+      if (!audioProvider) skipReasons.push("未配置语音识别供应商");
+      else if (!inspected.hasAudio) skipReasons.push("视频无音轨");
+      else {
+        const src = audioProvider.source || audioProvider.endpointType;
+        if (src !== "local_whisper" && src !== "local_whisper_cpp" && src !== "local_whisper_wasm" && !audioProvider.apiKeyRef) {
+          skipReasons.push(`供应商 ${audioProvider.name || src} 无 API Key 且非本地 whisper`);
+        }
+      }
+      const reason = skipReasons.length > 0 ? skipReasons.join("; ") : "未知原因";
+      send(50, "字幕识别跳过", reason);
+      handle.attachStageMeta({ transcriptSkipped: true, transcriptSkipReason: reason });
+      log.info("clipiq", `转录跳过: ${reason} (audioProvider=${audioProvider ? audioProvider.name : "null"}, hasAudio=${inspected.hasAudio})`);
+    }
     if (audioReady) {
       try {
         send(35, "提取音轨", "从视频里分离出音频,准备识别字幕。");
