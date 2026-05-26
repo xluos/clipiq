@@ -103,7 +103,7 @@ async function runWithCacheTraced(scope, key, run, meta = {}) {
 // - record: 单次调用 / 单 batch 调用完成后投递 usage
 // - snapshot: 持久化前快照, 写进 report.tokenUsage 和 token-usage.json
 // cache 命中只 +cacheHits, 不加 token; 累计调用次数走 callCount。
-function createTokenLedger() {
+function createTokenLedger(priorStages) {
   const buckets = new Map();
   const keyOf = (stage, providerId, model) => `${stage}|${providerId || ""}|${model || ""}`;
   const ensureBucket = (stage, providerId, providerName, model, source) => {
@@ -149,6 +149,16 @@ function createTokenLedger() {
       const src = source || (provider?.source ?? "remote");
       const b = ensureBucket(stage, provider?.id, provider?.name, m, src);
       b.cacheHits += 1;
+      if (b.totalTokens === 0 && priorStages) {
+        const match = priorStages.find((s) => s.stage === stage && s.model === m);
+        if (match && match.totalTokens > 0) {
+          b.promptTokens = match.promptTokens || 0;
+          b.completionTokens = match.completionTokens || 0;
+          b.totalTokens = match.totalTokens || 0;
+          b.callCount = match.callCount || 0;
+          b.fromPriorRun = true;
+        }
+      }
     },
     snapshot() {
       const stages = [...buckets.values()];
@@ -4301,10 +4311,22 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   };
 
   // Token 账本: 每个 LLM 阶段调用完后 record(usage), cache 命中走 cacheHit(); 收尾时
-  // snapshot 进 report.tokenUsage 持久化。各阶段 stage key (用机器名而非中文 send stage,
-  // 便于 renderer/外部脚本聚合): "prefilter" | "shot-merger" | "summarizer" | "detect-genre"
-  // | "main-analysis" | "danmaku-emotion" | "title-gen"。
-  const tokenLedger = createTokenLedger();
+  // snapshot 进 report.tokenUsage 持久化。缓存命中时从上一次成功分析的 token-usage
+  // 里回填对应 stage 的消耗量，让 UI 上能看到"这段如果不走缓存要花多少 token"。
+  let priorTokenStages = null;
+  try {
+    const db = getDb();
+    const priorRow = db.prepare(
+      "SELECT id FROM analyses WHERE project_id = ? AND id != ? ORDER BY created_at DESC LIMIT 1"
+    ).get(project.id, analysisId);
+    if (priorRow?.id) {
+      const priorUsage = await readJson(
+        path.join(getAnalysisDir(project.id, priorRow.id), "token-usage.json"), null
+      );
+      if (priorUsage?.stages?.length) priorTokenStages = priorUsage.stages;
+    }
+  } catch { /* best-effort */ }
+  const tokenLedger = createTokenLedger(priorTokenStages);
   handle.tokenLedger = tokenLedger;
 
   // stageIndex 映射: stage 中文名 → 流水线 UI 阶段索引 (0-8), 与 renderer PIPELINE_STAGE_DEFS 对齐。
