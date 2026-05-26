@@ -2,9 +2,10 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AnalysisRecord, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, AnalysisBudget, PIPELINE_STAGE_DEFS, PipelineState, PipelineStage, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
 import type { DownloadedVideo } from "./electron-api";
 
-function createEmptyPipeline(projectId: string): PipelineState {
+function createEmptyPipeline(projectId: string, analysisId: string): PipelineState {
   return {
     projectId,
+    analysisId,
     progress: 0,
     stages: PIPELINE_STAGE_DEFS.map((d) => ({ key: d.key, label: d.label, status: "pending" as const })),
   };
@@ -90,13 +91,11 @@ interface AppState {
   // 应用启动时全局订阅一次 onAnalysisProgress, 把每个 event 累加到这里;
   // TaskQueueDrawer / ProgressScreen 都直接读, 避免各自挂 listener 导致 drawer
   // 在打开瞬间订阅 → 错过之前事件 → 显示停留在很旧的 stage。
-  progressByProject: Record<string, AnalysisProgressEvent>;
-  pipelineByProject: Record<string, PipelineState>;
-  // ETA baseline budget: main 在 analyzeProject 开头算一次 broadcast, 这里 cache 给
-  // ProgressScreen 用做精准 ETA 估算 (替代之前的 elapsed/progress 线性外推)。
-  budgetByProject: Record<string, AnalysisBudget>;
-  // attach 模式重连时, ProgressScreen 调 getLastAnalysisBudget 拉一次后用这个写回 cache。
-  setBudgetForProject: (projectId: string, budget: AnalysisBudget) => void;
+  progressByAnalysis: Record<string, AnalysisProgressEvent>;
+  pipelineByAnalysis: Record<string, PipelineState>;
+  budgetByAnalysis: Record<string, AnalysisBudget>;
+  activeAnalysisForProject: Record<string, string>;
+  setBudgetForAnalysis: (analysisId: string, budget: AnalysisBudget) => void;
   // 模型下载进度,全局订阅 llama:progress (scope=model) 写入,任务队列和设置页共享读取
   modelDownloads: Record<string, ModelDownloadProgress>;
   // whisper 模型下载进度,全局订阅 whisperCpp:progress 写入
@@ -266,9 +265,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // v2.1: 账号视频独立表
   const [accountVideosByAccountId, setAccountVideosByAccountId] = useState<Record<string, AccountVideo[]>>({});
   const [accountFetchUi, setAccountFetchUi] = useState<Record<string, AccountFetchUiState>>({});
-  const [progressByProject, setProgressByProject] = useState<Record<string, AnalysisProgressEvent>>({});
-  const [pipelineByProject, setPipelineByProject] = useState<Record<string, PipelineState>>({});
-  const [budgetByProject, setBudgetByProject] = useState<Record<string, AnalysisBudget>>({});
+  const [progressByAnalysis, setProgressByAnalysis] = useState<Record<string, AnalysisProgressEvent>>({});
+  const [pipelineByAnalysis, setPipelineByAnalysis] = useState<Record<string, PipelineState>>({});
+  const [budgetByAnalysis, setBudgetByAnalysis] = useState<Record<string, AnalysisBudget>>({});
+  const [activeAnalysisForProject, setActiveAnalysisForProject] = useState<Record<string, string>>({});
   const [modelDownloads, setModelDownloads] = useState<Record<string, ModelDownloadProgress>>({});
   const [whisperDownloads, setWhisperDownloads] = useState<Record<string, ModelDownloadProgress>>({});
 
@@ -334,8 +334,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const setBudgetForProject = useCallback((projectId: string, budget: AnalysisBudget) => {
-    setBudgetByProject((prev) => ({ ...prev, [projectId]: budget }));
+  const setBudgetForAnalysis = useCallback((analysisId: string, budget: AnalysisBudget) => {
+    setBudgetByAnalysis((prev) => ({ ...prev, [analysisId]: budget }));
   }, []);
 
   const setReportForAnalysis = useCallback((analysisId: string, report: AnalysisReport) => {
@@ -381,25 +381,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setCurrentLocation({ module: "analysis", screen: "progress" });
         return;
       }
-      // 清掉旧的进度/pipeline/budget (这些是 per-project 的临时状态)
-      setPipelineByProject((prev) => {
-        if (!(projectId in prev)) return prev;
-        const next = { ...prev };
-        delete next[projectId];
-        return next;
-      });
-      setProgressByProject((prev) => {
-        if (!(projectId in prev)) return prev;
-        const next = { ...prev };
-        delete next[projectId];
-        return next;
-      });
-      setBudgetByProject((prev) => {
-        if (!(projectId in prev)) return prev;
-        const next = { ...prev };
-        delete next[projectId];
-        return next;
-      });
       // 新分析由 main 进程创建 (analysisId 在 analyzeProject 里生成)，
       // 这里只设 project.status 和导航
       setProjects((prev) =>
@@ -444,19 +425,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return next;
     });
     setActiveProjectId((current) => (current === projectId ? null : current));
-    setProgressByProject((prev) => {
-      if (!(projectId in prev)) return prev;
-      const next = { ...prev };
-      delete next[projectId];
-      return next;
-    });
-    setPipelineByProject((prev) => {
-      if (!(projectId in prev)) return prev;
-      const next = { ...prev };
-      delete next[projectId];
-      return next;
-    });
-    setBudgetByProject((prev) => {
+    // 按 analysisId 清理 per-analysis maps
+    const aidsToClear = new Set<string>(records.map((r) => r.id));
+    if (project?.currentAnalysisId) aidsToClear.add(project.currentAnalysisId);
+    if (aidsToClear.size > 0) {
+      setProgressByAnalysis((prev) => {
+        const next = { ...prev };
+        for (const id of aidsToClear) delete next[id];
+        return next;
+      });
+      setPipelineByAnalysis((prev) => {
+        const next = { ...prev };
+        for (const id of aidsToClear) delete next[id];
+        return next;
+      });
+      setBudgetByAnalysis((prev) => {
+        const next = { ...prev };
+        for (const id of aidsToClear) delete next[id];
+        return next;
+      });
+    }
+    setActiveAnalysisForProject((prev) => {
       if (!(projectId in prev)) return prev;
       const next = { ...prev };
       delete next[projectId];
@@ -646,34 +635,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // 订阅 main 进程的分析 / 下载进度事件 — 全局只挂一次, 同时写 progressByProject
-  // (最新一条快照) 和 pipelineByProject (结构化阶段进度)。
-  // 任何屏 (ProgressScreen / TaskQueueDrawer / 首屏卡片) 都从这两个全局 map 读,
-  // 避免组件 mount 才订阅导致漏掉之前的 events, 也避免 ProgressScreen 切换 /
-  // 退出再进时日志被清掉混在一起。
+  // 订阅 main 进程的分析 / 下载进度事件 — 全局只挂一次, 按 analysisId 索引。
+  // 每个分析有独立槽位，取消后开新分析不会互踩。
   useEffect(() => {
     if (!window.videoAnalyzer?.onAnalysisProgress) return;
     const off = window.videoAnalyzer.onAnalysisProgress((evt) => {
-      setProgressByProject((prev) => ({ ...prev, [evt.projectId]: evt }));
+      const key = evt.analysisId;
+      setProgressByAnalysis((prev) => ({ ...prev, [key]: evt }));
+      setActiveAnalysisForProject((prev) => {
+        if (prev[evt.projectId] === key) return prev;
+        return { ...prev, [evt.projectId]: key };
+      });
       if (evt.stageIndex != null) {
         const si = evt.stageIndex;
         const now = Date.now();
-        setPipelineByProject((prev) => {
-          const existing = prev[evt.projectId];
-          const isNewAnalysis = existing && existing.analysisId && existing.analysisId !== evt.analysisId;
-          // analysisId 变化 → 新分析开始,丢弃旧 pipeline 避免状态混叠
-          const pipeline = (existing && !isNewAnalysis)
-            ? existing
-            : { ...createEmptyPipeline(evt.projectId), analysisId: evt.analysisId };
-          // 新分析 → 旧 budget 无效,一并清掉
-          if (isNewAnalysis) {
-            setBudgetByProject((bp) => {
-              if (!(evt.projectId in bp)) return bp;
-              const next = { ...bp };
-              delete next[evt.projectId];
-              return next;
-            });
-          }
+        setPipelineByAnalysis((prev) => {
+          const existing = prev[key];
+          const pipeline = existing || createEmptyPipeline(evt.projectId, key);
           const stages: PipelineStage[] = pipeline.stages.map((s, i) => {
             if (i < si) {
               if (s.status === "done" || s.status === "failed") return s;
@@ -692,7 +670,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             }
             return s;
           });
-          return { ...prev, [evt.projectId]: { ...pipeline, progress: evt.progress, stages } };
+          return { ...prev, [key]: { ...pipeline, progress: evt.progress, stages } };
         });
       }
     });
@@ -761,13 +739,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return off;
   }, []);
 
-  // 订阅 analyzeProject 起来时广播的 ETA budget — 全局只挂一次, 写进 budgetByProject。
+  // 订阅 analyzeProject 起来时广播的 ETA budget — 全局只挂一次, 写进 budgetByAnalysis。
   // ProgressScreen 读这里给出比线性外推更准的 ETA; attach 模式重连时通过
   // getLastAnalysisBudget IPC 拉一次补回 cache。
   useEffect(() => {
     if (!window.videoAnalyzer?.onAnalysisBudget) return;
     const off = window.videoAnalyzer.onAnalysisBudget((evt) => {
-      setBudgetByProject((prev) => ({ ...prev, [evt.projectId]: evt.budget }));
+      const key = evt.analysisId;
+      setBudgetByAnalysis((prev) => ({ ...prev, [key]: evt.budget }));
+      setActiveAnalysisForProject((prev) => {
+        if (prev[evt.projectId] === key) return prev;
+        return { ...prev, [evt.projectId]: key };
+      });
     });
     return off;
   }, []);
@@ -893,10 +876,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
         refreshAccountVideos,
         upsertAccountVideoLocal,
         accountFetchUi,
-        progressByProject,
-        pipelineByProject,
-        budgetByProject,
-        setBudgetForProject,
+        progressByAnalysis,
+        pipelineByAnalysis,
+        budgetByAnalysis,
+        activeAnalysisForProject,
+        setBudgetForAnalysis,
         modelDownloads,
         whisperDownloads,
       }}

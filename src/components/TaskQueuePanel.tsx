@@ -22,7 +22,7 @@ type TaskEntry = {
 // ─── 数据汇聚 hook ────────────────────────────────────
 
 export function useTaskQueueData() {
-  const { projects, accounts, accountFetchUi, progressByProject, modelDownloads } = useApp();
+  const { projects, accounts, accountFetchUi, progressByAnalysis, activeAnalysisForProject, modelDownloads } = useApp();
 
   return useMemo(() => {
     // 视频分析任务
@@ -30,7 +30,8 @@ export function useTaskQueueData() {
     const failedProjects: Project[] = [];
     for (const p of projects) {
       if (p.status === "analyzing" || p.status === "downloading") {
-        const evt = progressByProject[p.id];
+        const aid = activeAnalysisForProject[p.id] || p.currentAnalysisId;
+        const evt = aid ? progressByAnalysis[aid] : undefined;
         const isDownloading = p.status === "downloading";
         analysisTasks.push({
           id: p.id,
@@ -73,7 +74,7 @@ export function useTaskQueueData() {
 
     const totalRunning = analysisTasks.length + accountTasks.length + downloadTasks.length;
     return { analysisTasks, accountTasks, downloadTasks, failedProjects, totalRunning };
-  }, [projects, progressByProject, accounts, accountFetchUi, modelDownloads]);
+  }, [projects, progressByAnalysis, activeAnalysisForProject, accounts, accountFetchUi, modelDownloads]);
 }
 
 function fmtSize(n: number): string | null {
