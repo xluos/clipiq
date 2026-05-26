@@ -559,6 +559,7 @@ export type AnalysisBudgetEvent = {
 };
 
 export const PIPELINE_STAGE_DEFS = [
+  { key: "download", label: "下载视频" },
   { key: "read_video", label: "读取视频信息" },
   { key: "detect_scenes", label: "检测镜头切换" },
   { key: "extract_frames", label: "挑选关键画面" },

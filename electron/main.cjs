@@ -4154,18 +4154,19 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   // stageIndex 映射: stage 中文名 → 流水线 UI 阶段索引 (0-8), 与 renderer PIPELINE_STAGE_DEFS 对齐。
   // timing 系统仍用细粒度的 stage 字符串做 key (eta-samples / DiagnosticsScreen 依赖它)。
   const STAGE_INDEX_MAP = {
-    "读取视频信息": 0, "校验视频": 0,
-    "检测镜头切换": 1,
-    "挑选关键画面": 2, "抽取关键画面": 2, "画面去重": 2,
-    "本地推理预检": 2, "本地初筛": 2, "本地初筛失败": 2,
-    "提取音轨": 3, "字幕识别": 3, "字幕识别完成": 3, "字幕识别失败": 3,
-    "镜头合并": 4, "镜头缩略图": 4, "镜头缩略图就绪": 4, "镜头合并完成": 4, "镜头合并失败": 4,
-    "全局聚合": 5, "全局聚合跳过": 5, "全局聚合失败": 5,
-    "准备分析素材": 5, "识别视频类型": 5, "类型识别跳过": 5, "类型识别完成": 5,
-    "模型分析画面": 6, "主分析(分段)": 6, "主分析(审计)": 6, "分析失败": 6,
-    "拉取弹幕": 6, "弹幕情绪聚合": 6, "弹幕情绪聚合完成": 6, "弹幕分析完成": 6, "弹幕分析失败": 6,
-    "整理结果": 7, "保存失败快照": 7,
-    "完成": 8, "已结束": 8, "生成最终报告": 8,
+    "下载视频": 0, "下载完成": 0,
+    "读取视频信息": 1, "校验视频": 1,
+    "检测镜头切换": 2,
+    "挑选关键画面": 3, "抽取关键画面": 3, "画面去重": 3,
+    "本地推理预检": 3, "本地初筛": 3, "本地初筛失败": 3,
+    "提取音轨": 4, "字幕识别": 4, "字幕识别完成": 4, "字幕识别失败": 4,
+    "镜头合并": 5, "镜头缩略图": 5, "镜头缩略图就绪": 5, "镜头合并完成": 5, "镜头合并失败": 5,
+    "全局聚合": 6, "全局聚合跳过": 6, "全局聚合失败": 6,
+    "准备分析素材": 6, "识别视频类型": 6, "类型识别跳过": 6, "类型识别完成": 6,
+    "模型分析画面": 7, "主分析(分段)": 7, "主分析(审计)": 7, "分析失败": 7,
+    "拉取弹幕": 7, "弹幕情绪聚合": 7, "弹幕情绪聚合完成": 7, "弹幕分析完成": 7, "弹幕分析失败": 7,
+    "整理结果": 8, "保存失败快照": 8,
+    "完成": 9, "已结束": 9, "生成最终报告": 9,
   };
 
   const send = (progress, stage, message, meta = {}) => {
@@ -4233,9 +4234,33 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   let analysisFailureMsg = null;
 
   try {
-    const inputPath = resolveProjectVideoPath(project);
+    let inputPath = resolveProjectVideoPath(project);
     if (!inputPath || !fsSync.existsSync(inputPath)) {
-      throw new Error("找不到本地视频文件，无法开始分析。");
+      const sourceUrl = project?.source?.type === "url" ? project.source.url : null;
+      if (!sourceUrl) {
+        throw new Error("找不到本地视频文件，无法开始分析。");
+      }
+      send(1, "下载视频", "视频文件缺失,正在重新下载…");
+      const projectDir = getProjectDir(project.id);
+      const mediaDir = path.join(projectDir, "media");
+      await fs.mkdir(mediaDir, { recursive: true });
+      const video = await performUrlDownloadFlow(sourceUrl, {
+        projectId: project.id,
+        mediaDir,
+        handle,
+        onProgress: (pct, stage, msg) => send(Math.min(9, Math.round(pct * 0.09)), stage, msg),
+      });
+      inputPath = video.filePath;
+      if (!inputPath || !fsSync.existsSync(inputPath)) {
+        throw new Error("视频重新下载后仍找不到文件。");
+      }
+      project.localFilePath = inputPath;
+      project.localVideoPath = video.mediaUrl;
+      project.durationSec = video.durationSec;
+      project.width = video.width;
+      project.height = video.height;
+      project.orientation = video.orientation;
+      if (video.title || video.filename) project.videoName = video.title || video.filename;
     }
 
     const ffmpeg = await commandPath("ffmpeg");
@@ -7381,7 +7406,7 @@ app.whenReady().then(async () => {
     const handle = registerAnalysis(projectId);
     const emitProgress = (progress, stage, message) => {
       if (handle.cancelled) return;
-      const payload = { projectId, progress, stage, message: message || "" };
+      const payload = { projectId, progress, stage, message: message || "", stageIndex: 0 };
       handle.lastProgress = payload;
       handle.lastProgressAt = Date.now();
       broadcastToWindows("analysis:progress", payload);
