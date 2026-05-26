@@ -6065,9 +6065,17 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("ytdlp:install", async (event) => {
-    return downloadYtDlp((stage, message) => {
+    const result = await downloadYtDlp((stage, message) => {
       event.sender.send("ytdlp:progress", { stage, message });
     });
+    event.sender.send("ytdlp:update-status", {
+      installed: true,
+      installedVersion: result.installedVersion,
+      isBundled: true,
+      latestVersion: result.latestVersion,
+      updateAvailable: false,
+    });
+    return result;
   });
 
   ipcMain.handle("video:openFile", async () => {
