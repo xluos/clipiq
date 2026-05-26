@@ -3937,11 +3937,24 @@ async function callOpenAICompatible(provider, project, frames, transcript, scene
     );
 
     if (singleTotal <= singleBudget) {
-      return await runSinglePassAnalysis({
-        effectiveProvider, project, frames, transcript, scenes, options, methodology,
-        reserveOutput: reserveForOutput,
-        handle, fallbackNodes, fallbackReport,
-      });
+      const SINGLE_MAX_RETRIES = 2;
+      for (let attempt = 0; attempt <= SINGLE_MAX_RETRIES; attempt++) {
+        if (handle?.cancelled) throw new AnalysisCancelledError();
+        try {
+          return await runSinglePassAnalysis({
+            effectiveProvider, project, frames, transcript, scenes, options, methodology,
+            reserveOutput: reserveForOutput,
+            handle, fallbackNodes, fallbackReport,
+          });
+        } catch (err) {
+          if (err instanceof AnalysisCancelledError || err?.name === "AbortError") throw new AnalysisCancelledError();
+          if (attempt < SINGLE_MAX_RETRIES) {
+            log.warn("analyze:main", `single-pass 第 ${attempt + 1} 次失败, 重试: ${err?.message?.slice(0, 200) || err}`);
+            continue;
+          }
+          throw err;
+        }
+      }
     }
 
     // 装不下 → 分段
@@ -7553,12 +7566,14 @@ app.whenReady().then(async () => {
     await fs.mkdir(useMediaDir, { recursive: true });
 
     const outputPattern = path.join(useMediaDir, "%(extractor)s_%(id)s.%(ext)s");
+    const ffmpegForYtdlp = bundledFfmpegPath();
     const ytdlpArgs = [
       "--no-playlist",
       "--restrict-filenames",
       "--write-info-json",
       "--newline",
       "--progress",
+      ...(ffmpegForYtdlp ? ["--ffmpeg-location", path.dirname(ffmpegForYtdlp)] : []),
       "-o", outputPattern,
       url,
     ];
