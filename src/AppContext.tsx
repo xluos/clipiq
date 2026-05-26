@@ -258,6 +258,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [analysisRecordsByProject, setAnalysisRecordsByProject] = useState<Record<string, AnalysisRecord[]>>({});
   const analysisRecordsByProjectRef = useRef<Record<string, AnalysisRecord[]>>({});
   useEffect(() => { analysisRecordsByProjectRef.current = analysisRecordsByProject; }, [analysisRecordsByProject]);
+  const analysisRecordRefreshPending = useRef<Set<string>>(new Set());
   // v2 状态
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [sessions, setSessions] = useState<StudioSession[]>([]);
@@ -655,6 +656,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (prev[evt.projectId] === key) return prev;
         return { ...prev, [evt.projectId]: key };
       });
+      // main 进程创建新分析记录后第一条 progress 就带新 analysisId,
+      // 同步刷新 project.currentAnalysisId 让 ProgressScreen 的 startedAt 指向新记录。
+      setProjects((prev) => prev.map((p) => {
+        if (p.id !== evt.projectId || p.currentAnalysisId === key) return p;
+        return { ...p, currentAnalysisId: key };
+      }));
+      if (!analysisRecordRefreshPending.current.has(key)) {
+        analysisRecordRefreshPending.current.add(key);
+        refreshAnalysisRecords(evt.projectId);
+      }
       if (evt.stageIndex != null) {
         const si = evt.stageIndex;
         const now = Date.now();
