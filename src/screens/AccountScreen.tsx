@@ -12,6 +12,7 @@
 import { type FunctionComponent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../AppContext";
 import { ImageGallery, ImageView, VideoThumbnail } from "../components/MediaViewer";
+import { ModelConfigDialog } from "../components/ModelConfigDialog";
 import type {
   AppLocation,
   Account,
@@ -20,6 +21,7 @@ import type {
   AccountFetchRange,
   AccountVideo,
   VideoContentAnalysis,
+  SlotOverrides,
   Project,
 } from "../types";
 import { defaultPresetToAnalysisOptions } from "../types";
@@ -859,6 +861,7 @@ function VideosTab({
   const [liveProgress, setLiveProgress] = useState<Record<string, { progress: number; message: string }>>({});
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
   const selectedVideo = selectedVideoId ? videos.find((v) => v.id === selectedVideoId) : null;
+  const [configTarget, setConfigTarget] = useState<string | null>(null);
 
   // ── 队列 ──
   const [queue, setQueue] = useState<{ type: "summary" | "analyze"; ids: string[]; index: number; cancelled: boolean } | null>(null);
@@ -878,11 +881,11 @@ function VideosTab({
     return () => { off?.(); };
   }, []);
 
-  const fireSummarize = useCallback((avId: string) => {
+  const fireSummarize = useCallback((avId: string, slotOverrides?: SlotOverrides) => {
     if (launchedRef.current.has(avId)) return;
     launchedRef.current.add(avId);
     setRowError((m) => { const n = { ...m }; delete n[avId]; return n; });
-    window.videoAnalyzer?.summarizeAccountVideo({ accountVideoId: avId }).catch((e: unknown) => {
+    window.videoAnalyzer?.summarizeAccountVideo({ accountVideoId: avId, slotOverrides }).catch((e: unknown) => {
       launchedRef.current.delete(avId);
       setRowError((m) => ({ ...m, [avId]: e instanceof Error ? e.message : String(e) }));
     });
@@ -1046,18 +1049,23 @@ function VideosTab({
             </div>
             <div className="flex items-center gap-2 mt-3">
               {!svHasSummary && !svSummarizing && !svFailed && (
-                <button onClick={() => fireSummarize(sv.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white">
+                <button onClick={() => setConfigTarget(sv.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white">
                   <Sparkles className="w-3 h-3" strokeWidth={2} />内容分析
                 </button>
               )}
               {svFailed && (
-                <button onClick={() => fireSummarize(sv.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300">
+                <button onClick={() => setConfigTarget(sv.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300">
                   <AlertTriangle className="w-3 h-3" strokeWidth={2} />重试分析
                 </button>
               )}
               {svSummarizing && (
                 <button onClick={() => cancelSummarize(sv.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/30">
                   <X className="w-3 h-3" strokeWidth={2} />取消
+                </button>
+              )}
+              {svHasSummary && !svSummarizing && (
+                <button onClick={() => setConfigTarget(sv.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">
+                  <RefreshCw className="w-3 h-3" strokeWidth={2} />重新分析
                 </button>
               )}
               {svHasSummary && !sv.analysisProjectId && (
@@ -1214,8 +1222,13 @@ function VideosTab({
               </div>
               <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
                 {!hasSummary && !isSummarizing && !summaryFailed && !inQueue && (
-                  <span role="button" onClick={() => fireSummarize(v.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white">
+                  <span role="button" onClick={() => setConfigTarget(v.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white">
                     <Sparkles className="w-3 h-3" strokeWidth={2} />内容分析
+                  </span>
+                )}
+                {hasSummary && !isSummarizing && !inQueue && (
+                  <span role="button" onClick={() => setConfigTarget(v.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800">
+                    <RefreshCw className="w-3 h-3" strokeWidth={2} />重新分析
                   </span>
                 )}
               </div>
@@ -1224,6 +1237,15 @@ function VideosTab({
           );
         })}
       </div>
+
+      <ModelConfigDialog
+        open={!!configTarget}
+        onClose={() => setConfigTarget(null)}
+        mode="content"
+        onConfirm={(overrides) => {
+          if (configTarget) fireSummarize(configTarget, Object.keys(overrides).length > 0 ? overrides : undefined);
+        }}
+      />
     </div>
   );
 }

@@ -198,6 +198,13 @@ export type TaskSlotKey =
 export type SlotAssignment = { providerId: string; modelId: string; enableThinking?: boolean } | null;
 export type TaskSlots = Record<TaskSlotKey, SlotAssignment>;
 
+export type SlotOverrides = {
+  simple_vision?: SlotAssignment;
+  complex_vision?: SlotAssignment;
+  medium_text?: SlotAssignment;
+  audio?: SlotAssignment;
+};
+
 export type ProjectSource =
   | { type: "local_file"; originalPath: string }
   | {

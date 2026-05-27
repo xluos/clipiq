@@ -8,7 +8,8 @@ import { type ChangeEvent, type DragEvent, type FunctionComponent, type Keyboard
 import type { InspectedVideo } from "../electron-api";
 import { BrandLogo } from "../components/BrandLogo";
 import { useConfirm } from "../components/ConfirmDialog";
-import type { AnalysisOptions, Project, ProjectSource, VideoGenre } from "../types";
+import type { AnalysisOptions, SlotOverrides, Project, ProjectSource, VideoGenre } from "../types";
+import { ModelConfigDialog } from "../components/ModelConfigDialog";
 
 type PresetKey = "quick" | "standard" | "deep" | "custom";
 
@@ -118,7 +119,7 @@ function projectSourceLabel(source: ProjectSource): string {
 }
 
 export function HomeScreen() {
-  const { setCurrentScreen, goModule, projects, setActiveProjectId, setProjects, removeProject, startAnalysisForProject } = useApp();
+  const { setCurrentScreen, goModule, projects, setActiveProjectId, setProjects, removeProject, startAnalysisForProject, setPendingSlotOverrides } = useApp();
   const confirm = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -135,6 +136,8 @@ export function HomeScreen() {
   const [manualGenre, setManualGenre] = useState<VideoGenre | "auto">("auto");
   const [presetOpen, setPresetOpen] = useState(false);
   const presetRef = useRef<HTMLDivElement>(null);
+  const [modelConfigOpen, setModelConfigOpen] = useState(false);
+  const [pendingOverrides, setPendingOverrides] = useState<SlotOverrides | undefined>(undefined);
 
   const currentPreset = matchPreset({ mode, density, focus });
   const presetMeta = PRESETS.find(p => p.key === currentPreset);
@@ -207,6 +210,7 @@ export function HomeScreen() {
       return;
     }
     // not_analyzed: 直接跑
+    if (pendingOverrides) setPendingSlotOverrides((prev) => ({ ...prev, [proj.id]: pendingOverrides }));
     startAnalysisForProject(proj.id);
   };
 
@@ -524,6 +528,19 @@ export function HomeScreen() {
                     />
                   )}
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setModelConfigOpen(true)}
+                  className={`inline-flex items-center gap-1 h-[30px] px-2.5 rounded-full border text-[12px] whitespace-nowrap transition-colors ${
+                    pendingOverrides
+                      ? "border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300"
+                      : "border-slate-200 dark:border-slate-800 bg-white dark:bg-[#1c1e24] text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-[#222530]"
+                  }`}
+                  title="指定本次分析使用的模型"
+                >
+                  <Wand2 className="w-3 h-3" />
+                  {pendingOverrides ? "已配置" : "高级"}
+                </button>
               </div>
               <button
                 type="button"
@@ -647,6 +664,16 @@ export function HomeScreen() {
           </div>
         </div>
       )}
+
+      <ModelConfigDialog
+        open={modelConfigOpen}
+        onClose={() => setModelConfigOpen(false)}
+        mode="pipeline"
+        title="结构拆解 · 高级设置"
+        onConfirm={(overrides) => {
+          setPendingOverrides(Object.keys(overrides).length > 0 ? overrides : undefined);
+        }}
+      />
     </main>
   );
 }

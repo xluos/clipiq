@@ -342,7 +342,7 @@ declare global {
       onAccountFetchDone: (callback: (event: { accountId: string; videos: AccountVideo[]; account: Partial<Account>; warnings?: string[] }) => void) => () => void;
       onAccountFetchFailed: (callback: (event: { accountId: string; error: string }) => void) => () => void;
       // 轻量视频摘要
-      summarizeAccountVideo: (payload: { accountVideoId: string }) => Promise<{ ok: true; accepted: boolean; reason?: string }>;
+      summarizeAccountVideo: (payload: { accountVideoId: string; slotOverrides?: import("./types").SlotOverrides }) => Promise<{ ok: true; accepted: boolean; reason?: string }>;
       cancelSummarizeVideo: (accountVideoId: string) => Promise<{ ok: true; cancelled: boolean }>;
       onAccountVideoSummaryStatus: (callback: (event: {
         accountVideoId: string;
@@ -378,6 +378,7 @@ declare global {
         provider?: ModelProvider;
         audioProvider?: ModelProvider | null;
         options: AnalysisOptions;
+        slotOverrides?: import("./types").SlotOverrides;
       }) => Promise<AnalysisResult>;
       cancelAnalysis: (projectId: string) => Promise<{ cancelled: boolean }>;
       isAnalysisActive: (projectId: string) => Promise<boolean>;
