@@ -1246,27 +1246,30 @@ function SummaryDetail({ summary, analysisProjectId, onOpenAnalysis }: {
   const hasTranscript = summary.transcript?.text;
 
   return (
-    <div className="px-4 pb-3 -mt-1 space-y-2.5">
+    <div className="space-y-4">
       {/* 选题 + 受众 */}
       {(summary.topic || summary.target) && (
-        <div className="flex gap-2 flex-wrap">
+        <div className="flex gap-3 flex-wrap">
           {summary.topic && (
-            <div className="rounded-md bg-slate-50 dark:bg-slate-800/50 px-2.5 py-1.5 flex-1 min-w-[140px]">
-              <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-0.5">选题</div>
-              <div className="text-[12px] leading-relaxed text-slate-700 dark:text-slate-300">{summary.topic}</div>
+            <div className="rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 px-3 py-2 flex-1 min-w-[180px]">
+              <div className="text-[11px] font-semibold text-slate-900 dark:text-slate-100 mb-0.5">选题</div>
+              <div className="text-[12.5px] leading-relaxed text-slate-700 dark:text-slate-300">{summary.topic}</div>
             </div>
           )}
           {summary.target && (
-            <div className="rounded-md bg-slate-50 dark:bg-slate-800/50 px-2.5 py-1.5 flex-1 min-w-[140px]">
-              <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-0.5">受众</div>
-              <div className="text-[12px] leading-relaxed text-slate-700 dark:text-slate-300">{summary.target}</div>
+            <div className="rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 px-3 py-2 flex-1 min-w-[180px]">
+              <div className="text-[11px] font-semibold text-slate-900 dark:text-slate-100 mb-0.5">受众</div>
+              <div className="text-[12.5px] leading-relaxed text-slate-700 dark:text-slate-300">{summary.target}</div>
             </div>
           )}
         </div>
       )}
 
       {/* 内容描述 */}
-      <p className="text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-400">{summary.summary}</p>
+      <div>
+        <div className="text-[11px] font-semibold text-slate-900 dark:text-slate-100 mb-1">内容描述</div>
+        <p className="text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-400">{summary.summary}</p>
+      </div>
 
       {/* 标签 */}
       {summary.tags?.length > 0 && (
@@ -1280,7 +1283,7 @@ function SummaryDetail({ summary, analysisProjectId, onOpenAnalysis }: {
       {/* 关键帧 */}
       {hasFrames && (
         <div>
-          <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">关键帧 · {summary.frames!.length}</div>
+          <div className="text-[11px] font-semibold text-slate-900 dark:text-slate-100 mb-1.5">关键帧 · {summary.frames!.length}</div>
           <div className="flex gap-1.5 overflow-x-auto pb-1">
             {summary.frames!.map((f, i) => (
               <div key={i} className="shrink-0">
@@ -1295,19 +1298,19 @@ function SummaryDetail({ summary, analysisProjectId, onOpenAnalysis }: {
       {/* 字幕 */}
       {hasTranscript && (
         <div>
-          <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">字幕</div>
-          <div className="rounded-md bg-slate-50 dark:bg-slate-800/40 px-3 py-2 max-h-[120px] overflow-y-auto">
+          <div className="text-[11px] font-semibold text-slate-900 dark:text-slate-100 mb-1">字幕</div>
+          <div className="rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40 px-3 py-2 max-h-[280px] overflow-y-auto">
             {summary.transcript!.segments?.length > 0 ? (
               <div className="space-y-0.5">
                 {summary.transcript!.segments.map((seg, i) => (
-                  <div key={i} className="flex gap-2 text-[11.5px] leading-relaxed">
-                    <span className="font-mono text-slate-400 dark:text-slate-500 shrink-0 w-[52px] text-right">{formatTimestamp(seg.startSec)}</span>
+                  <div key={i} className="flex gap-2 text-[12px] leading-relaxed">
+                    <span className="font-mono text-slate-400 dark:text-slate-500 shrink-0 w-[36px]">{formatTimestamp(seg.startSec)}</span>
                     <span className="text-slate-700 dark:text-slate-300">{seg.text}</span>
                   </div>
                 ))}
               </div>
             ) : (
-              <p className="text-[11.5px] leading-relaxed text-slate-600 dark:text-slate-400">{summary.transcript!.text}</p>
+              <p className="text-[12px] leading-relaxed text-slate-600 dark:text-slate-400">{summary.transcript!.text}</p>
             )}
           </div>
         </div>
