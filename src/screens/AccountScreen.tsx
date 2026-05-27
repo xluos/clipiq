@@ -834,44 +834,60 @@ function toMediaUrl(p: string | undefined): string | undefined {
 }
 
 function VideoPreview({ localVideoPath, thumbnailUrl, title }: { localVideoPath?: string; thumbnailUrl?: string; title: string }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [playing, setPlaying] = useState(false);
+  const [open, setOpen] = useState(false);
+  const modalVideoRef = useRef<HTMLVideoElement>(null);
   const src = toMediaUrl(localVideoPath);
 
-  const toggle = () => {
-    const el = videoRef.current;
-    if (!el) return;
-    if (playing) { el.pause(); setPlaying(false); }
-    else { el.play().then(() => setPlaying(true)).catch(() => {}); }
-  };
+  useEffect(() => {
+    if (open && modalVideoRef.current) {
+      modalVideoRef.current.play().catch(() => {});
+    }
+  }, [open]);
 
-  if (src) {
-    return (
-      <div className="h-[120px] rounded-lg bg-black shrink-0 overflow-hidden relative cursor-pointer" onClick={toggle}>
-        <video
-          ref={videoRef}
-          src={src}
-          poster={thumbnailUrl || undefined}
-          className="h-full w-auto object-contain"
-          preload="metadata"
-          onEnded={() => setPlaying(false)}
-          onDoubleClick={(e) => { e.stopPropagation(); (e.target as HTMLVideoElement).requestFullscreen?.(); }}
-        />
-        {!playing && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+  return (
+    <>
+      <div
+        className="h-[120px] rounded-lg bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden relative cursor-pointer"
+        onClick={() => src ? setOpen(true) : undefined}
+      >
+        {thumbnailUrl
+          ? <img src={thumbnailUrl} alt={title} referrerPolicy="no-referrer" className="h-full w-auto object-cover" />
+          : <span className="flex items-center justify-center h-full w-[120px] text-[11px] font-mono text-slate-400">无封面</span>}
+        {src && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/20 hover:bg-black/30 transition-colors">
             <Play className="w-8 h-8 text-white/90" strokeWidth={1.5} fill="currentColor" />
           </div>
         )}
       </div>
-    );
-  }
 
-  return (
-    <div className="h-[120px] rounded-lg bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden">
-      {thumbnailUrl
-        ? <img src={thumbnailUrl} alt={title} referrerPolicy="no-referrer" className="h-full w-auto object-cover" />
-        : <span className="flex items-center justify-center h-full w-[120px] text-[11px] font-mono text-slate-400">无封面</span>}
-    </div>
+      {open && src && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+          onClick={() => { setOpen(false); }}
+        >
+          <div
+            className="relative rounded-xl overflow-hidden bg-black shadow-2xl"
+            style={{ maxWidth: "80vw", maxHeight: "80vh" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => setOpen(false)}
+              className="absolute top-3 right-3 z-10 w-8 h-8 rounded-full bg-black/50 hover:bg-black/70 flex items-center justify-center text-white"
+            >
+              <X className="w-4 h-4" strokeWidth={2} />
+            </button>
+            <video
+              ref={modalVideoRef}
+              src={src}
+              controls
+              autoPlay
+              preload="auto"
+              className="max-w-[80vw] max-h-[80vh]"
+            />
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
