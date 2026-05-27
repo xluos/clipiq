@@ -7595,7 +7595,7 @@ app.whenReady().then(async () => {
         videoSummary,
         summaryStatus: "done",
         summaryError: undefined,
-        localVideoPath: videoPath,
+        localVideoPath: createExternalMediaUrl(videoPath),
       });
       sendStatus("done", { summary: videoSummary, progress: 100 });
       return { ok: true, summary: videoSummary };
