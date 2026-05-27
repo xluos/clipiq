@@ -18,6 +18,7 @@ import type {
   AccountMethodology,
   AccountFetchRange,
   AccountVideo,
+  VideoContentAnalysis,
   Project,
 } from "../types";
 import { defaultPresetToAnalysisOptions } from "../types";
@@ -530,9 +531,9 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
   const fetchingUi = id ? accountFetchUi[id] : undefined;
   const fetching = !!fetchingUi || account?.fetchPhase === "fetching";
 
-  const completedVideos = useMemo(
-    () => accountVideos.filter((v) => v.analysisProjectId && projects.find((p) => p.id === v.analysisProjectId && p.status === "completed")),
-    [accountVideos, projects],
+  const analyzableVideos = useMemo(
+    () => accountVideos.filter((v) => v.summaryStatus === "done" && v.videoSummary),
+    [accountVideos],
   );
 
   const triggerFetch = async (range: AccountFetchRange) => {
@@ -552,23 +553,23 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
 
   const generateMethodology = async () => {
     if (!account) return;
-    if (completedVideos.length === 0) {
-      setGenError("至少需要 1 条已完成分析的视频。先在视频 tab 里跑分析,再来汇总。");
+    if (analyzableVideos.length === 0) {
+      setGenError("至少需要 1 条已完成内容分析的视频。先在视频 tab 里生成摘要。");
       return;
     }
     setGenError("");
     setGenerating(true);
     try {
-      const videoSummaries = completedVideos.map((v) => {
-        const proj = projects.find((p) => p.id === v.analysisProjectId);
-        const r = proj?.currentAnalysisId ? reportByAnalysis[proj.currentAnalysisId] : undefined;
+      const videoSummaries = analyzableVideos.map((v) => {
+        const s = v.videoSummary;
         return {
           title: v.title,
-          summary: r?.globalSummary || r?.summary || "",
-          structure: r?.structure,
-          pacing: r?.pacing,
-          editingStyle: r?.editingStyle,
-          composition: r?.composition,
+          summary: typeof s === "string" ? s : s?.summary || "",
+          hook: typeof s === "object" ? s?.hook : undefined,
+          structure: typeof s === "object" ? s?.structure : undefined,
+          pacing: typeof s === "object" ? s?.pacing : undefined,
+          visual: typeof s === "object" ? s?.visual : undefined,
+          tags: typeof s === "object" ? s?.tags : undefined,
         };
       });
       const result = await window.videoAnalyzer?.generateAccountMethodology?.({
@@ -629,11 +630,11 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
         <button
           onClick={generateMethodology}
           disabled={generating}
-          title={completedVideos.length === 0 ? "需要先分析至少 1 条视频" : "调 LLM 跨视频汇总方法论"}
+          title={analyzableVideos.length === 0 ? "需要先生成至少 1 条视频摘要" : "跨视频汇总方法论"}
           className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200/70 dark:border-indigo-800/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 disabled:opacity-50"
         >
           <Sparkles className="w-3 h-3" strokeWidth={1.5} />
-          {generating ? "汇总中…" : `汇总方法论 (${completedVideos.length})`}
+          {generating ? "汇总中…" : `汇总方法论 (${analyzableVideos.length})`}
         </button>
         <button
           onClick={() => {
@@ -1172,20 +1173,7 @@ function VideosTab({
                 </div>
               )}
               {isExpanded && hasSummary && (
-                <div className="px-4 pb-3 -mt-1">
-                  <p className="text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-400">
-                    {v.videoSummary}
-                  </p>
-                  {v.analysisProjectId && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); openVideoDetail(v); }}
-                      className="mt-2 inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30"
-                    >
-                      <ChevronRight className="w-3 h-3" strokeWidth={2} />
-                      查看分析结果
-                    </button>
-                  )}
-                </div>
+                <SummaryDetail summary={v.videoSummary!} analysisProjectId={v.analysisProjectId} onOpenAnalysis={() => openVideoDetail(v)} />
               )}
               {/* 摘要失败错误 */}
               {summaryFailed && v.summaryError && (
@@ -1198,6 +1186,61 @@ function VideosTab({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function SummaryDetail({ summary, analysisProjectId, onOpenAnalysis }: {
+  summary: VideoContentAnalysis | string;
+  analysisProjectId?: string;
+  onOpenAnalysis: () => void;
+}) {
+  // 兼容旧版纯字符串摘要
+  if (typeof summary === "string") {
+    return (
+      <div className="px-4 pb-3 -mt-1">
+        <p className="text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-400">{summary}</p>
+        {analysisProjectId && (
+          <button onClick={(e) => { e.stopPropagation(); onOpenAnalysis(); }} className="mt-2 inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30">
+            <ChevronRight className="w-3 h-3" strokeWidth={2} />查看拆解结果
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  const dims: Array<{ label: string; value: string }> = [
+    { label: "开场钩子", value: summary.hook },
+    { label: "叙事结构", value: summary.structure },
+    { label: "节奏特征", value: summary.pacing },
+    { label: "画面风格", value: summary.visual },
+  ].filter((d) => d.value);
+
+  return (
+    <div className="px-4 pb-3 -mt-1 space-y-2">
+      <p className="text-[12.5px] leading-relaxed text-slate-700 dark:text-slate-300">{summary.summary}</p>
+      {dims.length > 0 && (
+        <div className="grid grid-cols-2 gap-2">
+          {dims.map((d) => (
+            <div key={d.label} className="rounded-md bg-slate-50 dark:bg-slate-800/50 px-2.5 py-2">
+              <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-0.5">{d.label}</div>
+              <div className="text-[12px] leading-relaxed text-slate-700 dark:text-slate-300">{d.value}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {summary.tags?.length > 0 && (
+        <div className="flex gap-1.5 flex-wrap">
+          {summary.tags.map((t) => (
+            <span key={t} className="text-[10.5px] font-mono px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">{t}</span>
+          ))}
+        </div>
+      )}
+      {analysisProjectId && (
+        <button onClick={(e) => { e.stopPropagation(); onOpenAnalysis(); }} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30">
+          <ChevronRight className="w-3 h-3" strokeWidth={2} />查看拆解结果
+        </button>
+      )}
     </div>
   );
 }

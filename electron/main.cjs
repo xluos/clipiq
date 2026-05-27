@@ -7501,11 +7501,26 @@ app.whenReady().then(async () => {
 
       const transcriptText = transcript?.text || transcript?.segments?.map((s) => s.text).join(" ") || "";
       log.info("summary", `visionProvider=${visionProvider?.id || "(null)"} textProvider=${textProvider?.id || "(null)"}`);
-      let summaryText;
+      const ANALYSIS_SYSTEM = [
+        "你是短视频内容分析师。基于关键帧画面和字幕,输出结构化分析 JSON。",
+        "字段说明:",
+        "- summary: 200-300 字,描述视频讲了什么、核心信息点",
+        "- hook: 1-2 句,开场前 3-5 秒用了什么钩子手法(悬念/冲突/提问/视觉冲击/数字/共鸣等)",
+        "- structure: 1-2 句,叙事结构(如 问题→方案→效果、观点→论据→总结、故事弧线等)",
+        "- pacing: 1-2 句,节奏特征(快切/慢叙/前快后慢/卡点/对比节奏等)",
+        "- visual: 1-2 句,画面风格(构图/色调/字幕排版/转场/特效等)",
+        "- tags: 3-5 个内容标签(如 穿搭、教程、剧情、口播、Vlog 等)",
+        "直接返回 JSON,不要 Markdown 围栏。",
+      ].join("\n");
+      const ANALYSIS_SCHEMA = {
+        summary: "string", hook: "string", structure: "string",
+        pacing: "string", visual: "string", tags: ["string"],
+      };
+
+      let analysisResult;
 
       if (visionProvider?.baseUrl && visionProvider?.apiKeyRef && visionProvider?.model) {
         log.info("summary", `使用视觉路径: ${visionProvider.id} model=${visionProvider.model}`);
-        // 视觉路径: 发帧图片 + 字幕
         const imageDataUrls = [];
         for (const f of frames.slice(0, 10)) {
           try {
@@ -7517,40 +7532,49 @@ app.whenReady().then(async () => {
         const transcriptPart = transcriptText ? `\n\n字幕全文:\n${transcriptText.slice(0, 3000)}` : "\n\n(该视频无字幕)";
         const result = await callOpenAIChatCompletions(
           visionProvider,
-          "你是视频内容分析师。基于关键帧画面和字幕,用 200-400 字中文描述这个视频讲了什么内容,包括主题、风格和亮点。直接输出描述文本,不要 JSON 包裹,不要 Markdown 格式。",
+          ANALYSIS_SYSTEM,
           `视频标题: ${av.title}\n时长: ${inspected.durationSec} 秒${transcriptPart}`,
           imageDataUrls,
           { abortController: new AbortController() },
         );
-        summaryText = result?.raw || result?.parsed;
+        const raw = result?.raw || result?.parsed || "";
+        try {
+          analysisResult = typeof raw === "string" ? JSON.parse(raw.replace(/```json?\s*|```/g, "").trim()) : raw;
+        } catch {
+          analysisResult = { summary: typeof raw === "string" ? raw : JSON.stringify(raw), hook: "", structure: "", pacing: "", visual: "", tags: [] };
+        }
       } else if (textProvider?.baseUrl && textProvider?.apiKeyRef && textProvider?.model) {
         log.info("summary", `使用纯文本路径: ${textProvider.id} model=${textProvider.model}`);
         const frameDesc = frames.map((f) => `${(f.midSec || 0).toFixed(1)}s`).join(", ");
         const result = await openaiClient.callJsonCompletion(textProvider, {
-          systemText:
-            "你是视频内容分析师。基于字幕和关键帧时间戳,用 200-400 字中文描述视频讲了什么内容。" +
-            "返回 JSON: {\"summary\": \"...\"}。不要 Markdown 围栏。",
+          systemText: ANALYSIS_SYSTEM,
           userText: `标题: ${av.title}\n时长: ${inspected.durationSec}s\n关键帧时刻: ${frameDesc}\n字幕: ${transcriptText.slice(0, 3000) || "(无字幕)"}`,
           temperature: 0.4,
         });
-        summaryText = result?.parsed?.summary || result?.raw;
+        analysisResult = result?.parsed || {};
       } else {
         throw new Error("未配置视觉或文本模型,无法生成摘要。请在设置 → 任务分配中配置。");
       }
 
-      if (typeof summaryText !== "string") summaryText = JSON.stringify(summaryText);
-      summaryText = summaryText.trim();
-      log.info("summary", `摘要生成完成, 长度=${summaryText.length}字`);
+      const videoSummary = {
+        summary: String(analysisResult.summary || "").trim(),
+        hook: String(analysisResult.hook || "").trim(),
+        structure: String(analysisResult.structure || "").trim(),
+        pacing: String(analysisResult.pacing || "").trim(),
+        visual: String(analysisResult.visual || "").trim(),
+        tags: Array.isArray(analysisResult.tags) ? analysisResult.tags.map(String).slice(0, 8) : [],
+      };
+      log.info("summary", `内容分析完成, summary=${videoSummary.summary.length}字 tags=${videoSummary.tags.join(",")}`);
 
       // 7) 落库
       updateAv({
-        videoSummary: summaryText,
+        videoSummary,
         summaryStatus: "done",
         summaryError: undefined,
         localVideoPath: videoPath,
       });
-      sendStatus("done", { summary: summaryText, progress: 100 });
-      return { ok: true, summary: summaryText };
+      sendStatus("done", { summary: videoSummary, progress: 100 });
+      return { ok: true, summary: videoSummary };
 
     } catch (err) {
       const msg = err?.message || String(err);
@@ -7599,10 +7623,11 @@ app.whenReady().then(async () => {
     videoSummaries.slice(0, 12).forEach((v, i) => {
       lines.push(`## 视频 ${i + 1} · ${v.title || "未命名"}`);
       if (v.summary) lines.push(`摘要: ${String(v.summary).slice(0, 400)}`);
+      if (v.hook) lines.push(`开场钩子: ${String(v.hook).slice(0, 200)}`);
       if (v.structure) lines.push(`结构: ${typeof v.structure === "string" ? v.structure.slice(0, 200) : JSON.stringify(v.structure).slice(0, 300)}`);
       if (v.pacing) lines.push(`节奏: ${String(v.pacing).slice(0, 200)}`);
-      if (v.editingStyle) lines.push(`剪辑: ${String(v.editingStyle).slice(0, 200)}`);
-      if (v.composition) lines.push(`构图: ${String(v.composition).slice(0, 200)}`);
+      if (v.visual) lines.push(`视觉: ${String(v.visual).slice(0, 200)}`);
+      if (Array.isArray(v.tags) && v.tags.length) lines.push(`标签: ${v.tags.join(", ")}`);
       lines.push("");
     });
     lines.push("请汇总该账号的视频方法论,输出 JSON:");

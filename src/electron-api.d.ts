@@ -347,14 +347,14 @@ declare global {
       onAccountVideoSummaryStatus: (callback: (event: {
         accountVideoId: string;
         status: "summarizing" | "done" | "failed" | "idle";
-        summary?: string;
+        summary?: import("./types").VideoContentAnalysis;
         error?: string;
         progress?: number;
         message?: string;
       }) => void) => () => void;
       generateAccountMethodology: (payload: {
         accountName: string;
-        videoSummaries: Array<{ title: string; summary?: string; structure?: unknown; pacing?: string; editingStyle?: string; composition?: string }>;
+        videoSummaries: Array<{ title: string; summary?: string; hook?: string; structure?: string; pacing?: string; visual?: string; tags?: string[] }>;
       }) => Promise<{ ok: true; methodology: import("./types").AccountMethodology }>;
       generateStudioSteps: (payload: {
         goal: string;

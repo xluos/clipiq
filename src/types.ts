@@ -705,11 +705,20 @@ export type AccountVideo = {
   addedAt: string;                  // ISO 入库时间
   // 派生的分析项目 id;有值表示已经"开始分析"过。
   analysisProjectId?: string;
-  // 轻量摘要
-  videoSummary?: string;
+  // 轻量内容分析
+  videoSummary?: VideoContentAnalysis;
   summaryStatus?: "idle" | "summarizing" | "done" | "failed";
   summaryError?: string;
   localVideoPath?: string;
+};
+
+export type VideoContentAnalysis = {
+  summary: string;
+  hook: string;
+  structure: string;
+  pacing: string;
+  visual: string;
+  tags: string[];
 };
 
 // 账号当前拉取状态
