@@ -534,10 +534,15 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
   const fetchingUi = id ? accountFetchUi[id] : undefined;
   const fetching = !!fetchingUi || account?.fetchPhase === "fetching";
 
+  const summarizedVideos = useMemo(
+    () => accountVideos.filter((v) => v.summaryStatus === "done" && v.videoSummary),
+    [accountVideos],
+  );
   const completedVideos = useMemo(
     () => accountVideos.filter((v) => v.analysisProjectId && projects.find((p) => p.id === v.analysisProjectId && p.status === "completed")),
     [accountVideos, projects],
   );
+  const methodologySourceCount = summarizedVideos.length + completedVideos.filter((v) => !summarizedVideos.find((s) => s.id === v.id)).length;
 
   const triggerFetch = async (range: AccountFetchRange) => {
     if (!account || !account.externalUrl) return;
@@ -545,8 +550,6 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
     if (tab !== "videos") setTab("videos");
     const patched = { ...account, fetchRange: range, fetchPhase: "fetching" as const, updatedAt: new Date().toISOString() };
     upsertAccount(patched);
-    // 先把 fetchRange/fetchPhase 落到 main 进程 DB,再启动后台拉取;
-    // 避免 main 端读到的还是上一次的 range 或 stale fetchPhase.
     try {
       if (window.videoAnalyzer.upsertAccount) await window.videoAnalyzer.upsertAccount(patched);
     } catch (err) { console.warn("upsertAccount before fetch failed", err); }
@@ -556,31 +559,46 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
 
   const generateMethodology = async () => {
     if (!account) return;
-    if (completedVideos.length === 0) {
-      setGenError("至少需要 1 条已完成拆解分析的视频。");
+    const videoSummaries: Array<{ title: string; summary?: string; structure?: unknown; pacing?: string; editingStyle?: string; composition?: string }> = [];
+
+    for (const v of summarizedVideos) {
+      const s = v.videoSummary;
+      videoSummaries.push({
+        title: v.title,
+        summary: typeof s === "string" ? s : s?.summary || "",
+      });
+    }
+
+    for (const v of completedVideos) {
+      if (summarizedVideos.find((s) => s.id === v.id)) continue;
+      const proj = projects.find((p) => p.id === v.analysisProjectId);
+      const r = proj?.currentAnalysisId ? reportByAnalysis[proj.currentAnalysisId] : undefined;
+      videoSummaries.push({
+        title: v.title,
+        summary: r?.globalSummary || r?.summary || "",
+        structure: r?.structure,
+        pacing: r?.pacing,
+        editingStyle: r?.editingStyle,
+        composition: r?.composition,
+      });
+    }
+
+    if (videoSummaries.length === 0) {
+      setGenError("至少需要 1 条已分析的视频。");
       return;
     }
     setGenError("");
     setGenerating(true);
     try {
-      const videoSummaries = completedVideos.map((v) => {
-        const proj = projects.find((p) => p.id === v.analysisProjectId);
-        const r = proj?.currentAnalysisId ? reportByAnalysis[proj.currentAnalysisId] : undefined;
-        return {
-          title: v.title,
-          summary: r?.globalSummary || r?.summary || "",
-          structure: r?.structure,
-          pacing: r?.pacing,
-          editingStyle: r?.editingStyle,
-          composition: r?.composition,
-        };
-      });
       const result = await window.videoAnalyzer?.generateAccountMethodology?.({
         accountName: account.name,
         videoSummaries,
       });
       if (result?.methodology) {
-        upsertAccount({ ...account, methodology: result.methodology, updatedAt: new Date().toISOString() });
+        const newMethodology = { ...result.methodology, sourceVideoCount: videoSummaries.length };
+        const history = [...(account.methodologyHistory || [])];
+        if (account.methodology?.generatedAt) history.push(account.methodology);
+        upsertAccount({ ...account, methodology: newMethodology, methodologyHistory: history.slice(-10), updatedAt: new Date().toISOString() });
       }
     } catch (e) {
       setGenError(e instanceof Error ? e.message : String(e));
@@ -633,11 +651,11 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
         <button
           onClick={generateMethodology}
           disabled={generating}
-          title={completedVideos.length === 0 ? "需要先拆解分析至少 1 条视频" : "跨视频汇总方法论"}
+          title={methodologySourceCount === 0 ? "需要先分析至少 1 条视频" : "跨视频汇总方法论"}
           className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200/70 dark:border-indigo-800/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 disabled:opacity-50"
         >
           <Sparkles className="w-3 h-3" strokeWidth={1.5} />
-          {generating ? "汇总中…" : `汇总方法论 (${completedVideos.length})`}
+          {generating ? "汇总中…" : `汇总方法论 (${methodologySourceCount})`}
         </button>
         <button
           onClick={() => {
@@ -709,7 +727,15 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
             ))}
           </div>
 
-          {tab === "methodology" && <MethodologyTab methodology={account.methodology} />}
+          {tab === "methodology" && (
+            <MethodologyTab
+              methodology={account.methodology}
+              history={account.methodologyHistory}
+              sourceCount={methodologySourceCount}
+              generating={generating}
+              onGenerate={generateMethodology}
+            />
+          )}
           {tab === "videos" && (
             <VideosTab
               account={account}
@@ -766,19 +792,86 @@ const RangeDropdown: FunctionComponent<{
   );
 };
 
-function MethodologyTab({ methodology }: { methodology?: AccountMethodology }) {
-  if (!methodology || !(methodology.hooks || methodology.pacing || methodology.structure || methodology.visual)) {
-    return (
-      <div className="border border-dashed border-slate-300 dark:border-slate-700 rounded-xl bg-white/50 dark:bg-slate-900/30 px-8 py-12 text-center">
-        <Sparkles className="w-5 h-5 mx-auto text-slate-400 dark:text-slate-500 mb-2" strokeWidth={1.5} />
-        <p className="text-[13.5px] text-slate-600 dark:text-slate-400">
-          方法论还未生成。
-          <br />
-          先拉取并分析该账号下的视频,系统会自动跨视频汇总方法论。
-        </p>
+function MethodologyTab({ methodology, history, sourceCount, generating, onGenerate }: {
+  methodology?: AccountMethodology;
+  history?: AccountMethodology[];
+  sourceCount: number;
+  generating: boolean;
+  onGenerate: () => void;
+}) {
+  const [viewIdx, setViewIdx] = useState<number | null>(null);
+  const allVersions = useMemo(() => {
+    const list: AccountMethodology[] = [];
+    if (methodology?.generatedAt) list.push(methodology);
+    if (history?.length) list.push(...[...history].reverse());
+    return list;
+  }, [methodology, history]);
+  const viewing = viewIdx !== null ? allVersions[viewIdx] : methodology;
+
+  const hasContent = viewing && (viewing.hooks || viewing.pacing || viewing.structure || viewing.visual);
+
+  return (
+    <div className="space-y-4">
+      {/* 操作栏 */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          onClick={onGenerate}
+          disabled={generating || sourceCount === 0}
+          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50"
+        >
+          {generating ? <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} /> : <Sparkles className="w-3 h-3" strokeWidth={2} />}
+          {generating ? "生成中…" : methodology ? `重新生成 (${sourceCount} 条视频)` : `生成方法论 (${sourceCount} 条视频)`}
+        </button>
+        {sourceCount === 0 && (
+          <span className="text-[11.5px] text-slate-500">需要先分析至少 1 条视频</span>
+        )}
+        <div className="flex-1" />
+        {allVersions.length > 1 && (
+          <div className="flex items-center gap-1">
+            <span className="text-[10.5px] font-mono text-slate-500 mr-1">历史</span>
+            {allVersions.map((v, i) => (
+              <button
+                key={v.generatedAt || i}
+                onClick={() => setViewIdx(i === 0 ? null : i)}
+                className={`h-6 px-2 rounded text-[10.5px] font-mono ${
+                  (viewIdx === null && i === 0) || viewIdx === i
+                    ? "bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800"
+                    : "text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700"
+                }`}
+              >
+                {i === 0 ? "最新" : new Date(v.generatedAt || "").toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
-    );
-  }
+
+      {/* 内容 */}
+      {!hasContent ? (
+        <div className="border border-dashed border-slate-300 dark:border-slate-700 rounded-xl bg-white/50 dark:bg-slate-900/30 px-8 py-12 text-center">
+          <Sparkles className="w-5 h-5 mx-auto text-slate-400 dark:text-slate-500 mb-2" strokeWidth={1.5} />
+          <p className="text-[13.5px] text-slate-600 dark:text-slate-400">
+            方法论还未生成。
+            <br />
+            先分析该账号下的视频，再点击上方按钮生成。
+          </p>
+        </div>
+      ) : (
+        <>
+          {viewing?.generatedAt && (
+            <div className="text-[10.5px] font-mono text-slate-400">
+              生成于 {new Date(viewing.generatedAt).toLocaleString("zh-CN")}
+              {viewing.sourceVideoCount ? ` · 基于 ${viewing.sourceVideoCount} 条视频` : ""}
+            </div>
+          )}
+          <MethodologyCards methodology={viewing!} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function MethodologyCards({ methodology }: { methodology: AccountMethodology }) {
   const items: Array<{ k: string; m?: { summary: string; sampleVideoIds?: string[] } }> = [
     { k: "开场风格 / Hooks", m: methodology.hooks },
     { k: "节奏画像", m: methodology.pacing },
@@ -792,11 +885,6 @@ function MethodologyTab({ methodology }: { methodology?: AccountMethodology }) {
           <div key={k} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 p-4">
             <h3 className="text-[14px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 mb-2">{k}</h3>
             <p className="text-[13px] leading-relaxed text-slate-700 dark:text-slate-300">{m.summary}</p>
-            {(m.sampleVideoIds?.length ?? 0) > 0 && (
-              <div className="text-[10.5px] font-mono tracking-wider uppercase text-indigo-600 dark:text-indigo-400 mt-3">
-                引用 · {m.sampleVideoIds!.length} 条视频
-              </div>
-            )}
           </div>
         ) : null,
       )}
