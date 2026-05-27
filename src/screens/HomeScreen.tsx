@@ -8,8 +8,9 @@ import { type ChangeEvent, type DragEvent, type FunctionComponent, type Keyboard
 import type { InspectedVideo } from "../electron-api";
 import { BrandLogo } from "../components/BrandLogo";
 import { useConfirm } from "../components/ConfirmDialog";
-import type { AnalysisOptions, SlotOverrides, Project, ProjectSource, VideoGenre } from "../types";
-import { ModelConfigDialog } from "../components/ModelConfigDialog";
+import type { AnalysisOptions, SlotAssignment, SlotOverrides, TaskSlotKey, ModelProvider, Project, ProjectSource, VideoGenre } from "../types";
+import { PipelineRow, type PipelineStage, type SlotMeta } from "../components/PipelineSlotPicker";
+import { useSidecarReadiness } from "../hooks/useSidecarReadiness";
 
 type PresetKey = "quick" | "standard" | "deep" | "custom";
 
@@ -119,7 +120,7 @@ function projectSourceLabel(source: ProjectSource): string {
 }
 
 export function HomeScreen() {
-  const { setCurrentScreen, goModule, projects, setActiveProjectId, setProjects, removeProject, startAnalysisForProject, setPendingSlotOverrides } = useApp();
+  const { setCurrentScreen, goModule, projects, setActiveProjectId, setProjects, removeProject, startAnalysisForProject, setPendingSlotOverrides, providers, taskSlots, audioSlot } = useApp();
   const confirm = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -137,6 +138,7 @@ export function HomeScreen() {
   const [presetOpen, setPresetOpen] = useState(false);
   const presetRef = useRef<HTMLDivElement>(null);
   const [modelConfigOpen, setModelConfigOpen] = useState(false);
+  const modelConfigRef = useRef<HTMLDivElement>(null);
   const [pendingOverrides, setPendingOverrides] = useState<SlotOverrides | undefined>(undefined);
 
   const currentPreset = matchPreset({ mode, density, focus });
@@ -144,13 +146,14 @@ export function HomeScreen() {
   const presetLabel = presetMeta?.title ?? "自定义";
 
   useEffect(() => {
-    if (!presetOpen) return;
+    if (!presetOpen && !modelConfigOpen) return;
     const onDown = (e: globalThis.MouseEvent) => {
-      if (presetRef.current && !presetRef.current.contains(e.target as Node)) setPresetOpen(false);
+      if (presetOpen && presetRef.current && !presetRef.current.contains(e.target as Node)) setPresetOpen(false);
+      if (modelConfigOpen && modelConfigRef.current && !modelConfigRef.current.contains(e.target as Node)) setModelConfigOpen(false);
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
-  }, [presetOpen]);
+  }, [presetOpen, modelConfigOpen]);
 
   const pickPreset = (preset: PresetDef) => {
     setMode(preset.options.mode);
@@ -528,19 +531,32 @@ export function HomeScreen() {
                     />
                   )}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setModelConfigOpen(true)}
-                  className={`inline-flex items-center gap-1 h-[30px] px-2.5 rounded-full border text-[12px] whitespace-nowrap transition-colors ${
-                    pendingOverrides
-                      ? "border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300"
-                      : "border-slate-200 dark:border-slate-800 bg-white dark:bg-[#1c1e24] text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-[#222530]"
-                  }`}
-                  title="指定本次分析使用的模型"
-                >
-                  <Wand2 className="w-3 h-3" />
-                  {pendingOverrides ? "已配置" : "高级"}
-                </button>
+                <div ref={modelConfigRef} className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setModelConfigOpen((o) => !o)}
+                    className={`inline-flex items-center gap-1 h-[30px] px-2.5 rounded-full border text-[12px] whitespace-nowrap transition-colors ${
+                      modelConfigOpen || pendingOverrides
+                        ? "border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300"
+                        : "border-slate-200 dark:border-slate-800 bg-white dark:bg-[#1c1e24] text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-[#222530]"
+                    }`}
+                    title="指定本次分析使用的模型"
+                  >
+                    <Wand2 className="w-3 h-3" />
+                    {pendingOverrides ? "已配置" : "高级"}
+                    <ChevronDown className={`w-3 h-3 opacity-60 transition-transform ${modelConfigOpen ? "rotate-180" : ""}`} />
+                  </button>
+                  {modelConfigOpen && (
+                    <ModelSlotPopover
+                      providers={providers}
+                      taskSlots={taskSlots}
+                      audioSlot={audioSlot}
+                      initial={pendingOverrides}
+                      onApply={(ov) => { setPendingOverrides(ov); setModelConfigOpen(false); }}
+                      onClose={() => setModelConfigOpen(false)}
+                    />
+                  )}
+                </div>
               </div>
               <button
                 type="button"
@@ -665,15 +681,6 @@ export function HomeScreen() {
         </div>
       )}
 
-      <ModelConfigDialog
-        open={modelConfigOpen}
-        onClose={() => setModelConfigOpen(false)}
-        mode="pipeline"
-        title="结构拆解 · 高级设置"
-        onConfirm={(overrides) => {
-          setPendingOverrides(Object.keys(overrides).length > 0 ? overrides : undefined);
-        }}
-      />
     </main>
   );
 }
@@ -919,6 +926,84 @@ function StatusBadge({ status }: { status: Project["status"] }) {
         <Clock className="w-3 h-3" /> 待开始
       </span>;
   }
+}
+
+const POPOVER_STAGES: PipelineStage[] = [
+  { num: "01", title: "抽帧初筛", badges: ["simple · vision"], desc: "初筛打标", slot: "simple_vision" },
+  { num: "02", title: "字幕识别", badges: ["audio"], desc: "提取台词", slot: "__audio__" },
+  { num: "03", title: "镜头合并", badges: ["medium · text"], desc: "合并+聚合", slot: "medium_text" },
+  { num: "04", title: "主分析", badges: ["complex · vision"], desc: "拉片打标", slot: "complex_vision", isKey: true },
+];
+
+const POPOVER_METAS: Record<string, SlotMeta> = {
+  simple_vision: { key: "simple_vision", label: "简单·视觉", difficulty: "simple", axis: "vision", hint: "", used: true },
+  medium_text: { key: "medium_text", label: "中等·文本", difficulty: "medium", axis: "text", hint: "", used: true },
+  complex_vision: { key: "complex_vision", label: "复杂·视觉", difficulty: "complex", axis: "vision", hint: "", used: true },
+  __audio__: { key: "__audio__" as unknown as TaskSlotKey, label: "字幕识别", difficulty: "simple", axis: "text", hint: "", used: true },
+};
+
+function ModelSlotPopover({ providers, taskSlots, audioSlot, initial, onApply, onClose }: {
+  providers: ModelProvider[];
+  taskSlots: Record<TaskSlotKey, SlotAssignment>;
+  audioSlot: SlotAssignment;
+  initial?: SlotOverrides;
+  onApply: (ov: SlotOverrides | undefined) => void;
+  onClose: () => void;
+}) {
+  const { readyLocalIds, readyWhisperIds } = useSidecarReadiness();
+  const [local, setLocal] = useState<Record<string, SlotAssignment>>(() => {
+    const init: Record<string, SlotAssignment> = {};
+    for (const s of POPOVER_STAGES) {
+      if (s.slot === "__audio__") init.__audio__ = (initial?.audio !== undefined ? initial.audio : audioSlot);
+      else init[s.slot] = ((initial as any)?.[s.slot] !== undefined ? (initial as any)[s.slot] : taskSlots[s.slot as TaskSlotKey]);
+    }
+    return init;
+  });
+
+  const handleApply = () => {
+    const overrides: SlotOverrides = {};
+    for (const s of POPOVER_STAGES) {
+      const key = s.slot === "__audio__" ? "audio" : s.slot;
+      const orig = s.slot === "__audio__" ? audioSlot : taskSlots[s.slot as TaskSlotKey];
+      const cur = local[s.slot === "__audio__" ? "__audio__" : s.slot];
+      if (JSON.stringify(cur) !== JSON.stringify(orig)) (overrides as any)[key] = cur;
+    }
+    onApply(Object.keys(overrides).length > 0 ? overrides : undefined);
+  };
+
+  return (
+    <div
+      className="absolute z-30 top-full mt-2 right-0 w-[520px] rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] shadow-lg shadow-slate-900/5 dark:shadow-black/40 p-3 space-y-1"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="text-[10.5px] font-mono uppercase tracking-wider text-slate-500 mb-1">模型配置 · 本次生效</div>
+      {POPOVER_STAGES.map((stage, idx) => {
+        const isAudio = stage.slot === "__audio__";
+        const slotKey = isAudio ? "__audio__" : stage.slot;
+        return (
+          <PipelineRow
+            key={slotKey}
+            stage={stage}
+            isFirst={idx === 0}
+            providers={providers}
+            meta={POPOVER_METAS[slotKey]}
+            assignment={local[slotKey]}
+            onChange={(a) => setLocal((prev) => ({ ...prev, [slotKey]: a }))}
+            audioMode={isAudio}
+            readyLocalIds={readyLocalIds}
+            readyWhisperIds={readyWhisperIds}
+            compact
+          />
+        );
+      })}
+      <div className="flex justify-between items-center pt-2 border-t border-slate-100 dark:border-slate-800">
+        <span className="text-[10.5px] text-slate-400">不修改的项使用全局默认值</span>
+        <button onClick={handleApply} className="h-7 px-3 rounded-md text-[12px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white">
+          应用
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function PresetPopover({
