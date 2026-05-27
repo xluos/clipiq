@@ -59,6 +59,14 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
     ipcRenderer.on("account:fetch:failed", listener);
     return () => ipcRenderer.removeListener("account:fetch:failed", listener);
   },
+  // 轻量视频摘要
+  summarizeAccountVideo: (payload) => ipcRenderer.invoke("accounts:summarizeVideo", payload),
+  cancelSummarizeVideo: (accountVideoId) => ipcRenderer.invoke("accounts:cancelSummarize", accountVideoId),
+  onAccountVideoSummaryStatus: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("account:video:summary:status", listener);
+    return () => ipcRenderer.removeListener("account:video:summary:status", listener);
+  },
   generateAccountMethodology: (payload) => ipcRenderer.invoke("accounts:generateMethodology", payload),
   generateStudioSteps: (payload) => ipcRenderer.invoke("sessions:generateSteps", payload),
   analyzeAssetShots: (payload) => ipcRenderer.invoke("assets:analyzeShots", payload),

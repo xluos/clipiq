@@ -647,6 +647,31 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // 订阅轻量视频摘要状态事件
+  useEffect(() => {
+    if (!window.videoAnalyzer?.onAccountVideoSummaryStatus) return;
+    const off = window.videoAnalyzer.onAccountVideoSummaryStatus((evt) => {
+      setAccountVideosByAccountId((prev: Record<string, AccountVideo[]>) => {
+        for (const accId of Object.keys(prev)) {
+          const videos = prev[accId];
+          const idx = videos.findIndex((v: AccountVideo) => v.id === evt.accountVideoId);
+          if (idx >= 0) {
+            const updated = [...videos];
+            updated[idx] = {
+              ...updated[idx],
+              summaryStatus: evt.status === "idle" ? undefined : evt.status,
+              videoSummary: evt.summary ?? updated[idx].videoSummary,
+              summaryError: evt.error,
+            };
+            return { ...prev, [accId]: updated };
+          }
+        }
+        return prev;
+      });
+    });
+    return () => { off?.(); };
+  }, []);
+
   // 订阅 main 进程的分析 / 下载进度事件 — 全局只挂一次, 按 analysisId 索引。
   // 每个分析有独立槽位，取消后开新分析不会互踩。
   useEffect(() => {
