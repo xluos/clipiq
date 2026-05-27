@@ -11,6 +11,7 @@
 
 import { type FunctionComponent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../AppContext";
+import { ImageGallery, ImageView, VideoThumbnail } from "../components/MediaViewer";
 import type {
   AppLocation,
   Account,
@@ -827,69 +828,6 @@ function formatUploadDate(raw: string): string {
   return raw;
 }
 
-function toMediaUrl(p: string | undefined): string | undefined {
-  if (!p) return undefined;
-  if (p.startsWith("media://")) return p;
-  return `media://external/${encodeURIComponent(p)}`;
-}
-
-function VideoPreview({ localVideoPath, thumbnailUrl, title }: { localVideoPath?: string; thumbnailUrl?: string; title: string }) {
-  const [open, setOpen] = useState(false);
-  const modalVideoRef = useRef<HTMLVideoElement>(null);
-  const src = toMediaUrl(localVideoPath);
-
-  useEffect(() => {
-    if (open && modalVideoRef.current) {
-      modalVideoRef.current.play().catch(() => {});
-    }
-  }, [open]);
-
-  return (
-    <>
-      <div
-        className="h-[120px] rounded-lg bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden relative cursor-pointer"
-        onClick={() => src ? setOpen(true) : undefined}
-      >
-        {thumbnailUrl
-          ? <img src={thumbnailUrl} alt={title} referrerPolicy="no-referrer" className="h-full w-auto object-cover" />
-          : <span className="flex items-center justify-center h-full w-[120px] text-[11px] font-mono text-slate-400">无封面</span>}
-        {src && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/20 hover:bg-black/30 transition-colors">
-            <Play className="w-8 h-8 text-white/90" strokeWidth={1.5} fill="currentColor" />
-          </div>
-        )}
-      </div>
-
-      {open && src && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
-          onClick={() => { setOpen(false); }}
-        >
-          <div
-            className="relative rounded-xl overflow-hidden bg-black shadow-2xl"
-            style={{ maxWidth: "80vw", maxHeight: "80vh" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              onClick={() => setOpen(false)}
-              className="absolute top-3 right-3 z-10 w-8 h-8 rounded-full bg-black/50 hover:bg-black/70 flex items-center justify-center text-white"
-            >
-              <X className="w-4 h-4" strokeWidth={2} />
-            </button>
-            <video
-              ref={modalVideoRef}
-              src={src}
-              controls
-              autoPlay
-              preload="auto"
-              className="max-w-[80vw] max-h-[80vh]"
-            />
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
 
 function formatCount(n: number): string {
   if (n >= 1_0000) return `${(n / 1_0000).toFixed(1).replace(/\.0$/, "")}万`;
@@ -1096,7 +1034,7 @@ function VideosTab({
 
         {/* 视频信息 */}
         <div className="flex gap-4 items-start">
-          <VideoPreview localVideoPath={sv.localVideoPath} thumbnailUrl={sv.thumbnailUrl} title={sv.title} />
+          <VideoThumbnail localVideoPath={sv.localVideoPath} thumbnailUrl={sv.thumbnailUrl} title={sv.title} />
           <div className="flex-1 min-w-0">
             <h3 className="text-[16px] font-semibold text-slate-900 dark:text-slate-100">{sv.title}</h3>
             <div className="text-[11px] font-mono tracking-wider text-slate-500 dark:text-slate-400 mt-1.5 flex items-center gap-2 flex-wrap">
@@ -1351,14 +1289,18 @@ function SummaryDetail({ summary, analysisProjectId, onOpenAnalysis }: {
       {hasFrames && (
         <div>
           <div className="text-[11px] font-semibold text-slate-900 dark:text-slate-100 mb-1.5">关键帧 · {summary.frames!.length}</div>
-          <div className="flex gap-1.5 overflow-x-auto pb-1">
-            {summary.frames!.map((f, i) => (
-              <div key={i} className="shrink-0">
-                <img src={f.url} alt={`${f.timeSec.toFixed(1)}s`} className="max-h-[100px] w-auto rounded bg-slate-200 dark:bg-slate-800" />
-                <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 text-center mt-0.5">{formatTimestamp(f.timeSec)}</div>
-              </div>
-            ))}
-          </div>
+          <ImageGallery>
+            <div className="flex gap-1.5 overflow-x-auto pb-1">
+              {summary.frames!.map((f, i) => (
+                <div key={i} className="shrink-0 cursor-pointer">
+                  <ImageView src={f.url}>
+                    <img src={f.url} alt={`${f.timeSec.toFixed(1)}s`} className="max-h-[100px] w-auto rounded bg-slate-200 dark:bg-slate-800 hover:ring-2 hover:ring-indigo-400 transition-shadow" />
+                  </ImageView>
+                  <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 text-center mt-0.5">{formatTimestamp(f.timeSec)}</div>
+                </div>
+              ))}
+            </div>
+          </ImageGallery>
         </div>
       )}
 
