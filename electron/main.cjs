@@ -6842,7 +6842,13 @@ app.whenReady().then(async () => {
   ipcMain.handle("accounts:delete", async (_event, accountId) => {
     if (!accountId) return { ok: false, message: "缺少 accountId" };
     const db = getDb();
+    db.prepare("DELETE FROM account_videos WHERE account_id = ?").run(accountId);
     db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
+    // 清理磁盘 artifacts
+    const accountDir = path.join(app.getPath("userData"), "accounts", accountId);
+    try {
+      await fs.rm(accountDir, { recursive: true, force: true });
+    } catch { /* 目录可能不存在 */ }
     return { ok: true };
   });
 
@@ -7268,7 +7274,7 @@ app.whenReady().then(async () => {
           const acc = JSON.parse(accRow.data);
           const patched = {
             ...acc,
-            name: acc.name || result.accountUploader || result.accountTitle || acc.name,
+            name: result.accountUploader || result.accountTitle || acc.name,
             avatarUrl: result.accountAvatarUrl || acc.avatarUrl,
             followers: result.accountFollowers || acc.followers,
             bio: result.accountBio || acc.bio,
@@ -7395,14 +7401,16 @@ app.whenReady().then(async () => {
       const handle = { get cancelled() { return state.cancelled; }, abortController: new AbortController(), children: new Set() };
 
       // 1) 下载视频
+      log.info("summary", `[1/6] 下载视频, url=${av.externalUrl?.slice(0, 80)} playUrl=${av.playUrl ? "有" : "无"}`);
       sendStatus("summarizing", { progress: 5, message: "下载视频" });
       const artifactDir = path.join(app.getPath("userData"), "accounts", av.accountId, "videos", av.externalId);
       await fs.mkdir(artifactDir, { recursive: true });
+      log.info("summary", `artifactDir=${artifactDir}`);
 
       let videoPath = av.localVideoPath;
-      log.info("summary", `本地路径=${videoPath || "(无)"} 存在=${videoPath ? fsSync.existsSync(videoPath) : false}`);
+      log.info("summary", `已有本地路径=${videoPath || "(无)"} 存在=${videoPath ? fsSync.existsSync(videoPath) : false}`);
       if (!videoPath || !fsSync.existsSync(videoPath)) {
-        log.info("summary", "需要下载视频");
+        log.info("summary", "本地无缓存, 开始下载");
         try {
           const dl = await performUrlDownloadFlow(av.externalUrl, {
             projectId: `summary-${accountVideoId}`,
@@ -7441,65 +7449,88 @@ app.whenReady().then(async () => {
       checkCancel();
 
       // 2) 读取视频信息
-      log.info("summary", `视频下载完成: ${videoPath}`);
+      log.info("summary", `[2/6] 读取视频信息: ${videoPath}`);
       sendStatus("summarizing", { progress: 28, message: "读取视频信息" });
       const ffmpegPath = await commandPath("ffmpeg");
       log.info("summary", `ffmpeg=${ffmpegPath || "(未安装)"}`);
       const inspected = await inspectVideo(videoPath);
-      log.info("summary", `视频: ${inspected.durationSec}s ${inspected.width}x${inspected.height} hasAudio=${inspected.hasAudio}`);
+      log.info("summary", `视频元数据: ${inspected.durationSec}s ${inspected.width}x${inspected.height} hasAudio=${inspected.hasAudio} codec=${inspected.videoCodec || "?"}`);
       checkCancel();
 
       // 3) 检测镜头切换
+      log.info("summary", `[3/6] 检测镜头切换, threshold=0.3`);
       sendStatus("summarizing", { progress: 32, message: "检测镜头" });
       let scenes = [];
       if (ffmpegPath) {
         scenes = await detectScenes(ffmpegPath, videoPath, 0.3, handle);
+        log.info("summary", `镜头切换检测完成: ${scenes.length} 个切点`);
+      } else {
+        log.warn("summary", "ffmpeg 不可用, 跳过镜头检测");
       }
       checkCancel();
 
       // 4) 抽取关键画面 (8-12 帧)
-      sendStatus("summarizing", { progress: 38, message: "抽取关键画面" });
       const targetCount = Math.min(12, Math.max(6, scenes.length || 6));
+      log.info("summary", `[4/6] 抽取关键画面, 目标 ${targetCount} 帧 (scenes=${scenes.length})`);
+      sendStatus("summarizing", { progress: 38, message: "抽取关键画面" });
       const plan = planFramePlan(scenes, inspected.durationSec, targetCount);
       const framesDir = path.join(artifactDir, "frames");
       await fs.mkdir(framesDir, { recursive: true });
-      const { frames } = await buildFrames(ffmpegPath, videoPath, plan, framesDir, handle,
+      const { frames, skipped } = await buildFrames(ffmpegPath, videoPath, plan, framesDir, handle,
         (i, total) => sendStatus("summarizing", { progress: 38 + Math.round((i / total) * 12), message: `抽帧 ${i + 1}/${total}` }),
       );
+      log.info("summary", `抽帧完成: ${frames.length} 帧 (跳过相似 ${skipped || 0}), framesDir=${framesDir}`);
       checkCancel();
 
       // 5) 识别字幕
+      log.info("summary", `[5/6] 识别字幕, hasAudio=${inspected.hasAudio}`);
       sendStatus("summarizing", { progress: 52, message: "识别字幕" });
       let transcript = null;
       if (inspected.hasAudio) {
         const cfg = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
         const audioProvider = resolveAudioProvider(cfg);
+        log.info("summary", `音频提供者: ${audioProvider?.id || "(null)"} type=${audioProvider?.endpointType || "?"}`);
         if (audioProvider) {
           const wavPath = path.join(artifactDir, "audio.wav");
+          log.info("summary", `提取音频 → ${wavPath}`);
           await extractAudioWav(ffmpegPath, videoPath, wavPath, handle);
           checkCancel();
+          log.info("summary", "开始语音转文字");
           transcript = await transcribeAudio(audioProvider, wavPath, handle,
             (p) => sendStatus("summarizing", { progress: 52 + Math.round(18 * (p?.progress || 0)), message: "识别字幕" }),
           );
+          log.info("summary", `字幕识别完成: ${transcript?.text?.length || 0} 字, segments=${transcript?.segments?.length || 0}`);
+        } else {
+          log.warn("summary", "未配置音频提供者, 跳过字幕识别");
         }
       }
       checkCancel();
 
-      log.info("summary", `抽帧完成: ${frames.length} 帧, 字幕: ${transcript ? transcript.text?.length + "字" : "无"}`);
+      log.info("summary", `[5/6] 数据收集完成: ${frames.length} 帧, 字幕 ${transcript ? transcript.text?.length + "字" : "无"}`);
 
-      // 6) LLM 生成摘要
-      sendStatus("summarizing", { progress: 75, message: "生成摘要" });
+      // 6) LLM 生成内容分析
+      log.info("summary", `[6/6] LLM 内容分析, 帧=${frames.length} 字幕=${transcript?.text?.length || 0}字`);
+      sendStatus("summarizing", { progress: 75, message: "LLM 内容分析" });
       const cfg = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
       const visionProvider = resolveSlotProvider(cfg, "complex_vision");
       const textProvider = resolveSlotProvider(cfg, "medium_text");
 
       const transcriptText = transcript?.text || transcript?.segments?.map((s) => s.text).join(" ") || "";
-      log.info("summary", `visionProvider=${visionProvider?.id || "(null)"} textProvider=${textProvider?.id || "(null)"}`);
-      let summaryText;
+      log.info("summary", `visionProvider=${visionProvider?.id || "(null)"} model=${visionProvider?.model || "?"} textProvider=${textProvider?.id || "(null)"}`);
+      const ANALYSIS_SYSTEM = [
+        "你是短视频内容分析师。基于关键帧画面和字幕,输出结构化内容分析 JSON。",
+        "字段说明:",
+        "- summary: 200-300 字,描述视频讲了什么、核心信息点、传达的观点或展示的内容",
+        "- topic: 1 句话,提炼核心选题/主题(如「夏季通勤穿搭搭配指南」「自驾川西环线攻略」)",
+        "- target: 1 句话,推断目标受众(如「18-30岁关注穿搭的女性用户」「有自驾需求的旅行爱好者」)",
+        "- tags: 3-5 个内容分类标签(如 穿搭、教程、探店、Vlog、美食、旅行、知识 等)",
+        "直接返回 JSON,不要 Markdown 围栏。",
+      ].join("\n");
+
+      let analysisResult;
 
       if (visionProvider?.baseUrl && visionProvider?.apiKeyRef && visionProvider?.model) {
         log.info("summary", `使用视觉路径: ${visionProvider.id} model=${visionProvider.model}`);
-        // 视觉路径: 发帧图片 + 字幕
         const imageDataUrls = [];
         for (const f of frames.slice(0, 10)) {
           try {
@@ -7511,40 +7542,63 @@ app.whenReady().then(async () => {
         const transcriptPart = transcriptText ? `\n\n字幕全文:\n${transcriptText.slice(0, 3000)}` : "\n\n(该视频无字幕)";
         const result = await callOpenAIChatCompletions(
           visionProvider,
-          "你是视频内容分析师。基于关键帧画面和字幕,用 200-400 字中文描述这个视频讲了什么内容,包括主题、风格和亮点。直接输出描述文本,不要 JSON 包裹,不要 Markdown 格式。",
+          ANALYSIS_SYSTEM,
           `视频标题: ${av.title}\n时长: ${inspected.durationSec} 秒${transcriptPart}`,
           imageDataUrls,
           { abortController: new AbortController() },
         );
-        summaryText = result?.raw || result?.parsed;
+        const raw = result?.raw || result?.parsed || "";
+        try {
+          analysisResult = typeof raw === "string" ? JSON.parse(raw.replace(/```json?\s*|```/g, "").trim()) : raw;
+        } catch {
+          analysisResult = { summary: typeof raw === "string" ? raw : JSON.stringify(raw), topic: "", target: "", tags: [] };
+        }
       } else if (textProvider?.baseUrl && textProvider?.apiKeyRef && textProvider?.model) {
         log.info("summary", `使用纯文本路径: ${textProvider.id} model=${textProvider.model}`);
         const frameDesc = frames.map((f) => `${(f.midSec || 0).toFixed(1)}s`).join(", ");
         const result = await openaiClient.callJsonCompletion(textProvider, {
-          systemText:
-            "你是视频内容分析师。基于字幕和关键帧时间戳,用 200-400 字中文描述视频讲了什么内容。" +
-            "返回 JSON: {\"summary\": \"...\"}。不要 Markdown 围栏。",
+          systemText: ANALYSIS_SYSTEM,
           userText: `标题: ${av.title}\n时长: ${inspected.durationSec}s\n关键帧时刻: ${frameDesc}\n字幕: ${transcriptText.slice(0, 3000) || "(无字幕)"}`,
           temperature: 0.4,
         });
-        summaryText = result?.parsed?.summary || result?.raw;
+        analysisResult = result?.parsed || {};
       } else {
         throw new Error("未配置视觉或文本模型,无法生成摘要。请在设置 → 任务分配中配置。");
       }
 
-      if (typeof summaryText !== "string") summaryText = JSON.stringify(summaryText);
-      summaryText = summaryText.trim();
-      log.info("summary", `摘要生成完成, 长度=${summaryText.length}字`);
+      const frameEntries = frames.map((f) => ({
+        url: createExternalMediaUrl(f.framePath),
+        timeSec: f.midSec || 0,
+      }));
+      const transcriptSegments = transcript?.segments?.map((s) => ({
+        text: s.text || "",
+        startSec: s.start ?? s.startSec ?? 0,
+        endSec: s.end ?? s.endSec ?? 0,
+      })) || [];
+
+      const videoSummary = {
+        summary: String(analysisResult.summary || "").trim(),
+        topic: String(analysisResult.topic || "").trim(),
+        target: String(analysisResult.target || "").trim(),
+        tags: Array.isArray(analysisResult.tags) ? analysisResult.tags.map(String).slice(0, 8) : [],
+        frames: frameEntries,
+        transcript: transcriptSegments.length > 0 ? {
+          text: transcriptText,
+          segments: transcriptSegments,
+        } : null,
+        durationSec: inspected.durationSec,
+      };
+      log.info("summary", `[6/6] 内容分析完成, summary=${videoSummary.summary.length}字 topic=${videoSummary.topic} frames=${frameEntries.length} transcriptSegs=${transcriptSegments.length} tags=${videoSummary.tags.join(",")}`);
 
       // 7) 落库
       updateAv({
-        videoSummary: summaryText,
+        videoSummary,
         summaryStatus: "done",
         summaryError: undefined,
         localVideoPath: videoPath,
       });
-      sendStatus("done", { summary: summaryText, progress: 100 });
-      return { ok: true, summary: summaryText };
+      sendStatus("done", { summary: videoSummary, progress: 100 });
+      return { ok: true, summary: videoSummary };
 
     } catch (err) {
       const msg = err?.message || String(err);

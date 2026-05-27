@@ -347,7 +347,7 @@ declare global {
       onAccountVideoSummaryStatus: (callback: (event: {
         accountVideoId: string;
         status: "summarizing" | "done" | "failed" | "idle";
-        summary?: string;
+        summary?: import("./types").VideoContentAnalysis;
         error?: string;
         progress?: number;
         message?: string;

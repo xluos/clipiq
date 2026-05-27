@@ -285,6 +285,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const removeAccount = useCallback((id: string) => {
     setAccounts((prev) => prev.filter((x) => x.id !== id));
+    setAccountVideosByAccountId((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     window.videoAnalyzer?.deleteAccount(id).catch((err) => console.warn("deleteAccount failed", err));
   }, []);
 
