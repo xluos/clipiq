@@ -7384,7 +7384,7 @@ app.whenReady().then(async () => {
   if (!global.__summaryInFlight) global.__summaryInFlight = new Map();
   const summaryInFlight = global.__summaryInFlight;
 
-  async function summarizeAccountVideo(accountVideoId, slotOverrides) {
+  async function summarizeAccountVideo(accountVideoId, slotOverrides, customPrompt) {
     log.info("summary", `开始摘要 accountVideoId=${accountVideoId}`);
     const db = getDb();
     const row = db.prepare("SELECT data FROM account_videos WHERE id = ?").get(accountVideoId);
@@ -7530,7 +7530,7 @@ app.whenReady().then(async () => {
 
       const transcriptText = transcript?.text || transcript?.segments?.map((s) => s.text).join(" ") || "";
       log.info("summary", `visionProvider=${visionProvider?.id || "(null)"} model=${visionProvider?.model || "?"} textProvider=${textProvider?.id || "(null)"}`);
-      const ANALYSIS_SYSTEM = [
+      const systemParts = [
         "你是短视频内容分析师。基于关键帧画面和字幕,输出结构化内容分析 JSON。",
         "字段说明:",
         "- summary: 200-300 字,描述视频讲了什么、核心信息点、传达的观点或展示的内容",
@@ -7538,7 +7538,12 @@ app.whenReady().then(async () => {
         "- target: 1 句话,推断目标受众(如「18-30岁关注穿搭的女性用户」「有自驾需求的旅行爱好者」)",
         "- tags: 3-5 个内容分类标签(如 穿搭、教程、探店、Vlog、美食、旅行、知识 等)",
         "直接返回 JSON,不要 Markdown 围栏。",
-      ].join("\n");
+      ];
+      if (customPrompt) {
+        systemParts.push("", "用户补充的分析方向:", customPrompt);
+        log.info("summary", `customPrompt: ${customPrompt.slice(0, 100)}`);
+      }
+      const ANALYSIS_SYSTEM = systemParts.join("\n");
 
       let analysisResult;
 
@@ -7627,12 +7632,12 @@ app.whenReady().then(async () => {
     }
   }
 
-  ipcMain.handle("accounts:summarizeVideo", async (_event, { accountVideoId, slotOverrides } = {}) => {
+  ipcMain.handle("accounts:summarizeVideo", async (_event, { accountVideoId, slotOverrides, customPrompt } = {}) => {
     if (!accountVideoId) throw new Error("accounts:summarizeVideo 需要 accountVideoId");
     if (summaryInFlight.has(accountVideoId)) {
       return { ok: true, accepted: false, reason: "already in flight" };
     }
-    summarizeAccountVideo(accountVideoId, slotOverrides || undefined).catch((err) => {
+    summarizeAccountVideo(accountVideoId, slotOverrides || undefined, customPrompt || undefined).catch((err) => {
       log.warn("accounts:summarizeVideo", "unhandled", err?.message || err);
     });
     return { ok: true, accepted: true };

@@ -12,7 +12,7 @@
 import { type FunctionComponent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../AppContext";
 import { ImageGallery, ImageView, VideoThumbnail } from "../components/MediaViewer";
-import { ModelConfigDialog } from "../components/ModelConfigDialog";
+import { ModelConfigDialog, type ModelConfigResult } from "../components/ModelConfigDialog";
 import type {
   AppLocation,
   Account,
@@ -881,11 +881,11 @@ function VideosTab({
     return () => { off?.(); };
   }, []);
 
-  const fireSummarize = useCallback((avId: string, slotOverrides?: SlotOverrides) => {
+  const fireSummarize = useCallback((avId: string, slotOverrides?: SlotOverrides, customPrompt?: string) => {
     if (launchedRef.current.has(avId)) return;
     launchedRef.current.add(avId);
     setRowError((m) => { const n = { ...m }; delete n[avId]; return n; });
-    window.videoAnalyzer?.summarizeAccountVideo({ accountVideoId: avId, slotOverrides }).catch((e: unknown) => {
+    window.videoAnalyzer?.summarizeAccountVideo({ accountVideoId: avId, slotOverrides, customPrompt }).catch((e: unknown) => {
       launchedRef.current.delete(avId);
       setRowError((m) => ({ ...m, [avId]: e instanceof Error ? e.message : String(e) }));
     });
@@ -956,7 +956,7 @@ function VideosTab({
         return;
       }
       if (av.summaryStatus !== "summarizing" && !launchedRef.current.has(av.id)) {
-        fireSummarize(av.id);
+        fireSummarize(av.id, account.analysisConfig?.slotOverrides, account.analysisConfig?.customPrompt);
       }
     } else {
       if (av.analysisProjectId) {
@@ -1119,8 +1119,14 @@ function VideosTab({
           open={!!configTarget}
           onClose={() => setConfigTarget(null)}
           mode="content"
-          onConfirm={(overrides) => {
-            if (configTarget) fireSummarize(configTarget, Object.keys(overrides).length > 0 ? overrides : undefined);
+          initialOverrides={account.analysisConfig?.slotOverrides}
+          initialPrompt={account.analysisConfig?.customPrompt}
+          onConfirm={(result) => {
+            if (!configTarget) return;
+            ctx.upsertAccount({ ...account, analysisConfig: { slotOverrides: result.overrides, customPrompt: result.customPrompt }, updatedAt: new Date().toISOString() });
+            if (configTarget !== "__account__") {
+              fireSummarize(configTarget, result.overrides, result.customPrompt);
+            }
           }}
         />
       </div>
@@ -1177,9 +1183,21 @@ function VideosTab({
             className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200 disabled:opacity-50"
           >
             <Sparkles className="w-3 h-3" strokeWidth={2} />
-            全部摘要 ({unsummarizedCount})
+            全部分析 ({unsummarizedCount})
           </button>
         )}
+        <button
+          onClick={() => setConfigTarget("__account__")}
+          className={`inline-flex items-center gap-1 h-8 px-2.5 rounded-md text-[12.5px] ${
+            account.analysisConfig
+              ? "text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800"
+              : "text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700"
+          }`}
+          title="配置该账号的分析模型和分析方向"
+        >
+          <Sparkles className="w-3 h-3" strokeWidth={2} />
+          {account.analysisConfig ? "已配置" : "高级"}
+        </button>
       </div>
 
       {/* ── 视频列表 ── */}
@@ -1251,8 +1269,15 @@ function VideosTab({
         open={!!configTarget}
         onClose={() => setConfigTarget(null)}
         mode="content"
-        onConfirm={(overrides) => {
-          if (configTarget) fireSummarize(configTarget, Object.keys(overrides).length > 0 ? overrides : undefined);
+        title={configTarget === "__account__" ? "账号分析配置" : undefined}
+        initialOverrides={account.analysisConfig?.slotOverrides}
+        initialPrompt={account.analysisConfig?.customPrompt}
+        onConfirm={(result) => {
+          if (!configTarget) return;
+          ctx.upsertAccount({ ...account, analysisConfig: { slotOverrides: result.overrides, customPrompt: result.customPrompt }, updatedAt: new Date().toISOString() });
+          if (configTarget !== "__account__") {
+            fireSummarize(configTarget, result.overrides, result.customPrompt);
+          }
         }}
       />
     </div>

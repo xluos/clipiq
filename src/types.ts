@@ -772,6 +772,11 @@ export type Account = {
   fetchPhase?: AccountFetchPhase;
   fetchError?: string;              // failed 时的最后错误信息
   lastFetchedAt?: string;           // 上次成功拉取时间
+  // 账号级内容分析配置（高级设置持久化）
+  analysisConfig?: {
+    slotOverrides?: SlotOverrides;
+    customPrompt?: string;
+  };
   createdAt?: string;
   updatedAt?: string;
 };
