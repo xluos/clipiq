@@ -700,6 +700,7 @@ export type AccountVideo = {
   commentCount?: number;
   shareCount?: number;
   collectCount?: number;
+  playUrl?: string;
   platform: AccountPlatform;
   addedAt: string;                  // ISO 入库时间
   // 派生的分析项目 id;有值表示已经"开始分析"过。

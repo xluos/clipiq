@@ -2096,13 +2096,14 @@ async function fetchBilibiliCard(mid) {
   };
 }
 
-// 抖音 aweme 原始数据 → 标准 video 对象 (含互动数据)
+// 抖音 aweme 原始数据 → 标准 video 对象 (含互动数据 + play_url 直链)
 function normalizeDouyinAweme(a) {
   const id = String(a?.aweme_id || "");
   const cover =
     a?.video?.cover?.url_list?.[0] ||
     a?.video?.origin_cover?.url_list?.[0] ||
     null;
+  const playUrls = a?.video?.play_addr?.url_list || [];
   const dur = Number(a?.video?.duration) || 0; // 抖音 duration 单位是 ms
   const createTs = Number(a?.create_time) || 0; // 秒
   const stats = a?.statistics || {};
@@ -2120,6 +2121,7 @@ function normalizeDouyinAweme(a) {
     collectCount: Number(stats.collect_count) || 0,
     externalUrl: id ? `https://www.douyin.com/video/${id}` : "",
     thumbnailUrl: cover ? String(cover).replace(/^http:\/\//, "https://") : null,
+    playUrl: playUrls[0] || null,
   };
 }
 
@@ -2176,6 +2178,7 @@ async function fetchDouyinUserPosts(secUid, limit = 18) {
 }
 
 // 抖音用户投稿 — BrowserWindow 兜底 (不需要插件桥, 用 Electron Chromium 在 douyin.com 页面上下文执行 fetch).
+// 同时抓取账号元数据 (名字/头像/简介/粉丝) + 视频列表.
 async function fetchDouyinUserPostsViaWindow(secUid, limit = 18) {
   log.info("douyin:window", `开始 BrowserWindow 拉取, secUid=${secUid.slice(0, 20)}... limit=${limit}`);
   const win = new BrowserWindow({
@@ -2188,8 +2191,53 @@ async function fetchDouyinUserPostsViaWindow(secUid, limit = 18) {
     const targetUrl = `https://www.douyin.com/user/${encodeURIComponent(secUid)}`;
     log.info("douyin:window", `导航到 ${targetUrl}`);
     await win.loadURL(targetUrl, { timeout: 45_000 });
-    log.info("douyin:window", "页面加载完成, 等待 1.5s webmssdk 初始化");
-    await new Promise((r) => setTimeout(r, 1500));
+    log.info("douyin:window", "页面加载完成, 等待 2s webmssdk + 页面渲染");
+    await new Promise((r) => setTimeout(r, 2000));
+
+    // 从页面 RENDER_DATA 中提取账号信息
+    let accountInfo = null;
+    try {
+      accountInfo = await win.webContents.executeJavaScript(`
+        (function() {
+          try {
+            // 抖音 SSR 数据嵌在 script#RENDER_DATA 里 (URL-encoded JSON)
+            const el = document.querySelector("script#RENDER_DATA");
+            if (!el) return null;
+            const raw = decodeURIComponent(el.textContent || "");
+            const data = JSON.parse(raw);
+            // 用户信息在不同版本的抖音页面里路径不同, 遍历找
+            let userInfo = null;
+            const walk = (obj, depth) => {
+              if (!obj || depth > 4 || userInfo) return;
+              if (obj.user && obj.user.nickname && obj.user.secUid) { userInfo = obj.user; return; }
+              if (obj.userInfo && obj.userInfo.user) { userInfo = obj.userInfo.user; return; }
+              if (typeof obj === "object") {
+                for (const v of Object.values(obj)) {
+                  if (typeof v === "object" && v) walk(v, depth + 1);
+                }
+              }
+            };
+            walk(data, 0);
+            if (!userInfo) return null;
+            return {
+              nickname: userInfo.nickname || null,
+              avatarUrl: (userInfo.avatarLarger || userInfo.avatar300x300?.url_list?.[0] || userInfo.avatarMedium?.url_list?.[0] || "").replace(/^http:\\/\\//, "https://") || null,
+              signature: userInfo.signature || null,
+              followerCount: Number(userInfo.followerCount) || 0,
+              uid: userInfo.uid || userInfo.shortId || null,
+              secUid: userInfo.secUid || null,
+            };
+          } catch { return null; }
+        })()
+      `);
+      if (accountInfo) {
+        log.info("douyin:window", `账号信息: ${accountInfo.nickname} 粉丝=${accountInfo.followerCount} uid=${accountInfo.uid}`);
+      } else {
+        log.info("douyin:window", "未从 RENDER_DATA 中提取到账号信息");
+      }
+    } catch (e) {
+      log.warn("douyin:window", `提取账号信息失败: ${e?.message || e}`);
+    }
 
     const videos = [];
     let maxCursor = "0";
@@ -2229,7 +2277,7 @@ async function fetchDouyinUserPostsViaWindow(secUid, limit = 18) {
       }
     }
     log.info("douyin:window", `BrowserWindow 拉取完成, 共 ${videos.length} 条`);
-    return { videos: videos.slice(0, limit), total: videos.length };
+    return { videos: videos.slice(0, limit), total: videos.length, accountInfo };
   } finally {
     log.info("douyin:window", "销毁 BrowserWindow");
     win.destroy();
@@ -6891,9 +6939,41 @@ app.whenReady().then(async () => {
           try {
             const result = await fetchDouyinUserPostsViaWindow(secUid, safeLimit);
             if (result && result.videos.length > 0) nativeVideos = result;
+            // BrowserWindow 同时抓取了账号元数据
+            if (result?.accountInfo) {
+              const ai = result.accountInfo;
+              nativeCard = {
+                name: ai.nickname || null,
+                face: ai.avatarUrl || null,
+                sign: ai.signature || null,
+                fansFormatted: ai.followerCount > 0 ? formatFollowersCount(ai.followerCount) : null,
+                mid: ai.uid || null,
+              };
+              log.info("accounts:fetch", `抖音账号信息: ${ai.nickname} 粉丝=${ai.followerCount}`);
+            }
           } catch (e) {
             const prevErr = nativeVideosError ? nativeVideosError + "; " : "";
             nativeVideosError = prevErr + `douyin BrowserWindow: ${e?.message || String(e)}`;
+          }
+        }
+        // 如果已有视频但没有账号信息, 单独补一次 BrowserWindow 只抓账号元数据
+        if (nativeVideos && !nativeCard) {
+          report(40, "抓取账号信息", "从抖音主页提取");
+          try {
+            const infoResult = await fetchDouyinUserPostsViaWindow(secUid, 1);
+            if (infoResult?.accountInfo) {
+              const ai = infoResult.accountInfo;
+              nativeCard = {
+                name: ai.nickname || null,
+                face: ai.avatarUrl || null,
+                sign: ai.signature || null,
+                fansFormatted: ai.followerCount > 0 ? formatFollowersCount(ai.followerCount) : null,
+                mid: ai.uid || null,
+              };
+              log.info("accounts:fetch", `补充抖音账号信息: ${ai.nickname}`);
+            }
+          } catch (e) {
+            log.warn("accounts:fetch", `补充抖音账号信息失败: ${e?.message || e}`);
           }
         }
       } else {
@@ -7149,6 +7229,7 @@ app.whenReady().then(async () => {
           commentCount: v.commentCount || undefined,
           shareCount: v.shareCount || undefined,
           collectCount: v.collectCount || undefined,
+          playUrl: v.playUrl || undefined,
           platform,
           addedAt: new Date(now).toISOString(),
         };
@@ -7313,13 +7394,40 @@ app.whenReady().then(async () => {
       log.info("summary", `本地路径=${videoPath || "(无)"} 存在=${videoPath ? fsSync.existsSync(videoPath) : false}`);
       if (!videoPath || !fsSync.existsSync(videoPath)) {
         log.info("summary", "需要下载视频");
-        const dl = await performUrlDownloadFlow(av.externalUrl, {
-          projectId: `summary-${accountVideoId}`,
-          mediaDir: artifactDir,
-          handle: { cancelled: state.cancelled, abortController: new AbortController() },
-          onProgress: (p, s, m) => sendStatus("summarizing", { progress: 5 + Math.round(p * 0.2), message: m || s }),
-        });
-        videoPath = dl.filePath;
+        try {
+          const dl = await performUrlDownloadFlow(av.externalUrl, {
+            projectId: `summary-${accountVideoId}`,
+            mediaDir: artifactDir,
+            handle: { cancelled: state.cancelled, abortController: new AbortController(), children: new Set() },
+            onProgress: (p, s, m) => sendStatus("summarizing", { progress: 5 + Math.round(p * 0.2), message: m || s }),
+          });
+          videoPath = dl.filePath;
+        } catch (dlErr) {
+          log.warn("summary", `yt-dlp 下载失败: ${dlErr?.message || dlErr}, 尝试 play_url 直连`);
+          // fallback: 用 play_url 直连下载 (参考 douyin-crawler-demo)
+          if (av.playUrl) {
+            sendStatus("summarizing", { progress: 10, message: "直连下载" });
+            const filePath = path.join(artifactDir, `${av.externalId || "video"}.mp4`);
+            const partPath = filePath + ".part";
+            const res = await fetch(av.playUrl, {
+              headers: {
+                "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+                referer: "https://www.douyin.com/",
+                range: "bytes=0-",
+              },
+            });
+            if (!res.ok) throw new Error(`直连下载失败: HTTP ${res.status}`);
+            const { createWriteStream } = require("node:fs");
+            const { pipeline } = require("node:stream/promises");
+            const { Readable } = require("node:stream");
+            await pipeline(Readable.fromWeb(res.body), createWriteStream(partPath));
+            await fs.rename(partPath, filePath);
+            videoPath = filePath;
+            log.info("summary", `play_url 直连下载完成: ${filePath}`);
+          } else {
+            throw dlErr;
+          }
+        }
       }
       checkCancel();
 
