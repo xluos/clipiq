@@ -531,9 +531,9 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
   const fetchingUi = id ? accountFetchUi[id] : undefined;
   const fetching = !!fetchingUi || account?.fetchPhase === "fetching";
 
-  const analyzableVideos = useMemo(
-    () => accountVideos.filter((v) => v.summaryStatus === "done" && v.videoSummary),
-    [accountVideos],
+  const completedVideos = useMemo(
+    () => accountVideos.filter((v) => v.analysisProjectId && projects.find((p) => p.id === v.analysisProjectId && p.status === "completed")),
+    [accountVideos, projects],
   );
 
   const triggerFetch = async (range: AccountFetchRange) => {
@@ -553,23 +553,23 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
 
   const generateMethodology = async () => {
     if (!account) return;
-    if (analyzableVideos.length === 0) {
-      setGenError("至少需要 1 条已完成内容分析的视频。先在视频 tab 里生成摘要。");
+    if (completedVideos.length === 0) {
+      setGenError("至少需要 1 条已完成拆解分析的视频。");
       return;
     }
     setGenError("");
     setGenerating(true);
     try {
-      const videoSummaries = analyzableVideos.map((v) => {
-        const s = v.videoSummary;
+      const videoSummaries = completedVideos.map((v) => {
+        const proj = projects.find((p) => p.id === v.analysisProjectId);
+        const r = proj?.currentAnalysisId ? reportByAnalysis[proj.currentAnalysisId] : undefined;
         return {
           title: v.title,
-          summary: typeof s === "string" ? s : s?.summary || "",
-          hook: typeof s === "object" ? s?.hook : undefined,
-          structure: typeof s === "object" ? s?.structure : undefined,
-          pacing: typeof s === "object" ? s?.pacing : undefined,
-          visual: typeof s === "object" ? s?.visual : undefined,
-          tags: typeof s === "object" ? s?.tags : undefined,
+          summary: r?.globalSummary || r?.summary || "",
+          structure: r?.structure,
+          pacing: r?.pacing,
+          editingStyle: r?.editingStyle,
+          composition: r?.composition,
         };
       });
       const result = await window.videoAnalyzer?.generateAccountMethodology?.({
@@ -630,11 +630,11 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
         <button
           onClick={generateMethodology}
           disabled={generating}
-          title={analyzableVideos.length === 0 ? "需要先生成至少 1 条视频摘要" : "跨视频汇总方法论"}
+          title={completedVideos.length === 0 ? "需要先拆解分析至少 1 条视频" : "跨视频汇总方法论"}
           className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200/70 dark:border-indigo-800/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 disabled:opacity-50"
         >
           <Sparkles className="w-3 h-3" strokeWidth={1.5} />
-          {generating ? "汇总中…" : `汇总方法论 (${analyzableVideos.length})`}
+          {generating ? "汇总中…" : `汇总方法论 (${completedVideos.length})`}
         </button>
         <button
           onClick={() => {
@@ -1209,26 +1209,25 @@ function SummaryDetail({ summary, analysisProjectId, onOpenAnalysis }: {
     );
   }
 
-  const dims: Array<{ label: string; value: string }> = [
-    { label: "开场钩子", value: summary.hook },
-    { label: "叙事结构", value: summary.structure },
-    { label: "节奏特征", value: summary.pacing },
-    { label: "画面风格", value: summary.visual },
-  ].filter((d) => d.value);
-
   return (
     <div className="px-4 pb-3 -mt-1 space-y-2">
-      <p className="text-[12.5px] leading-relaxed text-slate-700 dark:text-slate-300">{summary.summary}</p>
-      {dims.length > 0 && (
-        <div className="grid grid-cols-2 gap-2">
-          {dims.map((d) => (
-            <div key={d.label} className="rounded-md bg-slate-50 dark:bg-slate-800/50 px-2.5 py-2">
-              <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-0.5">{d.label}</div>
-              <div className="text-[12px] leading-relaxed text-slate-700 dark:text-slate-300">{d.value}</div>
+      {(summary.topic || summary.target) && (
+        <div className="flex gap-2 flex-wrap">
+          {summary.topic && (
+            <div className="rounded-md bg-slate-50 dark:bg-slate-800/50 px-2.5 py-1.5 flex-1 min-w-[140px]">
+              <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-0.5">选题</div>
+              <div className="text-[12px] leading-relaxed text-slate-700 dark:text-slate-300">{summary.topic}</div>
             </div>
-          ))}
+          )}
+          {summary.target && (
+            <div className="rounded-md bg-slate-50 dark:bg-slate-800/50 px-2.5 py-1.5 flex-1 min-w-[140px]">
+              <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-0.5">受众</div>
+              <div className="text-[12px] leading-relaxed text-slate-700 dark:text-slate-300">{summary.target}</div>
+            </div>
+          )}
         </div>
       )}
+      <p className="text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-400">{summary.summary}</p>
       {summary.tags?.length > 0 && (
         <div className="flex gap-1.5 flex-wrap">
           {summary.tags.map((t) => (

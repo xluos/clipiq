@@ -7502,20 +7502,14 @@ app.whenReady().then(async () => {
       const transcriptText = transcript?.text || transcript?.segments?.map((s) => s.text).join(" ") || "";
       log.info("summary", `visionProvider=${visionProvider?.id || "(null)"} textProvider=${textProvider?.id || "(null)"}`);
       const ANALYSIS_SYSTEM = [
-        "你是短视频内容分析师。基于关键帧画面和字幕,输出结构化分析 JSON。",
+        "你是短视频内容分析师。基于关键帧画面和字幕,输出结构化内容分析 JSON。",
         "字段说明:",
-        "- summary: 200-300 字,描述视频讲了什么、核心信息点",
-        "- hook: 1-2 句,开场前 3-5 秒用了什么钩子手法(悬念/冲突/提问/视觉冲击/数字/共鸣等)",
-        "- structure: 1-2 句,叙事结构(如 问题→方案→效果、观点→论据→总结、故事弧线等)",
-        "- pacing: 1-2 句,节奏特征(快切/慢叙/前快后慢/卡点/对比节奏等)",
-        "- visual: 1-2 句,画面风格(构图/色调/字幕排版/转场/特效等)",
-        "- tags: 3-5 个内容标签(如 穿搭、教程、剧情、口播、Vlog 等)",
+        "- summary: 200-300 字,描述视频讲了什么、核心信息点、传达的观点或展示的内容",
+        "- topic: 1 句话,提炼核心选题/主题(如「夏季通勤穿搭搭配指南」「自驾川西环线攻略」)",
+        "- target: 1 句话,推断目标受众(如「18-30岁关注穿搭的女性用户」「有自驾需求的旅行爱好者」)",
+        "- tags: 3-5 个内容分类标签(如 穿搭、教程、探店、Vlog、美食、旅行、知识 等)",
         "直接返回 JSON,不要 Markdown 围栏。",
       ].join("\n");
-      const ANALYSIS_SCHEMA = {
-        summary: "string", hook: "string", structure: "string",
-        pacing: "string", visual: "string", tags: ["string"],
-      };
 
       let analysisResult;
 
@@ -7541,7 +7535,7 @@ app.whenReady().then(async () => {
         try {
           analysisResult = typeof raw === "string" ? JSON.parse(raw.replace(/```json?\s*|```/g, "").trim()) : raw;
         } catch {
-          analysisResult = { summary: typeof raw === "string" ? raw : JSON.stringify(raw), hook: "", structure: "", pacing: "", visual: "", tags: [] };
+          analysisResult = { summary: typeof raw === "string" ? raw : JSON.stringify(raw), topic: "", target: "", tags: [] };
         }
       } else if (textProvider?.baseUrl && textProvider?.apiKeyRef && textProvider?.model) {
         log.info("summary", `使用纯文本路径: ${textProvider.id} model=${textProvider.model}`);
@@ -7558,13 +7552,11 @@ app.whenReady().then(async () => {
 
       const videoSummary = {
         summary: String(analysisResult.summary || "").trim(),
-        hook: String(analysisResult.hook || "").trim(),
-        structure: String(analysisResult.structure || "").trim(),
-        pacing: String(analysisResult.pacing || "").trim(),
-        visual: String(analysisResult.visual || "").trim(),
+        topic: String(analysisResult.topic || "").trim(),
+        target: String(analysisResult.target || "").trim(),
         tags: Array.isArray(analysisResult.tags) ? analysisResult.tags.map(String).slice(0, 8) : [],
       };
-      log.info("summary", `内容分析完成, summary=${videoSummary.summary.length}字 tags=${videoSummary.tags.join(",")}`);
+      log.info("summary", `内容分析完成, summary=${videoSummary.summary.length}字 topic=${videoSummary.topic} tags=${videoSummary.tags.join(",")}`);
 
       // 7) 落库
       updateAv({
@@ -7623,11 +7615,10 @@ app.whenReady().then(async () => {
     videoSummaries.slice(0, 12).forEach((v, i) => {
       lines.push(`## 视频 ${i + 1} · ${v.title || "未命名"}`);
       if (v.summary) lines.push(`摘要: ${String(v.summary).slice(0, 400)}`);
-      if (v.hook) lines.push(`开场钩子: ${String(v.hook).slice(0, 200)}`);
       if (v.structure) lines.push(`结构: ${typeof v.structure === "string" ? v.structure.slice(0, 200) : JSON.stringify(v.structure).slice(0, 300)}`);
       if (v.pacing) lines.push(`节奏: ${String(v.pacing).slice(0, 200)}`);
-      if (v.visual) lines.push(`视觉: ${String(v.visual).slice(0, 200)}`);
-      if (Array.isArray(v.tags) && v.tags.length) lines.push(`标签: ${v.tags.join(", ")}`);
+      if (v.editingStyle) lines.push(`剪辑: ${String(v.editingStyle).slice(0, 200)}`);
+      if (v.composition) lines.push(`构图: ${String(v.composition).slice(0, 200)}`);
       lines.push("");
     });
     lines.push("请汇总该账号的视频方法论,输出 JSON:");

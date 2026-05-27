@@ -354,7 +354,7 @@ declare global {
       }) => void) => () => void;
       generateAccountMethodology: (payload: {
         accountName: string;
-        videoSummaries: Array<{ title: string; summary?: string; hook?: string; structure?: string; pacing?: string; visual?: string; tags?: string[] }>;
+        videoSummaries: Array<{ title: string; summary?: string; structure?: unknown; pacing?: string; editingStyle?: string; composition?: string }>;
       }) => Promise<{ ok: true; methodology: import("./types").AccountMethodology }>;
       generateStudioSteps: (payload: {
         goal: string;

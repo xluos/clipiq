@@ -714,10 +714,8 @@ export type AccountVideo = {
 
 export type VideoContentAnalysis = {
   summary: string;
-  hook: string;
-  structure: string;
-  pacing: string;
-  visual: string;
+  topic: string;
+  target: string;
   tags: string[];
 };
 
