@@ -813,6 +813,13 @@ function formatVideoDuration(sec: number): string {
   return `${m}:${String(r).padStart(2, "0")}`;
 }
 
+function formatTimestamp(sec: number): string {
+  const s = Math.round(sec);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${String(r).padStart(2, "0")}`;
+}
+
 function formatCount(n: number): string {
   if (n >= 1_0000) return `${(n / 1_0000).toFixed(1).replace(/\.0$/, "")}万`;
   return String(n);
@@ -1212,8 +1219,12 @@ function SummaryDetail({ summary, analysisProjectId, onOpenAnalysis }: {
     );
   }
 
+  const hasFrames = summary.frames && summary.frames.length > 0;
+  const hasTranscript = summary.transcript?.text;
+
   return (
-    <div className="px-4 pb-3 -mt-1 space-y-2">
+    <div className="px-4 pb-3 -mt-1 space-y-2.5">
+      {/* 选题 + 受众 */}
       {(summary.topic || summary.target) && (
         <div className="flex gap-2 flex-wrap">
           {summary.topic && (
@@ -1230,7 +1241,11 @@ function SummaryDetail({ summary, analysisProjectId, onOpenAnalysis }: {
           )}
         </div>
       )}
+
+      {/* 内容描述 */}
       <p className="text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-400">{summary.summary}</p>
+
+      {/* 标签 */}
       {summary.tags?.length > 0 && (
         <div className="flex gap-1.5 flex-wrap">
           {summary.tags.map((t) => (
@@ -1238,6 +1253,43 @@ function SummaryDetail({ summary, analysisProjectId, onOpenAnalysis }: {
           ))}
         </div>
       )}
+
+      {/* 关键帧 */}
+      {hasFrames && (
+        <div>
+          <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">关键帧 · {summary.frames!.length}</div>
+          <div className="flex gap-1.5 overflow-x-auto pb-1">
+            {summary.frames!.map((f, i) => (
+              <div key={i} className="shrink-0 w-[100px]">
+                <img src={f.url} alt={`${f.timeSec.toFixed(1)}s`} className="w-full h-[56px] object-cover rounded bg-slate-200 dark:bg-slate-800" />
+                <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 text-center mt-0.5">{formatTimestamp(f.timeSec)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 字幕 */}
+      {hasTranscript && (
+        <div>
+          <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1">字幕</div>
+          <div className="rounded-md bg-slate-50 dark:bg-slate-800/40 px-3 py-2 max-h-[120px] overflow-y-auto">
+            {summary.transcript!.segments?.length > 0 ? (
+              <div className="space-y-0.5">
+                {summary.transcript!.segments.map((seg, i) => (
+                  <div key={i} className="flex gap-2 text-[11.5px] leading-relaxed">
+                    <span className="font-mono text-slate-400 dark:text-slate-500 shrink-0 w-[52px] text-right">{formatTimestamp(seg.startSec)}</span>
+                    <span className="text-slate-700 dark:text-slate-300">{seg.text}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-[11.5px] leading-relaxed text-slate-600 dark:text-slate-400">{summary.transcript!.text}</p>
+            )}
+          </div>
+        </div>
+      )}
+
       {analysisProjectId && (
         <button onClick={(e) => { e.stopPropagation(); onOpenAnalysis(); }} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30">
           <ChevronRight className="w-3 h-3" strokeWidth={2} />查看拆解结果

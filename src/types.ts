@@ -717,6 +717,12 @@ export type VideoContentAnalysis = {
   topic: string;
   target: string;
   tags: string[];
+  frames?: Array<{ url: string; timeSec: number }>;
+  transcript?: {
+    text: string;
+    segments: Array<{ text: string; startSec: number; endSec: number }>;
+  } | null;
+  durationSec?: number;
 };
 
 // 账号当前拉取状态
