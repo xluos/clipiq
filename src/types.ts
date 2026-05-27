@@ -749,6 +749,7 @@ export type AccountMethodology = {
   structure?: { summary: string; sampleVideoIds?: string[] };
   visual?: { summary: string; sampleVideoIds?: string[] };
   generatedAt?: string;
+  sourceVideoCount?: number;
 };
 
 export type Account = {
@@ -766,6 +767,7 @@ export type Account = {
   videoIds?: string[];
   totalVideoCount?: number;         // 该账号下的视频总数 (含未分析的)
   methodology?: AccountMethodology; // 跨视频汇总产物;null 表示还未生成
+  methodologyHistory?: AccountMethodology[];
   // 首次/上次拉取的范围设置;详情页 dropdown 可改
   fetchRange?: AccountFetchRange;
   // 后台拉取阶段。fetching → ready/failed,UI 用来挂"拉取中"角标
