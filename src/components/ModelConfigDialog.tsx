@@ -60,15 +60,22 @@ const META_BY_SLOT: Record<string, SlotMeta> = {
   medium_text: MEDIUM_TEXT_META,
 };
 
+export type ModelConfigResult = {
+  overrides: SlotOverrides;
+  customPrompt?: string;
+};
+
 type Props = {
   open: boolean;
   onClose: () => void;
   mode: "content" | "pipeline";
   title?: string;
-  onConfirm: (overrides: SlotOverrides) => void;
+  initialOverrides?: SlotOverrides;
+  initialPrompt?: string;
+  onConfirm: (result: ModelConfigResult) => void;
 };
 
-export function ModelConfigDialog({ open, onClose, mode, title, onConfirm }: Props) {
+export function ModelConfigDialog({ open, onClose, mode, title, initialOverrides, initialPrompt, onConfirm }: Props) {
   const { providers, taskSlots, audioSlot } = useApp();
   const { readyLocalIds, readyWhisperIds } = useSidecarReadiness();
 
@@ -77,11 +84,15 @@ export function ModelConfigDialog({ open, onClose, mode, title, onConfirm }: Pro
   const [localSlots, setLocalSlots] = useState<Record<string, SlotAssignment>>(() => {
     const init: Record<string, SlotAssignment> = {};
     for (const s of stages) {
-      if (s.slot === "__audio__") init.__audio__ = audioSlot;
-      else init[s.slot] = taskSlots[s.slot as TaskSlotKey];
+      if (s.slot === "__audio__") init.__audio__ = (initialOverrides?.audio !== undefined ? initialOverrides.audio : audioSlot);
+      else {
+        const key = s.slot as keyof SlotOverrides;
+        init[s.slot] = (initialOverrides?.[key] !== undefined ? initialOverrides[key]! : taskSlots[s.slot as TaskSlotKey]);
+      }
     }
     return init;
   });
+  const [prompt, setPrompt] = useState(initialPrompt || "");
 
   if (!open) return null;
 
@@ -89,13 +100,10 @@ export function ModelConfigDialog({ open, onClose, mode, title, onConfirm }: Pro
     const overrides: SlotOverrides = {};
     for (const s of stages) {
       const key = s.slot === "__audio__" ? "audio" : s.slot;
-      const original = s.slot === "__audio__" ? audioSlot : taskSlots[s.slot as TaskSlotKey];
-      const current = localSlots[s.slot === "__audio__" ? "__audio__" : s.slot];
-      if (JSON.stringify(current) !== JSON.stringify(original)) {
-        (overrides as any)[key] = current;
-      }
+      const slotKey = s.slot === "__audio__" ? "__audio__" : s.slot;
+      (overrides as any)[key] = localSlots[slotKey];
     }
-    onConfirm(overrides);
+    onConfirm({ overrides, customPrompt: prompt.trim() || undefined });
     onClose();
   };
 
@@ -114,7 +122,7 @@ export function ModelConfigDialog({ open, onClose, mode, title, onConfirm }: Pro
           </button>
         </div>
 
-        <div className="px-5 py-3">
+        <div className="px-5 py-3 space-y-1">
           {stages.map((stage, idx) => {
             const isAudio = stage.slot === "__audio__";
             const slotKey = isAudio ? "__audio__" : stage.slot;
@@ -137,16 +145,26 @@ export function ModelConfigDialog({ open, onClose, mode, title, onConfirm }: Pro
           })}
         </div>
 
-        <div className="flex items-center justify-between px-5 py-3 border-t border-slate-200 dark:border-slate-800">
-          <span className="text-[11px] text-slate-500 dark:text-slate-400">不修改的项使用全局默认值</span>
-          <div className="flex gap-2">
-            <button onClick={onClose} className="h-8 px-3 rounded-md text-[12.5px] text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800">
-              取消
-            </button>
-            <button onClick={handleConfirm} className="h-8 px-4 rounded-md text-[12.5px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white">
-              确认并开始
-            </button>
+        {mode === "content" && (
+          <div className="px-5 py-3 border-t border-slate-200 dark:border-slate-800">
+            <div className="text-[11px] font-semibold text-slate-900 dark:text-slate-100 mb-1.5">分析方向（可选）</div>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="想重点关注什么？如：分析视频的变现方式和商业价值、关注画面构图和色彩搭配..."
+              rows={2}
+              className="w-full rounded-md border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0e0e10] px-3 py-2 text-[12.5px] text-slate-700 dark:text-slate-300 placeholder-slate-400 resize-none focus:outline-none focus:ring-1 focus:ring-indigo-400"
+            />
           </div>
+        )}
+
+        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-slate-200 dark:border-slate-800">
+          <button onClick={onClose} className="h-8 px-3 rounded-md text-[12.5px] text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800">
+            取消
+          </button>
+          <button onClick={handleConfirm} className="h-8 px-4 rounded-md text-[12.5px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white">
+            确认并开始
+          </button>
         </div>
       </div>
     </div>
