@@ -341,6 +341,17 @@ declare global {
       onAccountFetchProgress: (callback: (event: AccountFetchProgress) => void) => () => void;
       onAccountFetchDone: (callback: (event: { accountId: string; videos: AccountVideo[]; account: Partial<Account>; warnings?: string[] }) => void) => () => void;
       onAccountFetchFailed: (callback: (event: { accountId: string; error: string }) => void) => () => void;
+      // 轻量视频摘要
+      summarizeAccountVideo: (payload: { accountVideoId: string }) => Promise<{ ok: true; accepted: boolean; reason?: string }>;
+      cancelSummarizeVideo: (accountVideoId: string) => Promise<{ ok: true; cancelled: boolean }>;
+      onAccountVideoSummaryStatus: (callback: (event: {
+        accountVideoId: string;
+        status: "summarizing" | "done" | "failed" | "idle";
+        summary?: string;
+        error?: string;
+        progress?: number;
+        message?: string;
+      }) => void) => () => void;
       generateAccountMethodology: (payload: {
         accountName: string;
         videoSummaries: Array<{ title: string; summary?: string; structure?: unknown; pacing?: string; editingStyle?: string; composition?: string }>;

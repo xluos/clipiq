@@ -2096,52 +2096,222 @@ async function fetchBilibiliCard(mid) {
   };
 }
 
-// 抖音用户投稿 — 必须经 Chrome 插件桥 (在 douyin.com tab 里调 fetch, 借 webmssdk 自动签 a_bogus).
-// main 进程没有 webmssdk, 自己签 a_bogus 工作量大且抖音常变签名, 不在 node 里实现.
-async function fetchDouyinUserPosts(secUid, count = 18) {
-  if (!extensionBridge.isConnected()) return null;
-  try {
+// 抖音 aweme 原始数据 → 标准 video 对象 (含互动数据)
+function normalizeDouyinAweme(a) {
+  const id = String(a?.aweme_id || "");
+  const cover =
+    a?.video?.cover?.url_list?.[0] ||
+    a?.video?.origin_cover?.url_list?.[0] ||
+    null;
+  const dur = Number(a?.video?.duration) || 0; // 抖音 duration 单位是 ms
+  const createTs = Number(a?.create_time) || 0; // 秒
+  const stats = a?.statistics || {};
+  return {
+    id,
+    title: a?.desc || "(未命名视频)",
+    durationSec: Math.round(dur / 1000),
+    uploadDate: createTs
+      ? new Date(createTs * 1000).toISOString().slice(0, 10).replace(/-/g, "")
+      : null,
+    viewCount: Number(stats.play_count) || 0,
+    likeCount: Number(stats.digg_count) || 0,
+    commentCount: Number(stats.comment_count) || 0,
+    shareCount: Number(stats.share_count) || 0,
+    collectCount: Number(stats.collect_count) || 0,
+    externalUrl: id ? `https://www.douyin.com/video/${id}` : "",
+    thumbnailUrl: cover ? String(cover).replace(/^http:\/\//, "https://") : null,
+  };
+}
+
+// 解析抖音 extensionBridge 单页响应, 返回 { list, hasMore, maxCursor }
+function parseDouyinBridgeResponse(result) {
+  if (!result || !result.ok) throw new Error(`HTTP ${result?.status ?? "?"}`);
+  const body = result.body;
+  if (body?.__parseError) throw new Error(`JSON 解析失败: ${body.raw?.slice(0, 200)}`);
+  if (body?.__error) throw new Error(body.__error);
+  if (Number(body?.status_code) !== 0 && body?.status_code != null) {
+    throw new Error(`status_code=${body.status_code} ${body?.status_msg || ""}`);
+  }
+  const list = Array.isArray(body?.aweme_list) ? body.aweme_list : [];
+  return {
+    list,
+    hasMore: Boolean(body?.has_more) && list.length > 0,
+    maxCursor: String(body?.max_cursor ?? ""),
+  };
+}
+
+// 抖音用户投稿 — 经 Chrome 插件桥 (在 douyin.com tab 里调 fetch, 借 webmssdk 自动签 a_bogus).
+// 支持分页拉取, limit 为最终目标数量.
+async function fetchDouyinUserPosts(secUid, limit = 18) {
+  if (!extensionBridge.isConnected()) {
+    log.info("douyin:bridge", `插件桥未连接, 跳过 bridge 路径`);
+    return null;
+  }
+  log.info("douyin:bridge", `开始 bridge 拉取, secUid=${secUid.slice(0, 20)}... limit=${limit}`);
+  const videos = [];
+  let maxCursor = "0";
+  let hasMore = true;
+  let pageNum = 0;
+  while (hasMore && videos.length < limit) {
+    pageNum++;
+    const count = Math.min(20, limit - videos.length);
+    log.info("douyin:bridge", `第 ${pageNum} 页, count=${count} maxCursor=${maxCursor.slice(0, 20)}`);
     const result = await extensionBridge.request(
       "douyin.userPosts",
-      { secUid, count, maxCursor: 0 },
+      { secUid, count, maxCursor },
       { timeoutMs: 25_000 },
     );
-    if (!result || !result.ok) {
-      throw new Error(`HTTP ${result?.status ?? "?"}`);
+    const page = parseDouyinBridgeResponse(result);
+    const batch = page.list.map(normalizeDouyinAweme).filter((v) => v.id);
+    log.info("douyin:bridge", `第 ${pageNum} 页返回 ${page.list.length} 条原始, 有效 ${batch.length} 条, hasMore=${page.hasMore}`);
+    videos.push(...batch);
+    hasMore = page.hasMore;
+    maxCursor = page.maxCursor;
+    if (hasMore && videos.length < limit) {
+      await new Promise((r) => setTimeout(r, 800));
     }
-    const body = result.body;
-    if (body?.__parseError) throw new Error(`JSON 解析失败: ${body.raw?.slice(0, 200)}`);
-    if (body?.__error) throw new Error(body.__error);
-    if (Number(body?.status_code) !== 0 && body?.status_code != null) {
-      // 抖音业务码; status_code 0 是 OK
-      throw new Error(`status_code=${body.status_code} ${body?.status_msg || ""}`);
-    }
-    const list = Array.isArray(body?.aweme_list) ? body.aweme_list : [];
-    const videos = list.map((a) => {
-      const id = String(a?.aweme_id || "");
-      const cover =
-        a?.video?.cover?.url_list?.[0] ||
-        a?.video?.origin_cover?.url_list?.[0] ||
-        null;
-      const dur = Number(a?.video?.duration) || 0; // 抖音 duration 单位是 ms
-      const createTs = Number(a?.create_time) || 0; // 秒
-      return {
-        id,
-        title: a?.desc || "(未命名视频)",
-        durationSec: Math.round(dur / 1000),
-        uploadDate: createTs
-          ? new Date(createTs * 1000).toISOString().slice(0, 10).replace(/-/g, "")
-          : null,
-        viewCount: Number(a?.statistics?.play_count) || 0,
-        externalUrl: id ? `https://www.douyin.com/video/${id}` : "",
-        thumbnailUrl: cover ? String(cover).replace(/^http:\/\//, "https://") : null,
-      };
-    }).filter((v) => v.id);
-    return { videos, total: videos.length };
-  } catch (e) {
-    // 让上层把错误 surface 到 warnings, 别在这里吞
-    throw e;
   }
+  log.info("douyin:bridge", `bridge 拉取完成, 共 ${videos.length} 条`);
+  return { videos: videos.slice(0, limit), total: videos.length };
+}
+
+// 抖音用户投稿 — BrowserWindow 兜底 (不需要插件桥, 用 Electron Chromium 在 douyin.com 页面上下文执行 fetch).
+async function fetchDouyinUserPostsViaWindow(secUid, limit = 18) {
+  log.info("douyin:window", `开始 BrowserWindow 拉取, secUid=${secUid.slice(0, 20)}... limit=${limit}`);
+  const win = new BrowserWindow({
+    show: false,
+    width: 800,
+    height: 600,
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
+  });
+  try {
+    const targetUrl = `https://www.douyin.com/user/${encodeURIComponent(secUid)}`;
+    log.info("douyin:window", `导航到 ${targetUrl}`);
+    await win.loadURL(targetUrl, { timeout: 45_000 });
+    log.info("douyin:window", "页面加载完成, 等待 1.5s webmssdk 初始化");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    const videos = [];
+    let maxCursor = "0";
+    let hasMore = true;
+    let pageNum = 0;
+    while (hasMore && videos.length < limit) {
+      pageNum++;
+      const count = Math.min(20, limit - videos.length);
+      log.info("douyin:window", `第 ${pageNum} 页, count=${count} maxCursor=${maxCursor.slice(0, 20)}`);
+      const pageData = await win.webContents.executeJavaScript(`
+        (async () => {
+          const params = new URLSearchParams({
+            sec_user_id: ${JSON.stringify(secUid)},
+            max_cursor: ${JSON.stringify(maxCursor)},
+            count: String(${count}),
+            aid: '6383',
+          });
+          const res = await fetch(
+            'https://www.douyin.com/aweme/v1/web/aweme/post/?' + params,
+            { method: 'GET', credentials: 'include', headers: { 'content-type': 'application/json' }, referrer: 'https://www.douyin.com/' }
+          );
+          return res.json();
+        })()
+      `);
+      log.info("douyin:window", `第 ${pageNum} 页响应 status_code=${pageData?.status_code} aweme_list.length=${pageData?.aweme_list?.length ?? 0} has_more=${pageData?.has_more}`);
+      if (Number(pageData?.status_code) !== 0 && pageData?.status_code != null) {
+        throw new Error(`status_code=${pageData.status_code} ${pageData?.status_msg || ""}`);
+      }
+      const list = Array.isArray(pageData?.aweme_list) ? pageData.aweme_list : [];
+      const batch = list.map(normalizeDouyinAweme).filter((v) => v.id);
+      log.info("douyin:window", `第 ${pageNum} 页有效 ${batch.length} 条`);
+      videos.push(...batch);
+      hasMore = Boolean(pageData?.has_more) && list.length > 0;
+      maxCursor = String(pageData?.max_cursor ?? "");
+      if (hasMore && videos.length < limit) {
+        await new Promise((r) => setTimeout(r, 800));
+      }
+    }
+    log.info("douyin:window", `BrowserWindow 拉取完成, 共 ${videos.length} 条`);
+    return { videos: videos.slice(0, limit), total: videos.length };
+  } finally {
+    log.info("douyin:window", "销毁 BrowserWindow");
+    win.destroy();
+  }
+}
+
+// 从分享文案/URL 中提取第一个 URL
+function extractFirstUrl(input) {
+  const text = String(input || "");
+  const match = text.match(/https?:\/\/[^\s，。)）\]】'"]+/i);
+  return match ? match[0].replace(/[.,;)]+$/, "") : null;
+}
+
+// 解析抖音短链 (v.douyin.com) → 完整 URL
+// 如果短链指向视频页面 (/video/xxx), 会尝试通过 BrowserWindow 抓取 author 的 sec_uid 并转为用户页 URL
+async function resolveDouyinShortUrl(url) {
+  if (!/v\.douyin\.com/i.test(url)) {
+    log.info("douyin:resolve", `非短链, 原样返回: ${url.slice(0, 80)}`);
+    return url;
+  }
+  log.info("douyin:resolve", `检测到短链, 尝试解析: ${url.slice(0, 80)}`);
+  let resolved = url;
+  try {
+    const res = await fetch(url, {
+      redirect: "follow",
+      headers: {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+        referer: "https://www.douyin.com/",
+      },
+    });
+    resolved = res.url || url;
+    log.info("douyin:resolve", `短链解析结果: ${resolved.slice(0, 120)}`);
+  } catch (e) {
+    log.warn("douyin:resolve", `短链 redirect 失败: ${e?.message || e}`);
+    return url;
+  }
+  // 如果解析到了视频页面, 尝试从视频页面获取 author sec_uid
+  const videoMatch = resolved.match(/douyin\.com\/video\/(\d+)/);
+  if (videoMatch) {
+    log.info("douyin:resolve", `短链指向视频页面 (aweme_id=${videoMatch[1]}), 尝试提取 author sec_uid`);
+    try {
+      const win = new BrowserWindow({
+        show: false, width: 800, height: 600,
+        webPreferences: { nodeIntegration: false, contextIsolation: true },
+      });
+      try {
+        await win.loadURL(resolved, { timeout: 30_000 });
+        await new Promise((r) => setTimeout(r, 2000));
+        const secUid = await win.webContents.executeJavaScript(`
+          (function() {
+            try {
+              // 抖音 SPA 在 __RENDER_DATA__ 或页面 DOM 中嵌有 author sec_uid
+              const scripts = document.querySelectorAll("script#RENDER_DATA");
+              for (const s of scripts) {
+                const text = decodeURIComponent(s.textContent || "");
+                const m = text.match(/"secUid"\\s*:\\s*"([^"]+)"/);
+                if (m) return m[1];
+              }
+              // fallback: 找页面上的 user link
+              const links = document.querySelectorAll('a[href*="/user/"]');
+              for (const a of links) {
+                const um = a.href.match(/\\/user\\/([A-Za-z0-9_-]+)/);
+                if (um) return um[1];
+              }
+              return null;
+            } catch { return null; }
+          })()
+        `);
+        if (secUid) {
+          const userUrl = `https://www.douyin.com/user/${secUid}`;
+          log.info("douyin:resolve", `从视频页面提取到 author sec_uid, 转为用户页: ${userUrl.slice(0, 80)}`);
+          return userUrl;
+        }
+        log.warn("douyin:resolve", "从视频页面未能提取 author sec_uid");
+      } finally {
+        win.destroy();
+      }
+    } catch (e) {
+      log.warn("douyin:resolve", `从视频页面提取 author 失败: ${e?.message || e}`);
+    }
+  }
+  return resolved;
 }
 
 // yt-dlp 跑一次 flat-playlist + dump-single-json, 抽出账号元数据 + 视频列表
@@ -6645,9 +6815,15 @@ app.whenReady().then(async () => {
 
   // v2: 多策略拉取 UP 主账号信息 + 视频列表
   // 策略: 平台 native API (头像/粉丝/简介) ∥ yt-dlp (视频列表 + 兜底元数据)
-  const fetchAccountVideosCore = async ({ url, limit = 20, onProgress, cancelled }) => {
-    if (!url || typeof url !== "string") throw new Error("fetchAccountVideosCore 需要 url");
+  const fetchAccountVideosCore = async ({ url: rawInput, limit = 20, onProgress, cancelled }) => {
+    if (!rawInput || typeof rawInput !== "string") throw new Error("fetchAccountVideosCore 需要 url");
+    // 从分享文案中提取 URL
+    const extractedUrl = extractFirstUrl(rawInput) || rawInput;
+    log.info("accounts:fetch", `原始输入: ${rawInput.slice(0, 80)} → 提取URL: ${extractedUrl.slice(0, 80)}`);
+    // 短链解析 (v.douyin.com → www.douyin.com/user/...)
+    const url = await resolveDouyinShortUrl(extractedUrl);
     const platform = detectAccountPlatform(url);
+    log.info("accounts:fetch", `解析后URL: ${url.slice(0, 120)} → 平台: ${platform}`);
     const safeLimit = Math.max(1, Math.min(200, Number(limit) || 20));
     const report = (progress, stage, message) => {
       if (cancelled && cancelled()) return;
@@ -6699,15 +6875,28 @@ app.whenReady().then(async () => {
 
     if (platform === "douyin") {
       const secUid = parseDouyinSecUid(url);
-      if (secUid && extensionBridge.isConnected()) {
-        report(20, "请求抖音接口", "经 Chrome 插件 douyin.com tab 调 fetch");
-        try {
-          const result = await fetchDouyinUserPosts(secUid, safeLimit);
-          if (result && result.videos.length > 0) nativeVideos = result;
-        } catch (e) {
-          nativeVideosError = `douyin user posts: ${e?.message || String(e)}`;
+      log.info("accounts:fetch", `抖音 secUid=${secUid ? secUid.slice(0, 20) + "..." : "(null)"} bridgeConnected=${extensionBridge.isConnected()}`);
+      if (secUid) {
+        if (extensionBridge.isConnected()) {
+          report(20, "请求抖音接口", "经 Chrome 插件桥");
+          try {
+            const result = await fetchDouyinUserPosts(secUid, safeLimit);
+            if (result && result.videos.length > 0) nativeVideos = result;
+          } catch (e) {
+            nativeVideosError = `douyin user posts (bridge): ${e?.message || String(e)}`;
+          }
         }
-      } else if (!secUid) {
+        if (!nativeVideos) {
+          report(30, "请求抖音接口", "BrowserWindow 兜底");
+          try {
+            const result = await fetchDouyinUserPostsViaWindow(secUid, safeLimit);
+            if (result && result.videos.length > 0) nativeVideos = result;
+          } catch (e) {
+            const prevErr = nativeVideosError ? nativeVideosError + "; " : "";
+            nativeVideosError = prevErr + `douyin BrowserWindow: ${e?.message || String(e)}`;
+          }
+        }
+      } else {
         nativeCardError = "无法从抖音 URL 解析出 sec_user_id (期望格式: douyin.com/user/MS4w...)";
       }
     }
@@ -6718,6 +6907,7 @@ app.whenReady().then(async () => {
     const skipYtDlp =
       (platform === "bilibili" && nativeCard && nativeVideos) ||
       (platform === "douyin" && nativeVideos && nativeVideos.videos.length > 0);
+    log.info("accounts:fetch", `nativeVideos=${nativeVideos ? nativeVideos.videos.length + "条" : "null"} nativeVideosError=${nativeVideosError || "无"} skipYtDlp=${skipYtDlp}`);
     if (!skipYtDlp) {
       report(45, "yt-dlp 兜底", "调 yt-dlp --flat-playlist 拉视频清单");
       try {
@@ -6955,10 +7145,14 @@ app.whenReady().then(async () => {
           thumbnailUrl: v.thumbnailUrl || undefined,
           uploadDate: v.uploadDate || null,
           viewCount: v.viewCount || 0,
+          likeCount: v.likeCount || undefined,
+          commentCount: v.commentCount || undefined,
+          shareCount: v.shareCount || undefined,
+          collectCount: v.collectCount || undefined,
           platform,
           addedAt: new Date(now).toISOString(),
         };
-        // 保留已有 analysisProjectId
+        // 保留已有 analysisProjectId + 摘要数据
         const existing = existsStmt.get(avId);
         if (existing) {
           const oldRow = db.prepare("SELECT data FROM account_videos WHERE id = ?").get(avId);
@@ -6966,6 +7160,9 @@ app.whenReady().then(async () => {
             try {
               const old = JSON.parse(oldRow.data);
               if (old.analysisProjectId) av.analysisProjectId = old.analysisProjectId;
+              if (old.videoSummary) av.videoSummary = old.videoSummary;
+              if (old.summaryStatus) av.summaryStatus = old.summaryStatus;
+              if (old.localVideoPath) av.localVideoPath = old.localVideoPath;
               av.addedAt = old.addedAt || av.addedAt;
             } catch { /* noop */ }
           }
@@ -7075,6 +7272,193 @@ app.whenReady().then(async () => {
       out.push({ accountId, stage: state.stage, progress: state.progress, message: state.message });
     }
     return out;
+  });
+
+  // ── 轻量视频摘要管线 ──
+  if (!global.__summaryInFlight) global.__summaryInFlight = new Map();
+  const summaryInFlight = global.__summaryInFlight;
+
+  async function summarizeAccountVideo(accountVideoId) {
+    log.info("summary", `开始摘要 accountVideoId=${accountVideoId}`);
+    const db = getDb();
+    const row = db.prepare("SELECT data FROM account_videos WHERE id = ?").get(accountVideoId);
+    if (!row) throw new Error("视频不存在");
+    const av = JSON.parse(row.data);
+    log.info("summary", `视频: ${av.title?.slice(0, 40)} url=${av.externalUrl?.slice(0, 60)}`);
+
+    const state = { cancelled: false, startedAt: Date.now() };
+    summaryInFlight.set(accountVideoId, state);
+
+    const sendStatus = (status, extra) => {
+      broadcastToWindows("account:video:summary:status", { accountVideoId, status, ...extra });
+    };
+    const updateAv = (patch) => {
+      Object.assign(av, patch);
+      db.prepare("UPDATE account_videos SET data = ? WHERE id = ?")
+        .run(JSON.stringify(av), accountVideoId);
+    };
+
+    updateAv({ summaryStatus: "summarizing", summaryError: undefined });
+    sendStatus("summarizing", { progress: 0 });
+
+    try {
+      const checkCancel = () => { if (state.cancelled) throw new Error("__cancelled__"); };
+
+      // 1) 下载视频
+      sendStatus("summarizing", { progress: 5, message: "下载视频" });
+      const artifactDir = path.join(app.getPath("userData"), "accounts", av.accountId, "videos", av.externalId);
+      await fs.mkdir(artifactDir, { recursive: true });
+
+      let videoPath = av.localVideoPath;
+      log.info("summary", `本地路径=${videoPath || "(无)"} 存在=${videoPath ? fsSync.existsSync(videoPath) : false}`);
+      if (!videoPath || !fsSync.existsSync(videoPath)) {
+        log.info("summary", "需要下载视频");
+        const dl = await performUrlDownloadFlow(av.externalUrl, {
+          projectId: `summary-${accountVideoId}`,
+          mediaDir: artifactDir,
+          handle: { cancelled: state.cancelled, abortController: new AbortController() },
+          onProgress: (p, s, m) => sendStatus("summarizing", { progress: 5 + Math.round(p * 0.2), message: m || s }),
+        });
+        videoPath = dl.filePath;
+      }
+      checkCancel();
+
+      // 2) 读取视频信息
+      log.info("summary", `视频下载完成: ${videoPath}`);
+      sendStatus("summarizing", { progress: 28, message: "读取视频信息" });
+      const ffmpegPath = await commandPath("ffmpeg");
+      log.info("summary", `ffmpeg=${ffmpegPath || "(未安装)"}`);
+      const inspected = await inspectVideo(videoPath);
+      log.info("summary", `视频: ${inspected.durationSec}s ${inspected.width}x${inspected.height} hasAudio=${inspected.hasAudio}`);
+      checkCancel();
+
+      // 3) 检测镜头切换
+      sendStatus("summarizing", { progress: 32, message: "检测镜头" });
+      let scenes = [];
+      if (ffmpegPath) {
+        scenes = await detectScenes(ffmpegPath, videoPath, 0.3, {});
+      }
+      checkCancel();
+
+      // 4) 抽取关键画面 (8-12 帧)
+      sendStatus("summarizing", { progress: 38, message: "抽取关键画面" });
+      const targetCount = Math.min(12, Math.max(6, scenes.length || 6));
+      const plan = planFramePlan(scenes, inspected.durationSec, targetCount);
+      const framesDir = path.join(artifactDir, "frames");
+      await fs.mkdir(framesDir, { recursive: true });
+      const { frames } = await buildFrames(ffmpegPath, videoPath, plan, framesDir, {},
+        (i, total) => sendStatus("summarizing", { progress: 38 + Math.round((i / total) * 12), message: `抽帧 ${i + 1}/${total}` }),
+      );
+      checkCancel();
+
+      // 5) 识别字幕
+      sendStatus("summarizing", { progress: 52, message: "识别字幕" });
+      let transcript = null;
+      if (inspected.hasAudio) {
+        const cfg = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+        const audioProvider = resolveAudioProvider(cfg);
+        if (audioProvider) {
+          const wavPath = path.join(artifactDir, "audio.wav");
+          await extractAudioWav(ffmpegPath, videoPath, wavPath, {});
+          checkCancel();
+          transcript = await transcribeAudio(audioProvider, wavPath, {},
+            (p) => sendStatus("summarizing", { progress: 52 + Math.round(18 * (p?.progress || 0)), message: "识别字幕" }),
+          );
+        }
+      }
+      checkCancel();
+
+      log.info("summary", `抽帧完成: ${frames.length} 帧, 字幕: ${transcript ? transcript.text?.length + "字" : "无"}`);
+
+      // 6) LLM 生成摘要
+      sendStatus("summarizing", { progress: 75, message: "生成摘要" });
+      const cfg = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+      const visionProvider = resolveSlotProvider(cfg, "complex_vision");
+      const textProvider = resolveSlotProvider(cfg, "medium_text");
+
+      const transcriptText = transcript?.text || transcript?.segments?.map((s) => s.text).join(" ") || "";
+      log.info("summary", `visionProvider=${visionProvider?.id || "(null)"} textProvider=${textProvider?.id || "(null)"}`);
+      let summaryText;
+
+      if (visionProvider?.baseUrl && visionProvider?.apiKeyRef && visionProvider?.model) {
+        log.info("summary", `使用视觉路径: ${visionProvider.id} model=${visionProvider.model}`);
+        // 视觉路径: 发帧图片 + 字幕
+        const imageDataUrls = [];
+        for (const f of frames.slice(0, 10)) {
+          try {
+            const buf = await fs.readFile(f.framePath);
+            imageDataUrls.push(`data:image/jpeg;base64,${buf.toString("base64")}`);
+          } catch { /* skip broken frames */ }
+        }
+        checkCancel();
+        const transcriptPart = transcriptText ? `\n\n字幕全文:\n${transcriptText.slice(0, 3000)}` : "\n\n(该视频无字幕)";
+        const result = await callOpenAIChatCompletions(
+          visionProvider,
+          "你是视频内容分析师。基于关键帧画面和字幕,用 200-400 字中文描述这个视频讲了什么内容,包括主题、风格和亮点。直接输出描述文本,不要 JSON 包裹,不要 Markdown 格式。",
+          `视频标题: ${av.title}\n时长: ${inspected.durationSec} 秒${transcriptPart}`,
+          imageDataUrls,
+          { abortController: new AbortController() },
+        );
+        summaryText = result?.raw || result?.parsed;
+      } else if (textProvider?.baseUrl && textProvider?.apiKeyRef && textProvider?.model) {
+        log.info("summary", `使用纯文本路径: ${textProvider.id} model=${textProvider.model}`);
+        const frameDesc = frames.map((f) => `${(f.midSec || 0).toFixed(1)}s`).join(", ");
+        const result = await openaiClient.callJsonCompletion(textProvider, {
+          systemText:
+            "你是视频内容分析师。基于字幕和关键帧时间戳,用 200-400 字中文描述视频讲了什么内容。" +
+            "返回 JSON: {\"summary\": \"...\"}。不要 Markdown 围栏。",
+          userText: `标题: ${av.title}\n时长: ${inspected.durationSec}s\n关键帧时刻: ${frameDesc}\n字幕: ${transcriptText.slice(0, 3000) || "(无字幕)"}`,
+          temperature: 0.4,
+        });
+        summaryText = result?.parsed?.summary || result?.raw;
+      } else {
+        throw new Error("未配置视觉或文本模型,无法生成摘要。请在设置 → 任务分配中配置。");
+      }
+
+      if (typeof summaryText !== "string") summaryText = JSON.stringify(summaryText);
+      summaryText = summaryText.trim();
+      log.info("summary", `摘要生成完成, 长度=${summaryText.length}字`);
+
+      // 7) 落库
+      updateAv({
+        videoSummary: summaryText,
+        summaryStatus: "done",
+        summaryError: undefined,
+        localVideoPath: videoPath,
+      });
+      sendStatus("done", { summary: summaryText, progress: 100 });
+      return { ok: true, summary: summaryText };
+
+    } catch (err) {
+      const msg = err?.message || String(err);
+      const isCancel = msg === "__cancelled__" || state.cancelled;
+      updateAv({
+        summaryStatus: isCancel ? "idle" : "failed",
+        summaryError: isCancel ? undefined : msg,
+      });
+      sendStatus(isCancel ? "idle" : "failed", { error: isCancel ? undefined : msg });
+      if (!isCancel) throw err;
+    } finally {
+      summaryInFlight.delete(accountVideoId);
+    }
+  }
+
+  ipcMain.handle("accounts:summarizeVideo", async (_event, { accountVideoId } = {}) => {
+    if (!accountVideoId) throw new Error("accounts:summarizeVideo 需要 accountVideoId");
+    if (summaryInFlight.has(accountVideoId)) {
+      return { ok: true, accepted: false, reason: "already in flight" };
+    }
+    summarizeAccountVideo(accountVideoId).catch((err) => {
+      log.warn("accounts:summarizeVideo", "unhandled", err?.message || err);
+    });
+    return { ok: true, accepted: true };
+  });
+
+  ipcMain.handle("accounts:cancelSummarize", async (_event, accountVideoId) => {
+    const state = summaryInFlight.get(accountVideoId);
+    if (!state) return { ok: true, cancelled: false };
+    state.cancelled = true;
+    return { ok: true, cancelled: true };
   });
 
   // v2: 跨视频 methodology LLM 汇总

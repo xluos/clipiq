@@ -157,6 +157,7 @@ function AccountListScreen() {
                     setActiveAccountId(a.id);
                     setLocation(detailLoc);
                   }}
+                  onDelete={() => ctx.removeAccount(a.id)}
                 />
               ))}
             </div>
@@ -208,7 +209,8 @@ const AccountCard: FunctionComponent<{
   videos: AccountVideo[];
   fetchUi?: { stage: string; progress: number; message?: string };
   onClick: () => void;
-}> = ({ account, videos, fetchUi, onClick }) => {
+  onDelete: () => void;
+}> = ({ account, videos, fetchUi, onClick, onDelete }) => {
   const fetching = !!fetchUi || account.fetchPhase === "fetching";
   const analyzed = videos.filter((v) => !!v.analysisProjectId).length;
   const total = videos.length || account.totalVideoCount || 0;
@@ -269,11 +271,21 @@ const AccountCard: FunctionComponent<{
           </div>
         </div>
       ) : failed ? (
-        <div className="mt-3.5 px-3 py-2.5 bg-rose-50 dark:bg-rose-950/30 rounded-md flex items-start gap-1.5">
-          <AlertTriangle className="w-3 h-3 mt-0.5 text-rose-500 shrink-0" strokeWidth={1.5} />
-          <p className="text-[12px] text-rose-700 dark:text-rose-300 leading-relaxed line-clamp-2">
-            {account.fetchError || "拉取失败,点击进入详情重试"}
-          </p>
+        <div className="mt-3.5 px-3 py-2.5 bg-rose-50 dark:bg-rose-950/30 rounded-md">
+          <div className="flex items-start gap-1.5">
+            <AlertTriangle className="w-3 h-3 mt-0.5 text-rose-500 shrink-0" strokeWidth={1.5} />
+            <p className="text-[12px] text-rose-700 dark:text-rose-300 leading-relaxed line-clamp-2 flex-1">
+              {account.fetchError || "拉取失败"}
+            </p>
+          </div>
+          <span
+            role="button"
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            className="mt-2 inline-flex items-center gap-1 h-6 px-2 rounded text-[11px] text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/40"
+          >
+            <X className="w-3 h-3" strokeWidth={2} />
+            删除
+          </span>
         </div>
       ) : (
         <div className="mt-3.5 px-3 py-2.5 bg-slate-50 dark:bg-slate-800/40 rounded-md">
@@ -618,6 +630,16 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
           <Sparkles className="w-3 h-3" strokeWidth={1.5} />
           {generating ? "汇总中…" : `汇总方法论 (${completedVideos.length})`}
         </button>
+        <button
+          onClick={() => {
+            ctx.removeAccount(account.id);
+            setLocation(backToList);
+          }}
+          title="删除账号"
+          className="inline-flex items-center justify-center w-8 h-8 rounded-md text-slate-500 dark:text-slate-400 hover:bg-rose-50 dark:hover:bg-rose-900/30 hover:text-rose-600 dark:hover:text-rose-400"
+        >
+          <X className="w-3.5 h-3.5" strokeWidth={1.5} />
+        </button>
       </header>
       {genError && (
         <div className="mx-6 mt-2 rounded-md border border-rose-200 dark:border-rose-900/50 bg-rose-50 dark:bg-rose-950/30 px-3 py-2 text-[12.5px] text-rose-700 dark:text-rose-300">
@@ -783,6 +805,11 @@ function formatVideoDuration(sec: number): string {
   return `${m}:${String(r).padStart(2, "0")}`;
 }
 
+function formatCount(n: number): string {
+  if (n >= 1_0000) return `${(n / 1_0000).toFixed(1).replace(/\.0$/, "")}万`;
+  return String(n);
+}
+
 function VideosTab({
   account,
   videos,
@@ -804,9 +831,27 @@ function VideosTab({
   setActiveProjectId: ReturnType<typeof useApp>["setActiveProjectId"];
   setLocation: ReturnType<typeof useApp>["setLocation"];
 }) {
-  const [busy, setBusy] = useState<Record<string, string>>({}); // accountVideoId → stage label
-  const [batchBusy, setBatchBusy] = useState(false);
+  const [busy, setBusy] = useState<Record<string, string>>({});
+  const [batchBusy, setBatchBusy] = useState<"summary" | "analyze" | false>(false);
   const [rowError, setRowError] = useState<Record<string, string>>({});
+  const [expandedSummary, setExpandedSummary] = useState<Record<string, boolean>>({});
+
+  const startSummarizeOne = async (av: AccountVideo) => {
+    if (busy[av.id]) return;
+    if (!window.videoAnalyzer?.summarizeAccountVideo) {
+      setRowError((m) => ({ ...m, [av.id]: "浏览器预览环境不支持摘要" }));
+      return;
+    }
+    setRowError((m) => { const n = { ...m }; delete n[av.id]; return n; });
+    setBusy((m) => ({ ...m, [av.id]: "生成摘要中" }));
+    try {
+      await window.videoAnalyzer.summarizeAccountVideo({ accountVideoId: av.id });
+    } catch (e) {
+      setRowError((m) => ({ ...m, [av.id]: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setBusy((m) => { const n = { ...m }; delete n[av.id]; return n; });
+    }
+  };
 
   const startAnalyzeOne = async (av: AccountVideo) => {
     if (busy[av.id]) return;
@@ -814,13 +859,9 @@ function VideosTab({
     setBusy((m) => ({ ...m, [av.id]: "下载中" }));
     try {
       if (!window.videoAnalyzer) throw new Error("浏览器预览环境不支持分析");
-      // 1) yt-dlp 下载 (复用 downloadVideo, 命中 url-cache 时直接复用)
       const dl = await window.videoAnalyzer.downloadVideo(av.externalUrl);
-      // 2) 创建分析 Project (kind=analysis), 关联回 AccountVideo
       const projectId = dl.projectId || `proj-${Date.now()}-${av.id}`;
       const now = new Date().toISOString();
-      const provider = ctx.providers.find((p) => p.id === ctx.activeVideoProviderId)
-        || ctx.providers.find((p) => p.kind === "video");
       const newProject: Project = {
         id: projectId,
         source: { type: "url", url: av.externalUrl, platform: (av.platform === "bilibili" || av.platform === "douyin" || av.platform === "xiaohongshu" || av.platform === "tiktok") ? av.platform : "unknown" },
@@ -844,12 +885,8 @@ function VideosTab({
         return [newProject, ...filtered];
       });
       await window.videoAnalyzer.upsertProject(newProject).catch(() => { /* noop */ });
-
-      // 3) 回写 AccountVideo.analysisProjectId
       const avPatched: AccountVideo = { ...av, analysisProjectId: projectId };
       ctx.upsertAccountVideoLocal(avPatched);
-
-      // 4) 直接跳进度屏,ProgressScreen 会读取 analysisOptions 起分析
       setActiveProjectId(projectId);
       setLocation({ module: "analysis", screen: "progress" });
     } catch (e) {
@@ -859,41 +896,25 @@ function VideosTab({
     }
   };
 
-  const startAnalyzeBatch = async () => {
+  const startBatchSummary = async () => {
     if (batchBusy) return;
-    const pending = videos.filter((v) => !v.analysisProjectId);
+    const pending = videos.filter((v) => !v.videoSummary && v.summaryStatus !== "summarizing" && v.summaryStatus !== "done");
     if (pending.length === 0) return;
-    setBatchBusy(true);
-    // 串行下载,避免并发把 yt-dlp 打爆
+    setBatchBusy("summary");
     for (const av of pending) {
-      try {
-        await startAnalyzeOne(av);
-      } catch { /* swallow, 已在 rowError 里 */ }
+      try { await startSummarizeOne(av); } catch { /* swallow */ }
     }
     setBatchBusy(false);
   };
 
   const openVideoDetail = (av: AccountVideo) => {
-    if (!av.analysisProjectId) {
-      // 未分析: 直接走开始分析路径
-      startAnalyzeOne(av);
-      return;
-    }
+    if (!av.analysisProjectId) return;
     const proj = projects.find((p) => p.id === av.analysisProjectId);
-    if (!proj) {
-      startAnalyzeOne(av);
-      return;
-    }
+    if (!proj) return;
     setActiveProjectId(proj.id);
     if (proj.status === "completed") setLocation({ module: "analysis", screen: "workspace" });
     else if (proj.status === "analyzing" || proj.status === "downloading") setLocation({ module: "analysis", screen: "progress" });
-    else if (proj.status === "failed" || proj.status === "download_failed") {
-      // 跳 progress 屏让用户看错误 + 手动点重试,跟 HomeScreen.goToProject 行为一致
-      setLocation({ module: "analysis", screen: "progress" });
-    } else {
-      // not_analyzed: 用系统默认参数直接跑
-      startAnalyzeOne(av);
-    }
+    else if (proj.status === "failed" || proj.status === "download_failed") setLocation({ module: "analysis", screen: "progress" });
   };
 
   if (videos.length === 0) {
@@ -914,23 +935,24 @@ function VideosTab({
     );
   }
 
-  const pendingCount = videos.filter((v) => !v.analysisProjectId).length;
+  const unsummarizedCount = videos.filter((v) => !v.videoSummary && v.summaryStatus !== "summarizing" && v.summaryStatus !== "done").length;
+  const summarizedNotAnalyzedCount = videos.filter((v) => v.summaryStatus === "done" && !v.analysisProjectId).length;
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 flex-wrap">
         <span className="text-[11px] font-mono uppercase tracking-wider text-slate-500">
-          共 {videos.length} 条 · 待分析 {pendingCount}
+          共 {videos.length} 条 · 待摘要 {unsummarizedCount}{summarizedNotAnalyzedCount > 0 ? ` · 可拆解 ${summarizedNotAnalyzedCount}` : ""}
         </span>
         <div className="flex-1" />
-        {pendingCount > 0 && (
+        {unsummarizedCount > 0 && (
           <button
-            onClick={startAnalyzeBatch}
-            disabled={batchBusy}
+            onClick={startBatchSummary}
+            disabled={!!batchBusy}
             className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200 disabled:opacity-50"
           >
-            {batchBusy ? <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} /> : <Play className="w-3 h-3" strokeWidth={2} />}
-            {batchBusy ? "全部分析中…" : `全部分析 (${pendingCount})`}
+            {batchBusy === "summary" ? <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} /> : <Sparkles className="w-3 h-3" strokeWidth={2} />}
+            {batchBusy === "summary" ? "全部摘要中…" : `全部摘要 (${unsummarizedCount})`}
           </button>
         )}
       </div>
@@ -938,15 +960,20 @@ function VideosTab({
         {videos.map((v) => {
           const proj = v.analysisProjectId ? projects.find((p) => p.id === v.analysisProjectId) : undefined;
           const rawStatus = proj?.status || "not_analyzed";
-          const status: "completed" | "analyzing" | "downloading" | "failed" | "not_analyzed" =
+          const analysisStatus: "completed" | "analyzing" | "downloading" | "failed" | "not_analyzed" =
             rawStatus === "download_failed" ? "failed" : rawStatus;
           const rowBusy = !!busy[v.id];
           const err = rowError[v.id];
+          const hasSummary = v.summaryStatus === "done" && !!v.videoSummary;
+          const isSummarizing = v.summaryStatus === "summarizing" || busy[v.id] === "生成摘要中";
+          const summaryFailed = v.summaryStatus === "failed";
+          const isExpanded = !!expandedSummary[v.id];
+
           return (
             <div key={v.id} className="w-full">
-              <button
-                onClick={() => openVideoDetail(v)}
-                className="w-full flex items-center gap-3.5 px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/40 text-left"
+              <div
+                onClick={() => { if (v.analysisProjectId) openVideoDetail(v); }}
+                className={`w-full flex items-center gap-3.5 px-4 py-3 text-left ${v.analysisProjectId ? "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40" : ""}`}
               >
                 <div className="w-[94px] h-[54px] rounded bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden flex items-center justify-center">
                   {v.thumbnailUrl
@@ -958,26 +985,86 @@ function VideosTab({
                   <div className="text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400 mt-1 flex items-center gap-2 flex-wrap">
                     <span>{formatVideoDuration(v.durationSec)}</span>
                     {v.viewCount ? <span>· {formatViews(v.viewCount)}</span> : null}
-                    <span className={`px-1.5 py-0.5 rounded ${statusChipClass(status)}`}>{statusLabel(status)}</span>
+                    {v.likeCount ? <span>· {formatCount(v.likeCount)}赞</span> : null}
+                    {v.commentCount ? <span>· {formatCount(v.commentCount)}评</span> : null}
+                    {analysisStatus !== "not_analyzed" && (
+                      <span className={`px-1.5 py-0.5 rounded ${statusChipClass(analysisStatus)}`}>{statusLabel(analysisStatus)}</span>
+                    )}
+                    {hasSummary && analysisStatus === "not_analyzed" && (
+                      <span className="px-1.5 py-0.5 rounded bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300">已摘要</span>
+                    )}
                   </div>
                 </div>
-                {status === "not_analyzed" && (
-                  <span
-                    role="button"
-                    aria-label="开始分析"
-                    onClick={(e) => { e.stopPropagation(); startAnalyzeOne(v); }}
-                    className={`inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium ${
-                      rowBusy
-                        ? "bg-slate-100 dark:bg-slate-800 text-slate-500"
-                        : "bg-indigo-600 hover:bg-indigo-700 text-white"
-                    }`}
+                <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+                  {/* 无摘要 + 无分析 → 生成摘要 */}
+                  {!hasSummary && !isSummarizing && analysisStatus === "not_analyzed" && !summaryFailed && (
+                    <span
+                      role="button"
+                      onClick={() => startSummarizeOne(v)}
+                      className={`inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium ${
+                        rowBusy ? "bg-slate-100 dark:bg-slate-800 text-slate-500" : "bg-indigo-600 hover:bg-indigo-700 text-white"
+                      }`}
+                    >
+                      {rowBusy ? <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} /> : <Sparkles className="w-3 h-3" strokeWidth={2} />}
+                      {rowBusy ? "运行中" : "生成摘要"}
+                    </span>
+                  )}
+                  {/* 摘要中 */}
+                  {isSummarizing && (
+                    <span className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-slate-100 dark:bg-slate-800 text-slate-500">
+                      <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} />
+                      生成中
+                    </span>
+                  )}
+                  {/* 摘要失败 → 重试 */}
+                  {summaryFailed && !hasSummary && (
+                    <span
+                      role="button"
+                      onClick={() => startSummarizeOne(v)}
+                      className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/50"
+                    >
+                      <AlertTriangle className="w-3 h-3" strokeWidth={2} />
+                      重试摘要
+                    </span>
+                  )}
+                  {/* 有摘要 + 无分析 → 拆解分析 */}
+                  {hasSummary && analysisStatus === "not_analyzed" && (
+                    <span
+                      role="button"
+                      onClick={() => startAnalyzeOne(v)}
+                      className={`inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium ${
+                        rowBusy ? "bg-slate-100 dark:bg-slate-800 text-slate-500" : "border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+                      }`}
+                    >
+                      {rowBusy ? <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} /> : <Play className="w-3 h-3" strokeWidth={2} />}
+                      拆解分析
+                    </span>
+                  )}
+                </div>
+                {v.analysisProjectId && <ChevronRight className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500 shrink-0" strokeWidth={1.5} />}
+              </div>
+              {/* 摘要展示 */}
+              {hasSummary && (
+                <div className="px-4 pb-3 -mt-1">
+                  <button
+                    onClick={() => setExpandedSummary((m) => ({ ...m, [v.id]: !isExpanded }))}
+                    className="text-left w-full"
                   >
-                    {rowBusy ? <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} /> : <Play className="w-3 h-3" strokeWidth={2} />}
-                    {rowBusy ? (busy[v.id] || "运行中") : "开始分析"}
-                  </span>
-                )}
-                <ChevronRight className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" strokeWidth={1.5} />
-              </button>
+                    <p className="text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-400">
+                      {isExpanded ? v.videoSummary : (v.videoSummary!.length > 80 ? v.videoSummary!.slice(0, 80) + "…" : v.videoSummary)}
+                    </p>
+                    {v.videoSummary!.length > 80 && (
+                      <span className="text-[10.5px] text-indigo-600 dark:text-indigo-400 mt-0.5 inline-block">
+                        {isExpanded ? "收起" : "展开"}
+                      </span>
+                    )}
+                  </button>
+                </div>
+              )}
+              {/* 摘要失败错误 */}
+              {summaryFailed && v.summaryError && (
+                <div className="px-4 pb-2 -mt-1 text-[11.5px] text-rose-600 dark:text-rose-400">{v.summaryError}</div>
+              )}
               {err && (
                 <div className="px-4 pb-2 -mt-1 text-[11.5px] text-rose-600 dark:text-rose-400">{err}</div>
               )}

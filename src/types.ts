@@ -696,10 +696,19 @@ export type AccountVideo = {
   thumbnailUrl?: string;
   uploadDate?: string | null;       // YYYYMMDD or ISO
   viewCount?: number;
+  likeCount?: number;
+  commentCount?: number;
+  shareCount?: number;
+  collectCount?: number;
   platform: AccountPlatform;
   addedAt: string;                  // ISO 入库时间
   // 派生的分析项目 id;有值表示已经"开始分析"过。
   analysisProjectId?: string;
+  // 轻量摘要
+  videoSummary?: string;
+  summaryStatus?: "idle" | "summarizing" | "done" | "failed";
+  summaryError?: string;
+  localVideoPath?: string;
 };
 
 // 账号当前拉取状态
