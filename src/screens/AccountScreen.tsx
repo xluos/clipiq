@@ -1069,8 +1069,8 @@ function VideosTab({
             <div key={v.id} className="w-full">
               <div
                 onClick={() => {
-                  if (v.analysisProjectId) openVideoDetail(v);
-                  else if (isSummarizing || hasSummary) setExpandedRows((m) => ({ ...m, [v.id]: !isExpanded }));
+                  if (isSummarizing || hasSummary) setExpandedRows((m) => ({ ...m, [v.id]: !isExpanded }));
+                  else if (v.analysisProjectId) openVideoDetail(v);
                 }}
                 className={`w-full flex items-center gap-3.5 px-4 py-3 text-left ${
                   v.analysisProjectId || isSummarizing || hasSummary ? "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40" : ""
@@ -1171,11 +1171,20 @@ function VideosTab({
                   </div>
                 </div>
               )}
-              {isExpanded && hasSummary && !v.analysisProjectId && (
+              {isExpanded && hasSummary && (
                 <div className="px-4 pb-3 -mt-1">
                   <p className="text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-400">
                     {v.videoSummary}
                   </p>
+                  {v.analysisProjectId && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); openVideoDetail(v); }}
+                      className="mt-2 inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30"
+                    >
+                      <ChevronRight className="w-3 h-3" strokeWidth={2} />
+                      查看分析结果
+                    </button>
+                  )}
                 </div>
               )}
               {/* 摘要失败错误 */}
