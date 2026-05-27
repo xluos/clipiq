@@ -820,6 +820,61 @@ function formatTimestamp(sec: number): string {
   return `${m}:${String(r).padStart(2, "0")}`;
 }
 
+function formatUploadDate(raw: string): string {
+  if (!raw) return "";
+  const d = raw.replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
+  if (/^\d{4}-\d{2}-\d{2}/.test(d)) return d.slice(0, 10);
+  return raw;
+}
+
+function toMediaUrl(p: string | undefined): string | undefined {
+  if (!p) return undefined;
+  if (p.startsWith("media://")) return p;
+  return `media://external/${encodeURIComponent(p)}`;
+}
+
+function VideoPreview({ localVideoPath, thumbnailUrl, title }: { localVideoPath?: string; thumbnailUrl?: string; title: string }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [playing, setPlaying] = useState(false);
+  const src = toMediaUrl(localVideoPath);
+
+  const toggle = () => {
+    const el = videoRef.current;
+    if (!el) return;
+    if (playing) { el.pause(); setPlaying(false); }
+    else { el.play().then(() => setPlaying(true)).catch(() => {}); }
+  };
+
+  if (src) {
+    return (
+      <div className="h-[120px] rounded-lg bg-black shrink-0 overflow-hidden relative cursor-pointer" onClick={toggle}>
+        <video
+          ref={videoRef}
+          src={src}
+          poster={thumbnailUrl || undefined}
+          className="h-full w-auto object-contain"
+          preload="metadata"
+          onEnded={() => setPlaying(false)}
+          onDoubleClick={(e) => { e.stopPropagation(); (e.target as HTMLVideoElement).requestFullscreen?.(); }}
+        />
+        {!playing && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+            <Play className="w-8 h-8 text-white/90" strokeWidth={1.5} fill="currentColor" />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-[120px] rounded-lg bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden">
+      {thumbnailUrl
+        ? <img src={thumbnailUrl} alt={title} referrerPolicy="no-referrer" className="h-full w-auto object-cover" />
+        : <span className="flex items-center justify-center h-full w-[120px] text-[11px] font-mono text-slate-400">无封面</span>}
+    </div>
+  );
+}
+
 function formatCount(n: number): string {
   if (n >= 1_0000) return `${(n / 1_0000).toFixed(1).replace(/\.0$/, "")}万`;
   return String(n);
@@ -1023,28 +1078,9 @@ function VideosTab({
           返回列表
         </button>
 
-        {/* 视频播放器 */}
-        {sv.localVideoPath && (
-          <div className="rounded-lg bg-black overflow-hidden flex items-center justify-center" style={{ maxHeight: 360 }}>
-            <video
-              src={sv.localVideoPath}
-              controls
-              poster={sv.thumbnailUrl || undefined}
-              className="max-h-[360px] w-auto"
-              preload="metadata"
-            />
-          </div>
-        )}
-
         {/* 视频信息 */}
         <div className="flex gap-4 items-start">
-          {!sv.localVideoPath && (
-            <div className="h-[120px] rounded-lg bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden">
-              {sv.thumbnailUrl
-                ? <img src={sv.thumbnailUrl} alt={sv.title} referrerPolicy="no-referrer" className="h-full w-auto object-cover" />
-                : <span className="flex items-center justify-center h-full w-[120px] text-[11px] font-mono text-slate-400">无封面</span>}
-            </div>
-          )}
+          <VideoPreview localVideoPath={sv.localVideoPath} thumbnailUrl={sv.thumbnailUrl} title={sv.title} />
           <div className="flex-1 min-w-0">
             <h3 className="text-[16px] font-semibold text-slate-900 dark:text-slate-100">{sv.title}</h3>
             <div className="text-[11px] font-mono tracking-wider text-slate-500 dark:text-slate-400 mt-1.5 flex items-center gap-2 flex-wrap">
@@ -1052,7 +1088,7 @@ function VideosTab({
               {sv.viewCount ? <span>· {formatViews(sv.viewCount)}</span> : null}
               {sv.likeCount ? <span>· {formatCount(sv.likeCount)}赞</span> : null}
               {sv.commentCount ? <span>· {formatCount(sv.commentCount)}评</span> : null}
-              {sv.uploadDate && <span>· {sv.uploadDate}</span>}
+              {sv.uploadDate && <span>· {formatUploadDate(sv.uploadDate)}</span>}
             </div>
             <div className="flex items-center gap-2 mt-3">
               {!svHasSummary && !svSummarizing && !svFailed && (
