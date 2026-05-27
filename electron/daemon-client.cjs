@@ -9,6 +9,7 @@ const fsSync = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const log = require("./logger.cjs");
+const sidecarUtils = require("./sidecar-utils.cjs");
 
 function daemonStorageDir() {
   if (process.platform === "darwin") {
@@ -135,8 +136,32 @@ async function findDaemonBinary() {
 
 let daemonProcess = null;
 
+function killOrphanByPidFile() {
+  const pf = pidPath();
+  try {
+    const raw = fsSync.readFileSync(pf, "utf8").trim();
+    const pid = parseInt(raw, 10);
+    if (Number.isFinite(pid) && sidecarUtils.pidAlive(pid)) {
+      log.info("daemon-client", `killing orphan daemon pid=${pid}`);
+      sidecarUtils.killPidSyncWait(pid, 800);
+    }
+  } catch { /* no pid file or unreadable */ }
+  try { fsSync.unlinkSync(pf); } catch {}
+}
+
+function shutdownSync() {
+  if (daemonProcess) {
+    try { daemonProcess.kill("SIGTERM"); } catch {}
+    daemonProcess = null;
+  }
+  killOrphanByPidFile();
+  try { fsSync.unlinkSync(socketPath()); } catch {}
+}
+
 async function ensureDaemon() {
   if (await isDaemonRunning()) return;
+
+  killOrphanByPidFile();
 
   const binary = await findDaemonBinary();
   if (!binary) {
@@ -335,6 +360,7 @@ function downloadModel(modelId, onProgress) {
 module.exports = {
   ensureDaemon,
   isDaemonRunning,
+  shutdownSync,
   getStatus,
   listModels,
   getModelStatus,

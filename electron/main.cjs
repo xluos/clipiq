@@ -8637,6 +8637,7 @@ function cleanupSidecars(reason) {
   try { log.info("clipiq", `cleanupSidecars: ${reason}`); } catch {}
   try { llamaRuntime.shutdownSync(); } catch {}
   try { whisperCppRuntime.shutdownSync(); } catch {}
+  try { require("./daemon-client.cjs").shutdownSync(); } catch {}
 }
 app.on("before-quit", () => {
   isQuitting = true;
