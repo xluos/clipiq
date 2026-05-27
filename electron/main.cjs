@@ -6842,7 +6842,13 @@ app.whenReady().then(async () => {
   ipcMain.handle("accounts:delete", async (_event, accountId) => {
     if (!accountId) return { ok: false, message: "缺少 accountId" };
     const db = getDb();
+    db.prepare("DELETE FROM account_videos WHERE account_id = ?").run(accountId);
     db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
+    // 清理磁盘 artifacts
+    const accountDir = path.join(app.getPath("userData"), "accounts", accountId);
+    try {
+      await fs.rm(accountDir, { recursive: true, force: true });
+    } catch { /* 目录可能不存在 */ }
     return { ok: true };
   });
 
@@ -7268,7 +7274,7 @@ app.whenReady().then(async () => {
           const acc = JSON.parse(accRow.data);
           const patched = {
             ...acc,
-            name: acc.name || result.accountUploader || result.accountTitle || acc.name,
+            name: result.accountUploader || result.accountTitle || acc.name,
             avatarUrl: result.accountAvatarUrl || acc.avatarUrl,
             followers: result.accountFollowers || acc.followers,
             bio: result.accountBio || acc.bio,

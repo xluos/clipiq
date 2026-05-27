@@ -230,7 +230,7 @@ const AccountCard: FunctionComponent<{
       <div className="flex items-start gap-3">
         <AccountAvatar account={account} size={44} fontSize={12} />
         <div className="flex-1 min-w-0">
-          <div className="text-[14.5px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 truncate">{account.name}</div>
+          <div className="text-[14.5px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 truncate">{account.name || (account.fetchPhase === "fetching" ? "拉取中…" : "未知账号")}</div>
           <div className="text-[10.5px] font-mono tracking-wider uppercase text-slate-500 dark:text-slate-400 mt-1">
             {PLATFORM_LABEL[account.platform]}
             {account.followers && <span> · {account.followers} 粉丝</span>}
@@ -280,7 +280,12 @@ const AccountCard: FunctionComponent<{
           </div>
           <span
             role="button"
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            onClick={(e) => {
+              e.stopPropagation();
+              const label = account.name || "该账号";
+              if (!window.confirm(`确认删除「${label}」？`)) return;
+              onDelete();
+            }}
             className="mt-2 inline-flex items-center gap-1 h-6 px-2 rounded text-[11px] text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/40"
           >
             <X className="w-3 h-3" strokeWidth={2} />
@@ -359,7 +364,7 @@ function AddAccountDialog({ onClose, ctx }: { onClose: () => void; ctx: ReturnTy
     setSubmitting(true);
     const now = new Date().toISOString();
     const accId = `acc-${Date.now()}`;
-    const resolvedName = name.trim() || "(拉取中…)";
+    const resolvedName = name.trim();
 
     // 1) 创建占位 Account — 必须先 await 把 stub 落到 main 进程 DB,
     //    否则下面 startAccountFetch 在 main lookup account 时找不到, 导致 done event 里
@@ -369,7 +374,7 @@ function AddAccountDialog({ onClose, ctx }: { onClose: () => void; ctx: ReturnTy
       name: resolvedName,
       platform,
       externalUrl: url.trim(),
-      avatarHint: resolvedName.slice(0, 2),
+      avatarHint: resolvedName.slice(0, 2) || "…",
       fetchRange: range,
       fetchPhase: "fetching",
       createdAt: now,
@@ -606,7 +611,7 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
           账号分析
         </button>
         <div className="w-px h-4 bg-slate-200 dark:bg-slate-800" />
-        <h2 className="text-[14px] font-semibold text-slate-900 dark:text-slate-100">{account.name}</h2>
+        <h2 className="text-[14px] font-semibold text-slate-900 dark:text-slate-100">{account.name || (account.fetchPhase === "fetching" ? "拉取中…" : "未知账号")}</h2>
         <span className="text-[10.5px] font-mono px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
           {PLATFORM_LABEL[account.platform]}
         </span>
@@ -632,6 +637,8 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
         </button>
         <button
           onClick={() => {
+            const label = account.name || "该账号";
+            if (!window.confirm(`确认删除「${label}」？相关视频数据和摘要也会一并删除。`)) return;
             ctx.removeAccount(account.id);
             setLocation(backToList);
           }}
