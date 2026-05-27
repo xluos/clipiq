@@ -847,8 +847,9 @@ function VideosTab({
   setLocation: ReturnType<typeof useApp>["setLocation"];
 }) {
   const [rowError, setRowError] = useState<Record<string, string>>({});
-  const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
   const [liveProgress, setLiveProgress] = useState<Record<string, { progress: number; message: string }>>({});
+  const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
+  const selectedVideo = selectedVideoId ? videos.find((v) => v.id === selectedVideoId) : null;
 
   // ── 队列 ──
   const [queue, setQueue] = useState<{ type: "summary" | "analyze"; ids: string[]; index: number; cancelled: boolean } | null>(null);
@@ -1003,6 +1004,107 @@ function VideosTab({
     );
   }
 
+  // ── 二级详情页 ──
+  if (selectedVideo) {
+    const sv = selectedVideo;
+    const svLive = liveProgress[sv.id];
+    const svSummarizing = sv.summaryStatus === "summarizing" || launchedRef.current.has(sv.id);
+    const svHasSummary = sv.summaryStatus === "done" && !!sv.videoSummary;
+    const svFailed = sv.summaryStatus === "failed";
+    const svProj = sv.analysisProjectId ? projects.find((p) => p.id === sv.analysisProjectId) : undefined;
+
+    return (
+      <div className="space-y-4">
+        <button
+          onClick={() => setSelectedVideoId(null)}
+          className="inline-flex items-center gap-1.5 h-8 px-2 rounded-md text-[13px] text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800/60"
+        >
+          <ArrowLeft className="w-3.5 h-3.5" strokeWidth={1.5} />
+          返回列表
+        </button>
+
+        {/* 视频信息 */}
+        <div className="flex gap-4 items-start">
+          <div className="h-[120px] rounded-lg bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden">
+            {sv.thumbnailUrl
+              ? <img src={sv.thumbnailUrl} alt={sv.title} referrerPolicy="no-referrer" className="h-full w-auto object-cover" />
+              : <span className="flex items-center justify-center h-full w-[120px] text-[11px] font-mono text-slate-400">无封面</span>}
+          </div>
+          <div className="flex-1 min-w-0">
+            <h3 className="text-[16px] font-semibold text-slate-900 dark:text-slate-100">{sv.title}</h3>
+            <div className="text-[11px] font-mono tracking-wider text-slate-500 dark:text-slate-400 mt-1.5 flex items-center gap-2 flex-wrap">
+              <span>{formatVideoDuration(sv.durationSec)}</span>
+              {sv.viewCount ? <span>· {formatViews(sv.viewCount)}</span> : null}
+              {sv.likeCount ? <span>· {formatCount(sv.likeCount)}赞</span> : null}
+              {sv.commentCount ? <span>· {formatCount(sv.commentCount)}评</span> : null}
+              {sv.uploadDate && <span>· {sv.uploadDate}</span>}
+            </div>
+            <div className="flex items-center gap-2 mt-3">
+              {!svHasSummary && !svSummarizing && !svFailed && (
+                <button onClick={() => fireSummarize(sv.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white">
+                  <Sparkles className="w-3 h-3" strokeWidth={2} />内容分析
+                </button>
+              )}
+              {svFailed && (
+                <button onClick={() => fireSummarize(sv.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300">
+                  <AlertTriangle className="w-3 h-3" strokeWidth={2} />重试分析
+                </button>
+              )}
+              {svSummarizing && (
+                <button onClick={() => cancelSummarize(sv.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/30">
+                  <X className="w-3 h-3" strokeWidth={2} />取消
+                </button>
+              )}
+              {svHasSummary && !sv.analysisProjectId && (
+                <button onClick={() => fireAnalyze(sv)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800">
+                  <Play className="w-3 h-3" strokeWidth={2} />拆解分析
+                </button>
+              )}
+              {svProj && (
+                <button onClick={() => openVideoDetail(sv)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30">
+                  <ChevronRight className="w-3 h-3" strokeWidth={2} />查看拆解结果
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* 分析进度 */}
+        {svSummarizing && (
+          <div className="rounded-lg border border-indigo-200 dark:border-indigo-800/50 bg-indigo-50/60 dark:bg-indigo-950/30 p-4">
+            <div className="flex items-center gap-2 text-[13px] font-medium text-indigo-800 dark:text-indigo-200">
+              <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
+              <span>{svLive?.message || "分析中"}</span>
+              <span className="ml-auto font-mono">{svLive?.progress ?? 0}%</span>
+            </div>
+            <div className="mt-2 h-2 rounded-full bg-indigo-100 dark:bg-indigo-900/40 overflow-hidden">
+              <div className="h-full bg-indigo-600 dark:bg-indigo-500 rounded-full transition-all" style={{ width: `${svLive?.progress ?? 0}%` }} />
+            </div>
+          </div>
+        )}
+
+        {/* 分析失败 */}
+        {svFailed && sv.summaryError && (
+          <div className="rounded-lg border border-rose-200 dark:border-rose-900/50 bg-rose-50 dark:bg-rose-950/30 p-3 text-[12.5px] text-rose-700 dark:text-rose-300">
+            {sv.summaryError}
+          </div>
+        )}
+
+        {/* 分析结果 */}
+        {svHasSummary && (
+          <SummaryDetail summary={sv.videoSummary!} analysisProjectId={sv.analysisProjectId} onOpenAnalysis={() => openVideoDetail(sv)} />
+        )}
+
+        {/* 行错误 */}
+        {rowError[sv.id] && (
+          <div className="rounded-lg border border-rose-200 dark:border-rose-900/50 bg-rose-50 dark:bg-rose-950/30 p-3 text-[12.5px] text-rose-700 dark:text-rose-300">
+            {rowError[sv.id]}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   const unsummarizedCount = videos.filter((v) => !v.videoSummary && v.summaryStatus !== "summarizing" && v.summaryStatus !== "done").length;
   const summarizedNotAnalyzedCount = videos.filter((v) => v.summaryStatus === "done" && !v.analysisProjectId).length;
 
@@ -1069,129 +1171,50 @@ function VideosTab({
           const hasSummary = v.summaryStatus === "done" && !!v.videoSummary;
           const isSummarizing = v.summaryStatus === "summarizing" || launchedRef.current.has(v.id);
           const summaryFailed = v.summaryStatus === "failed";
-          const isExpanded = !!expandedRows[v.id];
           const live = liveProgress[v.id];
           const inQueue = queue && !queue.cancelled && queue.ids.includes(v.id) && queue.ids.indexOf(v.id) > queue.index;
+          const clickable = isSummarizing || hasSummary || summaryFailed || !!v.analysisProjectId;
 
           return (
-            <div key={v.id} className="w-full">
-              <div
-                onClick={() => {
-                  if (isSummarizing || hasSummary) setExpandedRows((m) => ({ ...m, [v.id]: !isExpanded }));
-                  else if (v.analysisProjectId) openVideoDetail(v);
-                }}
-                className={`w-full flex items-center gap-3.5 px-4 py-3 text-left ${
-                  v.analysisProjectId || isSummarizing || hasSummary ? "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40" : ""
-                }`}
-              >
-                <div className="w-[94px] h-[54px] rounded bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden flex items-center justify-center">
-                  {v.thumbnailUrl
-                    ? <img src={v.thumbnailUrl} alt={v.title} referrerPolicy="no-referrer" className="w-full h-full object-cover" />
-                    : <span className="text-[10.5px] font-mono text-slate-400">无封面</span>}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-[14px] font-medium text-slate-900 dark:text-slate-100 truncate">{v.title}</div>
-                  <div className="text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400 mt-1 flex items-center gap-2 flex-wrap">
-                    <span>{formatVideoDuration(v.durationSec)}</span>
-                    {v.viewCount ? <span>· {formatViews(v.viewCount)}</span> : null}
-                    {v.likeCount ? <span>· {formatCount(v.likeCount)}赞</span> : null}
-                    {v.commentCount ? <span>· {formatCount(v.commentCount)}评</span> : null}
-                    {analysisStatus !== "not_analyzed" && (
-                      <span className={`px-1.5 py-0.5 rounded ${statusChipClass(analysisStatus)}`}>{statusLabel(analysisStatus)}</span>
-                    )}
-                    {hasSummary && analysisStatus === "not_analyzed" && (
-                      <span className="px-1.5 py-0.5 rounded bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300">已分析</span>
-                    )}
-                    {hasSummary && typeof v.videoSummary === "object" && v.videoSummary.topic && (
-                      <span className="text-slate-600 dark:text-slate-300 normal-case tracking-normal">{v.videoSummary.topic}</span>
-                    )}
-                    {inQueue && (
-                      <span className="px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300">排队中</span>
-                    )}
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
-                  {/* 无摘要 + 无分析 → 生成摘要 */}
-                  {!hasSummary && !isSummarizing && analysisStatus === "not_analyzed" && !summaryFailed && !inQueue && (
-                    <span
-                      role="button"
-                      onClick={() => fireSummarize(v.id)}
-                      className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white"
-                    >
-                      <Sparkles className="w-3 h-3" strokeWidth={2} />
-                      生成摘要
-                    </span>
-                  )}
-                  {/* 摘要中 → 带取消 */}
+            <div
+              key={v.id}
+              onClick={() => clickable && setSelectedVideoId(v.id)}
+              className={`w-full flex items-center gap-3.5 px-4 py-3 text-left ${clickable ? "cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/40" : ""}`}
+            >
+              <div className="h-[54px] rounded bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden flex items-center justify-center">
+                {v.thumbnailUrl
+                  ? <img src={v.thumbnailUrl} alt={v.title} referrerPolicy="no-referrer" className="h-full w-auto object-cover" />
+                  : <span className="text-[10.5px] font-mono text-slate-400 px-4">无封面</span>}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-[14px] font-medium text-slate-900 dark:text-slate-100 truncate">{v.title}</div>
+                <div className="text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400 mt-1 flex items-center gap-2 flex-wrap">
+                  <span>{formatVideoDuration(v.durationSec)}</span>
+                  {v.viewCount ? <span>· {formatViews(v.viewCount)}</span> : null}
+                  {v.likeCount ? <span>· {formatCount(v.likeCount)}赞</span> : null}
+                  {v.commentCount ? <span>· {formatCount(v.commentCount)}评</span> : null}
                   {isSummarizing && (
-                    <>
-                      <span className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-slate-100 dark:bg-slate-800 text-slate-500">
-                        <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} />
-                        {live ? `${live.progress}%` : "生成中"}
-                      </span>
-                      <span
-                        role="button"
-                        onClick={() => cancelSummarize(v.id)}
-                        className="inline-flex items-center justify-center w-7 h-7 rounded-md text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30"
-                        title="取消摘要"
-                      >
-                        <X className="w-3 h-3" strokeWidth={2} />
-                      </span>
-                    </>
-                  )}
-                  {/* 摘要失败 → 重试 */}
-                  {summaryFailed && !hasSummary && (
-                    <span
-                      role="button"
-                      onClick={() => fireSummarize(v.id)}
-                      className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/50"
-                    >
-                      <AlertTriangle className="w-3 h-3" strokeWidth={2} />
-                      重试摘要
+                    <span className="px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300">
+                      {live ? `分析中 ${live.progress}%` : "分析中"}
                     </span>
                   )}
-                  {/* 有摘要 + 无分析 → 拆解分析 */}
-                  {hasSummary && analysisStatus === "not_analyzed" && !inQueue && (
-                    <span
-                      role="button"
-                      onClick={() => fireAnalyze(v)}
-                      className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
-                    >
-                      <Play className="w-3 h-3" strokeWidth={2} />
-                      拆解分析
-                    </span>
+                  {summaryFailed && <span className="px-1.5 py-0.5 rounded bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300">失败</span>}
+                  {hasSummary && <span className="px-1.5 py-0.5 rounded bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300">已分析</span>}
+                  {hasSummary && typeof v.videoSummary === "object" && v.videoSummary.topic && (
+                    <span className="text-slate-600 dark:text-slate-300 normal-case tracking-normal">{v.videoSummary.topic}</span>
                   )}
+                  {inQueue && <span className="px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300">排队中</span>}
                 </div>
-                {(v.analysisProjectId || isSummarizing || hasSummary) && (
-                  <ChevronRight className={`w-3.5 h-3.5 text-slate-400 dark:text-slate-500 shrink-0 transition-transform ${isExpanded && !v.analysisProjectId ? "rotate-90" : ""}`} strokeWidth={1.5} />
+                {err && <div className="text-[11px] text-rose-600 dark:text-rose-400 mt-1">{err}</div>}
+              </div>
+              <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+                {!hasSummary && !isSummarizing && !summaryFailed && !inQueue && (
+                  <span role="button" onClick={() => fireSummarize(v.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white">
+                    <Sparkles className="w-3 h-3" strokeWidth={2} />内容分析
+                  </span>
                 )}
               </div>
-
-              {/* ── 展开区：摘要进度详情 / 摘要文本 ── */}
-              {isExpanded && isSummarizing && live && (
-                <div className="px-4 pb-3 -mt-1">
-                  <div className="rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40 p-3">
-                    <div className="flex items-center gap-2 text-[12px] font-mono text-slate-600 dark:text-slate-400">
-                      <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} />
-                      <span>{live.message || "处理中"}</span>
-                      <span className="ml-auto">{live.progress}%</span>
-                    </div>
-                    <div className="mt-2 h-1.5 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
-                      <div className="h-full bg-indigo-600 dark:bg-indigo-500 rounded-full transition-all" style={{ width: `${live.progress}%` }} />
-                    </div>
-                  </div>
-                </div>
-              )}
-              {isExpanded && hasSummary && (
-                <SummaryDetail summary={v.videoSummary!} analysisProjectId={v.analysisProjectId} onOpenAnalysis={() => openVideoDetail(v)} />
-              )}
-              {/* 摘要失败错误 */}
-              {summaryFailed && v.summaryError && (
-                <div className="px-4 pb-2 -mt-1 text-[11.5px] text-rose-600 dark:text-rose-400">{v.summaryError}</div>
-              )}
-              {err && (
-                <div className="px-4 pb-2 -mt-1 text-[11.5px] text-rose-600 dark:text-rose-400">{err}</div>
-              )}
+              {clickable && <ChevronRight className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500 shrink-0" strokeWidth={1.5} />}
             </div>
           );
         })}
@@ -1260,8 +1283,8 @@ function SummaryDetail({ summary, analysisProjectId, onOpenAnalysis }: {
           <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">关键帧 · {summary.frames!.length}</div>
           <div className="flex gap-1.5 overflow-x-auto pb-1">
             {summary.frames!.map((f, i) => (
-              <div key={i} className="shrink-0 w-[100px]">
-                <img src={f.url} alt={`${f.timeSec.toFixed(1)}s`} className="w-full h-[56px] object-cover rounded bg-slate-200 dark:bg-slate-800" />
+              <div key={i} className="shrink-0">
+                <img src={f.url} alt={`${f.timeSec.toFixed(1)}s`} className="max-h-[100px] w-auto rounded bg-slate-200 dark:bg-slate-800" />
                 <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400 text-center mt-0.5">{formatTimestamp(f.timeSec)}</div>
               </div>
             ))}
@@ -1334,8 +1357,8 @@ function HooksTab({ videos }: { videos: AccountVideo[] }) {
     <div className="space-y-2.5">
       {videos.slice(0, 5).map((v) => (
         <div key={v.id} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 p-4 flex gap-3.5">
-          <div className="w-[120px] h-[68px] rounded bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden">
-            {v.thumbnailUrl && <img src={v.thumbnailUrl} alt={v.title} className="w-full h-full object-cover" />}
+          <div className="h-[68px] rounded bg-slate-200 dark:bg-slate-800 shrink-0 overflow-hidden">
+            {v.thumbnailUrl && <img src={v.thumbnailUrl} alt={v.title} referrerPolicy="no-referrer" className="h-full w-auto object-cover" />}
           </div>
           <div className="flex-1 min-w-0">
             <div className="text-[14px] font-medium text-slate-900 dark:text-slate-100 truncate">{v.title}</div>
