@@ -1114,6 +1114,15 @@ function VideosTab({
             {rowError[sv.id]}
           </div>
         )}
+
+        <ModelConfigDialog
+          open={!!configTarget}
+          onClose={() => setConfigTarget(null)}
+          mode="content"
+          onConfirm={(overrides) => {
+            if (configTarget) fireSummarize(configTarget, Object.keys(overrides).length > 0 ? overrides : undefined);
+          }}
+        />
       </div>
     );
   }
