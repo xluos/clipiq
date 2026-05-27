@@ -1093,7 +1093,10 @@ function VideosTab({
                       <span className={`px-1.5 py-0.5 rounded ${statusChipClass(analysisStatus)}`}>{statusLabel(analysisStatus)}</span>
                     )}
                     {hasSummary && analysisStatus === "not_analyzed" && (
-                      <span className="px-1.5 py-0.5 rounded bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300">已摘要</span>
+                      <span className="px-1.5 py-0.5 rounded bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300">已分析</span>
+                    )}
+                    {hasSummary && typeof v.videoSummary === "object" && v.videoSummary.topic && (
+                      <span className="text-slate-600 dark:text-slate-300 normal-case tracking-normal">{v.videoSummary.topic}</span>
                     )}
                     {inQueue && (
                       <span className="px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300">排队中</span>
