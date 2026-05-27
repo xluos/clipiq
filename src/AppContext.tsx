@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AnalysisRecord, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, AnalysisBudget, PIPELINE_STAGE_DEFS, PipelineState, PipelineStage, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AnalysisRecord, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, SlotOverrides, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, AnalysisBudget, PIPELINE_STAGE_DEFS, PipelineState, PipelineStage, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
 import type { DownloadedVideo } from "./electron-api";
 
 function createEmptyPipeline(projectId: string, analysisId: string): PipelineState {
@@ -100,6 +100,9 @@ interface AppState {
   modelDownloads: Record<string, ModelDownloadProgress>;
   // whisper 模型下载进度,全局订阅 whisperCpp:progress 写入
   whisperDownloads: Record<string, ModelDownloadProgress>;
+  // 单次分析的临时 slot 覆盖, keyed by projectId
+  pendingSlotOverrides: Record<string, SlotOverrides>;
+  setPendingSlotOverrides: React.Dispatch<React.SetStateAction<Record<string, SlotOverrides>>>;
 }
 
 const AppContext = createContext<AppState | undefined>(undefined);
@@ -273,6 +276,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [activeAnalysisForProject, setActiveAnalysisForProject] = useState<Record<string, string>>({});
   const [modelDownloads, setModelDownloads] = useState<Record<string, ModelDownloadProgress>>({});
   const [whisperDownloads, setWhisperDownloads] = useState<Record<string, ModelDownloadProgress>>({});
+  const [pendingSlotOverrides, setPendingSlotOverrides] = useState<Record<string, SlotOverrides>>({});
 
   const upsertAccount = useCallback((a: Account) => {
     setAccounts((prev) => {
@@ -939,6 +943,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setBudgetForAnalysis,
         modelDownloads,
         whisperDownloads,
+        pendingSlotOverrides,
+        setPendingSlotOverrides,
       }}
     >
       {children}

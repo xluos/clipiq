@@ -48,7 +48,6 @@ import type { CachePolicy, CacheScopeStats, CacheStats, ExtensionBridgeStatus, L
 
 type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "bridge" | "data";
 
-const NONE = "__none__";
 
 const SECTIONS: { key: Section; label: string }[] = [
   { key: "providers", label: "供应商" },
@@ -85,14 +84,8 @@ function whisperModelHint(modelId?: string) {
 }
 
 // ModelCapability (provider.models[i].capabilities) 的中文映射,任务分配 dropdown 用
-const CAPABILITY_LABELS_ZH: Record<string, string> = {
-  vision: "视觉",
-  audio_transcription: "音频",
-  reasoning: "推理",
-  fast: "快速",
-  long_context: "长上下文",
-  text: "文本",
-};
+import { PipelineRow, CAPABILITY_LABELS_ZH, type SlotMeta, type PipelineStage } from "../components/PipelineSlotPicker";
+import { useSidecarReadiness } from "../hooks/useSidecarReadiness";
 
 function formatBytes(bytes: number) {
   if (!bytes) return "0 B";
@@ -274,29 +267,18 @@ function ProvidersSection() {
   );
 }
 
-type SlotMeta = {
-  key: TaskSlotKey;
-  label: string;
-  difficulty: TaskDifficulty;
-  axis: TaskAxis;
-  hint: string;
-  used: boolean;
-};
-
 const SLOT_METAS: SlotMeta[] = [
   { key: "simple_vision", label: "简单 · 视觉", difficulty: "simple", axis: "vision", hint: "用于本地视觉初筛打标", used: true },
   { key: "medium_text", label: "中等 · 文本", difficulty: "medium", axis: "text", hint: "用于字幕推断视频类型", used: true },
-  { key: "complex_vision", label: "复杂 · 视觉", difficulty: "complex", axis: "vision", hint: "用于主分析:拉片打标 + 方法论审计", used: true },
+  { key: "complex_vision", label: "复杂 · 视觉", difficulty: "complex", axis: "vision", hint: "用于主分析", used: true },
 ];
 
-const PIPELINE_STAGES: Array<{
-  num: string;
-  title: string;
-  badges: string[];
-  desc: string;
-  slot: TaskSlotKey | "__audio__";
-  isKey?: boolean;
-}> = [
+const CONTENT_STAGES: PipelineStage[] = [
+  { num: "01", title: "字幕识别", badges: ["audio"], desc: "从音轨提取台词。", slot: "__audio__" },
+  { num: "02", title: "内容分析", badges: ["complex · vision"], desc: "基于关键帧和字幕,分析视频内容、选题和受众。", slot: "complex_vision", isKey: true },
+];
+
+const PIPELINE_STAGES: PipelineStage[] = [
   { num: "01", title: "抽帧初筛", badges: ["simple · vision"], desc: "对每秒 1-2 帧的抽帧打标(场景类型、主体、是否空帧),过滤重复与低信息量帧。", slot: "simple_vision" },
   { num: "02", title: "字幕识别", badges: ["audio"], desc: "从音轨提取台词,作为节点字幕来源。", slot: "__audio__" },
   { num: "03", title: "镜头合并 + 全局摘要", badges: ["medium · text"], desc: "把同一镜头的若干帧合并成镜头描述,聚合成全局摘要并推断视频类型。", slot: "medium_text" },
@@ -358,47 +340,7 @@ function ConcurrencyControl() {
 
 function TaskAssignmentSection() {
   const { providers, taskSlots, setTaskSlot, audioSlot, setAudioSlot } = useApp();
-  // 本地 llama 已下载且可启动的 model id 集合; 任务分配 dropdown 据此过滤未下载项
-  const [readyLocalIds, setReadyLocalIds] = useState<Set<string>>(new Set());
-  const [readyWhisperIds, setReadyWhisperIds] = useState<Set<string>>(new Set());
-
-  useEffect(() => {
-    if (!window.videoAnalyzer?.llama) return;
-    let cancelled = false;
-    const refresh = async () => {
-      const r = await window.videoAnalyzer!.llama.listManifest().catch(() => null);
-      if (cancelled || !r) return;
-      const ready = new Set(
-        r.models.filter((m) => m.availability.state === "ready").map((m) => m.id),
-      );
-      setReadyLocalIds(ready);
-    };
-    refresh();
-    const unsub = window.videoAnalyzer.llama.onProgress(() => refresh());
-    return () => {
-      cancelled = true;
-      unsub();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!window.videoAnalyzer?.whisperCpp) return;
-    let cancelled = false;
-    const refresh = async () => {
-      const models = await window.videoAnalyzer!.whisperCpp.listModels().catch(() => null);
-      if (cancelled || !models) return;
-      const ready = new Set(
-        models.filter((m) => m.availability.state === "ready").map((m) => m.id),
-      );
-      setReadyWhisperIds(ready);
-    };
-    refresh();
-    const unsub = window.videoAnalyzer.whisperCpp.onProgress(() => refresh());
-    return () => {
-      cancelled = true;
-      unsub();
-    };
-  }, []);
+  const { readyLocalIds, readyWhisperIds } = useSidecarReadiness();
 
   const slotMetaByKey: Record<string, SlotMeta> = SLOT_METAS.reduce((acc, m) => {
     acc[m.key] = m;
@@ -413,218 +355,55 @@ function TaskAssignmentSection() {
     used: true,
   };
 
+  const renderStages = (stages: PipelineStage[]) =>
+    stages.map((stage, idx) => {
+      const isAudio = stage.slot === "__audio__";
+      const meta = isAudio ? audioMeta : slotMetaByKey[stage.slot];
+      const assignment = isAudio ? audioSlot : taskSlots[stage.slot as TaskSlotKey];
+      const onChange = isAudio
+        ? (a: SlotAssignment) => setAudioSlot(a)
+        : (a: SlotAssignment) => setTaskSlot(stage.slot as TaskSlotKey, a);
+      return (
+        <PipelineRow
+          key={stage.slot + stage.num}
+          stage={stage}
+          isFirst={idx === 0}
+          providers={providers}
+          meta={meta}
+          assignment={assignment}
+          onChange={onChange}
+          audioMode={isAudio}
+          readyLocalIds={readyLocalIds}
+          readyWhisperIds={readyWhisperIds}
+        />
+      );
+    });
+
   return (
     <>
-      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">分析管线</h2>
+      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">任务分配</h2>
       <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
-        每一步绑定独立模型。
+        每一步绑定独立模型,分别为两条管线配置默认值。
       </p>
 
       <ConcurrencyControl />
 
+      <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mt-2">内容分析</h3>
+      <p className="text-[12.5px] text-slate-500 dark:text-slate-400 -mt-4">账号视频的轻量内容分析管线。</p>
       <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] overflow-hidden">
-        {PIPELINE_STAGES.map((stage, idx) => {
-          const isAudio = stage.slot === "__audio__";
-          const meta = isAudio ? audioMeta : slotMetaByKey[stage.slot];
-          const assignment = isAudio ? audioSlot : taskSlots[stage.slot as TaskSlotKey];
-          const onChange = isAudio
-            ? (a: SlotAssignment) => setAudioSlot(a)
-            : (a: SlotAssignment) => setTaskSlot(stage.slot as TaskSlotKey, a);
-          return (
-            <PipelineRow
-              key={stage.slot}
-              stage={stage}
-              isFirst={idx === 0}
-              providers={providers}
-              meta={meta}
-              assignment={assignment}
-              onChange={onChange}
-              audioMode={isAudio}
-              readyLocalIds={readyLocalIds}
-              readyWhisperIds={readyWhisperIds}
-            />
-          );
-        })}
+        {renderStages(CONTENT_STAGES)}
+      </div>
+
+      <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mt-4">结构拆解</h3>
+      <p className="text-[12.5px] text-slate-500 dark:text-slate-400 -mt-4">完整的视频结构拆解管线。</p>
+      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] overflow-hidden">
+        {renderStages(PIPELINE_STAGES)}
       </div>
     </>
   );
 }
 
-type PipelineRowProps = {
-  stage: { num: string; title: string; badges: string[]; desc: string; isKey?: boolean };
-  isFirst: boolean;
-  providers: ModelProvider[];
-  meta: SlotMeta;
-  assignment: SlotAssignment;
-  onChange: (a: SlotAssignment) => void;
-  audioMode?: boolean;
-  readyLocalIds: Set<string>;
-  readyWhisperIds: Set<string>;
-};
 
-const PipelineRow: FunctionComponent<PipelineRowProps> = ({
-  stage, isFirst, providers, meta, assignment, onChange, audioMode, readyLocalIds, readyWhisperIds,
-}) => {
-  // 本地 llama / whisper provider 下未 ready (未下载) 的 model id 一律不出现在 dropdown
-  const isModelEligible = (p: ModelProvider, m: ProviderModel) => {
-    if (p.source === "local_llama" && !readyLocalIds.has(m.id)) return false;
-    if (p.source === "local_whisper" && !readyWhisperIds.has(m.id)) return false;
-    return true;
-  };
-
-  const candidateProviders = audioMode
-    ? providers.filter((p) =>
-        p.models.some((m) => isModelEligible(p, m) && m.capabilities.includes("audio_transcription")) ||
-        p.endpointType === "openai_audio_transcriptions" ||
-        p.endpointType === "local_whisper_cpp",
-      )
-    : providers.filter((p) =>
-        meta.axis === "vision"
-          ? p.models.some((m) => isModelEligible(p, m) && m.capabilities.includes("vision"))
-          : p.models.some((m) => isModelEligible(p, m)),
-      );
-  const selectedProvider = assignment ? providers.find((p) => p.id === assignment.providerId) : null;
-  const candidateModels = (() => {
-    if (!selectedProvider) return [];
-    const eligible = selectedProvider.models.filter((m) => isModelEligible(selectedProvider, m));
-    if (audioMode) {
-      return eligible.filter(
-        (m) =>
-          m.capabilities.includes("audio_transcription") ||
-          selectedProvider.endpointType === "openai_audio_transcriptions" ||
-          selectedProvider.endpointType === "local_whisper_cpp",
-      );
-    }
-    if (meta.axis === "vision") {
-      return eligible.filter((m) => m.capabilities.includes("vision"));
-    }
-    return eligible;
-  })();
-
-  const handleProviderChange = (id: string) => {
-    if (id === NONE) {
-      onChange(null);
-      return;
-    }
-    const p = providers.find((x) => x.id === id);
-    const eligibleModels = p?.models.filter((m) => isModelEligible(p, m)) || [];
-    const firstModel = audioMode
-      ? eligibleModels.find((m) => m.capabilities.includes("audio_transcription")) || eligibleModels[0]
-      : meta.axis === "vision"
-      ? eligibleModels.find((m) => m.capabilities.includes("vision")) || eligibleModels[0]
-      : eligibleModels[0];
-    onChange(firstModel ? { providerId: id, modelId: firstModel.id } : null);
-  };
-
-  const handleModelChange = (id: string) => {
-    if (!assignment) return;
-    onChange({ ...assignment, modelId: id });
-  };
-
-  return (
-    <div className={`grid grid-cols-[36px_minmax(0,1fr)_280px] gap-4 items-start px-5 py-4 ${isFirst ? "" : "border-t border-slate-200 dark:border-slate-800"}`}>
-      <div className={`w-7 h-7 grid place-items-center rounded-md font-mono text-[11px] font-medium ${
-        stage.isKey
-          ? "bg-indigo-600 text-white border border-indigo-600"
-          : "bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700"
-      }`}>
-        {stage.num}
-      </div>
-      <div className="min-w-0">
-        <h4 className="text-[13.5px] font-semibold text-slate-900 dark:text-slate-100 mb-1 flex items-center gap-2">
-          {stage.title}
-          {stage.badges.map(b => (
-            <span key={b} className={`inline-flex h-5 px-1.5 rounded font-mono text-[10.5px] uppercase tracking-wider items-center ${
-              stage.isKey
-                ? "bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900"
-                : "bg-transparent text-slate-500 border border-slate-200 dark:border-slate-700"
-            }`}>
-              {b}
-            </span>
-          ))}
-        </h4>
-        <p className="text-[12.5px] text-slate-600 dark:text-slate-400 leading-snug">
-          {stage.desc}
-        </p>
-      </div>
-      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0e0e10] p-2.5 space-y-2">
-        <div className="font-mono text-[10px] uppercase tracking-wider text-slate-500">当前使用</div>
-        <Select value={assignment?.providerId ?? NONE} onValueChange={handleProviderChange}>
-          <SelectTrigger className="h-7 text-[12px] bg-white dark:bg-[#14151a] border-slate-200 dark:border-slate-800">
-            <SelectValue placeholder="选供应商">
-              {selectedProvider ? selectedProvider.name : "选供应商"}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={NONE}>不启用</SelectItem>
-            {candidateProviders.length === 0 && (
-              <SelectItem value={NONE} disabled>没有符合能力的供应商</SelectItem>
-            )}
-            {candidateProviders.map((p) => (
-              <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select value={assignment?.modelId ?? NONE} onValueChange={handleModelChange} disabled={!selectedProvider}>
-          <SelectTrigger className="h-7 text-[12px] bg-white dark:bg-[#14151a] border-slate-200 dark:border-slate-800 font-mono">
-            <SelectValue placeholder="选模型">
-              {(() => {
-                if (!assignment || !selectedProvider) return "选模型";
-                const m = selectedProvider.models.find((x) => x.id === assignment.modelId);
-                return m?.label || assignment.modelId;
-              })()}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            {candidateModels.length === 0 && (
-              <SelectItem value={NONE} disabled>
-                {meta.axis === "vision" ? "该供应商无视觉能力的 model" : "该供应商没有 model"}
-              </SelectItem>
-            )}
-            {candidateModels.map((m) => (
-              <SelectItem key={m.id} value={m.id}>
-                <span className="flex items-center gap-2">
-                  <span>{m.label}</span>
-                  <span className="text-[10px] text-slate-400">{m.capabilities.map((c) => CAPABILITY_LABELS_ZH[c] || c).join(" · ")}</span>
-                </span>
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        {/* 思考模式开关: 只在选中的 model 支持 thinking 时显示。默认关 (业务要 JSON 不要 thinking),
-            用户可显式打开调试 / 复杂推理场景。绑定到 SlotAssignment.enableThinking。 */}
-        {(() => {
-          if (!assignment || !selectedProvider) return null;
-          const m = selectedProvider.models.find((x) => x.id === assignment.modelId);
-          if (!m?.isThinking) return null;
-          const on = assignment.enableThinking === true;
-          return (
-            <label className="flex items-center justify-between gap-2 cursor-pointer select-none">
-              <span className="text-[11.5px] text-slate-600 dark:text-slate-400">启用思考</span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={on}
-                onClick={() => onChange({ ...assignment, enableThinking: !on })}
-                className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full border transition-colors ${
-                  on
-                    ? "bg-indigo-600 border-indigo-600"
-                    : "bg-slate-200 dark:bg-slate-700 border-slate-300 dark:border-slate-600"
-                }`}
-              >
-                <span
-                  className={`inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform mt-[1px] ${
-                    on ? "translate-x-3.5" : "translate-x-[1px]"
-                  }`}
-                />
-              </button>
-            </label>
-          );
-        })()}
-      </div>
-    </div>
-  );
-}
 
 function ProviderGroup({
   kind,

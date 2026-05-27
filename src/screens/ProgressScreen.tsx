@@ -28,6 +28,7 @@ export function ProgressScreen() {
     setNodesForAnalysis, setReportForAnalysis, progressByAnalysis, pipelineByAnalysis,
     budgetByAnalysis, activeAnalysisForProject, setBudgetForAnalysis, startAnalysisForProject,
     analysisRecordsByProject, refreshAnalysisRecords,
+    pendingSlotOverrides, setPendingSlotOverrides,
   } = useApp();
 
   const project = projects.find(p => p.id === activeProjectId);
@@ -315,7 +316,9 @@ export function ProgressScreen() {
         return;
       }
       try {
-        const result = await window.videoAnalyzer!.analyzeProject({ project, provider, audioProvider, options });
+        const slotOverrides = pendingSlotOverrides[project.id];
+        if (slotOverrides) setPendingSlotOverrides((prev) => { const n = { ...prev }; delete n[project.id]; return n; });
+        const result = await window.videoAnalyzer!.analyzeProject({ project, provider, audioProvider, options, slotOverrides });
         if (cancelledRef.current) return;
         setNodesForAnalysis(result.analysisId, result.nodes);
         setReportForAnalysis(result.analysisId, result.report);

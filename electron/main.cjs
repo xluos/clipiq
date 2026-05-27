@@ -1463,6 +1463,16 @@ function resolveAudioProvider(config) {
   return shapeEffectiveProvider(provider, model, slot);
 }
 
+function applySlotOverrides(config, overrides) {
+  if (!overrides) return config;
+  const patched = { ...config, taskSlots: { ...config.taskSlots } };
+  if (overrides.simple_vision !== undefined) patched.taskSlots.simple_vision = overrides.simple_vision;
+  if (overrides.complex_vision !== undefined) patched.taskSlots.complex_vision = overrides.complex_vision;
+  if (overrides.medium_text !== undefined) patched.taskSlots.medium_text = overrides.medium_text;
+  if (overrides.audio !== undefined) patched.audioSlot = overrides.audio;
+  return patched;
+}
+
 function shapeEffectiveProvider(provider, model, slot) {
   // local_llama 的 baseUrl / apiKeyRef 由 llama-manager 在请求时动态注入,
   // 这里只占位; openai-client 看到 provider.source === "local_llama" 会自动 acquire slot。
@@ -4385,7 +4395,7 @@ async function warmupLocalWhisperCpp(audioProvider) {
   return { modelId, elapsedMs: Date.now() - t0 };
 }
 
-async function analyzeProject(event, { project, provider: _legacyProvider, audioProvider: _legacyAudio, options }) {
+async function analyzeProject(event, { project, provider: _legacyProvider, audioProvider: _legacyAudio, options, slotOverrides }) {
   if (activeAnalyses.has(project.id)) {
     const stale = activeAnalyses.get(project.id);
     if (stale?.cancelled) {
@@ -4409,6 +4419,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   let cfgSnapshot, complexVisionProvider, mediumTextProvider, audioProvider, provider;
   try {
     cfgSnapshot = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+    if (slotOverrides) cfgSnapshot = applySlotOverrides(cfgSnapshot, slotOverrides);
     _activeCachePolicy = cfgSnapshot?.cachePolicy || null;
     complexVisionProvider = resolveSlotProvider(cfgSnapshot, "complex_vision");
     mediumTextProvider = resolveSlotProvider(cfgSnapshot, "medium_text");
@@ -7373,7 +7384,7 @@ app.whenReady().then(async () => {
   if (!global.__summaryInFlight) global.__summaryInFlight = new Map();
   const summaryInFlight = global.__summaryInFlight;
 
-  async function summarizeAccountVideo(accountVideoId) {
+  async function summarizeAccountVideo(accountVideoId, slotOverrides) {
     log.info("summary", `开始摘要 accountVideoId=${accountVideoId}`);
     const db = getDb();
     const row = db.prepare("SELECT data FROM account_videos WHERE id = ?").get(accountVideoId);
@@ -7483,11 +7494,14 @@ app.whenReady().then(async () => {
       checkCancel();
 
       // 5) 识别字幕
+      // 统一读取并补丁 config
+      let cfg = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+      if (slotOverrides) cfg = applySlotOverrides(cfg, slotOverrides);
+
       log.info("summary", `[5/6] 识别字幕, hasAudio=${inspected.hasAudio}`);
       sendStatus("summarizing", { progress: 52, message: "识别字幕" });
       let transcript = null;
       if (inspected.hasAudio) {
-        const cfg = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
         const audioProvider = resolveAudioProvider(cfg);
         log.info("summary", `音频提供者: ${audioProvider?.id || "(null)"} type=${audioProvider?.endpointType || "?"}`);
         if (audioProvider) {
@@ -7511,7 +7525,6 @@ app.whenReady().then(async () => {
       // 6) LLM 生成内容分析
       log.info("summary", `[6/6] LLM 内容分析, 帧=${frames.length} 字幕=${transcript?.text?.length || 0}字`);
       sendStatus("summarizing", { progress: 75, message: "LLM 内容分析" });
-      const cfg = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
       const visionProvider = resolveSlotProvider(cfg, "complex_vision");
       const textProvider = resolveSlotProvider(cfg, "medium_text");
 
@@ -7614,12 +7627,12 @@ app.whenReady().then(async () => {
     }
   }
 
-  ipcMain.handle("accounts:summarizeVideo", async (_event, { accountVideoId } = {}) => {
+  ipcMain.handle("accounts:summarizeVideo", async (_event, { accountVideoId, slotOverrides } = {}) => {
     if (!accountVideoId) throw new Error("accounts:summarizeVideo 需要 accountVideoId");
     if (summaryInFlight.has(accountVideoId)) {
       return { ok: true, accepted: false, reason: "already in flight" };
     }
-    summarizeAccountVideo(accountVideoId).catch((err) => {
+    summarizeAccountVideo(accountVideoId, slotOverrides || undefined).catch((err) => {
       log.warn("accounts:summarizeVideo", "unhandled", err?.message || err);
     });
     return { ok: true, accepted: true };
