@@ -166,7 +166,7 @@ export function HomeScreen() {
   const canSubmit = source.kind === "url" || source.kind === "file";
 
   const { inProgress, completed, broken, all } = useMemo(() => {
-    const sorted = [...projects].sort(
+    const sorted = [...projects].filter((p) => !p.accountId).sort(
       (a, b) =>
         new Date(b.updatedAt || b.createdAt || 0).getTime() -
         new Date(a.updatedAt || a.createdAt || 0).getTime(),

@@ -112,13 +112,14 @@ const AccountAvatar: FunctionComponent<{
 
 function AccountListScreen() {
   const ctx = useApp();
-  const { accounts, accountVideosByAccountId, accountFetchUi, setLocation, setActiveAccountId } = useAccountNav();
+  const { accounts, accountFetchUi, setLocation, setActiveAccountId } = useAccountNav();
+  const { videos } = useApp();
   const [addOpen, setAddOpen] = useState(false);
 
   const detailLoc: AppLocation = { module: "account", screen: "detail" };
   const totalVideos = useMemo(
-    () => accounts.reduce((sum, a) => sum + (accountVideosByAccountId[a.id]?.length ?? 0), 0),
-    [accounts, accountVideosByAccountId],
+    () => accounts.reduce((sum, a) => sum + videos.filter((v) => v.accountId === a.id).length, 0),
+    [accounts, videos],
   );
 
   return (
@@ -155,7 +156,7 @@ function AccountListScreen() {
                 <AccountCard
                   key={a.id}
                   account={a}
-                  videos={accountVideosByAccountId[a.id] || []}
+                  videos={videos.filter((v) => v.accountId === a.id)}
                   fetchUi={accountFetchUi[a.id]}
                   onClick={() => {
                     setActiveAccountId(a.id);
@@ -514,8 +515,8 @@ const Field: FunctionComponent<{ label: string; children: ReactNode }> = ({ labe
 function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "methodology" | "videos" | "hooks" }) {
   const ctx = useApp();
   const {
-    accounts, setLocation, projects, setProjects, reportByAnalysis, upsertAccount,
-    accountVideosByAccountId, accountFetchUi, refreshAccountVideos,
+    accounts, setLocation, videos, projects, setProjects, reportByAnalysis, upsertAccount,
+    accountFetchUi,
     setActiveProjectId,
   } = ctx;
   const id = activeAccountId();
@@ -524,12 +525,7 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState("");
 
-  const accountVideos = useMemo(() => (id ? accountVideosByAccountId[id] || [] : []), [accountVideosByAccountId, id]);
-
-  // 进入详情时刷一次 (兜底,事件流之外的迟滞情况)
-  useEffect(() => {
-    if (id) refreshAccountVideos(id);
-  }, [id, refreshAccountVideos]);
+  const accountVideos = useMemo(() => (id ? videos.filter((v) => v.accountId === id) : []), [videos, id]);
 
   const fetchingUi = id ? accountFetchUi[id] : undefined;
   const fetching = !!fetchingUi || account?.fetchPhase === "fetching";
