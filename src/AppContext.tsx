@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AnalysisRecord, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, SlotOverrides, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, AnalysisBudget, PIPELINE_STAGE_DEFS, PipelineState, PipelineStage, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot } from "./types";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AnalysisRecord, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, SlotOverrides, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, AnalysisBudget, PIPELINE_STAGE_DEFS, PipelineState, PipelineStage, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot, PipelineId, PipelineSlots, PipelineSlotConfig } from "./types";
 import type { DownloadedVideo } from "./electron-api";
 
 function createEmptyPipeline(projectId: string, analysisId: string): PipelineState {
@@ -49,6 +49,9 @@ interface AppState {
   setTaskSlot: (key: TaskSlotKey, assignment: SlotAssignment) => void;
   audioSlot: SlotAssignment;
   setAudioSlot: (assignment: SlotAssignment) => void;
+  pipelineSlots: PipelineSlots;
+  setPipelineSlot: (pipelineId: PipelineId, slotKey: TaskSlotKey | "__audio__", assignment: SlotAssignment) => void;
+  getPipelineSlot: (pipelineId: PipelineId, slotKey: TaskSlotKey | "__audio__") => SlotAssignment;
   defaultAnalysis: DefaultAnalysis;
   setDefaultAnalysis: React.Dispatch<React.SetStateAction<DefaultAnalysis>>;
   // 本地 llama 模型 ctx 覆盖。落 config.localModelOverrides;
@@ -145,6 +148,19 @@ const DEFAULT_TASK_SLOTS: TaskSlots = {
   complex_text: { providerId: "default-video", modelId: "gpt-4o-mini" },
 };
 
+function buildDefaultPipelineSlots(ts: TaskSlots, audio: SlotAssignment): PipelineSlots {
+  return {
+    content: {
+      taskSlots: { complex_vision: ts.complex_vision },
+      audioSlot: audio,
+    },
+    pipeline: {
+      taskSlots: { simple_vision: ts.simple_vision, medium_text: ts.medium_text, complex_vision: ts.complex_vision },
+      audioSlot: audio,
+    },
+  };
+}
+
 const LOCAL_STORAGE_KEY = "video-analyzer-state";
 const SIDEBAR_COLLAPSED_KEY = "clipiq-sidebar-collapsed";
 
@@ -190,6 +206,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [providers, setProviders] = useState<ModelProvider[]>(DEFAULT_PROVIDERS);
   const [taskSlots, setTaskSlots] = useState<TaskSlots>(DEFAULT_TASK_SLOTS);
   const [audioSlot, setAudioSlotState] = useState<SlotAssignment>(null);
+  const [pipelineSlotsState, setPipelineSlotsState] = useState<PipelineSlots>(
+    () => buildDefaultPipelineSlots(DEFAULT_TASK_SLOTS, null),
+  );
   const [defaultAnalysis, setDefaultAnalysis] = useState<DefaultAnalysis>(DEFAULT_ANALYSIS);
   const [localModelOverrides, setLocalModelOverrides] = useState<Record<string, { contextSize?: number }>>({});
   const updateLocalModelOverride = useCallback(
@@ -225,6 +244,34 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const setAudioSlot = useCallback((assignment: SlotAssignment) => {
     setAudioSlotState(assignment);
   }, []);
+
+  const setPipelineSlot = useCallback(
+    (pipelineId: PipelineId, slotKey: TaskSlotKey | "__audio__", assignment: SlotAssignment) => {
+      setPipelineSlotsState((prev) => {
+        const cur = prev[pipelineId] || { taskSlots: {}, audioSlot: null };
+        if (slotKey === "__audio__") {
+          return { ...prev, [pipelineId]: { ...cur, audioSlot: assignment } };
+        }
+        return {
+          ...prev,
+          [pipelineId]: { ...cur, taskSlots: { ...cur.taskSlots, [slotKey]: assignment } },
+        };
+      });
+    },
+    [],
+  );
+
+  const getPipelineSlot = useCallback(
+    (pipelineId: PipelineId, slotKey: TaskSlotKey | "__audio__"): SlotAssignment => {
+      const pc = pipelineSlotsState[pipelineId];
+      if (slotKey === "__audio__") {
+        return pc?.audioSlot !== undefined ? pc.audioSlot : audioSlot;
+      }
+      const v = pc?.taskSlots?.[slotKey];
+      return v !== undefined ? v : taskSlots[slotKey];
+    },
+    [pipelineSlotsState, taskSlots, audioSlot],
+  );
 
   // Deprecated 兼容层:旧 UI 仍读 activeVideoProviderId / activeAudioProviderId,
   // 我们把它们映射到 taskSlots.complex_vision / audioSlot 上。PR-3 时一并删除。
@@ -493,6 +540,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
           if (config?.audioSlot !== undefined) {
             setAudioSlotState(config.audioSlot);
           }
+          if (config?.pipelineSlots) {
+            setPipelineSlotsState(config.pipelineSlots);
+          } else if (config?.taskSlots) {
+            setPipelineSlotsState(buildDefaultPipelineSlots(config.taskSlots, config?.audioSlot ?? null));
+          }
           if (config?.defaultAnalysis) {
             setDefaultAnalysis(config.defaultAnalysis);
           }
@@ -568,6 +620,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
             if (state.providers?.length) setProviders(state.providers);
             if (state.taskSlots) setTaskSlots(state.taskSlots);
             if (state.audioSlot !== undefined) setAudioSlotState(state.audioSlot);
+            if (state.pipelineSlots) {
+              setPipelineSlotsState(state.pipelineSlots);
+            } else if (state.taskSlots) {
+              setPipelineSlotsState(buildDefaultPipelineSlots(state.taskSlots, state.audioSlot ?? null));
+            }
             if (state.defaultAnalysis) setDefaultAnalysis(state.defaultAnalysis);
             setProjects(state.projects || []);
             setNodesByAnalysis(state.nodesByAnalysis || {});
@@ -594,6 +651,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       audioSlot,
       defaultAnalysis,
       localModelOverrides,
+      pipelineSlots: pipelineSlotsState,
       schemaVersion: 2,
     };
     const timer = window.setTimeout(() => {
@@ -610,7 +668,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [providers, taskSlots, audioSlot, defaultAnalysis, localModelOverrides, hasHydrated]);
+  }, [providers, taskSlots, audioSlot, defaultAnalysis, localModelOverrides, pipelineSlotsState, hasHydrated]);
 
   // 订阅后台账号拉取事件 (progress / done / failed) — 全局只挂一次
   useEffect(() => {
@@ -907,6 +965,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setTaskSlot,
         audioSlot,
         setAudioSlot,
+        pipelineSlots: pipelineSlotsState,
+        setPipelineSlot,
+        getPipelineSlot,
         defaultAnalysis,
         setDefaultAnalysis,
         localModelOverrides,

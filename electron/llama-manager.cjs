@@ -24,7 +24,7 @@
 //     slot.release();
 //   }
 
-const llamaRuntime = require("./llama-runtime.cjs");
+const daemonClient = require("./daemon-client.cjs");
 const log = require("./logger.cjs");
 
 const state = {
@@ -40,9 +40,26 @@ const state = {
 
 // 真实的当前 model 始终从 runtime.getStatus() 读, 不在 manager 缓存,
 // 这样 IPC (llama:start / llama:stop) 直接操作 runtime 也不会让 manager 失忆。
+let _cachedRtStatus = null;
+let _cachedRtTs = 0;
+
+async function fetchRuntimeStatus() {
+  const now = Date.now();
+  if (_cachedRtStatus && now - _cachedRtTs < 500) return _cachedRtStatus;
+  try {
+    const rt = await daemonClient.getRuntimeStatus();
+    _cachedRtStatus = rt;
+    _cachedRtTs = now;
+    return rt;
+  } catch {
+    return null;
+  }
+}
+
 function getCurrentModel() {
-  const s = llamaRuntime.getStatus();
-  return s.running ? s.modelKey : null;
+  const rt = _cachedRtStatus;
+  if (!rt) return null;
+  return rt.llm?.state === "ready" ? (rt.llm.modelId || null) : null;
 }
 
 function getActiveModel() {
@@ -68,24 +85,22 @@ function describeState() {
 }
 
 function buildSlot(modelKey) {
-  const status = llamaRuntime.getStatus();
-  if (!status.running || !status.port) {
-    throw new Error(`llama-server 未就绪 (status=${status.status})`);
+  const rt = _cachedRtStatus;
+  if (!rt || rt.llm?.state !== "ready" || !rt.llm?.port) {
+    throw new Error(`llama-server 未就绪 (state=${rt?.llm?.state || "unknown"})`);
   }
-  const meta = llamaRuntime.MODELS[modelKey];
-  const contextSize = status.contextSize || meta?.contextSize || 8192;
+  const contextSize = rt.llm.contextSize || 8192;
   let released = false;
   return {
     modelKey,
     model: modelKey,
-    baseUrl: `http://127.0.0.1:${status.port}/v1`,
+    baseUrl: `http://127.0.0.1:${rt.llm.port}/v1`,
     apiKey: "local",
     contextSize,
     release() {
       if (released) return;
       released = true;
       state.inflight = Math.max(0, state.inflight - 1);
-      // 释放后唤醒 worker, 看是否有 pending 切换
       schedule();
     },
   };
@@ -110,54 +125,42 @@ function schedule() {
 }
 
 async function processQueue() {
-  // 循环处理: 同 model 的批量放行 + 必要时触发切换
-  // 不在 switching 中时反复尝试;切换发起后, 当前调用退出,
-  // 切换完成后下一轮 while 把刚切到的 model 的 head 放行
   while (state.queue.length > 0) {
     const head = state.queue[0];
+    await fetchRuntimeStatus();
     const currentModel = getCurrentModel();
     const sameModel = currentModel === head.modelKey;
 
     if (sameModel && !state.switchingTo) {
-      // 直接放行
       state.queue.shift();
       detachAbort(head);
       state.inflight += 1;
       try {
         head.resolve(buildSlot(head.modelKey));
       } catch (err) {
-        // server 突然没了 → 倒回 queue 头, 触发切换
         state.inflight = Math.max(0, state.inflight - 1);
         state.queue.unshift(head);
-        // fallthrough 到切换分支
       }
       continue;
     }
 
-    // 需要切换 (空启动 or 不同 model)
-    if (state.inflight > 0) {
-      // 有人还在用当前 server, 等他们 release 后 schedule 会再调进来
-      return;
-    }
-    if (state.switchingTo) {
-      // 已经在切换中, 让 in-flight switch 完成后再 schedule
-      return;
-    }
+    if (state.inflight > 0) return;
+    if (state.switchingTo) return;
 
-    // 触发切换
     const targetModel = head.modelKey;
     state.switchingTo = targetModel;
     try {
       log.info("llama-manager",
         `切换 ${currentModel || "(空)"} → ${targetModel} (queue=${state.queue.length})`,
       );
-      const result = await llamaRuntime.start(targetModel);
+      const result = await daemonClient.startLLM(targetModel);
+      _cachedRtStatus = null;
+      await fetchRuntimeStatus();
       log.info("llama-manager",
-        `切换完成 model=${targetModel} port=${result.port} ctx=${result.contextSize} reused=${!!result.reused}`,
+        `切换完成 model=${targetModel} port=${result.port} ctx=${result.contextSize}`,
       );
     } catch (err) {
       log.error("llama-manager", `切换 ${targetModel} 失败:`, err?.message || err);
-      // 这个 target 的所有 pending 都拒掉
       for (let i = state.queue.length - 1; i >= 0; i--) {
         if (state.queue[i].modelKey === targetModel) {
           const t = state.queue.splice(i, 1)[0];
@@ -168,7 +171,6 @@ async function processQueue() {
     } finally {
       state.switchingTo = null;
     }
-    // 切换完成后继续 while: 把刚切到的 model 的队列 head 放行
   }
 }
 
@@ -195,9 +197,7 @@ function acquire(modelKey, opts = {}) {
   if (!modelKey || typeof modelKey !== "string") {
     return Promise.reject(new Error("acquire 需要 modelKey 字符串"));
   }
-  if (!llamaRuntime.MODELS[modelKey]) {
-    return Promise.reject(new Error(`未知 modelKey: ${modelKey}`));
-  }
+  // daemon 管理模型列表，不在本地校验 modelKey
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new Error("acquire 被取消"));
@@ -242,7 +242,7 @@ async function shutdown() {
   }
   state.switchingTo = null;
   try {
-    await llamaRuntime.stop();
+    await daemonClient.stopLLM();
   } catch (err) {
     log.warn("llama-manager", "shutdown stop 失败:", err?.message || err);
   }

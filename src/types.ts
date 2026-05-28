@@ -205,6 +205,15 @@ export type SlotOverrides = {
   audio?: SlotAssignment;
 };
 
+export type PipelineId = "content" | "pipeline";
+
+export type PipelineSlotConfig = {
+  taskSlots: Partial<TaskSlots>;
+  audioSlot: SlotAssignment;
+};
+
+export type PipelineSlots = Record<PipelineId, PipelineSlotConfig>;
+
 export type ProjectSource =
   | { type: "local_file"; originalPath: string }
   | {
@@ -624,6 +633,7 @@ export type AppConfig = {
     enabled: boolean;
     stages?: Record<string, boolean>;
   };
+  pipelineSlots?: PipelineSlots;
   schemaVersion: 2;
   // v1 残留字段,仅在 migrateConfigV1ToV2 内读取,迁移后写回时不再产生
   /** @deprecated migrated to taskSlots.complex_vision */

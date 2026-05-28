@@ -76,18 +76,20 @@ type Props = {
 };
 
 export function ModelConfigDialog({ open, onClose, mode, title, initialOverrides, initialPrompt, onConfirm }: Props) {
-  const { providers, taskSlots, audioSlot } = useApp();
+  const { providers, getPipelineSlot } = useApp();
   const { readyLocalIds, readyWhisperIds } = useSidecarReadiness();
 
+  const pipelineId = mode as import("../types").PipelineId;
   const stages = mode === "content" ? CONTENT_STAGES : PIPELINE_STAGES;
 
   const [localSlots, setLocalSlots] = useState<Record<string, SlotAssignment>>(() => {
     const init: Record<string, SlotAssignment> = {};
     for (const s of stages) {
-      if (s.slot === "__audio__") init.__audio__ = (initialOverrides?.audio !== undefined ? initialOverrides.audio : audioSlot);
-      else {
+      if (s.slot === "__audio__") {
+        init.__audio__ = initialOverrides?.audio !== undefined ? initialOverrides.audio : getPipelineSlot(pipelineId, "__audio__");
+      } else {
         const key = s.slot as keyof SlotOverrides;
-        init[s.slot] = (initialOverrides?.[key] !== undefined ? initialOverrides[key]! : taskSlots[s.slot as TaskSlotKey]);
+        init[s.slot] = initialOverrides?.[key] !== undefined ? initialOverrides[key]! : getPipelineSlot(pipelineId, s.slot as TaskSlotKey);
       }
     }
     return init;

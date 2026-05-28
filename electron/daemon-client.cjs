@@ -399,6 +399,217 @@ function downloadModel(modelId, onProgress) {
   });
 }
 
+// --- 推理运行时管理 ---
+
+async function getRuntimeStatus() {
+  await ensureDaemon();
+  const res = await request("GET", "/api/runtime/status");
+  return res.data;
+}
+
+async function startLLM(modelId, opts = {}) {
+  await ensureDaemon();
+  const body = { modelId };
+  if (opts.contextSize > 0) body.contextSize = opts.contextSize;
+  if (opts.gpuLayers > 0) body.gpuLayers = opts.gpuLayers;
+  if (opts.parallel > 0) body.parallel = opts.parallel;
+  const res = await request("POST", "/api/runtime/llm/start", body);
+  if (res.status >= 400) throw new Error(res.data?.error || `startLLM failed: ${res.status}`);
+  return res.data;
+}
+
+async function stopLLM() {
+  await ensureDaemon();
+  const res = await request("POST", "/api/runtime/llm/stop");
+  return res.data;
+}
+
+async function startWhisper(modelId, opts = {}) {
+  await ensureDaemon();
+  const body = { modelId };
+  if (opts.threads > 0) body.threads = opts.threads;
+  const res = await request("POST", "/api/runtime/whisper/start", body);
+  if (res.status >= 400) throw new Error(res.data?.error || `startWhisper failed: ${res.status}`);
+  return res.data;
+}
+
+async function stopWhisper() {
+  await ensureDaemon();
+  const res = await request("POST", "/api/runtime/whisper/stop");
+  return res.data;
+}
+
+async function getLLMLogs() {
+  await ensureDaemon();
+  const res = await request("GET", "/api/runtime/llm/logs");
+  return res.data?.logs || [];
+}
+
+async function getWhisperLogs() {
+  await ensureDaemon();
+  const res = await request("GET", "/api/runtime/whisper/logs");
+  return res.data?.logs || [];
+}
+
+// --- 推理引擎二进制管理 ---
+
+async function getBinariesStatus() {
+  await ensureDaemon();
+  const res = await request("GET", "/api/binaries/status");
+  return res.data;
+}
+
+// SSE 下载推理引擎二进制。kind = "llama-server" | "whisper-server"
+function downloadBinary(kind, onProgress) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      await ensureDaemon();
+    } catch (err) {
+      return reject(err);
+    }
+
+    const opts = {
+      socketPath: socketPath(),
+      path: `/api/binaries/${encodeURIComponent(kind)}/download`,
+      method: "POST",
+      headers: { ...authHeaders(), "Accept": "text/event-stream" },
+    };
+
+    const req = http.request(opts, (res) => {
+      const contentType = res.headers["content-type"] || "";
+      if (!contentType.includes("text/event-stream")) {
+        let data = "";
+        res.on("data", (chunk) => { data += chunk.toString(); });
+        res.on("end", () => {
+          try {
+            const json = JSON.parse(data);
+            if (json.available || json.ok) return resolve({ ok: true, alreadyInstalled: true, data: json });
+            if (json.error) return reject(new Error(json.error));
+            resolve({ ok: true, data: json });
+          } catch {
+            reject(new Error(`daemon 响应异常: ${data.slice(0, 200)}`));
+          }
+        });
+        return;
+      }
+
+      let buf = "";
+      res.on("data", (chunk) => {
+        buf += chunk.toString();
+        const blocks = buf.split("\n\n");
+        buf = blocks.pop();
+        for (const block of blocks) {
+          if (!block.trim()) continue;
+          const eventMatch = block.match(/^event:\s*(.+)$/m);
+          const dataMatch = block.match(/^data:\s*(.+)$/m);
+          if (!eventMatch || !dataMatch) continue;
+          const eventType = eventMatch[1].trim();
+          let payload;
+          try { payload = JSON.parse(dataMatch[1]); } catch { continue; }
+
+          if (eventType === "progress" && onProgress) {
+            onProgress(payload);
+          } else if (eventType === "done") {
+            if (payload.ok || !payload.error) {
+              resolve({ ok: true });
+            } else {
+              reject(new Error(payload.error || "下载失败"));
+            }
+          }
+        }
+      });
+      res.on("end", () => resolve({ ok: true }));
+    });
+
+    req.on("error", (err) => {
+      if (/cancel|abort|socket hang up/i.test(err?.message)) {
+        resolve({ ok: false, cancelled: true });
+      } else {
+        reject(err);
+      }
+    });
+    req.end();
+  });
+}
+
+// --- Whisper 转写 (multipart over Unix socket) ---
+
+function transcribe(audioBuffer, options = {}) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      await ensureDaemon();
+    } catch (err) {
+      return reject(err);
+    }
+
+    const boundary = `----DaemonTranscribe${Date.now()}${Math.random().toString(36).slice(2)}`;
+    const parts = [];
+
+    // file part
+    const fileHeader = [
+      `--${boundary}`,
+      `Content-Disposition: form-data; name="file"; filename="audio.wav"`,
+      `Content-Type: audio/wav`,
+      ``,
+    ].join("\r\n");
+    parts.push(Buffer.from(fileHeader + "\r\n"));
+    parts.push(Buffer.isBuffer(audioBuffer) ? audioBuffer : Buffer.from(audioBuffer));
+    parts.push(Buffer.from("\r\n"));
+
+    // text fields
+    const fields = {
+      model: options.model || "whisper-large-v3-turbo",
+      response_format: options.response_format || "verbose_json",
+    };
+    if (options.language) fields.language = options.language;
+    if (options.prompt) fields.prompt = options.prompt;
+    if (options.temperature != null) fields.temperature = String(options.temperature);
+
+    for (const [key, val] of Object.entries(fields)) {
+      const fieldPart = [
+        `--${boundary}`,
+        `Content-Disposition: form-data; name="${key}"`,
+        ``,
+        val,
+      ].join("\r\n");
+      parts.push(Buffer.from(fieldPart + "\r\n"));
+    }
+
+    parts.push(Buffer.from(`--${boundary}--\r\n`));
+    const body = Buffer.concat(parts);
+
+    const reqOpts = {
+      socketPath: socketPath(),
+      path: "/v1/audio/transcriptions",
+      method: "POST",
+      headers: {
+        ...authHeaders(),
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        "Content-Length": body.length,
+      },
+    };
+
+    const req = http.request(reqOpts, (res) => {
+      let data = "";
+      res.on("data", (chunk) => { data += chunk.toString(); });
+      res.on("end", () => {
+        try {
+          const json = JSON.parse(data);
+          if (res.statusCode >= 400) {
+            return reject(new Error(json?.error?.message || json?.error || `转写失败: ${res.statusCode}`));
+          }
+          resolve(json);
+        } catch {
+          reject(new Error(`转写响应解析失败: ${data.slice(0, 300)}`));
+        }
+      });
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 module.exports = {
   ensureDaemon,
   isDaemonRunning,
@@ -418,4 +629,17 @@ module.exports = {
   recomputeFit,
   socketPath,
   daemonStorageDir,
+  // 运行时管理
+  getRuntimeStatus,
+  startLLM,
+  stopLLM,
+  startWhisper,
+  stopWhisper,
+  getLLMLogs,
+  getWhisperLogs,
+  // 推理引擎二进制
+  getBinariesStatus,
+  downloadBinary,
+  // 转写
+  transcribe,
 };

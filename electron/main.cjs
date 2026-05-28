@@ -10,7 +10,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { Readable } = require("node:stream");
 const llamaRuntime = require("./llama-runtime.cjs");
 const llamaManager = require("./llama-manager.cjs");
-const whisperCppRuntime = require("./whisper-cpp-runtime.cjs");
+// whisper 运行时由 ai-model-daemon 管理,不再本地 require
 const prefilter = require("./prefilter.cjs");
 const shotMerger = require("./shot-merger.cjs");
 const summarizer = require("./summarizer.cjs");
@@ -26,6 +26,7 @@ const log = require("./logger.cjs");
 const { getTranscriber } = require("./transcribe/index.cjs");
 const OpenCC = require("opencc-js");
 
+let contextResolver = null;
 const DEFAULT_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
 // 每个阶段一份 prompt/输入格式 VERSION 常量, 改 prompt 时手动 bump → 旧 cache 自动失效。
 const CACHE_VERSIONS = {
@@ -1334,10 +1335,10 @@ function daemonModelToLlamaEntry(dm) {
   };
 }
 
-// 本地 whisper 模型 (whisperCppRuntime.MODELS / listModels) → ModelDescriptor
+// daemon whisper 模型 → ModelDescriptor
 function localWhisperEntryToDescriptor(entry) {
   if (!entry) return null;
-  const fastKeys = new Set(["ggml-tiny", "ggml-base"]);
+  const fastKeys = new Set(["whisper-tiny", "whisper-base"]);
   const caps = ["audio_transcription"];
   if (fastKeys.has(entry.key)) caps.push("fast");
   return {
@@ -1404,14 +1405,21 @@ function buildBuiltinLocalLlamaProvider(localModelOverrides = {}) {
   };
 }
 
-// builtin local_whisper: 内置 whisper.cpp + ggml 模型 provider。
-// 每次 loadConfig 都强制重写,把旧 transformers.js (Xenova/whisper-*) 配置自然替换掉。
+// builtin local_whisper: 内置 whisper 模型 provider (由 ai-model-daemon 管理)。
+// 每次 loadConfig 都强制重写,把旧 transformers.js (Xenova/whisper-*) / ggml-* 配置替换。
+const WHISPER_MODELS_BUILTIN = [
+  { id: "whisper-tiny", label: "Whisper Tiny", fast: true },
+  { id: "whisper-base", label: "Whisper Base", fast: true },
+  { id: "whisper-small", label: "Whisper Small", fast: false },
+  { id: "whisper-medium", label: "Whisper Medium", fast: false },
+  { id: "whisper-large-v3-turbo", label: "Whisper Large V3 Turbo", fast: false },
+];
+
 function buildBuiltinLocalWhisperProvider() {
-  const FAST_KEYS = new Set(["ggml-tiny", "ggml-base"]);
-  const models = Object.values(whisperCppRuntime.MODELS).map((meta) => ({
-    id: meta.key,
-    label: meta.name,
-    capabilities: FAST_KEYS.has(meta.key)
+  const models = WHISPER_MODELS_BUILTIN.map((m) => ({
+    id: m.id,
+    label: m.label,
+    capabilities: m.fast
       ? ["audio_transcription", "fast"]
       : ["audio_transcription"],
     language: "zh",
@@ -1426,8 +1434,7 @@ function buildBuiltinLocalWhisperProvider() {
     endpointType: "local_whisper_cpp",
     inputMode: "keyframe_sequence",
     models,
-    // 保留 deprecated 字段供旧 audio 路径读取
-    model: "ggml-base",
+    model: "whisper-base",
     kind: "audio",
     language: "zh",
   };
@@ -1503,6 +1510,17 @@ function emptyTaskSlots() {
   return TASK_SLOT_KEYS.reduce((acc, k) => ({ ...acc, [k]: null }), {});
 }
 
+function resolvePipelineConfig(config, pipelineId) {
+  const globalSlots = config?.taskSlots || emptyTaskSlots();
+  const globalAudio = config?.audioSlot || null;
+  const pc = config?.pipelineSlots?.[pipelineId];
+  if (!pc) return { taskSlots: globalSlots, audioSlot: globalAudio };
+  return {
+    taskSlots: { ...globalSlots, ...pc.taskSlots },
+    audioSlot: pc.audioSlot !== undefined ? pc.audioSlot : globalAudio,
+  };
+}
+
 // v1 → v2 迁移。幂等。
 function migrateConfigV1ToV2(raw) {
   const cfg = raw && typeof raw === "object" ? raw : {};
@@ -1535,20 +1553,23 @@ function migrateConfigV1ToV2(raw) {
     audioSlot = cfg.audioSlot || null;
 
     // builtin provider 重新注入后, audioSlot.modelId 可能指向已下线的 model id
-    // (典型: 从 transformers.js 时代的 Xenova/whisper-* 升到 whisper.cpp 的 ggml-*)。
-    // 兜底: 优先做 Xenova → ggml 映射, 否则落到 provider.models[0]。
+    // (Xenova/whisper-* → ggml-* → whisper-* 两代迁移)。
     if (audioSlot?.providerId && audioSlot?.modelId) {
       const audioProv = providers.find((p) => p.id === audioSlot.providerId);
       if (audioProv) {
         const modelOk = audioProv.models.some((m) => m.id === audioSlot.modelId);
         if (!modelOk) {
-          const xenovaToGgml = {
-            "Xenova/whisper-tiny": "ggml-tiny",
-            "Xenova/whisper-base": "ggml-base",
-            "Xenova/whisper-small": "ggml-small",
-            "Xenova/whisper-medium": "ggml-medium",
+          const legacyToNew = {
+            "Xenova/whisper-tiny": "whisper-tiny",
+            "Xenova/whisper-base": "whisper-base",
+            "Xenova/whisper-small": "whisper-small",
+            "Xenova/whisper-medium": "whisper-medium",
+            "ggml-tiny": "whisper-tiny",
+            "ggml-base": "whisper-base",
+            "ggml-small": "whisper-small",
+            "ggml-medium": "whisper-medium",
           };
-          const mapped = xenovaToGgml[audioSlot.modelId];
+          const mapped = legacyToNew[audioSlot.modelId];
           const fallback =
             (mapped && audioProv.models.find((m) => m.id === mapped)?.id) ||
             audioProv.models[0]?.id ||
@@ -1587,24 +1608,45 @@ function migrateConfigV1ToV2(raw) {
     taskSlots.complex_text = complexVisionSlot;
 
     if (audioProvider) {
-      // 优先用旧 provider 的 model id 在新 provider.models 里匹配。
-      // transformers.js 时代的 Xenova/whisper-* → whisper.cpp 时代的 ggml-* 映射。
       const oldModelId = rawAudioProvider?.localWhisperModel || rawAudioProvider?.model || null;
-      const xenovaToGgml = {
-        "Xenova/whisper-tiny": "ggml-tiny",
-        "Xenova/whisper-base": "ggml-base",
-        "Xenova/whisper-small": "ggml-small",
-        "Xenova/whisper-medium": "ggml-medium",
+      const legacyToNew = {
+        "Xenova/whisper-tiny": "whisper-tiny",
+        "Xenova/whisper-base": "whisper-base",
+        "Xenova/whisper-small": "whisper-small",
+        "Xenova/whisper-medium": "whisper-medium",
+        "ggml-tiny": "whisper-tiny",
+        "ggml-base": "whisper-base",
+        "ggml-small": "whisper-small",
+        "ggml-medium": "whisper-medium",
       };
-      const mapped = oldModelId ? xenovaToGgml[oldModelId] || oldModelId : null;
+      const mapped = oldModelId ? legacyToNew[oldModelId] || oldModelId : null;
       const match = mapped && audioProvider.models.find((m) => m.id === mapped);
       audioSlot = {
         providerId: audioProvider.id,
         modelId: match?.id || audioProvider.models[0]?.id,
       };
     } else {
-      audioSlot = { providerId: "builtin-local-whisper", modelId: "ggml-base" };
+      audioSlot = { providerId: "builtin-local-whisper", modelId: "whisper-base" };
     }
+  }
+
+  // pipelineSlots: 首次加载旧配置时从全局 taskSlots/audioSlot 初始化两套一样的值
+  let pipelineSlots = cfg.pipelineSlots || null;
+  if (!pipelineSlots) {
+    pipelineSlots = {
+      content: {
+        taskSlots: { complex_vision: taskSlots.complex_vision || null },
+        audioSlot: audioSlot,
+      },
+      pipeline: {
+        taskSlots: {
+          simple_vision: taskSlots.simple_vision || null,
+          medium_text: taskSlots.medium_text || null,
+          complex_vision: taskSlots.complex_vision || null,
+        },
+        audioSlot: audioSlot,
+      },
+    };
   }
 
   return {
@@ -1612,6 +1654,7 @@ function migrateConfigV1ToV2(raw) {
     providers,
     taskSlots,
     audioSlot,
+    pipelineSlots,
     localModelOverrides,
     schemaVersion: 2,
   };
@@ -4333,65 +4376,92 @@ async function transcribeAudio(audioProvider, wavPath, handle, onProgress) {
   };
 }
 
-// 把任意旧/新 modelId 规范化成 whisper.cpp 的 ggml-* key。
-// 老 Xenova/whisper-* 配置在 migrate 时已经被改写, 这里是双保险。
-function normalizeWhisperCppModelId(rawId) {
-  if (!rawId) return "ggml-base";
-  const xenovaMap = {
-    "Xenova/whisper-tiny": "ggml-tiny",
-    "Xenova/whisper-base": "ggml-base",
-    "Xenova/whisper-small": "ggml-small",
-    "Xenova/whisper-medium": "ggml-medium",
+// 把任意旧 modelId 规范化成 daemon 的 whisper-* key。
+function normalizeWhisperModelId(rawId) {
+  if (!rawId) return "whisper-base";
+  const legacyMap = {
+    "Xenova/whisper-tiny": "whisper-tiny",
+    "Xenova/whisper-base": "whisper-base",
+    "Xenova/whisper-small": "whisper-small",
+    "Xenova/whisper-medium": "whisper-medium",
+    "ggml-tiny": "whisper-tiny",
+    "ggml-base": "whisper-base",
+    "ggml-small": "whisper-small",
+    "ggml-medium": "whisper-medium",
   };
-  return xenovaMap[rawId] || rawId;
+  return legacyMap[rawId] || rawId;
 }
 
 async function transcribeLocalWhisperCpp(audioProvider, wavPath, handle, onProgress) {
-  const modelId = normalizeWhisperCppModelId(
+  const daemonClient = require("./daemon-client.cjs");
+  const modelId = normalizeWhisperModelId(
     audioProvider.localWhisperModel || audioProvider.model,
   );
-  // 没下过模型就先下
-  const status = await whisperCppRuntime.listModels();
-  const target = status.find((m) => m.key === modelId);
-  if (!target) throw new Error(`未知 whisper.cpp 模型: ${modelId}`);
-  if (!target.downloaded) {
-    if (onProgress) onProgress({ stage: "download", message: `${target.name} 首次使用,下载模型中` });
-    const mirror = await getLocalModelMirror();
-    await whisperCppRuntime.ensureModel(modelId, (p) => {
-      if (p.percent != null && onProgress) {
-        onProgress({ stage: "download", message: p.message });
+  // 确保模型已下载
+  const ms = await daemonClient.getModelStatus(modelId);
+  if (!ms) throw new Error(`未知 whisper 模型: ${modelId}`);
+  if (!ms.ready) {
+    if (onProgress) onProgress({ stage: "download", message: `${ms.name || modelId} 首次使用,下载模型中` });
+    await daemonClient.downloadModel(modelId, (p) => {
+      if (p.pct != null && onProgress) {
+        onProgress({ stage: "download", message: `${modelId} ${p.pct}%` });
       }
-    }, { mirror });
+    });
   }
-  const transcriber = getTranscriber("whisper_cpp");
-  return transcriber.transcribe({
-    wavPath,
-    modelId,
-    language: audioProvider.language || null,
-    onProgress,
-    handle,
+
+  if (onProgress) onProgress({ stage: "load", message: "正在准备本地语音引擎" });
+
+  // 通过 daemon 的 OpenAI 兼容转写接口,自动管理 whisper-server 生命周期
+  const language = audioProvider.language || null;
+  const isZh = isChineseLangMain(language);
+
+  if (onProgress) onProgress({ stage: "infer", message: "本地语音引擎推理中" });
+  const fileBytes = await fs.readFile(wavPath);
+  const data = await daemonClient.transcribe(fileBytes, {
+    model: modelId,
+    response_format: "verbose_json",
+    language: language || undefined,
+    temperature: "0",
+    prompt: isZh ? SIMPLIFIED_PROMPT_ZH : undefined,
   });
+
+  // OpenCC 简繁转换后处理
+  const detectedLang = data?.language || language || null;
+  const shouldSimplify = isChineseLangMain(detectedLang) || isZh;
+  const normalize = (s) => {
+    const t = String(s || "").trim();
+    return shouldSimplify && t ? t2sConverterMain(t) : t;
+  };
+  const segments = Array.isArray(data?.segments)
+    ? data.segments.map((s) => ({ start: Number(s.start) || 0, end: Number(s.end) || 0, text: normalize(s.text) }))
+    : [];
+  const fullText = typeof data?.text === "string" ? normalize(data.text) : segments.map((s) => s.text).join(" ").trim();
+  return {
+    language: detectedLang,
+    text: fullText,
+    segments,
+    duration: Number(data?.duration) || 0,
+  };
 }
 
 async function warmupLocalWhisperCpp(audioProvider) {
-  const modelId = normalizeWhisperCppModelId(
+  const daemonClient = require("./daemon-client.cjs");
+  const modelId = normalizeWhisperModelId(
     audioProvider.localWhisperModel || audioProvider.model,
   );
   const t0 = Date.now();
-  // ensureBinary 不存在 → 提示开发者跑 build script
-  if (!whisperCppRuntime.resolveBinaryPath()) {
-    throw new Error(
-      "找不到 whisper-server 可执行文件,请先运行 scripts/build-whisper-cpp.sh 编译。",
-    );
+  // 确保二进制就绪
+  const bins = await daemonClient.getBinariesStatus();
+  if (!bins?.whisperServer?.available) {
+    await daemonClient.downloadBinary("whisper-server", () => {});
   }
-  const models = await whisperCppRuntime.listModels();
-  const target = models.find((m) => m.key === modelId);
-  if (!target) throw new Error(`未知 whisper.cpp 模型: ${modelId}`);
-  if (!target.downloaded) {
-    const mirror = await getLocalModelMirror();
-    await whisperCppRuntime.ensureModel(modelId, undefined, { mirror });
+  // 确保模型已下载
+  const ms = await daemonClient.getModelStatus(modelId);
+  if (!ms) throw new Error(`未知 whisper 模型: ${modelId}`);
+  if (!ms.ready) {
+    await daemonClient.downloadModel(modelId, () => {});
   }
-  await whisperCppRuntime.start(modelId);
+  await daemonClient.startWhisper(modelId);
   return { modelId, elapsedMs: Date.now() - t0 };
 }
 
@@ -4419,6 +4489,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   let cfgSnapshot, complexVisionProvider, mediumTextProvider, audioProvider, provider;
   try {
     cfgSnapshot = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+    const pipelineCfg = resolvePipelineConfig(cfgSnapshot, "pipeline");
+    cfgSnapshot = { ...cfgSnapshot, taskSlots: pipelineCfg.taskSlots, audioSlot: pipelineCfg.audioSlot };
     if (slotOverrides) cfgSnapshot = applySlotOverrides(cfgSnapshot, slotOverrides);
     _activeCachePolicy = cfgSnapshot?.cachePolicy || null;
     complexVisionProvider = resolveSlotProvider(cfgSnapshot, "complex_vision");
@@ -4431,22 +4503,17 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       (p) => p?.source === "local_llama",
     );
     if (localProviders.length > 0) {
-      const localStatus = llamaRuntime.getStatus();
-      if (!localStatus.binaryFound) {
-        const binaryPath = await llamaRuntime.resolveLlamaServerPath();
-        if (!binaryPath) {
-          const err = new Error("当前选择了本地模型,但推理引擎还没安装,需要先到设置页安装。");
-          err.code = "LOCAL_SETUP_REQUIRED";
-          throw err;
-        }
+      const daemonClient = require("./daemon-client.cjs");
+      const bins = await daemonClient.getBinariesStatus();
+      if (!bins?.llamaServer?.available) {
+        const err = new Error("当前选择了本地模型,但推理引擎还没安装,需要先到设置页安装。");
+        err.code = "LOCAL_SETUP_REQUIRED";
+        throw err;
       }
-      const manifest = llamaRuntime.getManifest();
-      const installedModels = await llamaRuntime.listModels();
-      const installedMap = new Map(installedModels.map((m) => [m.key, m]));
       for (const lp of localProviders) {
-        const m = installedMap.get(lp.model);
-        if (!m || !m.downloaded) {
-          const displayName = manifest?.[lp.model]?.name || lp.model;
+        const ms = await daemonClient.getModelStatus(lp.model);
+        if (!ms || !ms.ready) {
+          const displayName = ms?.name || lp.model;
           const err = new Error(`当前选择的本地模型「${displayName}」还没下载完成,需要先到设置页下载。`);
           err.code = "LOCAL_SETUP_REQUIRED";
           throw err;
@@ -4701,19 +4768,23 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     {
       const cfg = await readJson(getConfigPath(), null).catch(() => null);
       const preferredModel = cfg?.lastLlamaModelKey;
-      const localStatus = llamaRuntime.getStatus();
       if (preferredModel) {
-        if (!localStatus.binaryFound) {
-          send(7, "本地推理预检", "推理引擎未安装,本次跳过初筛(去设置 → 本地推理可安装)。");
-        } else {
-          const models = await llamaRuntime.listModels();
-          const target = models.find((m) => m.key === preferredModel);
-          if (!target || !target.downloaded) {
-            send(8, "本地推理预检", `模型 ${preferredModel} 未下载完成,本次跳过初筛。`);
+        const daemonClient = require("./daemon-client.cjs");
+        try {
+          const bins = await daemonClient.getBinariesStatus();
+          if (!bins?.llamaServer?.available) {
+            send(7, "本地推理预检", "推理引擎未安装,本次跳过初筛(去设置 → 本地推理可安装)。");
           } else {
-            localPrefilterReady = true;
-            prefilterModelKey = preferredModel;
+            const ms = await daemonClient.getModelStatus(preferredModel);
+            if (!ms || !ms.ready) {
+              send(8, "本地推理预检", `模型 ${preferredModel} 未下载完成,本次跳过初筛。`);
+            } else {
+              localPrefilterReady = true;
+              prefilterModelKey = preferredModel;
+            }
           }
+        } catch (err) {
+          send(7, "本地推理预检", `daemon 不可用,跳过初筛: ${err.message}`);
         }
       }
     }
@@ -6266,7 +6337,8 @@ app.whenReady().then(async () => {
 
   // 本地 llama 接线: ctx override 解析 + openai-client 自动 acquire/release。
   // 业务方零改动: 任何 provider.source === "local_llama" 的请求都会被 manager 调度。
-  llamaRuntime.setContextResolver(async (modelKey) => {
+  // ctx override 解析器,供 llama:start / autoResume 使用
+  contextResolver = async (modelKey) => {
     try {
       const cfg = (await readJson(getConfigPath(), null)) || {};
       const override = cfg?.localModelOverrides?.[modelKey]?.contextSize;
@@ -6274,7 +6346,8 @@ app.whenReady().then(async () => {
     } catch {
       return null;
     }
-  });
+  };
+  llamaRuntime.setContextResolver(contextResolver);
   openaiClient.setLocalProviderAdapter((modelKey, opts) =>
     llamaManager.acquire(modelKey, opts),
   );
@@ -6620,35 +6693,32 @@ app.whenReady().then(async () => {
       }),
     );
 
-    // ps 失败说明 PID 已死/runtime 还没清理掉,跳过避免显示 0/0 假条目
+    // daemon 管理推理子进程;这里只展示 daemon 本身的进程状态
     const sidecars = [];
-    const llamaPid = llamaRuntime.getRuntimePid?.();
-    if (llamaPid) {
-      const stats = await samplePsByPid(llamaPid);
-      if (stats) {
-        sidecars.push({
-          pid: llamaPid,
-          kind: "sidecar",
-          label: "llama-server",
-          detail: llamaRuntime.getStatus?.()?.modelKey || undefined,
-          cpuPercent: stats.cpuPercent,
-          memoryBytes: stats.memoryBytes,
-        });
+    try {
+      const daemonClient = require("./daemon-client.cjs");
+      const pidPath = path.join(daemonClient.daemonStorageDir(), ".daemon.pid");
+      const pidStr = await fs.readFile(pidPath, "utf8").catch(() => "");
+      const daemonPid = parseInt(pidStr.trim(), 10);
+      if (daemonPid > 0) {
+        const stats = await samplePsByPid(daemonPid);
+        if (stats) {
+          const rt = await daemonClient.getRuntimeStatus().catch(() => null);
+          const details = [];
+          if (rt?.llm?.state === "ready" && rt.llm.modelId) details.push(`LLM: ${rt.llm.modelId}`);
+          if (rt?.whisper?.state === "ready" && rt.whisper.modelId) details.push(`Whisper: ${rt.whisper.modelId}`);
+          sidecars.push({
+            pid: daemonPid,
+            kind: "sidecar",
+            label: "ai-model-daemon",
+            detail: details.join(" · ") || undefined,
+            cpuPercent: stats.cpuPercent,
+            memoryBytes: stats.memoryBytes,
+          });
+        }
       }
-    }
-    const whisperPid = whisperCppRuntime.getRuntimePid?.();
-    if (whisperPid) {
-      const stats = await samplePsByPid(whisperPid);
-      if (stats) {
-        sidecars.push({
-          pid: whisperPid,
-          kind: "sidecar",
-          label: "whisper-server",
-          detail: whisperCppRuntime.getStatus?.()?.modelKey || undefined,
-          cpuPercent: stats.cpuPercent,
-          memoryBytes: stats.memoryBytes,
-        });
-      }
+    } catch {
+      // daemon 未运行时静默跳过
     }
 
     return [...electronProcs, ...sidecars];
@@ -7496,6 +7566,8 @@ app.whenReady().then(async () => {
       // 5) 识别字幕
       // 统一读取并补丁 config
       let cfg = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+      const contentCfg = resolvePipelineConfig(cfg, "content");
+      cfg = { ...cfg, taskSlots: contentCfg.taskSlots, audioSlot: contentCfg.audioSlot };
       if (slotOverrides) cfg = applySlotOverrides(cfg, slotOverrides);
 
       log.info("summary", `[5/6] 识别字幕, hasAudio=${inspected.hasAudio}`);
@@ -7953,7 +8025,7 @@ app.whenReady().then(async () => {
       provider?.endpointType === "local_whisper_wasm" ||
       provider?.source === "local_whisper"
     ) {
-      const modelId = normalizeWhisperCppModelId(
+      const modelId = normalizeWhisperModelId(
         provider.localWhisperModel || provider.model,
       );
       try {
@@ -8309,8 +8381,13 @@ app.whenReady().then(async () => {
     return { projectId, url, platform: inferPlatform(url) };
   });
 
-  await llamaRuntime.init();
-  await whisperCppRuntime.init();
+  // daemon 管理推理运行时,确保连接就绪
+  try {
+    const daemonClient = require("./daemon-client.cjs");
+    await daemonClient.ensureDaemon();
+  } catch (err) {
+    log.warn("clipiq", "daemon 初始化失败:", err?.message || err);
+  }
 
   // 从 config 读 localModelOverrides[*].contextSize → { modelKey: ctx } 给 annotateManifest 用
   // 让 fit/memPercent 反映用户实际调过的 ctx 值, 不是 manifest 默认。
@@ -8339,17 +8416,36 @@ app.whenReady().then(async () => {
       .filter(Boolean);
   });
 
-  ipcMain.handle("llama:getStatus", async () => llamaRuntime.getStatus());
+  ipcMain.handle("llama:getStatus", async () => {
+    const daemonClient = require("./daemon-client.cjs");
+    try {
+      const rt = await daemonClient.getRuntimeStatus();
+      return {
+        binaryPath: rt.binaries?.llamaServer?.path || null,
+        binaryFound: !!rt.binaries?.llamaServer?.available,
+        running: rt.llm?.state === "ready",
+        status: rt.llm?.state || "idle",
+        modelKey: rt.llm?.modelId || null,
+        port: rt.llm?.port || null,
+        contextSize: rt.llm?.contextSize || 0,
+        startedAt: rt.llm?.startedAt ? new Date(rt.llm.startedAt).getTime() : 0,
+        lastError: rt.llm?.error || null,
+        recentLogs: [],
+      };
+    } catch (err) {
+      return {
+        binaryPath: null, binaryFound: false, running: false, status: "error",
+        modelKey: null, port: null, contextSize: 0, startedAt: 0,
+        lastError: err.message, recentLogs: [],
+      };
+    }
+  });
 
-  // SettingsScreen ctx slider onChange 实时调:用新 ctx 重算单个 model 的 fit/memPercent/tps,
-  // 返回 { fit, memPercent, tps, totalMemBytes, weightBytes, kvBytes, memCapBytes }。
-  // 不持久化 — slider 改完用户点保存才会写到 config.localModelOverrides。
   ipcMain.handle("llama:recomputeFit", async (_evt, { modelKey, contextSize }) => {
     const daemonClient = require("./daemon-client.cjs");
     return daemonClient.recomputeFit(modelKey, contextSize);
   });
 
-  // 返回 ModelDescriptor[] + 机器规格. daemon 统一算 fit + 下载状态
   ipcMain.handle("llama:listManifest", async () => {
     const daemonClient = require("./daemon-client.cjs");
     const ctxOverrides = await readCtxOverrides();
@@ -8361,35 +8457,41 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("llama:ensureBinary", async (event) => {
-    const path = await llamaRuntime.ensureLlamaServer((progress) => {
+    const daemonClient = require("./daemon-client.cjs");
+    const result = await daemonClient.downloadBinary("llama-server", (progress) => {
       event.sender.send("llama:progress", { scope: "binary", ...progress });
     });
-    return { ok: true, binaryPath: path };
+    const bins = await daemonClient.getBinariesStatus();
+    return { ok: true, binaryPath: bins?.llamaServer?.path || "" };
   });
 
   ipcMain.handle("llama:ensureModel", async (event, modelKey) => {
-    const mirror = await getLocalModelMirror();
-    return llamaRuntime.ensureModel(modelKey, (progress) => {
+    const daemonClient = require("./daemon-client.cjs");
+    return daemonClient.downloadModel(modelKey, (progress) => {
       event.sender.send("llama:progress", { scope: "model", modelKey, ...progress });
-    }, { mirror });
+    });
   });
 
-  ipcMain.handle("llama:start", async (event, modelKey) => {
-    const result = await llamaRuntime.start(modelKey, {
-      onLog: (entry) => {
-        if (!event.sender.isDestroyed()) {
-          event.sender.send("llama:log", entry);
-        }
-      },
-    });
-    // 持久化最近一次启动的模型,下次开应用时自动恢复
+  ipcMain.handle("llama:start", async (_event, modelKey) => {
+    const daemonClient = require("./daemon-client.cjs");
+    const ctx = contextResolver ? await contextResolver(modelKey) : 0;
+    const result = await daemonClient.startLLM(modelKey, { contextSize: ctx || 0 });
     persistLastLlamaModelKey(modelKey).catch((e) =>
       log.warn("clipiq", "持久化 lastLlamaModelKey 失败:", e),
     );
-    return result;
+    return {
+      ok: true,
+      port: result.port || 0,
+      contextSize: result.contextSize || ctx || 0,
+      reused: result.state === "ready",
+    };
   });
 
-  ipcMain.handle("llama:stop", async () => llamaRuntime.stop());
+  ipcMain.handle("llama:stop", async () => {
+    const daemonClient = require("./daemon-client.cjs");
+    await daemonClient.stopLLM();
+    return { ok: true };
+  });
 
   ipcMain.handle("llama:cancelDownload", async (_event, modelKey) => {
     const daemonClient = require("./daemon-client.cjs");
@@ -8397,22 +8499,64 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("llama:selfTest", async (_event, payload) => {
-    return llamaRuntime.selfTest(payload || {});
+    const daemonClient = require("./daemon-client.cjs");
+    const rt = await daemonClient.getRuntimeStatus();
+    if (rt.llm?.state !== "ready" || !rt.llm?.port) {
+      throw new Error("本地推理服务未就绪,请先启动模型");
+    }
+    return llamaRuntime.selfTest({ ...payload, port: rt.llm.port, modelKey: rt.llm.modelId });
   });
 
-  // whisper.cpp runtime IPC ----------------------------------------------------
+  // whisper runtime IPC (由 ai-model-daemon 管理) ---------------------------------
   ipcMain.handle("whisperCpp:listModels", async () => {
-    const raws = await whisperCppRuntime.listModels();
-    return raws.map((e) => localWhisperEntryToDescriptor(e)).filter(Boolean);
+    const daemonClient = require("./daemon-client.cjs");
+    const allModels = await daemonClient.listModels();
+    const whisperModels = (allModels || []).filter((dm) =>
+      dm.runtimeKind === "whisper" || (dm.id && dm.id.startsWith("whisper-")),
+    );
+    return whisperModels.map((dm) => {
+      const ready = dm.ready || (dm.files || []).every((f) => f.ready);
+      const totalBytes = (dm.files || []).reduce((sum, f) => sum + (f.bytes || 0), 0);
+      return localWhisperEntryToDescriptor({
+        key: dm.id,
+        name: dm.name || dm.id,
+        description: dm.desc || "",
+        approxBytes: totalBytes,
+        downloaded: ready,
+        downloadedBytes: ready ? totalBytes : 0,
+      });
+    }).filter(Boolean);
   });
 
-  ipcMain.handle("whisperCpp:getStatus", async () => whisperCppRuntime.getStatus());
+  ipcMain.handle("whisperCpp:getStatus", async () => {
+    const daemonClient = require("./daemon-client.cjs");
+    try {
+      const rt = await daemonClient.getRuntimeStatus();
+      return {
+        binaryPath: rt.binaries?.whisperServer?.path || null,
+        binaryFound: !!rt.binaries?.whisperServer?.available,
+        running: rt.whisper?.state === "ready",
+        status: rt.whisper?.state || "idle",
+        modelKey: rt.whisper?.modelId || null,
+        port: rt.whisper?.port || null,
+        startedAt: rt.whisper?.startedAt ? new Date(rt.whisper.startedAt).getTime() : 0,
+        lastError: rt.whisper?.error || null,
+        recentLogs: [],
+      };
+    } catch (err) {
+      return {
+        binaryPath: null, binaryFound: false, running: false, status: "error",
+        modelKey: null, port: null, startedAt: 0,
+        lastError: err.message, recentLogs: [],
+      };
+    }
+  });
 
   ipcMain.handle("whisperCpp:ensureModel", async (event, modelKey) => {
-    const mirror = await getLocalModelMirror();
-    return whisperCppRuntime.ensureModel(modelKey, (progress) => {
+    const daemonClient = require("./daemon-client.cjs");
+    return daemonClient.downloadModel(modelKey, (progress) => {
       event.sender.send("whisperCpp:progress", { scope: "model", modelKey, ...progress });
-    }, { mirror });
+    });
   });
 
   ipcMain.handle("mirror:get", async () => {
@@ -8424,20 +8568,26 @@ app.whenReady().then(async () => {
     return { ok: true, mirror: saved };
   });
 
-  ipcMain.handle("whisperCpp:start", async (event, modelKey) => {
-    return whisperCppRuntime.start(modelKey, {
-      onLog: (entry) => {
-        if (!event.sender.isDestroyed()) {
-          event.sender.send("whisperCpp:log", entry);
-        }
-      },
-    });
+  ipcMain.handle("whisperCpp:start", async (_event, modelKey) => {
+    const daemonClient = require("./daemon-client.cjs");
+    // 先确保 whisper-server 二进制就绪
+    const bins = await daemonClient.getBinariesStatus();
+    if (!bins?.whisperServer?.available) {
+      await daemonClient.downloadBinary("whisper-server", () => {});
+    }
+    const result = await daemonClient.startWhisper(modelKey);
+    return { ok: true, port: result.port || 0, reused: result.state === "ready" };
   });
 
-  ipcMain.handle("whisperCpp:stop", async () => whisperCppRuntime.stop());
+  ipcMain.handle("whisperCpp:stop", async () => {
+    const daemonClient = require("./daemon-client.cjs");
+    await daemonClient.stopWhisper();
+    return { ok: true };
+  });
 
   ipcMain.handle("whisperCpp:cancelDownload", async (_event, modelKey) => {
-    return whisperCppRuntime.cancelDownload(modelKey);
+    const daemonClient = require("./daemon-client.cjs");
+    return daemonClient.cancelDownload(modelKey);
   });
 
   // 诊断: 读 eta-samples.jsonl, 返回历史分析执行记录 (含 timing/token/provider 信息)
@@ -8564,37 +8714,25 @@ async function persistLocalModelMirror(value) {
 }
 
 function scheduleLlamaAutoResume() {
-  // 不阻塞主流程,稍微延迟一点让窗口先呈现给用户
   setTimeout(async () => {
     try {
+      const daemonClient = require("./daemon-client.cjs");
       const cfg = await readJson(getConfigPath(), null);
       const lastKey = cfg?.lastLlamaModelKey;
       if (!lastKey) return;
-      const status = llamaRuntime.getStatus();
-      if (!status.binaryFound) {
+      const bins = await daemonClient.getBinariesStatus();
+      if (!bins?.llamaServer?.available) {
         log.info("clipiq", "llama auto-resume 跳过:推理引擎未安装");
         return;
       }
-      const models = await llamaRuntime.listModels();
-      const target = models.find((m) => m.key === lastKey);
-      if (!target) {
-        log.info("clipiq", `llama auto-resume 跳过:未知模型 ${lastKey}`);
-        return;
-      }
-      if (!target.downloaded) {
-        log.info("clipiq", `llama auto-resume 跳过:模型 ${lastKey} 未下载完成`);
+      const modelStatus = await daemonClient.getModelStatus(lastKey);
+      if (!modelStatus || !modelStatus.ready) {
+        log.info("clipiq", `llama auto-resume 跳过:模型 ${lastKey} 未就绪`);
         return;
       }
       log.info("clipiq", `llama auto-resume: 启动 ${lastKey}`);
-      await llamaRuntime.start(lastKey, {
-        onLog: (entry) => {
-          // 自启动期间日志只走主进程 stdout,不打扰 renderer
-          if (entry.channel === "stderr" && /error|fatal/i.test(entry.line)) {
-            log.warn("llama auto-resume", entry.line);
-          }
-        },
-      });
-      // 通知 renderer 更新状态卡片(如果已打开 Settings 本地推理 section)
+      const ctx = contextResolver ? await contextResolver(lastKey) : 0;
+      await daemonClient.startLLM(lastKey, { contextSize: ctx || 0 });
       const win = BrowserWindow.getAllWindows()[0];
       if (win && !win.isDestroyed()) {
         win.webContents.send("llama:progress", {
@@ -8635,8 +8773,7 @@ function cleanupSidecars(reason) {
   if (_cleanedUp) return;
   _cleanedUp = true;
   try { log.info("clipiq", `cleanupSidecars: ${reason}`); } catch {}
-  try { llamaRuntime.shutdownSync(); } catch {}
-  try { whisperCppRuntime.shutdownSync(); } catch {}
+  // daemon 管理推理进程;这里只注销客户端
   try { require("./daemon-client.cjs").shutdownSync(); } catch {}
 }
 app.on("before-quit", () => {

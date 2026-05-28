@@ -43,6 +43,7 @@ import {
   TaskDifficulty,
   TaskSlotKey,
   VideoGenre,
+  PipelineId,
 } from "../types";
 import type { CachePolicy, CacheScopeStats, CacheStats, ExtensionBridgeStatus, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
 
@@ -71,13 +72,15 @@ const SCOPE_LABELS_ZH: Record<string, string> = {
 
 function whisperModelHint(modelId?: string) {
   switch (modelId) {
-    case "ggml-tiny":
+    case "whisper-tiny":
       return "~75 MB · 最快,但中文准确率一般,适合英文 / 噪声小的素材。";
-    case "ggml-small":
+    case "whisper-small":
       return "~466 MB · 中文较准,速度适中,常规拉片推荐。";
-    case "ggml-medium":
+    case "whisper-medium":
       return "~1.5 GB · 准确率高,速度慢,长视频耗时较多。";
-    case "ggml-base":
+    case "whisper-large-v3-turbo":
+      return "~1.6 GB · 最高准确率,适合专业字幕场景。";
+    case "whisper-base":
     default:
       return "~142 MB · 默认选项,速度和准确率折中。";
   }
@@ -339,7 +342,7 @@ function ConcurrencyControl() {
 }
 
 function TaskAssignmentSection() {
-  const { providers, taskSlots, setTaskSlot, audioSlot, setAudioSlot } = useApp();
+  const { providers, getPipelineSlot, setPipelineSlot } = useApp();
   const { readyLocalIds, readyWhisperIds } = useSidecarReadiness();
 
   const slotMetaByKey: Record<string, SlotMeta> = SLOT_METAS.reduce((acc, m) => {
@@ -355,14 +358,13 @@ function TaskAssignmentSection() {
     used: true,
   };
 
-  const renderStages = (stages: PipelineStage[]) =>
+  const renderStages = (pipelineId: PipelineId, stages: PipelineStage[]) =>
     stages.map((stage, idx) => {
       const isAudio = stage.slot === "__audio__";
+      const slotKey = isAudio ? ("__audio__" as const) : (stage.slot as TaskSlotKey);
       const meta = isAudio ? audioMeta : slotMetaByKey[stage.slot];
-      const assignment = isAudio ? audioSlot : taskSlots[stage.slot as TaskSlotKey];
-      const onChange = isAudio
-        ? (a: SlotAssignment) => setAudioSlot(a)
-        : (a: SlotAssignment) => setTaskSlot(stage.slot as TaskSlotKey, a);
+      const assignment = getPipelineSlot(pipelineId, slotKey);
+      const onChange = (a: SlotAssignment) => setPipelineSlot(pipelineId, slotKey, a);
       return (
         <PipelineRow
           key={stage.slot + stage.num}
@@ -391,13 +393,13 @@ function TaskAssignmentSection() {
       <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mt-2">内容分析</h3>
       <p className="text-[12.5px] text-slate-500 dark:text-slate-400 -mt-4">账号视频的轻量内容分析管线。</p>
       <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] overflow-hidden">
-        {renderStages(CONTENT_STAGES)}
+        {renderStages("content", CONTENT_STAGES)}
       </div>
 
       <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mt-4">结构拆解</h3>
       <p className="text-[12.5px] text-slate-500 dark:text-slate-400 -mt-4">完整的视频结构拆解管线。</p>
       <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] overflow-hidden">
-        {renderStages(PIPELINE_STAGES)}
+        {renderStages("pipeline", PIPELINE_STAGES)}
       </div>
     </>
   );
@@ -473,7 +475,7 @@ function ProviderCard({
   onUpdate: (patch: Partial<ModelProvider>) => void;
   kind: ProviderKind;
 }) {
-  const { taskSlots, audioSlot, localModelOverrides, updateLocalModelOverride } = useApp();
+  const { taskSlots, audioSlot, pipelineSlots, localModelOverrides, updateLocalModelOverride } = useApp();
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [whisperCache, setWhisperCache] = useState<{ cached: boolean; sizeBytes?: number } | null>(null);
@@ -533,18 +535,20 @@ function ProviderCard({
   const slotUsage = useCallback(
     (modelId: string): string[] => {
       const usage: string[] = [];
-      Object.entries(taskSlots).forEach(([slotKey, raw]) => {
-        const asn = raw as SlotAssignment;
-        if (asn?.providerId === persisted.id && asn.modelId === modelId) {
-          usage.push(slotKey);
+      const pid = persisted.id;
+      for (const [pipelineId, pc] of Object.entries(pipelineSlots) as [string, import("../types").PipelineSlotConfig][]) {
+        if (pc.audioSlot?.providerId === pid && pc.audioSlot.modelId === modelId) {
+          usage.push(`${pipelineId}:audio`);
         }
-      });
-      if (audioSlot?.providerId === persisted.id && audioSlot.modelId === modelId) {
-        usage.push("audio");
+        for (const [slotKey, asn] of Object.entries(pc.taskSlots || {}) as [string, SlotAssignment][]) {
+          if (asn?.providerId === pid && asn.modelId === modelId) {
+            usage.push(`${pipelineId}:${slotKey}`);
+          }
+        }
       }
       return usage;
     },
-    [taskSlots, audioSlot, persisted.id],
+    [pipelineSlots, persisted.id],
   );
 
   const isLocalWhisper = draft.endpointType === "local_whisper_cpp";
@@ -705,9 +709,9 @@ function ProviderCard({
                 if (next === "local_whisper_cpp") {
                   onUpdate({
                     endpointType: next,
-                    localWhisperModel: provider.localWhisperModel || "ggml-base",
+                    localWhisperModel: provider.localWhisperModel || "whisper-base",
                     localWhisperMirror: provider.localWhisperMirror || "https://hf-mirror.com",
-                    model: provider.localWhisperModel || "ggml-base",
+                    model: provider.localWhisperModel || "whisper-base",
                   });
                 } else {
                   onUpdate({ endpointType: next });

@@ -120,7 +120,7 @@ function projectSourceLabel(source: ProjectSource): string {
 }
 
 export function HomeScreen() {
-  const { setCurrentScreen, goModule, projects, setActiveProjectId, setProjects, removeProject, startAnalysisForProject, setPendingSlotOverrides, providers, taskSlots, audioSlot } = useApp();
+  const { setCurrentScreen, goModule, projects, setActiveProjectId, setProjects, removeProject, startAnalysisForProject, setPendingSlotOverrides, providers } = useApp();
   const confirm = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -549,8 +549,6 @@ export function HomeScreen() {
                   {modelConfigOpen && (
                     <ModelSlotPopover
                       providers={providers}
-                      taskSlots={taskSlots}
-                      audioSlot={audioSlot}
                       initial={pendingOverrides}
                       onApply={(ov) => { setPendingOverrides(ov); setModelConfigOpen(false); }}
                       onClose={() => setModelConfigOpen(false)}
@@ -942,20 +940,19 @@ const POPOVER_METAS: Record<string, SlotMeta> = {
   __audio__: { key: "__audio__" as unknown as TaskSlotKey, label: "字幕识别", difficulty: "simple", axis: "text", hint: "", used: true },
 };
 
-function ModelSlotPopover({ providers, taskSlots, audioSlot, initial, onApply, onClose }: {
+function ModelSlotPopover({ providers, initial, onApply, onClose }: {
   providers: ModelProvider[];
-  taskSlots: Record<TaskSlotKey, SlotAssignment>;
-  audioSlot: SlotAssignment;
   initial?: SlotOverrides;
   onApply: (ov: SlotOverrides | undefined) => void;
   onClose: () => void;
 }) {
+  const { getPipelineSlot } = useApp();
   const { readyLocalIds, readyWhisperIds } = useSidecarReadiness();
   const [local, setLocal] = useState<Record<string, SlotAssignment>>(() => {
     const init: Record<string, SlotAssignment> = {};
     for (const s of POPOVER_STAGES) {
-      if (s.slot === "__audio__") init.__audio__ = (initial?.audio !== undefined ? initial.audio : audioSlot);
-      else init[s.slot] = ((initial as any)?.[s.slot] !== undefined ? (initial as any)[s.slot] : taskSlots[s.slot as TaskSlotKey]);
+      if (s.slot === "__audio__") init.__audio__ = (initial?.audio !== undefined ? initial.audio : getPipelineSlot("pipeline", "__audio__"));
+      else init[s.slot] = ((initial as any)?.[s.slot] !== undefined ? (initial as any)[s.slot] : getPipelineSlot("pipeline", s.slot as TaskSlotKey));
     }
     return init;
   });
@@ -964,7 +961,7 @@ function ModelSlotPopover({ providers, taskSlots, audioSlot, initial, onApply, o
     const overrides: SlotOverrides = {};
     for (const s of POPOVER_STAGES) {
       const key = s.slot === "__audio__" ? "audio" : s.slot;
-      const orig = s.slot === "__audio__" ? audioSlot : taskSlots[s.slot as TaskSlotKey];
+      const orig = s.slot === "__audio__" ? getPipelineSlot("pipeline", "__audio__") : getPipelineSlot("pipeline", s.slot as TaskSlotKey);
       const cur = local[s.slot === "__audio__" ? "__audio__" : s.slot];
       if (JSON.stringify(cur) !== JSON.stringify(orig)) (overrides as any)[key] = cur;
     }

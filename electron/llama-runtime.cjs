@@ -641,8 +641,10 @@ async function start(modelKey, { onLog, contextSize } = {}) {
   return { ok: true, port, contextSize: effectiveCtx, reused: false };
 }
 
-async function selfTest({ imageDataUrl, prompt } = {}) {
-  if (state.status !== "ready" || !state.port) {
+async function selfTest({ imageDataUrl, prompt, port, modelKey } = {}) {
+  const targetPort = port || state.port;
+  const targetModel = modelKey || state.modelKey;
+  if (!targetPort) {
     throw new Error("本地推理服务未就绪,请先启动模型");
   }
   const messages = [
@@ -655,11 +657,11 @@ async function selfTest({ imageDataUrl, prompt } = {}) {
     },
   ];
   const t0 = Date.now();
-  const res = await fetch(`http://127.0.0.1:${state.port}/v1/chat/completions`, {
+  const res = await fetch(`http://127.0.0.1:${targetPort}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: state.modelKey || "local",
+      model: targetModel || "local",
       messages,
       max_tokens: 200,
       temperature: 0.3,
@@ -676,7 +678,7 @@ async function selfTest({ imageDataUrl, prompt } = {}) {
     ok: true,
     latencyMs,
     text,
-    modelKey: state.modelKey,
+    modelKey: targetModel,
     usage: json?.usage || null,
   };
 }
