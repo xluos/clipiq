@@ -1008,7 +1008,14 @@ function VideosTab({
     setRowError((m) => { const n = { ...m }; delete n[av.id]; return n; });
     try {
       if (!window.videoAnalyzer) throw new Error("浏览器预览环境不支持分析");
-      // 用原始 video ID 发起结构拆解，不创建新 video 记录
+      // 先检查后端是否已有分析在跑
+      const alreadyActive = await window.videoAnalyzer.isAnalysisActive(av.id);
+      if (alreadyActive) {
+        // 已有分析在跑，直接跳转到进度页
+        ctx.setActiveVideoId(av.id);
+        ctx.setLocation({ module: "analysis", screen: "progress" });
+        return;
+      }
       // 如果视频还没本地文件，先下载并更新 video 记录
       if (!av.localPath) {
         const dl = await window.videoAnalyzer.downloadVideo(av.sourceUrl || av.externalUrl);
@@ -1022,7 +1029,6 @@ function VideosTab({
           updatedAt: new Date().toISOString(),
         }).catch(() => {});
       }
-      // 跳转到分析进度页
       ctx.startAnalysis(av.id, "builtin-pipeline");
     } catch (e) {
       setRowError((m) => ({ ...m, [av.id]: e instanceof Error ? e.message : String(e) }));
