@@ -343,7 +343,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const analysesByVideoRef = useRef<Record<string, Analysis[]>>({});
   useEffect(() => { analysesByVideoRef.current = analysesByVideo; }, [analysesByVideo]);
   const analysisRecordRefreshPending = useRef<Set<string>>(new Set());
-  const dismissedAnalysisIds = useRef<Set<string>>(new Set());
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [sessions, setSessions] = useState<StudioSession[]>([]);
   const [shotsByVideo, setShotsByVideo] = useState<Record<string, Shot[]>>({});
@@ -768,10 +767,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!window.videoAnalyzer?.onAnalysisProgress) return;
     const off = window.videoAnalyzer.onAnalysisProgress((evt) => {
       const key = evt.analysisId;
-      if (key && dismissedAnalysisIds.current.has(key)) {
-        console.debug("[AppContext] 忽略已 dismiss 的分析进度事件", key, evt.stage, evt.progress);
-        return;
-      }
       setProgressByAnalysis((prev) => ({ ...prev, [key]: evt }));
       setActiveAnalysisForProject((prev) => {
         if (prev[evt.projectId] === key) return prev;
