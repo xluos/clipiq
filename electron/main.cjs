@@ -8135,9 +8135,37 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("analysis:start", async (event, args) => {
     const videoId = args?.videoId || args?.project?.id;
-    const videoTitle = args?.project?.videoName || args?.project?.title || "视频";
+    // v3: 从 DB 读 video 构造 analyzeProject 需要的 project 对象
+    let videoTitle = "视频";
+    let effectiveArgs = args;
+    if (videoId && !args?.project) {
+      const db = getDb();
+      const vrow = db.prepare("SELECT * FROM videos WHERE id = ?").get(videoId);
+      if (vrow) {
+        const video = rowToVideo(vrow);
+        videoTitle = video.title || videoTitle;
+        effectiveArgs = {
+          ...args,
+          project: {
+            id: video.id,
+            videoName: video.title,
+            source: video.source || { type: video.sourceType === "url" ? "url" : "local_file", url: video.sourceUrl, platform: video.platform },
+            localVideoPath: video.localVideoPath || (video.localPath ? `media://local/${encodeURIComponent(video.localPath)}` : ""),
+            localFilePath: video.localPath,
+            durationSec: video.durationSec,
+            width: video.width,
+            height: video.height,
+            orientation: video.orientation,
+            thumbnailUrl: video.thumbnailUrl,
+            status: "analyzing",
+          },
+        };
+      }
+    } else {
+      videoTitle = args?.project?.videoName || args?.project?.title || videoTitle;
+    }
     try {
-      const result = await analyzeProject(event, args);
+      const result = await analyzeProject(event, effectiveArgs);
       notifyIfBackground({
         title: "ClipIQ · 分析完成",
         body: `「${videoTitle}」分析已完成,可以查看报告了`,
@@ -8207,12 +8235,13 @@ app.whenReady().then(async () => {
     });
     if (result.canceled || !result.filePath) return { canceled: true };
 
+    const provider = analysis?.providerSnapshot || null;
     const content =
       format === "json"
-        ? JSON.stringify({ project, nodes, report, provider, exportedAt: new Date().toISOString() }, null, 2)
+        ? JSON.stringify({ video, nodes, report, provider, exportedAt: new Date().toISOString() }, null, 2)
         : format === "csv"
           ? exportCsv(nodes)
-          : exportMarkdown(project, nodes, report, provider);
+          : exportMarkdown(video, nodes, report, provider);
     await fs.writeFile(result.filePath, content, "utf8");
     return { canceled: false, filePath: result.filePath };
   });
@@ -8413,8 +8442,10 @@ app.whenReady().then(async () => {
             await writeUrlCache(cache);
           }
         }
+        const vid = projectId || `proj-url-${Date.now()}`;
         return {
-          projectId: projectId || `proj-url-${Date.now()}`,
+          videoId: vid,
+          projectId: vid,
           platform: inferPlatform(url),
           ...inspected,
           title: title || null,
@@ -8505,6 +8536,7 @@ app.whenReady().then(async () => {
     await writeUrlCache(cache);
     onProgress?.(100, "下载完成", "");
     return {
+      videoId: useProjectId,
       projectId: useProjectId,
       platform: inferPlatform(url),
       ...inspected,
@@ -8536,16 +8568,15 @@ app.whenReady().then(async () => {
       throw new Error("未找到 yt-dlp，无法通过链接拉取视频。请先安装 yt-dlp，或改用本地视频。");
     }
 
-    const projectId = `proj-url-${Date.now()}`;
-    const mediaDir = path.join(getVideoDir(projectId), "media");
+    const videoId = `proj-url-${Date.now()}`;
+    const mediaDir = path.join(getVideoDir(videoId), "media");
     await fs.mkdir(mediaDir, { recursive: true });
 
-    const handle = registerAnalysis(projectId);
+    const handle = registerAnalysis(videoId);
     const emitProgress = (progress, stage, message) => {
       if (handle.cancelled) return;
-      // 下载进度 0-100 映射到整体管线的 0-2%，与分析起始进度(2%)衔接
       const scaled = Math.min(2, Math.round(progress * 0.02));
-      const payload = { projectId, progress: scaled, stage, message: message || "", stageIndex: 0 };
+      const payload = { projectId: videoId, videoId, progress: scaled, stage, message: message || "", stageIndex: 0 };
       handle.lastProgress = payload;
       handle.lastProgressAt = Date.now();
       broadcastToWindows("analysis:progress", payload);
@@ -8553,30 +8584,29 @@ app.whenReady().then(async () => {
 
     emitProgress(0, "下载视频", "排队中");
 
-    // 后台跑,不 await
     (async () => {
       try {
         const video = await performUrlDownloadFlow(rawInput, {
-          projectId,
+          projectId: videoId,
           mediaDir,
           handle,
           onProgress: emitProgress,
         });
-        broadcastToWindows("download:complete", { projectId, success: true, video });
+        broadcastToWindows("download:complete", { videoId, success: true, video });
       } catch (err) {
         if (err instanceof AnalysisCancelledError) {
-          broadcastToWindows("download:complete", { projectId, success: false, cancelled: true, error: "已取消" });
+          broadcastToWindows("download:complete", { videoId, success: false, cancelled: true, error: "已取消" });
         } else {
           const msg = err instanceof Error ? err.message : String(err);
           emitProgress(0, "失败", msg);
-          broadcastToWindows("download:complete", { projectId, success: false, error: msg });
+          broadcastToWindows("download:complete", { videoId, success: false, error: msg });
         }
       } finally {
-        clearAnalysis(projectId);
+        clearAnalysis(videoId);
       }
     })();
 
-    return { projectId, url, platform: inferPlatform(url) };
+    return { videoId, url, platform: inferPlatform(url) };
   });
 
   // daemon 管理推理运行时,确保连接就绪
