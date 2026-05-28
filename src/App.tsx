@@ -1,7 +1,7 @@
 import { useApp } from './AppContext';
 import { HomeScreen } from './screens/HomeScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
-import { UrlPullScreen } from './screens/UrlPullScreen';
+// UrlPullScreen 已合并到 HomeScreen composer
 import { ProgressScreen } from './screens/ProgressScreen';
 import { WorkspaceScreen } from './screens/WorkspaceScreen';
 import { ReportScreen } from './screens/ReportScreen';
@@ -40,7 +40,7 @@ export default function App() {
                 className="absolute inset-0 flex flex-col"
               >
                 {currentLocation.module === 'analysis' && currentLocation.screen === 'home' && <HomeScreen />}
-                {currentLocation.module === 'analysis' && currentLocation.screen === 'url_pull' && <UrlPullScreen />}
+                {currentLocation.module === 'analysis' && currentLocation.screen === 'url_pull' && <HomeScreen />}
                 {currentLocation.module === 'analysis' && currentLocation.screen === 'progress' && <ProgressScreen />}
                 {currentLocation.module === 'analysis' && currentLocation.screen === 'workspace' && <WorkspaceScreen />}
                 {currentLocation.module === 'analysis' && currentLocation.screen === 'report' && <ReportScreen />}
