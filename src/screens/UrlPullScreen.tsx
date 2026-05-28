@@ -89,7 +89,7 @@ export function UrlPullScreen() {
       ]);
 
       setProjects(prev => [{
-        id: video.projectId,
+        id: video.videoId,
         source: { type: "url", url: url.trim(), platform: video.platform },
         localVideoPath: video.mediaUrl,
         localFilePath: video.filePath,
@@ -104,7 +104,7 @@ export function UrlPullScreen() {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       }, ...prev]);
-      window.setTimeout(() => startAnalysisForProject(video.projectId), 500);
+      window.setTimeout(() => startAnalysisForProject(video.videoId), 500);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error("[clipiq] url pull failed", err);

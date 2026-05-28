@@ -902,12 +902,144 @@ function getDbPath() {
   return path.join(app.getPath("userData"), "data.db");
 }
 
-function getProjectDir(projectId) {
-  return path.join(app.getPath("userData"), "projects", projectId);
+function getVideoDir(videoId) {
+  return path.join(app.getPath("userData"), "videos", videoId);
 }
 
-function getAnalysisDir(projectId, analysisId) {
-  return path.join(getProjectDir(projectId), "analyses", analysisId);
+function getAnalysisDir(videoId, analysisId) {
+  return path.join(getVideoDir(videoId), "analyses", analysisId);
+}
+
+// 兼容: 旧代码引用 getProjectDir 的地方用 getVideoDir
+const getProjectDir = getVideoDir;
+
+// --- row → object 转换 (SQLite 列 → JS 对象) ---
+
+function rowToVideo(r) {
+  return {
+    id: r.id,
+    title: r.title || "",
+    sourceType: r.source_type || "local",
+    sourceUrl: r.source_url || undefined,
+    platform: r.platform || undefined,
+    externalId: r.external_id || undefined,
+    localPath: r.local_path || undefined,
+    durationSec: r.duration_sec || 0,
+    width: r.width || 0,
+    height: r.height || 0,
+    orientation: r.orientation || "landscape",
+    thumbnailUrl: r.thumbnail_url || undefined,
+    accountId: r.account_id || undefined,
+    status: r.status || "ready",
+    uploadDate: r.upload_date || undefined,
+    viewCount: r.view_count ?? undefined,
+    likeCount: r.like_count ?? undefined,
+    commentCount: r.comment_count ?? undefined,
+    shareCount: r.share_count ?? undefined,
+    collectCount: r.collect_count ?? undefined,
+    tags: r.tags ? JSON.parse(r.tags) : undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  };
+}
+
+function rowToAnalysis(r) {
+  return {
+    id: r.id,
+    videoId: r.video_id,
+    pipelineId: r.pipeline_id,
+    status: r.status || "analyzing",
+    options: r.options ? JSON.parse(r.options) : undefined,
+    providerSnapshot: r.provider_snapshot ? JSON.parse(r.provider_snapshot) : undefined,
+    result: r.result ? JSON.parse(r.result) : undefined,
+    tokenUsage: r.token_usage ? JSON.parse(r.token_usage) : undefined,
+    durationMs: r.duration_ms || undefined,
+    errorMessage: r.error_message || undefined,
+    startedAt: new Date(r.started_at).toISOString(),
+    completedAt: r.completed_at ? new Date(r.completed_at).toISOString() : undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+  };
+}
+
+function rowToCollection(r) {
+  return {
+    id: r.id,
+    name: r.name || "",
+    description: r.description || undefined,
+    kind: r.kind || "manual",
+    coverUrl: r.cover_url || undefined,
+    filterRules: r.filter_rules ? JSON.parse(r.filter_rules) : undefined,
+    accountId: r.account_id || undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  };
+}
+
+function rowToPipeline(r) {
+  return {
+    id: r.id,
+    name: r.name || "",
+    builtin: !!r.builtin,
+    stages: r.stages ? JSON.parse(r.stages) : [],
+    slotConfig: r.slot_config ? JSON.parse(r.slot_config) : undefined,
+    description: r.description || undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  };
+}
+
+function rowToAccount(r) {
+  return {
+    id: r.id,
+    name: r.name || "",
+    platform: r.platform || "unknown",
+    externalId: r.external_id || undefined,
+    externalUrl: r.external_url || undefined,
+    avatarUrl: r.avatar_url || undefined,
+    bio: r.bio || undefined,
+    followers: r.followers || undefined,
+    tags: r.tags ? JSON.parse(r.tags) : undefined,
+    fetchRange: r.fetch_range || undefined,
+    fetchPhase: r.fetch_phase || "idle",
+    fetchError: r.fetch_error || undefined,
+    lastFetchedAt: r.last_fetched_at ? new Date(r.last_fetched_at).toISOString() : undefined,
+    analysisConfig: r.analysis_config ? JSON.parse(r.analysis_config) : undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  };
+}
+
+function rowToStudioSession(r) {
+  return {
+    id: r.id,
+    goal: r.goal || undefined,
+    targetPlatform: r.target_platform || undefined,
+    targetDurationSec: r.target_duration || undefined,
+    steps: r.steps ? JSON.parse(r.steps) : undefined,
+    scriptDraft: r.script_draft || undefined,
+    output: r.output ? JSON.parse(r.output) : undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  };
+}
+
+function rowToShot(r) {
+  return {
+    id: r.id,
+    assetProjectId: r.video_id,
+    videoId: r.video_id,
+    shotIndex: r.shot_index || 0,
+    startSec: r.start_sec || 0,
+    endSec: r.end_sec || 0,
+    thumbnailUrl: r.thumbnail_url || undefined,
+    description: r.description || undefined,
+    shotType: r.shot_type || undefined,
+    cameraMovement: r.camera_movement || undefined,
+    usageTags: r.usage_tags ? JSON.parse(r.usage_tags) : [],
+    isFavorite: !!r.is_favorite,
+    subtitleText: r.subtitle_text || undefined,
+    createdAt: r.created_at ? new Date(r.created_at).toISOString() : undefined,
+  };
 }
 
 let _db = null;
@@ -918,184 +1050,189 @@ function getDb() {
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA journal_mode=WAL");
   db.exec("PRAGMA foreign_keys=ON");
+
+  // v3: 清除所有旧表，从干净状态建新 schema
   db.exec(`
-    CREATE TABLE IF NOT EXISTS projects (
-      id TEXT PRIMARY KEY,
-      data TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS analyses (
-      id TEXT PRIMARY KEY,
-      project_id TEXT NOT NULL,
-      data TEXT NOT NULL,
-      nodes TEXT,
-      report TEXT,
-      created_at INTEGER NOT NULL,
-      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_analyses_project ON analyses(project_id);
-    -- v2: 对标账号 (UP 主) 元数据 + 跨视频汇总出的 methodology manifest
-    CREATE TABLE IF NOT EXISTS accounts (
-      id TEXT PRIMARY KEY,
-      data TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-    -- v2: 剪辑助手会话
-    CREATE TABLE IF NOT EXISTS studio_sessions (
-      id TEXT PRIMARY KEY,
-      data TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-    -- v2: 素材库的镜头索引 (一条 asset 对应多条 shot)
-    CREATE TABLE IF NOT EXISTS shots (
-      id TEXT PRIMARY KEY,
-      asset_project_id TEXT NOT NULL,
-      shot_index INTEGER NOT NULL,
-      data TEXT NOT NULL,
-      FOREIGN KEY (asset_project_id) REFERENCES projects(id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_shots_asset ON shots(asset_project_id);
-    -- v2.1: 账号下挂的视频元数据 (拉取产物). 真正分析时才派生 Project。
-    CREATE TABLE IF NOT EXISTS account_videos (
-      id TEXT PRIMARY KEY,
-      account_id TEXT NOT NULL,
-      data TEXT NOT NULL,
-      added_at INTEGER NOT NULL,
-      FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_account_videos_account ON account_videos(account_id);
+    DROP TABLE IF EXISTS account_videos;
+    DROP TABLE IF EXISTS shots;
+    DROP TABLE IF EXISTS analyses;
+    DROP TABLE IF EXISTS projects;
+    DROP TABLE IF EXISTS analysis_nodes;
+    DROP TABLE IF EXISTS analysis_reports;
   `);
 
-  // v3 迁移: 旧 1:1 分析表 → 新 1:N analyses 表
-  try {
-    const hasOldNodes = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='analysis_nodes'").get();
-    if (hasOldNodes) {
-      db.exec("DROP TABLE IF EXISTS analysis_nodes");
-      db.exec("DROP TABLE IF EXISTS analysis_reports");
-      // 清掉项目根目录下的旧分析文件 (现在放 analyses/<id>/ 子目录)
-      try {
-        const projectsDir = path.join(app.getPath("userData"), "projects");
-        const entries = fsSync.readdirSync(projectsDir, { withFileTypes: true }).filter(e => e.isDirectory());
-        for (const entry of entries) {
-          for (const name of ["analysis-result.json", "timings.json", "token-usage.json"]) {
-            try { fsSync.unlinkSync(path.join(projectsDir, entry.name, name)); } catch { /* noop */ }
-          }
-        }
-      } catch { /* noop */ }
-      // 清掉 projects 表里旧的分析字段
-      const allProjects = db.prepare("SELECT id, data FROM projects").all();
-      for (const row of allProjects) {
-        try {
-          const proj = JSON.parse(row.data);
-          delete proj.providerId;
-          delete proj.model;
-          delete proj.analysisOptions;
-          delete proj.analysisStartedAt;
-          delete proj.lastErrorMessage;
-          delete proj.lastErrorAt;
-          if (proj.status === "completed" || proj.status === "failed" || proj.status === "analyzing") {
-            proj.status = "not_analyzed";
-          }
-          proj.currentAnalysisId = undefined;
-          db.prepare("UPDATE projects SET data = ? WHERE id = ?").run(JSON.stringify(proj), row.id);
-        } catch { /* noop */ }
-      }
-      log.info("db", "v3 迁移完成: 旧 analysis_nodes/analysis_reports 表已清除");
-    }
-  } catch (migErr) {
-    log.warn("db", "v3 迁移失败:", migErr?.message || migErr);
-  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS accounts (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL DEFAULT '',
+      platform TEXT NOT NULL DEFAULT 'unknown',
+      external_id TEXT,
+      external_url TEXT,
+      avatar_url TEXT,
+      bio TEXT,
+      followers TEXT,
+      tags TEXT,
+      fetch_range TEXT,
+      fetch_phase TEXT DEFAULT 'idle',
+      fetch_error TEXT,
+      last_fetched_at INTEGER,
+      analysis_config TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
 
-  // v2.1 迁移: 旧的 projects(kind='account_video', status='not_analyzed', localVideoPath='')
-  // 全部转到 account_videos 表;有 status=completed/analyzing 的保留 project (会被 analysisProjectId 链回去)。
-  try {
-    const candidates = db.prepare("SELECT id, data FROM projects").all();
-    for (const row of candidates) {
-      let proj = null;
-      try { proj = JSON.parse(row.data); } catch { continue; }
-      if (!proj || proj.kind !== "account_video") continue;
-      if (!proj.accountId) continue;
-      const externalUrl = proj.source && proj.source.type === "url" ? proj.source.url : "";
-      const externalId = (proj.id || "").replace(/^acvid-[^-]+-/, "") || externalUrl;
-      const avId = `av-${proj.accountId}-${externalId}`;
-      const platform = (proj.source && proj.source.type === "url" && proj.source.platform) || "unknown";
-      const completed = proj.status === "completed" || proj.status === "analyzing";
-      const av = {
-        id: avId,
-        accountId: proj.accountId,
-        externalId,
-        externalUrl,
-        title: proj.videoName || "(未命名视频)",
-        durationSec: proj.durationSec || 0,
-        thumbnailUrl: proj.thumbnailUrl,
-        uploadDate: null,
-        viewCount: 0,
-        platform,
-        addedAt: proj.createdAt || new Date().toISOString(),
-        analysisProjectId: completed ? proj.id : undefined,
-      };
-      const existing = db.prepare("SELECT id FROM account_videos WHERE id = ?").get(avId);
-      if (!existing) {
-        db.prepare(
-          "INSERT INTO account_videos (id, account_id, data, added_at) VALUES (?, ?, ?, ?)"
-        ).run(avId, proj.accountId, JSON.stringify(av), Date.parse(av.addedAt) || Date.now());
-      }
-      if (!completed) {
-        // 删空壳 project (没本地视频、还没分析)
-        db.prepare("DELETE FROM projects WHERE id = ?").run(proj.id);
-      } else {
-        // 把已分析的 project 改成 kind=analysis,保留 accountId 反向引用
-        const proj2 = { ...proj, kind: "analysis" };
-        db.prepare("UPDATE projects SET data = ? WHERE id = ?")
-          .run(JSON.stringify(proj2), proj.id);
-      }
-    }
-  } catch (e) {
-    log.warn("migration", "account_video → account_videos 失败:", e?.message || e);
-  }
+    CREATE TABLE IF NOT EXISTS videos (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL DEFAULT '',
+      source_type TEXT NOT NULL DEFAULT 'local',
+      source_url TEXT,
+      platform TEXT,
+      external_id TEXT,
+      local_path TEXT,
+      duration_sec REAL DEFAULT 0,
+      width INTEGER DEFAULT 0,
+      height INTEGER DEFAULT 0,
+      orientation TEXT DEFAULT 'landscape',
+      thumbnail_url TEXT,
+      account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+      status TEXT NOT NULL DEFAULT 'ready',
+      upload_date TEXT,
+      view_count INTEGER,
+      like_count INTEGER,
+      comment_count INTEGER,
+      share_count INTEGER,
+      collect_count INTEGER,
+      tags TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_videos_account ON videos(account_id);
+    CREATE INDEX IF NOT EXISTS idx_videos_platform ON videos(platform);
 
-  // 上次进程退出时还停在 fetchPhase=fetching 的账号 → 改 idle (避免 UI 一直转)
-  try {
-    const rows = db.prepare("SELECT id, data FROM accounts").all();
-    for (const row of rows) {
-      let acc = null;
-      try { acc = JSON.parse(row.data); } catch { continue; }
-      if (!acc || acc.fetchPhase !== "fetching") continue;
-      const patched = { ...acc, fetchPhase: "idle", fetchError: undefined };
-      db.prepare("UPDATE accounts SET data = ? WHERE id = ?").run(JSON.stringify(patched), row.id);
-    }
-  } catch (e) {
-    log.warn("boot", "reset fetching → idle 失败:", e?.message || e);
-  }
+    CREATE TABLE IF NOT EXISTS analyses (
+      id TEXT PRIMARY KEY,
+      video_id TEXT NOT NULL,
+      pipeline_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'analyzing',
+      options TEXT,
+      provider_snapshot TEXT,
+      result TEXT,
+      token_usage TEXT,
+      duration_ms INTEGER,
+      error_message TEXT,
+      started_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_analyses_video ON analyses(video_id);
 
-  // 上次进程退出时还停在 status=analyzing 的项目 → 根据是否有 completed 分析记录
-  // 恢复到 completed 或 not_analyzed (避免重启后 UI 重新触发分析)
+    CREATE TABLE IF NOT EXISTS pipelines (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      builtin INTEGER NOT NULL DEFAULT 0,
+      stages TEXT NOT NULL,
+      slot_config TEXT,
+      description TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS collections (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      kind TEXT NOT NULL DEFAULT 'manual',
+      cover_url TEXT,
+      filter_rules TEXT,
+      account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS collection_videos (
+      collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+      video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+      position INTEGER NOT NULL DEFAULT 0,
+      added_at INTEGER NOT NULL,
+      PRIMARY KEY (collection_id, video_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS methodologies (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL DEFAULT 1,
+      data TEXT NOT NULL,
+      source_video_count INTEGER DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_methodologies_account ON methodologies(account_id);
+
+    CREATE TABLE IF NOT EXISTS shots (
+      id TEXT PRIMARY KEY,
+      video_id TEXT NOT NULL,
+      shot_index INTEGER NOT NULL,
+      start_sec REAL DEFAULT 0,
+      end_sec REAL DEFAULT 0,
+      thumbnail_url TEXT,
+      description TEXT,
+      shot_type TEXT,
+      camera_movement TEXT,
+      usage_tags TEXT,
+      is_favorite INTEGER DEFAULT 0,
+      subtitle_text TEXT,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_shots_video ON shots(video_id);
+
+    CREATE TABLE IF NOT EXISTS studio_sessions (
+      id TEXT PRIMARY KEY,
+      goal TEXT,
+      target_platform TEXT,
+      target_duration INTEGER,
+      steps TEXT,
+      script_draft TEXT,
+      output TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+
+  // 插入内置管线
+  const now = Date.now();
+  const insertPipeline = db.prepare(
+    "INSERT OR IGNORE INTO pipelines (id, name, builtin, stages, slot_config, created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?, ?)",
+  );
+  insertPipeline.run(
+    "builtin-pipeline",
+    "结构拆解",
+    JSON.stringify([
+      { key: "prefilter", label: "抽帧初筛", slot: "simple_vision" },
+      { key: "transcript", label: "字幕识别", slot: "__audio__" },
+      { key: "shot-merger", label: "镜头合并", slot: "medium_text" },
+      { key: "main", label: "主分析", slot: "complex_vision" },
+    ]),
+    null,
+    now,
+    now,
+  );
+  insertPipeline.run(
+    "builtin-content",
+    "内容分析",
+    JSON.stringify([
+      { key: "transcript", label: "字幕识别", slot: "__audio__" },
+      { key: "summarize", label: "内容分析", slot: "complex_vision" },
+    ]),
+    null,
+    now,
+    now,
+  );
+
+  // 启动时清理：上次退出时停在 fetching 的账号 → idle
   try {
-    const rows = db.prepare("SELECT id, data FROM projects").all();
-    for (const row of rows) {
-      let proj = null;
-      try { proj = JSON.parse(row.data); } catch { continue; }
-      if (!proj || proj.status !== "analyzing") continue;
-      // 检查是否有已完成的分析记录
-      const aid = proj.currentAnalysisId;
-      let hasCompleted = false;
-      if (aid) {
-        const ar = db.prepare("SELECT data FROM analyses WHERE id = ?").get(aid);
-        if (ar) {
-          try {
-            const rec = JSON.parse(ar.data);
-            hasCompleted = rec.status === "completed";
-          } catch { /* noop */ }
-        }
-      }
-      const newStatus = hasCompleted ? "completed" : "not_analyzed";
-      proj.status = newStatus;
-      db.prepare("UPDATE projects SET data = ? WHERE id = ?").run(JSON.stringify(proj), row.id);
-      log.info("boot", `project ${row.id} status analyzing → ${newStatus}`);
-    }
-  } catch (e) {
-    log.warn("boot", "reset analyzing projects 失败:", e?.message || e);
-  }
+    db.prepare("UPDATE accounts SET fetch_phase = 'idle' WHERE fetch_phase = 'fetching'").run();
+  } catch { /* noop */ }
 
   _db = db;
   return db;
@@ -6425,39 +6562,26 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("data:getInfo", async () => {
     const userData = app.getPath("userData");
-    const projectsDir = path.join(userData, "projects");
-    let projectCount = 0;
+    const videosDir = path.join(userData, "videos");
+    let videoCount = 0;
     let totalBytes = 0;
     try {
-      const entries = await fs.readdir(projectsDir, { withFileTypes: true });
+      const entries = await fs.readdir(videosDir, { withFileTypes: true });
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
-        projectCount += 1;
-        const projectPath = path.join(projectsDir, entry.name);
-        totalBytes += await directorySize(projectPath).catch(() => 0);
+        videoCount += 1;
+        const videoPath = path.join(videosDir, entry.name);
+        totalBytes += await directorySize(videoPath).catch(() => 0);
       }
-    } catch {
-      // projects dir not created yet
-    }
+    } catch { /* videos dir not created yet */ }
     let dbBytes = 0;
-    try {
-      dbBytes = (await fs.stat(getDbPath())).size;
-    } catch {
-      // db not created yet
-    }
-    let dbProjectCount = 0;
-    try {
-      dbProjectCount = getDb().prepare("SELECT COUNT(*) AS n FROM projects").get().n;
-    } catch {
-      // db not opened
-    }
+    try { dbBytes = (await fs.stat(getDbPath())).size; } catch { /* db not created yet */ }
     return {
       userDataPath: userData,
-      projectsPath: projectsDir,
+      videosPath: videosDir,
       configPath: getConfigPath(),
       dbPath: getDbPath(),
-      projectCount,
-      dbProjectCount,
+      videoCount,
       totalBytes,
       dbBytes,
     };
@@ -6472,19 +6596,19 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("data:openFolder", async (_event, which) => {
-    const target = which === "projects" ? path.join(app.getPath("userData"), "projects") : app.getPath("userData");
+    const target = which === "videos" ? path.join(app.getPath("userData"), "videos") : app.getPath("userData");
     await fs.mkdir(target, { recursive: true });
     await shell.openPath(target);
     return { ok: true, path: target };
   });
 
-  ipcMain.handle("data:purgeProjects", async () => {
-    const projectsDir = path.join(app.getPath("userData"), "projects");
+  ipcMain.handle("data:purgeAll", async () => {
+    const videosDir = path.join(app.getPath("userData"), "videos");
     try {
-      await fs.rm(projectsDir, { recursive: true, force: true });
-      await fs.mkdir(projectsDir, { recursive: true });
+      await fs.rm(videosDir, { recursive: true, force: true });
+      await fs.mkdir(videosDir, { recursive: true });
       const db = getDb();
-      db.exec("DELETE FROM analyses; DELETE FROM projects;");
+      db.exec("DELETE FROM analyses; DELETE FROM videos; DELETE FROM collection_videos; DELETE FROM collections; DELETE FROM shots; DELETE FROM methodologies;");
       return { ok: true };
     } catch (error) {
       return { ok: false, message: error?.message || String(error) };
@@ -6808,145 +6932,269 @@ app.whenReady().then(async () => {
     return { ok: true };
   });
 
-  ipcMain.handle("projects:list", async () => {
-    const db = getDb();
-    const rows = db.prepare("SELECT data FROM projects ORDER BY updated_at DESC").all();
-    return rows.map((row) => JSON.parse(row.data));
-  });
+  // ==================== v3 CRUD handlers ====================
 
-  ipcMain.handle("projects:upsert", async (_event, project) => {
-    if (!project?.id) throw new Error("projects:upsert 需要 project.id");
+  // --- videos ---
+  ipcMain.handle("videos:list", async (_event, filter = {}) => {
     const db = getDb();
-    const parsed = project.updatedAt ? Date.parse(project.updatedAt) : NaN;
-    const updatedAt = Number.isFinite(parsed) ? parsed : Date.now();
-    db.prepare(
-      "INSERT INTO projects (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
-    ).run(project.id, JSON.stringify(project), updatedAt);
-    return { ok: true };
-  });
+    const conditions = [];
+    const params = [];
+    if (filter.accountId) { conditions.push("account_id = ?"); params.push(filter.accountId); }
+    if (filter.platform) { conditions.push("platform = ?"); params.push(filter.platform); }
+    if (filter.status) { conditions.push("status = ?"); params.push(filter.status); }
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
 
-  ipcMain.handle("projects:delete", async (_event, projectId) => {
-    if (!projectId) return { ok: false, message: "缺少 projectId" };
-    cancelAnalysis(projectId);
-    clearAnalysis(projectId);
-    const db = getDb();
-    db.prepare("DELETE FROM analyses WHERE project_id = ?").run(projectId);
-    db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
-    try {
-      await fs.rm(getProjectDir(projectId), { recursive: true, force: true });
-    } catch {
-      // best-effort
+    if (filter.collectionId) {
+      const sql = `SELECT v.* FROM videos v JOIN collection_videos cv ON cv.video_id = v.id WHERE cv.collection_id = ?${conditions.length > 0 ? " AND " + conditions.join(" AND ") : ""} ORDER BY cv.position, v.updated_at DESC`;
+      return db.prepare(sql).all(filter.collectionId, ...params).map(rowToVideo);
     }
+
+    return db.prepare(`SELECT * FROM videos${where} ORDER BY updated_at DESC`).all(...params).map(rowToVideo);
+  });
+
+  ipcMain.handle("videos:upsert", async (_event, video) => {
+    if (!video?.id) throw new Error("videos:upsert 需要 video.id");
+    const db = getDb();
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO videos (id, title, source_type, source_url, platform, external_id, local_path,
+        duration_sec, width, height, orientation, thumbnail_url, account_id, status,
+        upload_date, view_count, like_count, comment_count, share_count, collect_count,
+        tags, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        title=excluded.title, source_type=excluded.source_type, source_url=excluded.source_url,
+        platform=excluded.platform, external_id=excluded.external_id, local_path=excluded.local_path,
+        duration_sec=excluded.duration_sec, width=excluded.width, height=excluded.height,
+        orientation=excluded.orientation, thumbnail_url=excluded.thumbnail_url, account_id=excluded.account_id,
+        status=excluded.status, upload_date=excluded.upload_date, view_count=excluded.view_count,
+        like_count=excluded.like_count, comment_count=excluded.comment_count, share_count=excluded.share_count,
+        collect_count=excluded.collect_count, tags=excluded.tags, updated_at=excluded.updated_at
+    `).run(
+      video.id, video.title || "", video.sourceType || "local", video.sourceUrl || null,
+      video.platform || null, video.externalId || null, video.localPath || null,
+      video.durationSec || 0, video.width || 0, video.height || 0, video.orientation || "landscape",
+      video.thumbnailUrl || null, video.accountId || null, video.status || "ready",
+      video.uploadDate || null, video.viewCount ?? null, video.likeCount ?? null,
+      video.commentCount ?? null, video.shareCount ?? null, video.collectCount ?? null,
+      video.tags ? JSON.stringify(video.tags) : null,
+      Date.parse(video.createdAt) || now, now,
+    );
     return { ok: true };
   });
 
-  // --- analyses (1:N per project) ---
-
-  ipcMain.handle("analyses:list", async (_event, projectId) => {
+  ipcMain.handle("videos:delete", async (_event, videoId) => {
+    if (!videoId) return { ok: false, message: "缺少 videoId" };
+    cancelAnalysis(videoId);
+    clearAnalysis(videoId);
     const db = getDb();
-    const rows = db.prepare("SELECT data FROM analyses WHERE project_id = ? ORDER BY created_at DESC").all(projectId);
-    return rows.map((row) => JSON.parse(row.data));
+    db.prepare("DELETE FROM videos WHERE id = ?").run(videoId);
+    try { await fs.rm(getVideoDir(videoId), { recursive: true, force: true }); } catch { /* best-effort */ }
+    return { ok: true };
+  });
+
+  // --- analyses (1:N per video, result 统一列) ---
+  ipcMain.handle("analyses:list", async (_event, videoId) => {
+    const db = getDb();
+    const rows = db.prepare(
+      "SELECT id, video_id, pipeline_id, status, options, provider_snapshot, result, token_usage, duration_ms, error_message, started_at, completed_at, created_at FROM analyses WHERE video_id = ? ORDER BY created_at DESC"
+    ).all(videoId);
+    return rows.map(rowToAnalysis);
   });
 
   ipcMain.handle("analyses:get", async (_event, analysisId) => {
     const db = getDb();
-    const row = db.prepare("SELECT data, nodes, report FROM analyses WHERE id = ?").get(analysisId);
-    if (!row) return null;
-    const record = JSON.parse(row.data);
-    const nodes = row.nodes ? JSON.parse(row.nodes) : [];
-    const report = row.report ? JSON.parse(row.report) : null;
-    return { record, nodes, report };
+    const row = db.prepare("SELECT * FROM analyses WHERE id = ?").get(analysisId);
+    return row ? rowToAnalysis(row) : null;
   });
 
   ipcMain.handle("analyses:delete", async (_event, analysisId) => {
     const db = getDb();
-    const row = db.prepare("SELECT data FROM analyses WHERE id = ?").get(analysisId);
+    const row = db.prepare("SELECT video_id FROM analyses WHERE id = ?").get(analysisId);
     if (row) {
-      const record = JSON.parse(row.data);
       db.prepare("DELETE FROM analyses WHERE id = ?").run(analysisId);
-      try {
-        await fs.rm(getAnalysisDir(record.projectId, analysisId), { recursive: true, force: true });
-      } catch { /* best-effort */ }
+      try { await fs.rm(getAnalysisDir(row.video_id, analysisId), { recursive: true, force: true }); } catch { /* best-effort */ }
     }
     return { ok: true };
   });
 
-  ipcMain.handle("nodes:get", async (_event, analysisId) => {
+  ipcMain.handle("analyses:updateResult", async (_event, analysisId, result) => {
     const db = getDb();
-    const row = db.prepare("SELECT nodes FROM analyses WHERE id = ?").get(analysisId);
-    if (!row || !row.nodes) return [];
-    return JSON.parse(row.nodes);
-  });
-
-  ipcMain.handle("nodes:set", async (_event, analysisId, nodes) => {
-    const db = getDb();
-    db.prepare("UPDATE analyses SET nodes = ? WHERE id = ?")
-      .run(JSON.stringify(Array.isArray(nodes) ? nodes : []), analysisId);
+    db.prepare("UPDATE analyses SET result = ? WHERE id = ?").run(
+      result != null ? JSON.stringify(result) : null, analysisId,
+    );
     return { ok: true };
   });
 
-  ipcMain.handle("report:get", async (_event, analysisId) => {
+  // --- collections ---
+  ipcMain.handle("collections:list", async () => {
     const db = getDb();
-    const row = db.prepare("SELECT report FROM analyses WHERE id = ?").get(analysisId);
-    if (!row) return null;
-    return row.report ? JSON.parse(row.report) : null;
+    const rows = db.prepare("SELECT * FROM collections ORDER BY updated_at DESC").all();
+    return rows.map(rowToCollection);
   });
 
-  ipcMain.handle("report:set", async (_event, analysisId, report) => {
+  ipcMain.handle("collections:upsert", async (_event, col) => {
+    if (!col?.id) throw new Error("collections:upsert 需要 id");
     const db = getDb();
-    if (report === null || report === undefined) {
-      db.prepare("UPDATE analyses SET report = NULL WHERE id = ?").run(analysisId);
-    } else {
-      db.prepare("UPDATE analyses SET report = ? WHERE id = ?")
-        .run(JSON.stringify(report), analysisId);
-    }
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO collections (id, name, description, kind, cover_url, filter_rules, account_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description,
+        kind=excluded.kind, cover_url=excluded.cover_url, filter_rules=excluded.filter_rules,
+        account_id=excluded.account_id, updated_at=excluded.updated_at
+    `).run(
+      col.id, col.name || "", col.description || null, col.kind || "manual",
+      col.coverUrl || null, col.filterRules ? JSON.stringify(col.filterRules) : null,
+      col.accountId || null, Date.parse(col.createdAt) || now, now,
+    );
     return { ok: true };
   });
 
-  // v2: accounts (对标账号)
+  ipcMain.handle("collections:delete", async (_event, collectionId) => {
+    const db = getDb();
+    db.prepare("DELETE FROM collections WHERE id = ?").run(collectionId);
+    return { ok: true };
+  });
+
+  ipcMain.handle("collections:addVideo", async (_event, collectionId, videoId) => {
+    const db = getDb();
+    const maxPos = db.prepare("SELECT MAX(position) as m FROM collection_videos WHERE collection_id = ?").get(collectionId);
+    db.prepare(
+      "INSERT OR IGNORE INTO collection_videos (collection_id, video_id, position, added_at) VALUES (?, ?, ?, ?)"
+    ).run(collectionId, videoId, (maxPos?.m ?? -1) + 1, Date.now());
+    return { ok: true };
+  });
+
+  ipcMain.handle("collections:removeVideo", async (_event, collectionId, videoId) => {
+    const db = getDb();
+    db.prepare("DELETE FROM collection_videos WHERE collection_id = ? AND video_id = ?").run(collectionId, videoId);
+    return { ok: true };
+  });
+
+  ipcMain.handle("collections:listVideos", async (_event, collectionId) => {
+    const db = getDb();
+    const rows = db.prepare(
+      "SELECT v.* FROM videos v JOIN collection_videos cv ON cv.video_id = v.id WHERE cv.collection_id = ? ORDER BY cv.position"
+    ).all(collectionId);
+    return rows.map(rowToVideo);
+  });
+
+  // --- pipelines ---
+  ipcMain.handle("pipelines:list", async () => {
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM pipelines ORDER BY builtin DESC, updated_at DESC").all();
+    return rows.map(rowToPipeline);
+  });
+
+  ipcMain.handle("pipelines:upsert", async (_event, pipeline) => {
+    if (!pipeline?.id) throw new Error("pipelines:upsert 需要 id");
+    const db = getDb();
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO pipelines (id, name, builtin, stages, slot_config, description, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name, stages=excluded.stages,
+        slot_config=excluded.slot_config, description=excluded.description, updated_at=excluded.updated_at
+    `).run(
+      pipeline.id, pipeline.name || "", pipeline.builtin ? 1 : 0,
+      JSON.stringify(pipeline.stages || []),
+      pipeline.slotConfig ? JSON.stringify(pipeline.slotConfig) : null,
+      pipeline.description || null,
+      Date.parse(pipeline.createdAt) || now, now,
+    );
+    return { ok: true };
+  });
+
+  ipcMain.handle("pipelines:delete", async (_event, pipelineId) => {
+    const db = getDb();
+    const row = db.prepare("SELECT builtin FROM pipelines WHERE id = ?").get(pipelineId);
+    if (row?.builtin) throw new Error("不能删除内置管线");
+    db.prepare("DELETE FROM pipelines WHERE id = ?").run(pipelineId);
+    return { ok: true };
+  });
+
+  // --- methodologies ---
+  ipcMain.handle("methodologies:list", async (_event, accountId) => {
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM methodologies WHERE account_id = ? ORDER BY version DESC").all(accountId);
+    return rows.map((r) => ({
+      id: r.id,
+      accountId: r.account_id,
+      version: r.version,
+      data: r.data ? JSON.parse(r.data) : null,
+      sourceVideoCount: r.source_video_count || 0,
+      createdAt: new Date(r.created_at).toISOString(),
+    }));
+  });
+
+  // --- accounts (v3: 结构化列) ---
   ipcMain.handle("accounts:list", async () => {
     const db = getDb();
-    const rows = db.prepare("SELECT data FROM accounts ORDER BY updated_at DESC").all();
-    return rows.map((row) => JSON.parse(row.data));
+    const rows = db.prepare("SELECT * FROM accounts ORDER BY updated_at DESC").all();
+    return rows.map(rowToAccount);
   });
 
   ipcMain.handle("accounts:upsert", async (_event, account) => {
     if (!account?.id) throw new Error("accounts:upsert 需要 account.id");
     const db = getDb();
-    const updatedAt = account.updatedAt ? Date.parse(account.updatedAt) || Date.now() : Date.now();
-    db.prepare(
-      "INSERT INTO accounts (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
-    ).run(account.id, JSON.stringify(account), updatedAt);
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO accounts (id, name, platform, external_id, external_url, avatar_url, bio, followers,
+        tags, fetch_range, fetch_phase, fetch_error, last_fetched_at, analysis_config, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name, platform=excluded.platform, external_id=excluded.external_id,
+        external_url=excluded.external_url, avatar_url=excluded.avatar_url, bio=excluded.bio,
+        followers=excluded.followers, tags=excluded.tags, fetch_range=excluded.fetch_range,
+        fetch_phase=excluded.fetch_phase, fetch_error=excluded.fetch_error,
+        last_fetched_at=excluded.last_fetched_at, analysis_config=excluded.analysis_config,
+        updated_at=excluded.updated_at
+    `).run(
+      account.id, account.name || "", account.platform || "unknown",
+      account.externalId || null, account.externalUrl || null,
+      account.avatarUrl || null, account.bio || null, account.followers || null,
+      account.tags ? JSON.stringify(account.tags) : null,
+      account.fetchRange || null, account.fetchPhase || "idle",
+      account.fetchError || null, account.lastFetchedAt ? Date.parse(account.lastFetchedAt) || null : null,
+      account.analysisConfig ? JSON.stringify(account.analysisConfig) : null,
+      Date.parse(account.createdAt) || now, now,
+    );
     return { ok: true };
   });
 
   ipcMain.handle("accounts:delete", async (_event, accountId) => {
     if (!accountId) return { ok: false, message: "缺少 accountId" };
     const db = getDb();
-    db.prepare("DELETE FROM account_videos WHERE account_id = ?").run(accountId);
     db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
-    // 清理磁盘 artifacts
-    const accountDir = path.join(app.getPath("userData"), "accounts", accountId);
-    try {
-      await fs.rm(accountDir, { recursive: true, force: true });
-    } catch { /* 目录可能不存在 */ }
     return { ok: true };
   });
 
-  // v2: studio sessions (剪辑会话)
+  // --- studio sessions ---
   ipcMain.handle("sessions:list", async () => {
     const db = getDb();
-    const rows = db.prepare("SELECT data FROM studio_sessions ORDER BY updated_at DESC").all();
-    return rows.map((row) => JSON.parse(row.data));
+    const rows = db.prepare("SELECT * FROM studio_sessions ORDER BY updated_at DESC").all();
+    return rows.map(rowToStudioSession);
   });
 
   ipcMain.handle("sessions:upsert", async (_event, session) => {
     if (!session?.id) throw new Error("sessions:upsert 需要 session.id");
     const db = getDb();
-    const updatedAt = session.updatedAt ? Date.parse(session.updatedAt) || Date.now() : Date.now();
-    db.prepare(
-      "INSERT INTO studio_sessions (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
-    ).run(session.id, JSON.stringify(session), updatedAt);
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO studio_sessions (id, goal, target_platform, target_duration, steps, script_draft, output, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        goal=excluded.goal, target_platform=excluded.target_platform, target_duration=excluded.target_duration,
+        steps=excluded.steps, script_draft=excluded.script_draft, output=excluded.output, updated_at=excluded.updated_at
+    `).run(
+      session.id, session.goal || null, session.targetPlatform || null,
+      session.targetDurationSec || null,
+      session.steps ? JSON.stringify(session.steps) : null,
+      session.scriptDraft || null,
+      session.output ? JSON.stringify(session.output) : null,
+      Date.parse(session.createdAt) || now, now,
+    );
     return { ok: true };
   });
 
@@ -6954,6 +7202,36 @@ app.whenReady().then(async () => {
     if (!sessionId) return { ok: false, message: "缺少 sessionId" };
     const db = getDb();
     db.prepare("DELETE FROM studio_sessions WHERE id = ?").run(sessionId);
+    return { ok: true };
+  });
+
+  // --- shots ---
+  ipcMain.handle("shots:list", async (_event, videoId) => {
+    const db = getDb();
+    const where = videoId ? " WHERE video_id = ?" : "";
+    const rows = videoId
+      ? db.prepare(`SELECT * FROM shots${where} ORDER BY shot_index`).all(videoId)
+      : db.prepare("SELECT * FROM shots ORDER BY shot_index").all();
+    return rows.map(rowToShot);
+  });
+
+  ipcMain.handle("shots:setForVideo", async (_event, videoId, shots) => {
+    const db = getDb();
+    db.prepare("DELETE FROM shots WHERE video_id = ?").run(videoId);
+    const insert = db.prepare(`
+      INSERT INTO shots (id, video_id, shot_index, start_sec, end_sec, thumbnail_url, description,
+        shot_type, camera_movement, usage_tags, is_favorite, subtitle_text, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const now = Date.now();
+    for (const s of (shots || [])) {
+      insert.run(
+        s.id, videoId, s.shotIndex ?? 0, s.startSec ?? 0, s.endSec ?? 0,
+        s.thumbnailUrl || null, s.description || null, s.shotType || null,
+        s.cameraMovement || null, s.usageTags ? JSON.stringify(s.usageTags) : null,
+        s.isFavorite ? 1 : 0, s.subtitleText || null, Date.parse(s.createdAt) || now,
+      );
+    }
     return { ok: true };
   });
 
@@ -7225,37 +7503,7 @@ app.whenReady().then(async () => {
   };
 
   // 旧入口 (内部 still 兼容; renderer 已迁到 accounts:startFetch)
-  ipcMain.handle("accounts:fetchVideos", async (_event, { url, limit = 20 } = {}) => {
-    return fetchAccountVideosCore({ url, limit });
-  });
-
-  // ── 账号下挂的视频 (account_videos 表) ──
-  ipcMain.handle("accountVideos:list", async (_event, accountId) => {
-    if (!accountId) return [];
-    const db = getDb();
-    const rows = db.prepare(
-      "SELECT data FROM account_videos WHERE account_id = ? ORDER BY added_at DESC"
-    ).all(accountId);
-    return rows.map((r) => JSON.parse(r.data));
-  });
-
-  ipcMain.handle("accountVideos:upsert", async (_event, video) => {
-    if (!video?.id || !video?.accountId) throw new Error("accountVideos:upsert 需要 id + accountId");
-    const db = getDb();
-    const addedAt = video.addedAt ? Date.parse(video.addedAt) || Date.now() : Date.now();
-    db.prepare(
-      "INSERT INTO account_videos (id, account_id, data, added_at) VALUES (?, ?, ?, ?) " +
-      "ON CONFLICT(id) DO UPDATE SET data = excluded.data, added_at = excluded.added_at"
-    ).run(video.id, video.accountId, JSON.stringify(video), addedAt);
-    return { ok: true };
-  });
-
-  ipcMain.handle("accountVideos:delete", async (_event, videoId) => {
-    if (!videoId) return { ok: true };
-    const db = getDb();
-    db.prepare("DELETE FROM account_videos WHERE id = ?").run(videoId);
-    return { ok: true };
-  });
+  // (旧 accountVideos:* handlers 已删除，用 videos:list { accountId } 替代)
 
   // ── 后台拉取驱动 ──
   // in-flight: accountId → { url, range, stage, progress, message, cancelled, startedAt }
@@ -7843,8 +8091,9 @@ app.whenReady().then(async () => {
   // v2: 素材自动分镜 (复用 ffprobe + ffmpeg scenedetect,不需要 LLM)
   // 输入: { assetProjectId, filePath, durationSec }
   // 输出: Shot[] 写入 shots 表
-  ipcMain.handle("assets:analyzeShots", async (_event, { assetProjectId, filePath, durationSec } = {}) => {
-    if (!assetProjectId || !filePath) throw new Error("assets:analyzeShots 需要 assetProjectId + filePath");
+  ipcMain.handle("shots:analyze", async (_event, { videoId, assetProjectId, filePath, durationSec } = {}) => {
+    const vid = videoId || assetProjectId;
+    if (!vid || !filePath) throw new Error("shots:analyze 需要 videoId + filePath");
     const ffmpeg = await commandPath("ffmpeg");
     if (!ffmpeg) throw new Error("未找到 ffmpeg");
     // 用 ffmpeg scenedetect filter 输出场景切换帧时间戳
@@ -7883,8 +8132,9 @@ app.whenReady().then(async () => {
       const dur = endSec - startSec;
       const shotType = dur < 2 ? "close" : dur < 6 ? "medium" : "wide";
       shots.push({
-        id: `${assetProjectId}-shot-${i + 1}`,
-        assetProjectId,
+        id: `${vid}-shot-${i + 1}`,
+        videoId: vid,
+        assetProjectId: vid,
         shotIndex: i + 1,
         startSec,
         endSec,
@@ -7894,13 +8144,16 @@ app.whenReady().then(async () => {
         createdAt: new Date().toISOString(),
       });
     }
-    // 落库
+    // 落库 (v3 schema)
     const db = getDb();
-    const tx = db.prepare("DELETE FROM shots WHERE asset_project_id = ?");
-    const ins = db.prepare("INSERT INTO shots (id, asset_project_id, shot_index, data) VALUES (?, ?, ?, ?)");
-    tx.run(assetProjectId);
+    db.prepare("DELETE FROM shots WHERE video_id = ?").run(vid);
+    const ins = db.prepare(
+      "INSERT INTO shots (id, video_id, shot_index, start_sec, end_sec, description, shot_type, usage_tags, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    );
+    const now = Date.now();
     for (const s of shots) {
-      ins.run(s.id, assetProjectId, s.shotIndex, JSON.stringify(s));
+      ins.run(s.id, vid, s.shotIndex, s.startSec, s.endSec, s.description, s.shotType,
+        s.usageTags ? JSON.stringify(s.usageTags) : null, now);
     }
     return { ok: true, shots };
   });
@@ -7913,50 +8166,29 @@ app.whenReady().then(async () => {
   }
 
 
-  // v2: shots (素材分镜索引)
-  ipcMain.handle("shots:list", async (_event, assetProjectId) => {
-    const db = getDb();
-    const rows = assetProjectId
-      ? db.prepare("SELECT data FROM shots WHERE asset_project_id = ? ORDER BY shot_index").all(assetProjectId)
-      : db.prepare("SELECT data FROM shots ORDER BY asset_project_id, shot_index").all();
-    return rows.map((row) => JSON.parse(row.data));
-  });
-
-  ipcMain.handle("shots:setForAsset", async (_event, assetProjectId, shots) => {
-    if (!assetProjectId) throw new Error("shots:setForAsset 需要 assetProjectId");
-    const db = getDb();
-    const tx = db.prepare("DELETE FROM shots WHERE asset_project_id = ?");
-    const ins = db.prepare("INSERT INTO shots (id, asset_project_id, shot_index, data) VALUES (?, ?, ?, ?)");
-    tx.run(assetProjectId);
-    for (const s of Array.isArray(shots) ? shots : []) {
-      if (!s?.id) continue;
-      ins.run(s.id, assetProjectId, Number(s.shotIndex) || 0, JSON.stringify(s));
-    }
-    return { ok: true };
-  });
+  // (旧 shots:list/shots:setForAsset handlers 已删除，v3 版在上方 CRUD 块注册)
 
   ipcMain.handle("analysis:start", async (event, args) => {
-    const projectName = args?.project?.videoName || args?.project?.title || "视频";
-    const projectId = args?.project?.id;
+    const videoId = args?.videoId || args?.project?.id;
+    const videoTitle = args?.project?.videoName || args?.project?.title || "视频";
     try {
       const result = await analyzeProject(event, args);
       notifyIfBackground({
         title: "ClipIQ · 分析完成",
-        body: `「${projectName}」分析已完成,可以查看报告了`,
+        body: `「${videoTitle}」分析已完成,可以查看报告了`,
       });
       return result;
     } catch (err) {
-      // 用户主动取消不弹通知,失败才弹
       if (!(err instanceof AnalysisCancelledError)) {
         const msg = String(err?.message || err).slice(0, 200);
-        const handle = activeAnalyses.get(projectId);
-        // 如果当前 handle 已经是一个新分析(重试触发的),不要用新的 analysisId 广播旧分析的失败
+        const handle = activeAnalyses.get(videoId);
         const failedAnalysisId = err?._analysisId || handle?.analysisId;
         if (handle && !handle.cancelled && handle.analysisId !== failedAnalysisId) {
-          log.warn("analyze:lifecycle", `analysis:start catch: 旧分析失败但新分析已在跑, 跳过失败广播 failedId=${failedAnalysisId} currentId=${handle.analysisId}`);
-        } else if (projectId) {
+          log.warn("analyze:lifecycle", `analysis:start catch: 旧分析失败但新分析已在跑, 跳过失败广播`);
+        } else if (videoId) {
           broadcastToWindows("analysis:progress", {
-            projectId,
+            projectId: videoId,
+            videoId,
             analysisId: failedAnalysisId,
             progress: 0,
             stage: "失败",
@@ -7965,40 +8197,41 @@ app.whenReady().then(async () => {
         }
         notifyIfBackground({
           title: "ClipIQ · 分析失败",
-          body: `「${projectName}」: ${msg.slice(0, 140)}`,
+          body: `「${videoTitle}」: ${msg.slice(0, 140)}`,
           urgency: "critical",
         });
-      } else {
-        log.info("analyze:lifecycle", `analysis:start catch: AnalysisCancelledError project=${projectId}`);
       }
       throw err;
     }
   });
 
-  ipcMain.handle("analysis:cancel", async (_event, projectId) => {
-    return { cancelled: cancelAnalysis(projectId) };
+  ipcMain.handle("analysis:cancel", async (_event, videoId) => {
+    return { cancelled: cancelAnalysis(videoId) };
   });
 
-  ipcMain.handle("analysis:isActive", async (_event, projectId) => {
-    const handle = activeAnalyses.get(projectId);
+  ipcMain.handle("analysis:isActive", async (_event, videoId) => {
+    const handle = activeAnalyses.get(videoId);
     return handle != null && !handle.cancelled;
   });
 
-  ipcMain.handle("analysis:getLastProgress", async (_event, projectId) => {
-    const handle = activeAnalyses.get(projectId);
+  ipcMain.handle("analysis:getLastProgress", async (_event, videoId) => {
+    const handle = activeAnalyses.get(videoId);
     return handle?.lastProgress || null;
   });
 
-  ipcMain.handle("analysis:getLastBudget", async (_event, projectId) => {
-    const handle = activeAnalyses.get(projectId);
+  ipcMain.handle("analysis:getLastBudget", async (_event, videoId) => {
+    const handle = activeAnalyses.get(videoId);
     return handle?.budget || null;
   });
 
-  ipcMain.handle("project:export", async (_event, { project, nodes, report, provider, format }) => {
+  ipcMain.handle("video:export", async (_event, { video, analysis, format }) => {
+    const title = video?.title || "video-analysis";
+    const nodes = analysis?.result?.nodes || [];
+    const report = analysis?.result?.report || analysis?.result || {};
     const extension = format === "json" ? "json" : format === "csv" ? "csv" : "md";
     const defaultPath = path.join(
       app.getPath("documents"),
-      `${path.parse(project.videoName || "video-analysis").name || "video-analysis"}-analysis.${extension}`
+      `${path.parse(title).name || "video-analysis"}-analysis.${extension}`
     );
     const result = await dialog.showSaveDialog({
       title: "导出拉片结果",

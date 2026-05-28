@@ -2902,7 +2902,7 @@ function DataSection() {
   };
   const handleOpenProjects = async () => {
     if (!window.videoAnalyzer) return;
-    await window.videoAnalyzer.openDataFolder("projects");
+    await window.videoAnalyzer.openDataFolder("videos");
   };
   const handlePurge = async () => {
     if (!window.videoAnalyzer) return;
@@ -2916,7 +2916,7 @@ function DataSection() {
     setPurging(true);
     setStatusMessage("");
     try {
-      const result = await window.videoAnalyzer.purgeProjects();
+      const result = await window.videoAnalyzer.purgeAllData();
       setStatusMessage(result.ok ? "已清空项目本地文件。" : `清空失败：${result.message}`);
       refresh();
     } finally {

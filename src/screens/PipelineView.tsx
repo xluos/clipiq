@@ -111,8 +111,8 @@ export const PipelineView: FunctionComponent<Props> = ({ projectId, project, onB
     try {
       const analysisId = project?.currentAnalysisId || projectId;
       const [reportRes, nodesRes, cpRes, trRes, tuRes] = await Promise.all([
-        api.getReport(analysisId),
-        api.getNodes(analysisId),
+        api.getAnalysis(analysisId),
+        api.getAnalysis(analysisId),
         api.diagnostics?.getFramesCheckpoint(projectId),
         api.diagnostics?.getTranscript(projectId),
         api.diagnostics?.getTokenUsage(analysisId),

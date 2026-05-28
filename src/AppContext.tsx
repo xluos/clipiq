@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AnalysisRecord, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, SlotOverrides, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, AnalysisBudget, PIPELINE_STAGE_DEFS, PipelineState, PipelineStage, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot, PipelineId, PipelineSlots, PipelineSlotConfig } from "./types";
+import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AnalysisRecord, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, SlotOverrides, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, AnalysisBudget, PIPELINE_STAGE_DEFS, PipelineState, PipelineStage, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot, PipelineId, PipelineSlots, PipelineSlotConfig, Video, Collection, Pipeline, Analysis } from "./types";
 import type { DownloadedVideo } from "./electron-api";
 
 function createEmptyPipeline(projectId: string, analysisId: string): PipelineState {
@@ -28,21 +28,32 @@ export type AccountFetchUiState = {
 };
 
 interface AppState {
-  // v2: 两层路由。新代码全部用 currentLocation/setLocation/goModule
   currentLocation: AppLocation;
   setLocation: (loc: AppLocation) => void;
   goModule: (m: AppModule) => void;
   sidebarCollapsed: boolean;
   setSidebarCollapsed: (collapsed: boolean) => void;
-  // v1 兼容层: 旧调用点 (setCurrentScreen("home")) 仍可用,内部同步到 currentLocation
   /** @deprecated v2 use setLocation */
   currentScreen: ScreenState;
   /** @deprecated v2 use setLocation */
   setCurrentScreen: (screen: ScreenState) => void;
-  projects: Project[];
-  setProjects: React.Dispatch<React.SetStateAction<Project[]>>;
+
+  // v3: videos 替代 projects
+  videos: Video[];
+  setVideos: React.Dispatch<React.SetStateAction<Video[]>>;
+  activeVideoId: string | null;
+  setActiveVideoId: (id: string | null) => void;
+
+  // v3 兼容别名 (旧 UI 用 projects/activeProjectId 的地方不崩)
+  /** @deprecated use videos */
+  projects: Video[];
+  /** @deprecated use setVideos */
+  setProjects: React.Dispatch<React.SetStateAction<Video[]>>;
+  /** @deprecated use activeVideoId */
   activeProjectId: string | null;
+  /** @deprecated use setActiveVideoId */
   setActiveProjectId: (id: string | null) => void;
+
   providers: ModelProvider[];
   setProviders: React.Dispatch<React.SetStateAction<ModelProvider[]>>;
   taskSlots: TaskSlots;
@@ -54,58 +65,75 @@ interface AppState {
   getPipelineSlot: (pipelineId: PipelineId, slotKey: TaskSlotKey | "__audio__") => SlotAssignment;
   defaultAnalysis: DefaultAnalysis;
   setDefaultAnalysis: React.Dispatch<React.SetStateAction<DefaultAnalysis>>;
-  // 本地 llama 模型 ctx 覆盖。落 config.localModelOverrides;
-  // main 进程下次启动该 model 时 --ctx-size 用这里的值, 否则用 manifest 默认。
   localModelOverrides: Record<string, { contextSize?: number }>;
   updateLocalModelOverride: (modelKey: string, patch: { contextSize?: number } | null) => void;
-  /** @deprecated derived from taskSlots.complex_vision; will be removed in PR-3 */
-  activeVideoProviderId: string | null;
-  /** @deprecated 写入会同步到 taskSlots.complex_vision.providerId,保留是为了在 PR-3 完成前旧 UI 不崩 */
-  setActiveVideoProviderId: (id: string | null) => void;
-  /** @deprecated derived from audioSlot */
-  activeAudioProviderId: string | null;
-  /** @deprecated 写入会同步到 audioSlot.providerId */
-  setActiveAudioProviderId: (id: string | null) => void;
+
+  // v3: collections / pipelines
+  collections: Collection[];
+  setCollections: React.Dispatch<React.SetStateAction<Collection[]>>;
+  pipelines: Pipeline[];
+
+  // 分析相关 (v3: result 统一在 Analysis.result)
+  analysesByVideo: Record<string, Analysis[]>;
+  refreshAnalyses: (videoId: string) => Promise<void>;
+  switchAnalysis: (videoId: string, analysisId: string) => Promise<void>;
+  removeVideo: (videoId: string) => void;
+  startAnalysis: (videoId: string, pipelineId: string, optionsOverride?: AnalysisOptions) => void;
+
+  // v3 兼容别名
+  /** @deprecated use analysesByVideo */
+  analysisRecordsByProject: Record<string, Analysis[]>;
+  /** @deprecated use refreshAnalyses */
+  refreshAnalysisRecords: (videoId: string) => Promise<void>;
+  /** @deprecated use removeVideo */
+  removeProject: (videoId: string) => void;
+  /** @deprecated use startAnalysis */
+  startAnalysisForProject: (videoId: string, optionsOverride?: AnalysisOptions) => void;
+
+  // analysis result cache
   nodesByAnalysis: Record<string, AnalysisNode[]>;
   setNodesForAnalysis: (analysisId: string, nodes: AnalysisNode[]) => void;
   reportByAnalysis: Record<string, AnalysisReport>;
   setReportForAnalysis: (analysisId: string, report: AnalysisReport) => void;
-  analysisRecordsByProject: Record<string, AnalysisRecord[]>;
-  refreshAnalysisRecords: (projectId: string) => Promise<void>;
-  switchAnalysis: (projectId: string, analysisId: string) => Promise<void>;
-  removeProject: (projectId: string) => void;
-  startAnalysisForProject: (projectId: string, optionsOverride?: AnalysisOptions) => void;
-  // v2: accounts / sessions / shots
+
   accounts: Account[];
   upsertAccount: (a: Account) => void;
   removeAccount: (id: string) => void;
   sessions: StudioSession[];
   upsertSession: (s: StudioSession) => void;
   removeSession: (id: string) => void;
+  shotsByVideo: Record<string, Shot[]>;
+  setShotsForVideo: (videoId: string, shots: Shot[]) => void;
+  /** @deprecated use shotsByVideo */
   shotsByAsset: Record<string, Shot[]>;
-  setShotsForAsset: (assetProjectId: string, shots: Shot[]) => void;
-  // v2.1: 账号视频独立表
-  accountVideosByAccountId: Record<string, AccountVideo[]>;
-  refreshAccountVideos: (accountId: string) => Promise<void>;
-  upsertAccountVideoLocal: (av: AccountVideo) => void;
-  // 后台拉取进度,渲染端订阅 main 进程事件汇总到这里
+  /** @deprecated use setShotsForVideo */
+  setShotsForAsset: (videoId: string, shots: Shot[]) => void;
+
   accountFetchUi: Record<string, AccountFetchUiState>;
-  // 分析 / 下载进度的全局快照, 按 projectId 索引。
-  // 应用启动时全局订阅一次 onAnalysisProgress, 把每个 event 累加到这里;
-  // TaskQueueDrawer / ProgressScreen 都直接读, 避免各自挂 listener 导致 drawer
-  // 在打开瞬间订阅 → 错过之前事件 → 显示停留在很旧的 stage。
   progressByAnalysis: Record<string, AnalysisProgressEvent>;
   pipelineByAnalysis: Record<string, PipelineState>;
   budgetByAnalysis: Record<string, AnalysisBudget>;
   activeAnalysisForProject: Record<string, string>;
   setBudgetForAnalysis: (analysisId: string, budget: AnalysisBudget) => void;
-  // 模型下载进度,全局订阅 llama:progress (scope=model) 写入,任务队列和设置页共享读取
   modelDownloads: Record<string, ModelDownloadProgress>;
-  // whisper 模型下载进度,全局订阅 whisperCpp:progress 写入
   whisperDownloads: Record<string, ModelDownloadProgress>;
-  // 单次分析的临时 slot 覆盖, keyed by projectId
   pendingSlotOverrides: Record<string, SlotOverrides>;
   setPendingSlotOverrides: React.Dispatch<React.SetStateAction<Record<string, SlotOverrides>>>;
+
+  /** @deprecated v2 */
+  activeVideoProviderId: string | null;
+  /** @deprecated v2 */
+  setActiveVideoProviderId: (id: string | null) => void;
+  /** @deprecated v2 */
+  activeAudioProviderId: string | null;
+  /** @deprecated v2 */
+  setActiveAudioProviderId: (id: string | null) => void;
+  /** @deprecated v2, removed in v3 */
+  accountVideosByAccountId: Record<string, AccountVideo[]>;
+  /** @deprecated v2 */
+  refreshAccountVideos: (accountId: string) => Promise<void>;
+  /** @deprecated v2 */
+  upsertAccountVideoLocal: (av: AccountVideo) => void;
 }
 
 const AppContext = createContext<AppState | undefined>(undefined);
@@ -174,7 +202,7 @@ const MODULE_DEFAULT_SCREEN: Record<Exclude<AppModule, "settings" | "diagnostics
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [hasHydrated, setHasHydrated] = useState(false);
-  const previousProjectsRef = useRef<Map<string, Project>>(new Map());
+  const previousVideosRef = useRef<Map<string, Video>>(new Map());
   const [currentLocation, setCurrentLocation] = useState<AppLocation>({ module: "analysis", screen: "home" });
   const [sidebarCollapsed, setSidebarCollapsedState] = useState<boolean>(() => {
     try { return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1"; } catch { return false; }
@@ -201,8 +229,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setCurrentLocation(legacyScreenToLocation(s));
   }, []);
   // 旧 useState<ScreenState>("home") 已被上方 currentLocation/currentScreen useMemo 取代
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [videos, setVideos] = useState<Video[]>([]);
+  const [activeVideoId, setActiveVideoId] = useState<string | null>(null);
+  const [collections, setCollections] = useState<Collection[]>([]);
+  const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [providers, setProviders] = useState<ModelProvider[]>(DEFAULT_PROVIDERS);
   const [taskSlots, setTaskSlots] = useState<TaskSlots>(DEFAULT_TASK_SLOTS);
   const [audioSlot, setAudioSlotState] = useState<SlotAssignment>(null);
@@ -234,8 +264,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const providersRef = useRef<ModelProvider[]>(providers);
   useEffect(() => { providersRef.current = providers; }, [providers]);
-  const projectsRef = useRef<Project[]>(projects);
-  useEffect(() => { projectsRef.current = projects; }, [projects]);
+  const videosRef = useRef<Video[]>(videos);
+  useEffect(() => { videosRef.current = videos; }, [videos]);
 
   const setTaskSlot = useCallback((key: TaskSlotKey, assignment: SlotAssignment) => {
     setTaskSlots((prev) => ({ ...prev, [key]: assignment }));
@@ -305,16 +335,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
   const [nodesByAnalysis, setNodesByAnalysis] = useState<Record<string, AnalysisNode[]>>({});
   const [reportByAnalysis, setReportByAnalysis] = useState<Record<string, AnalysisReport>>({});
-  const [analysisRecordsByProject, setAnalysisRecordsByProject] = useState<Record<string, AnalysisRecord[]>>({});
-  const analysisRecordsByProjectRef = useRef<Record<string, AnalysisRecord[]>>({});
-  useEffect(() => { analysisRecordsByProjectRef.current = analysisRecordsByProject; }, [analysisRecordsByProject]);
+  const [analysesByVideo, setAnalysesByVideo] = useState<Record<string, Analysis[]>>({});
+  const analysesByVideoRef = useRef<Record<string, Analysis[]>>({});
+  useEffect(() => { analysesByVideoRef.current = analysesByVideo; }, [analysesByVideo]);
   const analysisRecordRefreshPending = useRef<Set<string>>(new Set());
   const dismissedAnalysisIds = useRef<Set<string>>(new Set());
-  // v2 状态
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [sessions, setSessions] = useState<StudioSession[]>([]);
-  const [shotsByAsset, setShotsByAsset] = useState<Record<string, Shot[]>>({});
-  // v2.1: 账号视频独立表
+  const [shotsByVideo, setShotsByVideo] = useState<Record<string, Shot[]>>({});
   const [accountVideosByAccountId, setAccountVideosByAccountId] = useState<Record<string, AccountVideo[]>>({});
   const [accountFetchUi, setAccountFetchUi] = useState<Record<string, AccountFetchUiState>>({});
   const [progressByAnalysis, setProgressByAnalysis] = useState<Record<string, AnalysisProgressEvent>>({});
@@ -358,19 +386,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     window.videoAnalyzer?.deleteSession(id).catch((err) => console.warn("deleteSession failed", err));
   }, []);
 
-  const setShotsForAsset = useCallback((assetProjectId: string, shots: Shot[]) => {
-    setShotsByAsset((prev) => ({ ...prev, [assetProjectId]: shots }));
-    window.videoAnalyzer?.setShotsForAsset(assetProjectId, shots).catch((err) => console.warn("setShotsForAsset failed", err));
+  const setShotsForVideo = useCallback((videoId: string, shots: Shot[]) => {
+    setShotsByVideo((prev) => ({ ...prev, [videoId]: shots }));
+    window.videoAnalyzer?.setShotsForVideo(videoId, shots).catch((err) => console.warn("setShotsForVideo failed", err));
   }, []);
+  const setShotsForAsset = setShotsForVideo;
 
   const refreshAccountVideos = useCallback(async (accountId: string) => {
-    if (!window.videoAnalyzer?.listAccountVideos) return;
-    try {
-      const list = await window.videoAnalyzer.listAccountVideos(accountId);
-      setAccountVideosByAccountId((prev) => ({ ...prev, [accountId]: list }));
-    } catch (err) {
-      console.warn("refreshAccountVideos failed", err);
-    }
+    // v3: 不再有 accountVideos 独立表,但保留空实现以兼容旧调用
   }, []);
 
   const upsertAccountVideoLocal = useCallback((av: AccountVideo) => {
@@ -380,14 +403,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       next.unshift(av);
       return { ...prev, [av.accountId]: next };
     });
-    window.videoAnalyzer?.upsertAccountVideo(av).catch((err) => console.warn("upsertAccountVideo failed", err));
+    // v3: accountVideos 已合并到 videos 表，此处保留空操作
   }, []);
 
   const setNodesForAnalysis = useCallback((analysisId: string, nodes: AnalysisNode[]) => {
     setNodesByAnalysis((prev) => ({ ...prev, [analysisId]: nodes }));
     if (window.videoAnalyzer) {
-      window.videoAnalyzer.setNodes(analysisId, nodes).catch((error) => {
-        console.warn("setNodes failed", error);
+      window.videoAnalyzer.updateAnalysisResult(analysisId, { nodes }).catch((error) => {
+        console.warn("updateAnalysisResult(nodes) failed", error);
       });
     }
   }, []);
@@ -399,43 +422,42 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const setReportForAnalysis = useCallback((analysisId: string, report: AnalysisReport) => {
     setReportByAnalysis((prev) => ({ ...prev, [analysisId]: report }));
     if (window.videoAnalyzer) {
-      window.videoAnalyzer.setReport(analysisId, report).catch((error) => {
-        console.warn("setReport failed", error);
+      window.videoAnalyzer.updateAnalysisResult(analysisId, { report }).catch((error) => {
+        console.warn("updateAnalysisResult failed", error);
       });
     }
   }, []);
 
-  const refreshAnalysisRecords = useCallback(async (projectId: string) => {
+  const refreshAnalyses = useCallback(async (videoId: string) => {
     if (!window.videoAnalyzer?.listAnalyses) return;
     try {
-      const records = await window.videoAnalyzer.listAnalyses(projectId);
-      setAnalysisRecordsByProject((prev) => ({ ...prev, [projectId]: records }));
+      const records = await window.videoAnalyzer.listAnalyses(videoId);
+      setAnalysesByVideo((prev) => ({ ...prev, [videoId]: records }));
     } catch (err) {
-      console.warn("refreshAnalysisRecords failed", err);
+      console.warn("refreshAnalyses failed", err);
     }
   }, []);
 
-  const switchAnalysis = useCallback(async (projectId: string, analysisId: string) => {
+  const switchAnalysis = useCallback(async (videoId: string, analysisId: string) => {
     if (!window.videoAnalyzer?.getAnalysis) return;
     try {
-      const data = await window.videoAnalyzer.getAnalysis(analysisId);
-      if (!data) return;
-      if (data.nodes?.length) setNodesByAnalysis((prev) => ({ ...prev, [analysisId]: data.nodes }));
-      if (data.report) setReportByAnalysis((prev) => ({ ...prev, [analysisId]: data.report! }));
-      setProjects((prev) => prev.map((p) =>
-        p.id === projectId ? { ...p, currentAnalysisId: analysisId } : p,
-      ));
+      const analysis = await window.videoAnalyzer.getAnalysis(analysisId);
+      if (!analysis) return;
+      const result = analysis.result as any;
+      if (result?.nodes?.length) setNodesByAnalysis((prev) => ({ ...prev, [analysisId]: result.nodes }));
+      if (result?.report) setReportByAnalysis((prev) => ({ ...prev, [analysisId]: result.report }));
     } catch (err) {
       console.warn("switchAnalysis failed", err);
     }
   }, []);
 
-  const startAnalysisForProject = useCallback(
-    (projectId: string, optionsOverride?: AnalysisOptions) => {
+  const startAnalysis = useCallback(
+    (videoId: string, pipelineId: string = "builtin-pipeline", optionsOverride?: AnalysisOptions) => {
+      const projectId = videoId;
       // 如果该项目已有分析在运行，只跳转到进度屏
-      const currentProject = projectsRef.current.find((p) => p.id === projectId);
+      const currentProject = videosRef.current.find((p) => p.id === projectId);
       if (currentProject?.status === "analyzing") {
-        setActiveProjectId(projectId);
+        setActiveVideoId(projectId);
         setCurrentLocation({ module: "analysis", screen: "progress" });
         return;
       }
@@ -451,7 +473,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (!(projectId in prev)) return prev;
         const n = { ...prev }; delete n[projectId]; return n;
       });
-      setProjects((prev) =>
+      setVideos((prev) =>
         prev.map((p) => {
           if (p.id !== projectId) return p;
           return {
@@ -461,17 +483,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
           };
         }),
       );
-      setActiveProjectId(projectId);
+      setActiveVideoId(projectId);
       setCurrentLocation({ module: "analysis", screen: "progress" });
     },
     [],
   );
 
-  const removeProject = useCallback((projectId: string) => {
-    const project = projectsRef.current.find((p) => p.id === projectId);
-    setProjects((prev) => prev.filter((p) => p.id !== projectId));
+  const removeVideo = useCallback((projectId: string) => {
+    const project = videosRef.current.find((p) => p.id === projectId);
+    setVideos((prev) => prev.filter((p) => p.id !== projectId));
     // 清掉该项目所有分析的 nodes/report 缓存
-    const records = analysisRecordsByProjectRef.current[projectId] || [];
+    const records = analysesByVideoRef.current[projectId] || [];
     if (records.length || project?.currentAnalysisId) {
       const idsToClean = new Set<string>(records.map((r) => r.id));
       if (project?.currentAnalysisId) idsToClean.add(project.currentAnalysisId);
@@ -486,13 +508,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return next;
       });
     }
-    setAnalysisRecordsByProject((prev) => {
+    setAnalysesByVideo((prev) => {
       if (!(projectId in prev)) return prev;
       const next = { ...prev };
       delete next[projectId];
       return next;
     });
-    setActiveProjectId((current) => (current === projectId ? null : current));
+    setActiveVideoId((current) => (current === projectId ? null : current));
     // 按 analysisId 清理 per-analysis maps
     const aidsToClear = new Set<string>(records.map((r) => r.id));
     if (project?.currentAnalysisId) aidsToClear.add(project.currentAnalysisId);
@@ -520,8 +542,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return next;
     });
     if (window.videoAnalyzer) {
-      window.videoAnalyzer.deleteProject(projectId).catch((error) => {
-        console.warn("deleteProject failed", error);
+      window.videoAnalyzer.deleteVideo(projectId).catch((error) => {
+        console.warn("deleteVideo failed", error);
       });
     }
   }, []);
@@ -551,31 +573,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
           if (config?.localModelOverrides && typeof config.localModelOverrides === "object") {
             setLocalModelOverrides(config.localModelOverrides);
           }
-          const projectList = await window.videoAnalyzer.listProjects();
-          setProjects(projectList);
-          previousProjectsRef.current = new Map(projectList.map((p) => [p.id, p]));
-          // 加载每个项目的分析记录列表
-          const recordsMap: Record<string, AnalysisRecord[]> = {};
+          const videoList = await window.videoAnalyzer.listVideos();
+          setVideos(videoList);
+          previousVideosRef.current = new Map(videoList.map((v) => [v.id, v]));
+          // 加载每个视频的分析记录
+          const analysesMap: Record<string, Analysis[]> = {};
           const nodesMap: Record<string, AnalysisNode[]> = {};
           const reportsMap: Record<string, AnalysisReport> = {};
           await Promise.all(
-            projectList.map(async (p) => {
+            videoList.map(async (v) => {
               if (!window.videoAnalyzer?.listAnalyses) return;
-              const records = await window.videoAnalyzer.listAnalyses(p.id).catch(() => [] as AnalysisRecord[]);
-              if (records.length) recordsMap[p.id] = records;
-              // 只加载当前分析的 nodes/report
-              const aid = p.currentAnalysisId;
-              if (aid) {
-                const [nodes, report] = await Promise.all([
-                  window.videoAnalyzer!.getNodes(aid).catch(() => [] as AnalysisNode[]),
-                  window.videoAnalyzer!.getReport(aid).catch(() => null),
-                ]);
-                if (nodes?.length) nodesMap[aid] = nodes;
-                if (report) reportsMap[aid] = report;
+              const records = await window.videoAnalyzer.listAnalyses(v.id).catch(() => [] as Analysis[]);
+              if (records.length) analysesMap[v.id] = records;
+              // 加载最新完成的分析的 result
+              const latest = records.find((r) => r.status === "completed");
+              if (latest?.result) {
+                const result = latest.result as any;
+                if (result.nodes) nodesMap[latest.id] = result.nodes;
+                if (result.report) reportsMap[latest.id] = result.report;
               }
             }),
           );
-          setAnalysisRecordsByProject(recordsMap);
+          setAnalysesByVideo(analysesMap);
           setNodesByAnalysis(nodesMap);
           setReportByAnalysis(reportsMap);
           // v2: 加载 accounts / sessions / shots
@@ -587,17 +606,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
             ]);
             setAccounts(accs);
             setSessions(sess);
-            const byAsset: Record<string, Shot[]> = {};
+            const byVideo: Record<string, Shot[]> = {};
             for (const s of allShots) {
-              (byAsset[s.assetProjectId] ||= []).push(s);
+              const vid = s.videoId || s.assetProjectId;
+              if (vid) (byVideo[vid] ||= []).push(s);
             }
-            setShotsByAsset(byAsset);
-            // 每个账号一次性拉视频列表
-            if (window.videoAnalyzer.listAccountVideos) {
-              const avEntries = await Promise.all(
-                accs.map(async (a) => [a.id, await window.videoAnalyzer!.listAccountVideos!(a.id).catch(() => [] as AccountVideo[])] as const),
-              );
-              setAccountVideosByAccountId(Object.fromEntries(avEntries));
+            setShotsByVideo(byVideo);
+            // v3: 加载 collections + pipelines
+            if (window.videoAnalyzer.listCollections) {
+              setCollections(await window.videoAnalyzer.listCollections().catch(() => []));
+            }
+            if (window.videoAnalyzer.listPipelines) {
+              setPipelines(await window.videoAnalyzer.listPipelines().catch(() => []));
             }
             // 重连 in-flight fetch 进度
             if (window.videoAnalyzer.listAccountFetchInFlight) {
@@ -626,11 +646,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
               setPipelineSlotsState(buildDefaultPipelineSlots(state.taskSlots, state.audioSlot ?? null));
             }
             if (state.defaultAnalysis) setDefaultAnalysis(state.defaultAnalysis);
-            setProjects(state.projects || []);
+            setVideos(state.videos || state.projects || []);
             setNodesByAnalysis(state.nodesByAnalysis || {});
             setReportByAnalysis(state.reportByAnalysis || {});
-            previousProjectsRef.current = new Map(
-              (state.projects || []).map((p: Project) => [p.id, p] as const),
+            previousVideosRef.current = new Map(
+              (state.videos || state.projects || []).map((v: Video) => [v.id, v] as const),
             );
           }
         }
@@ -716,12 +736,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   // 订阅轻量视频摘要状态事件
   useEffect(() => {
-    if (!window.videoAnalyzer?.onAccountVideoSummaryStatus) return;
-    const off = window.videoAnalyzer.onAccountVideoSummaryStatus((evt) => {
+    if (!window.videoAnalyzer?.onVideoSummaryStatus) return;
+    const off = window.videoAnalyzer.onVideoSummaryStatus((evt) => {
       setAccountVideosByAccountId((prev: Record<string, AccountVideo[]>) => {
         for (const accId of Object.keys(prev)) {
           const videos = prev[accId];
-          const idx = videos.findIndex((v: AccountVideo) => v.id === evt.accountVideoId);
+          const idx = videos.findIndex((v: AccountVideo) => v.id === evt.videoId);
           if (idx >= 0) {
             const updated = [...videos];
             updated[idx] = {
@@ -756,13 +776,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       });
       // main 进程创建新分析记录后第一条 progress 就带新 analysisId,
       // 同步刷新 project.currentAnalysisId 让 ProgressScreen 的 startedAt 指向新记录。
-      setProjects((prev) => prev.map((p) => {
+      setVideos((prev) => prev.map((p) => {
         if (p.id !== evt.projectId || p.currentAnalysisId === key) return p;
         return { ...p, currentAnalysisId: key };
       }));
       if (!analysisRecordRefreshPending.current.has(key)) {
         analysisRecordRefreshPending.current.add(key);
-        refreshAnalysisRecords(evt.projectId);
+        refreshAnalyses(evt.projectId);
       }
       if (evt.stageIndex != null) {
         const si = evt.stageIndex;
@@ -880,7 +900,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const off = window.videoAnalyzer.onDownloadComplete((evt) => {
       // 项目 strict 未开,DownloadCompleteEvent 是 discriminated union 但 narrow 不稳。
       // 这里把字段全显式抽出, callback 闭包里只用平铺常量,绕开 TS narrow 失效。
-      const projectId = evt.projectId;
+      const videoId = (evt as any).videoId || (evt as any).projectId;
       const success = evt.success;
       let video: DownloadedVideo | null = null;
       let cancelled = false;
@@ -888,13 +908,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (evt.success) {
         video = evt.video;
       } else {
-        // strict 未开, union 在 else 分支也不收窄到 success:false; 显式 cast 拍死。
-        const failEvt = evt as { projectId: string; success: false; cancelled?: boolean; error: string };
+        const failEvt = evt as { videoId: string; success: false; cancelled?: boolean; error: string };
         cancelled = !!failEvt.cancelled;
         errorMessage = failEvt.error || "视频下载失败";
       }
-      setProjects((prev) => prev.map((p) => {
-        if (p.id !== projectId) return p;
+      setVideos((prev) => prev.map((p) => {
+        if (p.id !== videoId) return p;
         const now = new Date().toISOString();
         if (success && video) {
           return {
@@ -926,24 +945,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!hasHydrated) return;
-    const prev = previousProjectsRef.current;
-    const nextMap = new Map(projects.map((p) => [p.id, p] as const));
-    previousProjectsRef.current = nextMap;
+    const prev = previousVideosRef.current;
+    const nextMap = new Map(videos.map((v) => [v.id, v] as const));
+    previousVideosRef.current = nextMap;
     if (window.videoAnalyzer) {
-      for (const project of projects) {
-        if (prev.get(project.id) === project) continue;
-        window.videoAnalyzer.upsertProject(project).catch((error) => {
-          console.warn("upsertProject failed", error);
+      for (const video of videos) {
+        if (prev.get(video.id) === video) continue;
+        window.videoAnalyzer.upsertVideo(video).catch((error) => {
+          console.warn("upsertVideo failed", error);
         });
       }
     } else {
       const existing = JSON.parse(window.localStorage.getItem(LOCAL_STORAGE_KEY) || "{}");
       window.localStorage.setItem(
         LOCAL_STORAGE_KEY,
-        JSON.stringify({ ...existing, projects, nodesByAnalysis, reportByAnalysis })
+        JSON.stringify({ ...existing, videos, nodesByAnalysis, reportByAnalysis })
       );
     }
-  }, [projects, nodesByAnalysis, reportByAnalysis, hasHydrated]);
+  }, [videos, nodesByAnalysis, reportByAnalysis, hasHydrated]);
 
   return (
     <AppContext.Provider
@@ -955,10 +974,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setSidebarCollapsed,
         currentScreen,
         setCurrentScreen,
-        projects,
-        setProjects,
-        activeProjectId,
-        setActiveProjectId,
+        // v3 主名
+        videos,
+        setVideos,
+        activeVideoId,
+        setActiveVideoId,
+        collections,
+        setCollections,
+        pipelines,
+        // v3 兼容别名
+        projects: videos,
+        setProjects: setVideos,
+        activeProjectId: activeVideoId,
+        setActiveProjectId: setActiveVideoId,
+
         providers,
         setProviders,
         taskSlots,
@@ -980,19 +1009,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setNodesForAnalysis,
         reportByAnalysis,
         setReportForAnalysis,
-        analysisRecordsByProject,
-        refreshAnalysisRecords,
+        analysesByVideo,
+        analysisRecordsByProject: analysesByVideo,
+        refreshAnalyses,
+        refreshAnalysisRecords: refreshAnalyses,
         switchAnalysis,
-        removeProject,
-        startAnalysisForProject,
+        removeVideo,
+        removeProject: removeVideo,
+        startAnalysis,
+        startAnalysisForProject: (videoId: string, opts?: AnalysisOptions) => startAnalysis(videoId, "builtin-pipeline", opts),
         accounts,
         upsertAccount,
         removeAccount,
         sessions,
         upsertSession,
         removeSession,
-        shotsByAsset,
-        setShotsForAsset,
+        shotsByVideo,
+        setShotsForVideo,
+        shotsByAsset: shotsByVideo,
+        setShotsForAsset: setShotsForVideo,
         accountVideosByAccountId,
         refreshAccountVideos,
         upsertAccountVideoLocal,

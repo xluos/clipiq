@@ -2,22 +2,24 @@ import type {
   Account,
   AccountFetchProgress,
   AccountFetchRange,
-  AccountVideo,
+  Analysis,
   AnalysisNode,
   AnalysisOptions,
   AnalysisProgressEvent,
   AnalysisBudgetEvent,
-  AnalysisRecord,
   AnalysisReport,
   AppConfig,
+  Collection,
   LocalFitLevel,
   MachineSpecs,
+  Methodology,
   ModelDescriptor,
   ModelProvider,
-  Project,
-  ProjectSource,
+  Pipeline,
   Shot,
   StudioSession,
+  Video,
+  VideoContentAnalysis,
 } from "./types";
 
 export type RuntimeStatus = {
@@ -66,22 +68,15 @@ export type InspectedVideo = {
 };
 
 export type DownloadedVideo = InspectedVideo & {
-  projectId: string;
-  platform: Extract<ProjectSource, { type: "url" }>["platform"];
-  title?: string | null;    // medium_text 从分享文案提的项目标题 (空 → 用 filename)
-  fromCache?: boolean;      // true: 复用了 url-cache 里的本地文件, 没走 yt-dlp
+  videoId: string;
+  platform: "douyin" | "xiaohongshu" | "bilibili" | "tiktok" | "unknown";
+  title?: string | null;
+  fromCache?: boolean;
 };
 
 export type DownloadCompleteEvent =
-  | { projectId: string; success: true; video: DownloadedVideo }
-  | { projectId: string; success: false; cancelled?: boolean; error: string };
-
-export type AnalysisResult = {
-  analysisId: string;
-  project: Project;
-  nodes: AnalysisNode[];
-  report: AnalysisReport;
-};
+  | { videoId: string; success: true; video: DownloadedVideo }
+  | { videoId: string; success: false; cancelled?: boolean; error: string };
 
 export type ExportFormat = "markdown" | "json" | "csv";
 
@@ -304,112 +299,140 @@ declare global {
       inspectVideoPath: (filePath: string) => Promise<InspectedVideo>;
       getPathForFile: (file: File) => string;
       downloadVideo: (url: string) => Promise<DownloadedVideo>;
-      // 异步下载 — 同步返回 { projectId, url, platform };下载在后台进行,
-      // 进度通过 onAnalysisProgress 上报 (stage="下载视频"),
-      // 完成 / 失败通过 onDownloadComplete 上报。
       downloadVideoAsync: (url: string) => Promise<{
-        projectId: string;
+        videoId: string;
         url: string;
-        platform: Extract<ProjectSource, { type: "url" }>["platform"];
+        platform: "douyin" | "xiaohongshu" | "bilibili" | "tiktok" | "unknown";
       }>;
       onDownloadComplete: (callback: (payload: DownloadCompleteEvent) => void) => () => void;
       loadConfig: () => Promise<AppConfig | null>;
       saveConfig: (config: AppConfig) => Promise<{ ok: true }>;
       getConfigField: (key: string) => Promise<unknown>;
       saveConfigField: (key: string, value: unknown) => Promise<{ ok: true }>;
-      listProjects: () => Promise<Project[]>;
-      upsertProject: (project: Project) => Promise<{ ok: true }>;
-      deleteProject: (projectId: string) => Promise<{ ok: true }>;
-      // v2: accounts / sessions / shots
+
+      // v3: videos
+      listVideos: (filter?: { accountId?: string; collectionId?: string; platform?: string; status?: string }) => Promise<Video[]>;
+      upsertVideo: (video: Video) => Promise<{ ok: true }>;
+      deleteVideo: (videoId: string) => Promise<{ ok: true }>;
+
+      // v3: analyses
+      listAnalyses: (videoId: string) => Promise<Analysis[]>;
+      getAnalysis: (analysisId: string) => Promise<Analysis | null>;
+      deleteAnalysis: (analysisId: string) => Promise<{ ok: true }>;
+      updateAnalysisResult: (analysisId: string, result: unknown) => Promise<{ ok: true }>;
+
+      // v3: collections
+      listCollections: () => Promise<Collection[]>;
+      upsertCollection: (collection: Collection) => Promise<{ ok: true }>;
+      deleteCollection: (collectionId: string) => Promise<{ ok: true }>;
+      addVideoToCollection: (collectionId: string, videoId: string) => Promise<{ ok: true }>;
+      removeVideoFromCollection: (collectionId: string, videoId: string) => Promise<{ ok: true }>;
+      listCollectionVideos: (collectionId: string) => Promise<Video[]>;
+
+      // v3: pipelines
+      listPipelines: () => Promise<Pipeline[]>;
+      upsertPipeline: (pipeline: Pipeline) => Promise<{ ok: true }>;
+      deletePipeline: (pipelineId: string) => Promise<{ ok: true }>;
+
+      // v3: methodologies
+      listMethodologies: (accountId: string) => Promise<Methodology[]>;
+
+      // accounts
       listAccounts: () => Promise<Account[]>;
       upsertAccount: (account: Account) => Promise<{ ok: true }>;
       deleteAccount: (accountId: string) => Promise<{ ok: true; message?: string }>;
+
+      // studio sessions
       listSessions: () => Promise<StudioSession[]>;
       upsertSession: (session: StudioSession) => Promise<{ ok: true }>;
       deleteSession: (sessionId: string) => Promise<{ ok: true; message?: string }>;
-      listShots: (assetProjectId?: string) => Promise<Shot[]>;
-      setShotsForAsset: (assetProjectId: string, shots: Shot[]) => Promise<{ ok: true }>;
-      // v2 业务路径 — account videos 独立表 + 后台拉取
-      listAccountVideos: (accountId: string) => Promise<AccountVideo[]>;
-      upsertAccountVideo: (video: AccountVideo) => Promise<{ ok: true }>;
-      deleteAccountVideo: (videoId: string) => Promise<{ ok: true }>;
-      // 触发后台拉取 — 立即返回 { ok, accepted }; 进度通过 onAccountFetchProgress 推送
+
+      // shots
+      listShots: (videoId?: string) => Promise<Shot[]>;
+      setShotsForVideo: (videoId: string, shots: Shot[]) => Promise<{ ok: true }>;
+
+      // 后台拉取
       startAccountFetch: (payload: { accountId: string; url: string; range: AccountFetchRange }) => Promise<{ ok: true; accepted: boolean; reason?: string }>;
       cancelAccountFetch: (accountId: string) => Promise<{ ok: true; cancelled: boolean }>;
-      // 启动时获取尚在跑的 fetch 列表 (renderer 重连用)
       listAccountFetchInFlight: () => Promise<Array<{ accountId: string; stage: string; progress: number; message?: string }>>;
       onAccountFetchProgress: (callback: (event: AccountFetchProgress) => void) => () => void;
-      onAccountFetchDone: (callback: (event: { accountId: string; videos: AccountVideo[]; account: Partial<Account>; warnings?: string[] }) => void) => () => void;
+      onAccountFetchDone: (callback: (event: { accountId: string; videos: Video[]; account: Partial<Account>; warnings?: string[] }) => void) => () => void;
       onAccountFetchFailed: (callback: (event: { accountId: string; error: string }) => void) => () => void;
-      // 轻量视频摘要
-      summarizeAccountVideo: (payload: { accountVideoId: string; slotOverrides?: import("./types").SlotOverrides; customPrompt?: string }) => Promise<{ ok: true; accepted: boolean; reason?: string }>;
-      cancelSummarizeVideo: (accountVideoId: string) => Promise<{ ok: true; cancelled: boolean }>;
-      onAccountVideoSummaryStatus: (callback: (event: {
-        accountVideoId: string;
+
+      // 分析
+      analyzeVideo: (payload: {
+        videoId: string;
+        pipelineId: string;
+        options?: AnalysisOptions;
+        slotOverrides?: import("./types").SlotOverrides;
+      }) => Promise<Analysis>;
+      cancelAnalysis: (videoId: string) => Promise<{ cancelled: boolean }>;
+      isAnalysisActive: (videoId: string) => Promise<boolean>;
+      getLastAnalysisProgress: (videoId: string) => Promise<AnalysisProgressEvent | null>;
+      getLastAnalysisBudget: (videoId: string) => Promise<AnalysisBudgetEvent | null>;
+      onAnalysisProgress: (callback: (event: AnalysisProgressEvent) => void) => () => void;
+      onAnalysisBudget: (callback: (event: AnalysisBudgetEvent) => void) => () => void;
+
+      // 轻量视频摘要 (内容分析管线)
+      summarizeVideo: (payload: { videoId: string; slotOverrides?: import("./types").SlotOverrides; customPrompt?: string }) => Promise<{ ok: true; accepted: boolean; reason?: string }>;
+      cancelSummarizeVideo: (videoId: string) => Promise<{ ok: true; cancelled: boolean }>;
+      onVideoSummaryStatus: (callback: (event: {
+        videoId: string;
         status: "summarizing" | "done" | "failed" | "idle";
-        summary?: import("./types").VideoContentAnalysis;
+        summary?: VideoContentAnalysis;
         error?: string;
         progress?: number;
         message?: string;
       }) => void) => () => void;
+
+      // 方法论
       generateAccountMethodology: (payload: {
         accountName: string;
         videoSummaries: Array<{ title: string; summary?: string; structure?: unknown; pacing?: string; editingStyle?: string; composition?: string }>;
       }) => Promise<{ ok: true; methodology: import("./types").AccountMethodology }>;
+
+      // studio
       generateStudioSteps: (payload: {
         goal: string;
         targetDurationSec: number;
         methodologies?: Array<{ name: string; summary: string }>;
         assets?: Array<{ id: string; name: string; durationSec: number; shotCount: number }>;
       }) => Promise<{ ok: true; steps: import("./types").StudioStep[] }>;
-      analyzeAssetShots: (payload: { assetProjectId: string; filePath: string; durationSec: number }) => Promise<{
+      analyzeVideoShots: (payload: { videoId: string; filePath: string; durationSec: number }) => Promise<{
         ok: true;
         shots: Shot[];
       }>;
-      listAnalyses: (projectId: string) => Promise<AnalysisRecord[]>;
-      getAnalysis: (analysisId: string) => Promise<{ record: AnalysisRecord; nodes: AnalysisNode[]; report: AnalysisReport | null } | null>;
-      deleteAnalysis: (analysisId: string) => Promise<{ ok: true }>;
-      getNodes: (analysisId: string) => Promise<AnalysisNode[]>;
-      setNodes: (analysisId: string, nodes: AnalysisNode[]) => Promise<{ ok: true }>;
-      getReport: (analysisId: string) => Promise<AnalysisReport | null>;
-      setReport: (analysisId: string, report: AnalysisReport | null) => Promise<{ ok: true }>;
-      analyzeProject: (payload: {
-        project: Project;
-        provider?: ModelProvider;
-        audioProvider?: ModelProvider | null;
-        options: AnalysisOptions;
-        slotOverrides?: import("./types").SlotOverrides;
-      }) => Promise<AnalysisResult>;
-      cancelAnalysis: (projectId: string) => Promise<{ cancelled: boolean }>;
-      isAnalysisActive: (projectId: string) => Promise<boolean>;
-      getLastAnalysisProgress: (projectId: string) => Promise<AnalysisProgressEvent | null>;
-      getLastAnalysisBudget: (projectId: string) => Promise<AnalysisBudgetEvent | null>;
-      onAnalysisProgress: (callback: (event: AnalysisProgressEvent) => void) => () => void;
-      onAnalysisBudget: (callback: (event: AnalysisBudgetEvent) => void) => () => void;
-      exportProject: (payload: {
-        project: Project;
-        nodes: AnalysisNode[];
-        report: AnalysisReport;
-        provider?: ModelProvider;
+
+      // 导出
+      exportVideo: (payload: {
+        video: Video;
+        analysis: Analysis;
         format: ExportFormat;
       }) => Promise<{ canceled: boolean; filePath?: string }>;
+
+      // provider
       testProvider: (provider: ModelProvider) => Promise<ProviderTestResult>;
+
+      // yt-dlp
       checkYtDlpUpdate: () => Promise<YtDlpUpdateInfo>;
       installYtDlp: () => Promise<YtDlpInstallResult>;
       onYtDlpUpdateStatus: (callback: (info: YtDlpUpdateInfo) => void) => () => void;
       onYtDlpProgress: (callback: (progress: YtDlpProgress) => void) => () => void;
+
+      // 数据管理
       getDataInfo: () => Promise<{
         userDataPath: string;
-        projectsPath: string;
+        videosPath: string;
         configPath: string;
         dbPath: string;
-        projectCount: number;
-        dbProjectCount: number;
+        videoCount: number;
         totalBytes: number;
         dbBytes: number;
       }>;
-      openDataFolder: (which?: "projects" | "userData") => Promise<{ ok: boolean; path: string }>;
-      purgeProjects: () => Promise<{ ok: boolean; message?: string }>;
+      openDataFolder: (which?: "videos" | "userData") => Promise<{ ok: boolean; path: string }>;
+      purgeAllData: () => Promise<{ ok: boolean; message?: string }>;
+
+      // 扩展桥
       extensionBridge: {
         getStatus: () => Promise<ExtensionBridgeStatus>;
         rotateToken: () => Promise<{ token: string }>;
@@ -422,7 +445,6 @@ declare global {
       llama: {
         listModels: () => Promise<ModelDescriptor[]>;
         listManifest: () => Promise<{ machine: MachineSpecs; models: ModelDescriptor[] }>;
-        // 给 SettingsScreen ctx slider 实时算 fit/mem%/tps, 不持久化
         recomputeFit: (modelKey: string, contextSize: number) => Promise<{
           fit: LocalFitLevel;
           memPercent: number;
@@ -456,9 +478,9 @@ declare global {
       diagnostics: {
         getAnalysisSamples: () => Promise<{ ok: boolean; samples: AnalysisSample[]; error?: string }>;
         getTokenUsage: (analysisId: string) => Promise<{ ok: boolean; data: import("./types").TokenUsageSummary | null }>;
-        getFramesCheckpoint: (projectId: string) => Promise<{ ok: boolean; data: FramesCheckpoint | null }>;
-        getTranscript: (projectId: string) => Promise<{ ok: boolean; data: TranscriptData | null }>;
-        deleteSample: (projectId: string, startedAt: string) => Promise<{ ok: boolean; removed: number; error?: string }>;
+        getFramesCheckpoint: (videoId: string) => Promise<{ ok: boolean; data: FramesCheckpoint | null }>;
+        getTranscript: (videoId: string) => Promise<{ ok: boolean; data: TranscriptData | null }>;
+        deleteSample: (videoId: string, startedAt: string) => Promise<{ ok: boolean; removed: number; error?: string }>;
         clearAllSamples: () => Promise<{ ok: boolean; error?: string }>;
       };
       cache: {

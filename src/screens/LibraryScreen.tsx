@@ -237,33 +237,30 @@ function LibraryUploadScreen() {
       if (!video) { setBusy(""); return; }
       const id = `asset-${Date.now()}`;
       const now = new Date().toISOString();
-      const project = {
+      const newVideo: import("../types").Video = {
         id,
-        source: { type: "local_file" as const, originalPath: video.filePath },
-        localVideoPath: video.mediaUrl,
-        localFilePath: video.filePath,
-        videoName: video.filename,
+        title: video.filename,
+        sourceType: "local",
+        localPath: video.filePath,
         durationSec: video.durationSec,
         width: video.width,
         height: video.height,
         orientation: video.orientation,
-        status: "not_analyzed" as const,
-        kind: "asset" as const,
-        assetTags: [],
+        status: "ready",
+        tags: [],
         createdAt: now,
         updatedAt: now,
       };
-      setProjects((prev) => [project, ...prev]);
-      // 立刻落库 — analyzeAssetShots 需要从 DB 拿到 asset 元数据
-      await window.videoAnalyzer.upsertProject(project);
+      setProjects((prev) => [newVideo as any, ...prev]);
+      await window.videoAnalyzer.upsertVideo(newVideo);
       setActiveProjectId(id);
       setActiveAssetId(id);
 
       // 真分镜: ffmpeg scenedetect 切镜头边界,落库
       setBusy("ffmpeg 分镜中...");
       try {
-        const result = await window.videoAnalyzer.analyzeAssetShots?.({
-          assetProjectId: id,
+        const result = await window.videoAnalyzer.analyzeVideoShots?.({
+          videoId: id,
           filePath: video.filePath,
           durationSec: video.durationSec,
         });
@@ -359,9 +356,9 @@ function ShotListScreen() {
     if (!asset.localFilePath) return;
     setReanalyzing(true);
     try {
-      const result = await window.videoAnalyzer?.analyzeAssetShots?.({
-        assetProjectId: asset.id,
-        filePath: asset.localFilePath,
+      const result = await window.videoAnalyzer?.analyzeVideoShots?.({
+        videoId: asset.id,
+        filePath: (asset as any).localFilePath || (asset as any).localPath,
         durationSec: asset.durationSec,
       });
       if (result?.shots) {

@@ -314,7 +314,7 @@ export function HomeScreen() {
       const handle = await window.videoAnalyzer.downloadVideoAsync(targetUrl);
       const now = new Date().toISOString();
       setProjects(prev => [{
-        id: handle.projectId,
+        id: handle.videoId,
         source: { type: "url", url: targetUrl, platform: handle.platform },
         localVideoPath: "",
         videoName: targetUrl,
@@ -326,7 +326,7 @@ export function HomeScreen() {
         createdAt: now,
         updatedAt: now,
       }, ...prev]);
-      setActiveProjectId(handle.projectId);
+      setActiveProjectId(handle.videoId);
       setStatus("idle");
       setInputValue("");
       setCurrentScreen("progress");

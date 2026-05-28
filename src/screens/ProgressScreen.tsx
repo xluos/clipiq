@@ -185,12 +185,10 @@ export function ProgressScreen() {
         if (!aid) return;
         void (async () => {
           try {
-            const [nodes, report] = await Promise.all([
-              window.videoAnalyzer!.getNodes(aid),
-              window.videoAnalyzer!.getReport(aid),
-            ]);
-            if (nodes && nodes.length) setNodesForAnalysis(aid, nodes);
-            if (report) setReportForAnalysis(aid, report);
+            const analysis = await window.videoAnalyzer!.getAnalysis(aid);
+            const result = analysis?.result as any;
+            if (result?.nodes?.length) setNodesForAnalysis(aid, result.nodes);
+            if (result?.report) setReportForAnalysis(aid, result.report);
             setProjects(prev => prev.map(p => p.id === project.id
               ? { ...p, status: "completed", currentAnalysisId: aid, updatedAt: new Date().toISOString() }
               : p));
@@ -318,11 +316,11 @@ export function ProgressScreen() {
       try {
         const slotOverrides = pendingSlotOverrides[project.id];
         if (slotOverrides) setPendingSlotOverrides((prev) => { const n = { ...prev }; delete n[project.id]; return n; });
-        const result = await window.videoAnalyzer!.analyzeProject({ project, provider, audioProvider, options, slotOverrides });
+        const analysis = await window.videoAnalyzer!.analyzeVideo({ videoId: project.id, pipelineId: "builtin-pipeline", options, slotOverrides });
         if (cancelledRef.current) return;
-        setNodesForAnalysis(result.analysisId, result.nodes);
-        setReportForAnalysis(result.analysisId, result.report);
-        setProjects(prev => prev.map(p => p.id === project.id ? result.project : p));
+        const aResult = analysis?.result as any;
+        if (aResult?.nodes?.length) setNodesForAnalysis(analysis.id, aResult.nodes);
+        if (aResult?.report) setReportForAnalysis(analysis.id, aResult.report);
         refreshAnalysisRecords(project.id);
         setProgress(100);
         setStageLabel("完成");

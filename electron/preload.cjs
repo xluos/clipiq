@@ -24,22 +24,48 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   saveConfig: (config) => ipcRenderer.invoke("config:save", config),
   getConfigField: (key) => ipcRenderer.invoke("config:getField", key),
   saveConfigField: (key, value) => ipcRenderer.invoke("config:setField", key, value),
-  listProjects: () => ipcRenderer.invoke("projects:list"),
-  upsertProject: (project) => ipcRenderer.invoke("projects:upsert", project),
-  deleteProject: (projectId) => ipcRenderer.invoke("projects:delete", projectId),
-  // v2: accounts / sessions / shots
+
+  // v3: videos (替代 projects + accountVideos)
+  listVideos: (filter) => ipcRenderer.invoke("videos:list", filter || {}),
+  upsertVideo: (video) => ipcRenderer.invoke("videos:upsert", video),
+  deleteVideo: (videoId) => ipcRenderer.invoke("videos:delete", videoId),
+
+  // v3: analyses (result 统一列)
+  listAnalyses: (videoId) => ipcRenderer.invoke("analyses:list", videoId),
+  getAnalysis: (analysisId) => ipcRenderer.invoke("analyses:get", analysisId),
+  deleteAnalysis: (analysisId) => ipcRenderer.invoke("analyses:delete", analysisId),
+  updateAnalysisResult: (analysisId, result) => ipcRenderer.invoke("analyses:updateResult", analysisId, result),
+
+  // v3: collections
+  listCollections: () => ipcRenderer.invoke("collections:list"),
+  upsertCollection: (collection) => ipcRenderer.invoke("collections:upsert", collection),
+  deleteCollection: (collectionId) => ipcRenderer.invoke("collections:delete", collectionId),
+  addVideoToCollection: (collectionId, videoId) => ipcRenderer.invoke("collections:addVideo", collectionId, videoId),
+  removeVideoFromCollection: (collectionId, videoId) => ipcRenderer.invoke("collections:removeVideo", collectionId, videoId),
+  listCollectionVideos: (collectionId) => ipcRenderer.invoke("collections:listVideos", collectionId),
+
+  // v3: pipelines
+  listPipelines: () => ipcRenderer.invoke("pipelines:list"),
+  upsertPipeline: (pipeline) => ipcRenderer.invoke("pipelines:upsert", pipeline),
+  deletePipeline: (pipelineId) => ipcRenderer.invoke("pipelines:delete", pipelineId),
+
+  // v3: methodologies
+  listMethodologies: (accountId) => ipcRenderer.invoke("methodologies:list", accountId),
+
+  // accounts
   listAccounts: () => ipcRenderer.invoke("accounts:list"),
   upsertAccount: (account) => ipcRenderer.invoke("accounts:upsert", account),
   deleteAccount: (accountId) => ipcRenderer.invoke("accounts:delete", accountId),
+
+  // studio sessions
   listSessions: () => ipcRenderer.invoke("sessions:list"),
   upsertSession: (session) => ipcRenderer.invoke("sessions:upsert", session),
   deleteSession: (sessionId) => ipcRenderer.invoke("sessions:delete", sessionId),
-  listShots: (assetProjectId) => ipcRenderer.invoke("shots:list", assetProjectId),
-  setShotsForAsset: (assetProjectId, shots) => ipcRenderer.invoke("shots:setForAsset", assetProjectId, shots),
-  // v2 业务路径 — 账号视频独立表
-  listAccountVideos: (accountId) => ipcRenderer.invoke("accountVideos:list", accountId),
-  upsertAccountVideo: (video) => ipcRenderer.invoke("accountVideos:upsert", video),
-  deleteAccountVideo: (videoId) => ipcRenderer.invoke("accountVideos:delete", videoId),
+
+  // shots
+  listShots: (videoId) => ipcRenderer.invoke("shots:list", videoId),
+  setShotsForVideo: (videoId, shots) => ipcRenderer.invoke("shots:setForVideo", videoId, shots),
+
   // 后台拉取
   startAccountFetch: (payload) => ipcRenderer.invoke("accounts:startFetch", payload),
   cancelAccountFetch: (accountId) => ipcRenderer.invoke("accounts:cancelFetch", accountId),
@@ -59,29 +85,13 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
     ipcRenderer.on("account:fetch:failed", listener);
     return () => ipcRenderer.removeListener("account:fetch:failed", listener);
   },
-  // 轻量视频摘要
-  summarizeAccountVideo: (payload) => ipcRenderer.invoke("accounts:summarizeVideo", payload),
-  cancelSummarizeVideo: (accountVideoId) => ipcRenderer.invoke("accounts:cancelSummarize", accountVideoId),
-  onAccountVideoSummaryStatus: (callback) => {
-    const listener = (_event, payload) => callback(payload);
-    ipcRenderer.on("account:video:summary:status", listener);
-    return () => ipcRenderer.removeListener("account:video:summary:status", listener);
-  },
-  generateAccountMethodology: (payload) => ipcRenderer.invoke("accounts:generateMethodology", payload),
-  generateStudioSteps: (payload) => ipcRenderer.invoke("sessions:generateSteps", payload),
-  analyzeAssetShots: (payload) => ipcRenderer.invoke("assets:analyzeShots", payload),
-  listAnalyses: (projectId) => ipcRenderer.invoke("analyses:list", projectId),
-  getAnalysis: (analysisId) => ipcRenderer.invoke("analyses:get", analysisId),
-  deleteAnalysis: (analysisId) => ipcRenderer.invoke("analyses:delete", analysisId),
-  getNodes: (analysisId) => ipcRenderer.invoke("nodes:get", analysisId),
-  setNodes: (analysisId, nodes) => ipcRenderer.invoke("nodes:set", analysisId, nodes),
-  getReport: (analysisId) => ipcRenderer.invoke("report:get", analysisId),
-  setReport: (analysisId, report) => ipcRenderer.invoke("report:set", analysisId, report),
-  analyzeProject: (payload) => ipcRenderer.invoke("analysis:start", payload),
-  cancelAnalysis: (projectId) => ipcRenderer.invoke("analysis:cancel", projectId),
-  isAnalysisActive: (projectId) => ipcRenderer.invoke("analysis:isActive", projectId),
-  getLastAnalysisProgress: (projectId) => ipcRenderer.invoke("analysis:getLastProgress", projectId),
-  getLastAnalysisBudget: (projectId) => ipcRenderer.invoke("analysis:getLastBudget", projectId),
+
+  // 分析
+  analyzeVideo: (payload) => ipcRenderer.invoke("analysis:start", payload),
+  cancelAnalysis: (videoId) => ipcRenderer.invoke("analysis:cancel", videoId),
+  isAnalysisActive: (videoId) => ipcRenderer.invoke("analysis:isActive", videoId),
+  getLastAnalysisProgress: (videoId) => ipcRenderer.invoke("analysis:getLastProgress", videoId),
+  getLastAnalysisBudget: (videoId) => ipcRenderer.invoke("analysis:getLastBudget", videoId),
   onAnalysisProgress: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("analysis:progress", listener);
@@ -92,8 +102,30 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
     ipcRenderer.on("analysis:budget", listener);
     return () => ipcRenderer.removeListener("analysis:budget", listener);
   },
-  exportProject: (payload) => ipcRenderer.invoke("project:export", payload),
+
+  // 轻量视频摘要 (内容分析管线)
+  summarizeVideo: (payload) => ipcRenderer.invoke("analysis:summarize", payload),
+  cancelSummarizeVideo: (videoId) => ipcRenderer.invoke("analysis:cancelSummarize", videoId),
+  onVideoSummaryStatus: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("analysis:summary:status", listener);
+    return () => ipcRenderer.removeListener("analysis:summary:status", listener);
+  },
+
+  // 方法论生成
+  generateAccountMethodology: (payload) => ipcRenderer.invoke("accounts:generateMethodology", payload),
+
+  // studio
+  generateStudioSteps: (payload) => ipcRenderer.invoke("sessions:generateSteps", payload),
+  analyzeVideoShots: (payload) => ipcRenderer.invoke("shots:analyze", payload),
+
+  // 导出
+  exportVideo: (payload) => ipcRenderer.invoke("video:export", payload),
+
+  // provider 测试
   testProvider: (provider) => ipcRenderer.invoke("provider:testConnection", provider),
+
+  // yt-dlp
   checkYtDlpUpdate: () => ipcRenderer.invoke("ytdlp:checkUpdate"),
   installYtDlp: () => ipcRenderer.invoke("ytdlp:install"),
   onYtDlpUpdateStatus: (callback) => {
@@ -106,9 +138,13 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
     ipcRenderer.on("ytdlp:progress", listener);
     return () => ipcRenderer.removeListener("ytdlp:progress", listener);
   },
+
+  // 数据管理
   getDataInfo: () => ipcRenderer.invoke("data:getInfo"),
   openDataFolder: (which) => ipcRenderer.invoke("data:openFolder", which),
-  purgeProjects: () => ipcRenderer.invoke("data:purgeProjects"),
+  purgeAllData: () => ipcRenderer.invoke("data:purgeAll"),
+
+  // 扩展桥
   extensionBridge: {
     getStatus: () => ipcRenderer.invoke("extensionBridge:getStatus"),
     rotateToken: () => ipcRenderer.invoke("extensionBridge:rotateToken"),
@@ -118,10 +154,14 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
       return () => ipcRenderer.removeListener("extensionBridge:status", listener);
     },
   },
+
+  // 镜像源
   mirror: {
     get: () => ipcRenderer.invoke("mirror:get"),
     set: (value) => ipcRenderer.invoke("mirror:set", value),
   },
+
+  // 本地推理
   llama: {
     listModels: () => ipcRenderer.invoke("llama:listModels"),
     listManifest: () => ipcRenderer.invoke("llama:listManifest"),
@@ -145,6 +185,8 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
       return () => ipcRenderer.removeListener("llama:log", listener);
     },
   },
+
+  // 本地音频
   whisperCpp: {
     listModels: () => ipcRenderer.invoke("whisperCpp:listModels"),
     getStatus: () => ipcRenderer.invoke("whisperCpp:getStatus"),
@@ -163,14 +205,18 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
       return () => ipcRenderer.removeListener("whisperCpp:log", listener);
     },
   },
+
+  // 诊断
   diagnostics: {
     getAnalysisSamples: () => ipcRenderer.invoke("diagnostics:getAnalysisSamples"),
-    getTokenUsage: (projectId) => ipcRenderer.invoke("diagnostics:getTokenUsage", projectId),
-    getFramesCheckpoint: (projectId) => ipcRenderer.invoke("diagnostics:getFramesCheckpoint", projectId),
-    getTranscript: (projectId) => ipcRenderer.invoke("diagnostics:getTranscript", projectId),
-    deleteSample: (projectId, startedAt) => ipcRenderer.invoke("diagnostics:deleteSample", projectId, startedAt),
+    getTokenUsage: (analysisId) => ipcRenderer.invoke("diagnostics:getTokenUsage", analysisId),
+    getFramesCheckpoint: (videoId) => ipcRenderer.invoke("diagnostics:getFramesCheckpoint", videoId),
+    getTranscript: (videoId) => ipcRenderer.invoke("diagnostics:getTranscript", videoId),
+    deleteSample: (videoId, startedAt) => ipcRenderer.invoke("diagnostics:deleteSample", videoId, startedAt),
     clearAllSamples: () => ipcRenderer.invoke("diagnostics:clearAllSamples"),
   },
+
+  // 缓存
   cache: {
     getStats: () => ipcRenderer.invoke("cache:getStats"),
     list: (params) => ipcRenderer.invoke("cache:list", params || {}),

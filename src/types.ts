@@ -682,7 +682,8 @@ export type ProjectKind = "analysis" | "asset" | "account_video";
 // 单个镜头(Shot)— 素材分镜后的最小单位
 export type Shot = {
   id: string;
-  assetProjectId: string;          // 关联到 Project.id (kind=asset)
+  videoId?: string;                 // v3: 关联到 videos.id
+  assetProjectId: string;           // v2 兼容
   shotIndex: number;
   startSec: number;
   endSec: number;
@@ -814,6 +815,94 @@ export type StudioStep = {
   }>;
   missing?: string;             // 缺失镜头描述
 };
+
+// ==================== v3 数据模型 ====================
+
+export type VideoStatus = "ready" | "downloading" | "download_failed" | "failed";
+
+export type Video = {
+  id: string;
+  title: string;
+  sourceType: "url" | "local";
+  sourceUrl?: string;
+  platform?: AccountPlatform;
+  externalId?: string;
+  localPath?: string;
+  durationSec: number;
+  width: number;
+  height: number;
+  orientation: "landscape" | "portrait" | "square";
+  thumbnailUrl?: string;
+  accountId?: string;
+  status: VideoStatus;
+  uploadDate?: string;
+  viewCount?: number;
+  likeCount?: number;
+  commentCount?: number;
+  shareCount?: number;
+  collectCount?: number;
+  tags?: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CollectionKind = "manual" | "smart" | "account";
+
+export type Collection = {
+  id: string;
+  name: string;
+  description?: string;
+  kind: CollectionKind;
+  coverUrl?: string;
+  filterRules?: Record<string, unknown>;
+  accountId?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PipelineStageDefinition = {
+  key: string;
+  label: string;
+  slot: string | null;
+};
+
+export type Pipeline = {
+  id: string;
+  name: string;
+  builtin: boolean;
+  stages: PipelineStageDefinition[];
+  slotConfig?: Record<string, SlotAssignment>;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Analysis = {
+  id: string;
+  videoId: string;
+  pipelineId: string;
+  status: AnalysisStatus;
+  options?: AnalysisOptions;
+  providerSnapshot?: Record<string, unknown>;
+  result?: unknown;
+  tokenUsage?: TokenUsageSummary;
+  durationMs?: number;
+  errorMessage?: string;
+  startedAt: string;
+  completedAt?: string;
+  createdAt: string;
+};
+
+export type Methodology = {
+  id: string;
+  accountId: string;
+  version: number;
+  data: AccountMethodology;
+  sourceVideoCount: number;
+  createdAt: string;
+};
+
+// ==================== end v3 ====================
 
 export type StudioSession = {
   id: string;

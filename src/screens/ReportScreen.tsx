@@ -289,7 +289,7 @@ export function ReportScreen() {
     if (!project || !report) return;
     setExportStatus("");
     if (window.videoAnalyzer) {
-      const result = await window.videoAnalyzer.exportProject({ project, nodes, report, provider, format });
+      const result = await window.videoAnalyzer.exportVideo({ video: project as any, analysis: { result: { nodes, report } } as any, format });
       if (!result.canceled) setExportStatus(`已导出到 ${result.filePath}`);
       return;
     }
