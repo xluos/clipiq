@@ -997,41 +997,36 @@ function VideosTab({
     window.videoAnalyzer?.cancelSummarizeVideo(avId).catch(() => {});
   }, []);
 
+  const [analyzingIds, setAnalyzingIds] = useState<Set<string>>(new Set());
+
   const fireAnalyze = useCallback(async (av: any) => {
-    if (launchedRef.current.has(av.id)) return;
+    if (analyzingIds.has(av.id) || launchedRef.current.has(av.id)) return;
     launchedRef.current.add(av.id);
+    setAnalyzingIds((prev) => new Set(prev).add(av.id));
     setRowError((m) => { const n = { ...m }; delete n[av.id]; return n; });
     try {
       if (!window.videoAnalyzer) throw new Error("浏览器预览环境不支持分析");
-      const dl = await window.videoAnalyzer.downloadVideo(av.sourceUrl);
-      const projectId = dl.videoId || `proj-${Date.now()}-${av.id}`;
-      const now = new Date().toISOString();
-      const newVideo: import("../types").Video = {
-        id: projectId,
-        title: dl.title || av.title,
-        sourceType: "url",
-        sourceUrl: av.sourceUrl,
-        platform: (av.platform === "bilibili" || av.platform === "douyin" || av.platform === "xiaohongshu" || av.platform === "tiktok") ? av.platform : "unknown",
-        localPath: dl.filePath,
-        durationSec: dl.durationSec || av.durationSec,
-        width: dl.width || 0,
-        height: dl.height || 0,
-        orientation: dl.orientation || "landscape",
-        status: "ready",
-        accountId: account.id,
-        thumbnailUrl: av.thumbnailUrl,
-        createdAt: now,
-        updatedAt: now,
-      };
-      setProjects((prev) => {
-        const filtered = prev.filter((p) => p.id !== projectId);
-        return [newVideo as any, ...filtered];
-      });
-      await window.videoAnalyzer.upsertVideo(newVideo).catch(() => {});
+      // 用原始 video ID 发起结构拆解，不创建新 video 记录
+      // 如果视频还没本地文件，先下载并更新 video 记录
+      if (!av.localPath) {
+        const dl = await window.videoAnalyzer.downloadVideo(av.sourceUrl || av.externalUrl);
+        await window.videoAnalyzer.upsertVideo({
+          ...av,
+          localPath: dl.filePath,
+          durationSec: dl.durationSec || av.durationSec,
+          width: dl.width || av.width,
+          height: dl.height || av.height,
+          orientation: dl.orientation || av.orientation,
+          updatedAt: new Date().toISOString(),
+        }).catch(() => {});
+      }
+      // 跳转到分析进度页
+      ctx.startAnalysis(av.id, "builtin-pipeline");
     } catch (e) {
       setRowError((m) => ({ ...m, [av.id]: e instanceof Error ? e.message : String(e) }));
     } finally {
       launchedRef.current.delete(av.id);
+      setAnalyzingIds((prev) => { const n = new Set(prev); n.delete(av.id); return n; });
     }
   }, [account.id, ctx, setProjects]);
 
@@ -1168,8 +1163,16 @@ function VideosTab({
                 </button>
               )}
               {svHasSummary && !sv.analysisProjectId && (
-                <button onClick={() => fireAnalyze(sv)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800">
-                  <Play className="w-3 h-3" strokeWidth={2} />拆解分析
+                <button
+                  onClick={() => fireAnalyze(sv)}
+                  disabled={analyzingIds.has(sv.id)}
+                  className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {analyzingIds.has(sv.id) ? (
+                    <><Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} />分析中…</>
+                  ) : (
+                    <><Play className="w-3 h-3" strokeWidth={2} />拆解分析</>
+                  )}
                 </button>
               )}
               {svProj && (
