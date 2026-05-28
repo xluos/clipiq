@@ -291,8 +291,13 @@ export function ProgressScreen() {
     };
 
     const launchOrAttach = async () => {
+      // 先查后端是否已有同管线在跑，或者 DB 里已有 analyzing 记录
       const alreadyRunning = await window.videoAnalyzer!.isAnalysisActive(project.id);
-      if (alreadyRunning) {
+      // 也查 analysesByVideo 里是否有 analyzing 状态的同管线记录（覆盖后端 task 已注册但 isActive 还没返回的 race）
+      const dbAnalyzing = (analysisRecordsByProject[project.id] || []).some(
+        (a) => a.status === "analyzing" && (a as any).pipelineId === "builtin-pipeline"
+      );
+      if (alreadyRunning || dbAnalyzing) {
         inAttachMode.current = true;
         // 进入 attach 模式前清掉上轮的 handled 标记。reset effect 只在 project.id 变化时跑,
         // 重试时 (同 project, status failed → analyzing) 不重置,残留的 true 会让本轮
@@ -331,11 +336,15 @@ export function ProgressScreen() {
         const raw = err instanceof Error ? err.message : String(err);
         const message = raw.replace(/^Error invoking remote method '[^']+': Error: /, "");
         if (/cancel|取消/i.test(message)) return;
+        // 如果是"已有分析在运行"，进 attach 模式而不是显示失败
+        if (/已有.*在运行|already.*running/i.test(message)) {
+          inAttachMode.current = true;
+          completionHandledRef.current = false;
+          failureHandledRef.current = false;
+          setStageLabel("后台分析任务运行中");
+          return;
+        }
         setError(message);
-        const now = new Date().toISOString();
-        setProjects(prev => prev.map(p => p.id === project.id
-          ? { ...p, status: "failed", updatedAt: now }
-          : p));
         refreshAnalysisRecords(project.id);
       }
     };
