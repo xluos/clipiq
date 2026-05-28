@@ -370,6 +370,10 @@ declare global {
       isAnalysisActive: (videoId: string) => Promise<boolean>;
       getLastAnalysisProgress: (videoId: string) => Promise<AnalysisProgressEvent | null>;
       getLastAnalysisBudget: (videoId: string) => Promise<AnalysisBudgetEvent | null>;
+      // 统一任务管理
+      listActiveTasks: () => Promise<Array<{ analysisId: string; videoId: string; pipelineId: string; cancelled: boolean; startedAt: number; lastProgress: AnalysisProgressEvent | null }>>;
+      cancelTask: (analysisId: string) => Promise<{ cancelled: boolean }>;
+      onTaskProgress: (callback: (event: AnalysisProgressEvent & { pipelineId?: string }) => void) => () => void;
       onAnalysisProgress: (callback: (event: AnalysisProgressEvent) => void) => () => void;
       onAnalysisBudget: (callback: (event: AnalysisBudgetEvent) => void) => () => void;
 

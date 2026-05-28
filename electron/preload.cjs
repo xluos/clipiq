@@ -92,6 +92,15 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
   isAnalysisActive: (videoId) => ipcRenderer.invoke("analysis:isActive", videoId),
   getLastAnalysisProgress: (videoId) => ipcRenderer.invoke("analysis:getLastProgress", videoId),
   getLastAnalysisBudget: (videoId) => ipcRenderer.invoke("analysis:getLastBudget", videoId),
+  // 统一任务进度
+  listActiveTasks: () => ipcRenderer.invoke("task:list"),
+  cancelTask: (analysisId) => ipcRenderer.invoke("task:cancel", analysisId),
+  onTaskProgress: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("task:progress", listener);
+    return () => ipcRenderer.removeListener("task:progress", listener);
+  },
+  // 兼容旧通道
   onAnalysisProgress: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("analysis:progress", listener);

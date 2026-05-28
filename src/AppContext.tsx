@@ -738,34 +738,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // 订阅轻量视频摘要状态事件
+  // 统一任务进度监听：所有管线的 task:progress 走同一个通道
+  useEffect(() => {
+    if (!window.videoAnalyzer?.onTaskProgress) return;
+    const off = window.videoAnalyzer.onTaskProgress((evt: any) => {
+      if (!evt.analysisId) return;
+      const isComplete = evt.progress >= 100 || evt.stage === "完成";
+      const isFailed = evt.stage === "失败";
+      if (isComplete || isFailed) {
+        setProgressByAnalysis((prev) => { const n = { ...prev }; delete n[evt.analysisId]; return n; });
+        if (evt.videoId) refreshAnalyses(evt.videoId);
+      } else {
+        setProgressByAnalysis((prev) => ({ ...prev, [evt.analysisId]: evt }));
+      }
+    });
+    return () => { off?.(); };
+  }, []);
+
+  // 兼容: 旧的 analysis:summary:status 通道（前端某些地方还在监听）
   useEffect(() => {
     if (!window.videoAnalyzer?.onVideoSummaryStatus) return;
     const off = window.videoAnalyzer.onVideoSummaryStatus((evt) => {
-      if (!evt.videoId) return;
-      // 把内容分析进度注入 progressByAnalysis，让 TaskQueuePanel 能看到
-      if (evt.status === "summarizing") {
-        const fakeAnalysisId = `content-${evt.videoId}`;
-        setProgressByAnalysis((prev) => ({
-          ...prev,
-          [fakeAnalysisId]: {
-            projectId: evt.videoId!,
-            videoId: evt.videoId,
-            analysisId: fakeAnalysisId,
-            progress: evt.progress ?? 0,
-            stage: evt.message || "内容分析",
-            message: evt.message,
-          } as any,
-        }));
-      }
-      if (evt.status === "done" || evt.status === "failed") {
-        // 清理临时进度
-        const fakeAnalysisId = `content-${evt.videoId}`;
-        setProgressByAnalysis((prev) => {
-          const n = { ...prev };
-          delete n[fakeAnalysisId];
-          return n;
-        });
+      if (evt.videoId && (evt.status === "done" || evt.status === "failed")) {
         refreshAnalyses(evt.videoId);
       }
     });

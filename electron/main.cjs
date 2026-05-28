@@ -453,64 +453,117 @@ async function resolveYtDlp() {
   return await commandPath("yt-dlp");
 }
 
-const activeAnalyses = new Map();
+// ── 统一任务管理器 ──
+// activeTasks: analysisId → TaskHandle。替代旧的 activeAnalyses + summaryInFlight。
+const activeTasks = new Map();
+// 兼容别名：旧代码里 activeAnalyses.has(projectId) 的地方仍在用
+const activeAnalyses = {
+  has(videoId) { return [...activeTasks.values()].some((h) => h.videoId === videoId && !h.cancelled); },
+  get(videoId) { return [...activeTasks.values()].find((h) => h.videoId === videoId && !h.cancelled); },
+};
 
-// 云端模型 TPS baseline: 启动时从 userData/eta-baselines.json 加载, 每次 analyzeProject
-// 跑完根据 eta-samples.jsonl 重算 + 写回。eta-estimator.computeBudget 把它当成"learned
-// hint" 覆盖云端 hardcoded fallback。
 let learnedBaselines = { providers: {} };
 
 class AnalysisCancelledError extends Error {
-  constructor() {
-    super("分析已取消");
-    this.name = "AnalysisCancelledError";
-  }
+  constructor() { super("分析已取消"); this.name = "AnalysisCancelledError"; }
 }
 
-function registerAnalysis(projectId) {
-  const existing = activeAnalyses.get(projectId);
-  if (existing) {
-    log.warn("analyze:lifecycle", `registerAnalysis: 覆盖已有 handle project=${projectId} existingAnalysisId=${existing.analysisId || "?"} cancelled=${existing.cancelled}`);
-  }
+function registerTask(analysisId, videoId, pipelineId) {
   const handle = {
+    analysisId,
+    videoId,
+    pipelineId,
     abortController: new AbortController(),
     children: new Set(),
     cancelled: false,
+    startedAt: Date.now(),
+    lastProgress: null,
+    budget: null,
+    tokenLedger: null,
+    timings: [],
+    heartbeat: null,
   };
-  activeAnalyses.set(projectId, handle);
+  activeTasks.set(analysisId, handle);
   return handle;
 }
 
-function clearAnalysis(projectId, expectedHandle) {
-  const current = activeAnalyses.get(projectId);
-  if (expectedHandle && current !== expectedHandle) {
-    log.info("analyze:lifecycle", `clearAnalysis: guard 阻止清除 project=${projectId} — expectedAnalysisId=${expectedHandle?.analysisId || "?"} currentAnalysisId=${current?.analysisId || "?"} (新分析已接管)`);
-    return;
-  }
-  log.info("analyze:lifecycle", `clearAnalysis: 清除 project=${projectId} analysisId=${current?.analysisId || "?"} cancelled=${current?.cancelled}`);
-  if (current?.heartbeat) clearInterval(current.heartbeat);
-  activeAnalyses.delete(projectId);
+// 兼容别名
+function registerAnalysis(videoId) {
+  const fakeId = `legacy-${videoId}-${Date.now()}`;
+  return registerTask(fakeId, videoId, "builtin-pipeline");
+}
+
+function clearTask(analysisId) {
+  const handle = activeTasks.get(analysisId);
+  if (handle?.heartbeat) clearInterval(handle.heartbeat);
+  activeTasks.delete(analysisId);
   _activeCachePolicy = null;
 }
 
-function cancelAnalysis(projectId) {
-  const handle = activeAnalyses.get(projectId);
-  if (!handle) {
-    log.warn("analyze:lifecycle", `cancelAnalysis: 无 handle project=${projectId}, 可能已被清理`);
-    return false;
+function clearAnalysis(videoId, expectedHandle) {
+  // 兼容: 按 videoId 找并清除
+  for (const [aid, h] of activeTasks) {
+    if (h.videoId === videoId) {
+      if (expectedHandle && h !== expectedHandle) continue;
+      clearTask(aid);
+      return;
+    }
   }
-  log.info("analyze:lifecycle", `cancelAnalysis: 取消 project=${projectId} analysisId=${handle.analysisId || "?"} childCount=${handle.children.size}`);
+}
+
+function cancelTask(analysisId) {
+  const handle = activeTasks.get(analysisId);
+  if (!handle) return false;
   handle.cancelled = true;
   handle.cancelledAt = Date.now();
   handle.abortController.abort();
   for (const child of handle.children) {
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // already dead
-    }
+    try { child.kill("SIGTERM"); } catch { /* already dead */ }
   }
   return true;
+}
+
+function cancelAnalysis(videoId) {
+  // 兼容: 按 videoId 取消
+  for (const [aid, h] of activeTasks) {
+    if (h.videoId === videoId && !h.cancelled) return cancelTask(aid);
+  }
+  return false;
+}
+
+function emitTaskProgress(analysisId, { progress, stage, message }) {
+  const handle = activeTasks.get(analysisId);
+  if (!handle) return;
+  const payload = {
+    analysisId,
+    videoId: handle.videoId,
+    pipelineId: handle.pipelineId,
+    // 兼容旧字段名
+    projectId: handle.videoId,
+    progress,
+    stage,
+    message: message || "",
+  };
+  handle.lastProgress = payload;
+  broadcastToWindows("task:progress", payload);
+  // 兼容: 旧的 analysis:progress 通道也发一份，让 ProgressScreen 不崩
+  broadcastToWindows("analysis:progress", payload);
+}
+
+function isTaskActiveForVideo(videoId, pipelineId) {
+  for (const h of activeTasks.values()) {
+    if (h.videoId === videoId && !h.cancelled) {
+      if (!pipelineId || h.pipelineId === pipelineId) return true;
+    }
+  }
+  return false;
+}
+
+function getTaskForVideo(videoId) {
+  for (const h of activeTasks.values()) {
+    if (h.videoId === videoId && !h.cancelled) return h;
+  }
+  return null;
 }
 
 function ensureNotCancelled(handle) {
@@ -7658,8 +7711,6 @@ app.whenReady().then(async () => {
   });
 
   // ── 轻量视频摘要管线 ──
-  if (!global.__summaryInFlight) global.__summaryInFlight = new Map();
-  const summaryInFlight = global.__summaryInFlight;
 
   async function summarizeAccountVideo(videoId, slotOverrides, customPrompt) {
     const accountVideoId = videoId;
@@ -7668,27 +7719,18 @@ app.whenReady().then(async () => {
     const videoRow = db.prepare("SELECT * FROM videos WHERE id = ?").get(videoId);
     if (!videoRow) throw new Error("视频不存在");
     const av = rowToVideo(videoRow);
-    // 兼容旧字段: summarizeAccountVideo 内部仍用 av.externalUrl / av.playUrl 等
     av.externalUrl = av.sourceUrl;
     av.localVideoPath = av.localPath;
     log.info("summary", `视频: ${av.title?.slice(0, 40)} url=${av.sourceUrl?.slice(0, 60)}`);
 
-    const state = { cancelled: false, startedAt: Date.now() };
-    summaryInFlight.set(videoId, state);
-
-    const sendStatus = (status, extra) => {
-      broadcastToWindows("analysis:summary:status", { videoId, status, ...extra });
-    };
-
-    // v3: 如果已有 completed 的内容分析，直接返回
+    // 已有 completed 的内容分析 → 直接返回
     const existingAnalysis = db.prepare(
       "SELECT id, result FROM analyses WHERE video_id = ? AND pipeline_id = 'builtin-content' AND status = 'completed' ORDER BY created_at DESC LIMIT 1"
     ).get(videoId);
     if (existingAnalysis?.result) {
       log.info("summary", `已有完成的内容分析 ${existingAnalysis.id}，直接返回`);
       const cached = JSON.parse(existingAnalysis.result);
-      sendStatus("done", { summary: cached, progress: 100 });
-      summaryInFlight.delete(videoId);
+      emitTaskProgress(`cached-${existingAnalysis.id}`, { progress: 100, stage: "完成", message: "已有结果" });
       return { ok: true, summary: cached };
     }
 
@@ -7698,15 +7740,23 @@ app.whenReady().then(async () => {
       "INSERT INTO analyses (id, video_id, pipeline_id, status, started_at, created_at) VALUES (?, ?, 'builtin-content', 'analyzing', ?, ?)"
     ).run(analysisId, videoId, analysisStartedAt, analysisStartedAt);
 
-    sendStatus("summarizing", { progress: 0 });
+    // 注册到统一任务管理器
+    const taskHandle = registerTask(analysisId, videoId, "builtin-content");
+    const send = (progress, stage, message) => emitTaskProgress(analysisId, { progress, stage, message });
+    // 兼容: 旧 sendStatus 也通过 analysis:summary:status 发一份
+    const sendStatus = (status, extra) => {
+      broadcastToWindows("analysis:summary:status", { videoId, status, ...extra });
+    };
+
+    send(0, "内容分析", "开始");
 
     try {
-      const checkCancel = () => { if (state.cancelled) throw new Error("__cancelled__"); };
-      const handle = { get cancelled() { return state.cancelled; }, abortController: new AbortController(), children: new Set() };
+      const checkCancel = () => { if (taskHandle.cancelled) throw new Error("__cancelled__"); };
+      const handle = taskHandle;
 
       // 1) 下载视频
       log.info("summary", `[1/6] 下载视频, url=${av.externalUrl?.slice(0, 80)} playUrl=${av.playUrl ? "有" : "无"}`);
-      sendStatus("summarizing", { progress: 5, message: "下载视频" });
+      send(5, "下载视频", "下载视频文件");
       const artifactDir = path.join(app.getPath("userData"), "accounts", av.accountId, "videos", av.externalId);
       await fs.mkdir(artifactDir, { recursive: true });
       log.info("summary", `artifactDir=${artifactDir}`);
@@ -7722,14 +7772,14 @@ app.whenReady().then(async () => {
             projectId: `summary-${accountVideoId}`,
             mediaDir: artifactDir,
             handle,
-            onProgress: (p, s, m) => sendStatus("summarizing", { progress: 5 + Math.round(p * 0.2), message: m || s }),
+            onProgress: (p, s, m) => send(5 + Math.round(p * 0.2), "下载视频", m || s),
           });
           videoPath = dl.filePath;
         } catch (dlErr) {
           log.warn("summary", `yt-dlp 下载失败: ${dlErr?.message || dlErr}, 尝试 play_url 直连`);
           // fallback: 用 play_url 直连下载 (参考 douyin-crawler-demo)
           if (av.playUrl) {
-            sendStatus("summarizing", { progress: 10, message: "直连下载" });
+            send(10, "内容分析", "直连下载");
             const filePath = path.join(artifactDir, `${av.externalId || "video"}.mp4`);
             const partPath = filePath + ".part";
             const res = await fetch(av.playUrl, {
@@ -7756,7 +7806,7 @@ app.whenReady().then(async () => {
 
       // 2) 读取视频信息
       log.info("summary", `[2/6] 读取视频信息: ${videoPath}`);
-      sendStatus("summarizing", { progress: 28, message: "读取视频信息" });
+      send(28, "内容分析", "读取视频信息");
       const ffmpegPath = await commandPath("ffmpeg");
       log.info("summary", `ffmpeg=${ffmpegPath || "(未安装)"}`);
       const inspected = await inspectVideo(videoPath);
@@ -7765,7 +7815,7 @@ app.whenReady().then(async () => {
 
       // 3) 检测镜头切换
       log.info("summary", `[3/6] 检测镜头切换, threshold=0.3`);
-      sendStatus("summarizing", { progress: 32, message: "检测镜头" });
+      send(32, "内容分析", "检测镜头");
       let scenes = [];
       if (ffmpegPath) {
         scenes = await detectScenes(ffmpegPath, videoPath, 0.3, handle);
@@ -7778,12 +7828,12 @@ app.whenReady().then(async () => {
       // 4) 抽取关键画面 (8-12 帧)
       const targetCount = Math.min(12, Math.max(6, scenes.length || 6));
       log.info("summary", `[4/6] 抽取关键画面, 目标 ${targetCount} 帧 (scenes=${scenes.length})`);
-      sendStatus("summarizing", { progress: 38, message: "抽取关键画面" });
+      send(38, "内容分析", "抽取关键画面");
       const plan = planFramePlan(scenes, inspected.durationSec, targetCount);
       const framesDir = path.join(artifactDir, "frames");
       await fs.mkdir(framesDir, { recursive: true });
       const { frames, skipped } = await buildFrames(ffmpegPath, videoPath, plan, framesDir, handle,
-        (i, total) => sendStatus("summarizing", { progress: 38 + Math.round((i / total) * 12), message: `抽帧 ${i + 1}/${total}` }),
+        (i, total) => send(38 + Math.round((i / total) * 12), "抽帧", `抽帧 ${i + 1}/${total}`),
       );
       log.info("summary", `抽帧完成: ${frames.length} 帧 (跳过相似 ${skipped || 0}), framesDir=${framesDir}`);
       checkCancel();
@@ -7796,7 +7846,7 @@ app.whenReady().then(async () => {
       if (slotOverrides) cfg = applySlotOverrides(cfg, slotOverrides);
 
       log.info("summary", `[5/6] 识别字幕, hasAudio=${inspected.hasAudio}`);
-      sendStatus("summarizing", { progress: 52, message: "识别字幕" });
+      send(52, "内容分析", "识别字幕");
       let transcript = null;
       // 优先复用已有的 transcript 缓存
       const transcriptCachePath = path.join(artifactDir, "transcript.json");
@@ -7814,7 +7864,7 @@ app.whenReady().then(async () => {
           checkCancel();
           log.info("summary", "开始语音转文字");
           transcript = await transcribeAudio(audioProvider, wavPath, handle,
-            (p) => sendStatus("summarizing", { progress: 52 + Math.round(18 * (p?.progress || 0)), message: "识别字幕" }),
+            (p) => send(52 + Math.round(18 * (p?.progress || 0)), "识别字幕", "识别字幕"),
           );
           log.info("summary", `字幕识别完成: ${transcript?.text?.length || 0} 字, segments=${transcript?.segments?.length || 0}`);
           // 写入缓存
@@ -7831,7 +7881,7 @@ app.whenReady().then(async () => {
 
       // 6) LLM 生成内容分析
       log.info("summary", `[6/6] LLM 内容分析, 帧=${frames.length} 字幕=${transcript?.text?.length || 0}字`);
-      sendStatus("summarizing", { progress: 75, message: "LLM 内容分析" });
+      send(75, "内容分析", "LLM 内容分析");
       const visionProvider = resolveSlotProvider(cfg, "complex_vision");
       const textProvider = resolveSlotProvider(cfg, "medium_text");
 
@@ -7924,25 +7974,27 @@ app.whenReady().then(async () => {
         db.prepare("UPDATE videos SET local_path = ?, updated_at = ? WHERE id = ?")
           .run(videoPath, Date.now(), videoId);
       }
+      send(100, "完成", "内容分析完成");
       sendStatus("done", { summary: videoSummary, progress: 100 });
       return { ok: true, summary: videoSummary };
 
     } catch (err) {
       const msg = err?.message || String(err);
-      const isCancel = msg === "__cancelled__" || state.cancelled;
+      const isCancel = msg === "__cancelled__" || taskHandle.cancelled;
       db.prepare(
         "UPDATE analyses SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?"
       ).run(isCancel ? null : msg, Date.now(), analysisId);
+      send(0, "失败", isCancel ? "已取消" : msg);
       sendStatus(isCancel ? "idle" : "failed", { error: isCancel ? undefined : msg });
       if (!isCancel) throw err;
     } finally {
-      summaryInFlight.delete(accountVideoId);
+      clearTask(analysisId);
     }
   }
 
   ipcMain.handle("analysis:summarize", async (_event, { videoId, slotOverrides, customPrompt } = {}) => {
     if (!videoId) throw new Error("analysis:summarize 需要 videoId");
-    if (summaryInFlight.has(videoId)) {
+    if (isTaskActiveForVideo(videoId, "builtin-content")) {
       return { ok: true, accepted: false, reason: "already in flight" };
     }
     summarizeAccountVideo(videoId, slotOverrides || undefined, customPrompt || undefined).catch((err) => {
@@ -7952,10 +8004,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("analysis:cancelSummarize", async (_event, videoId) => {
-    const state = summaryInFlight.get(videoId);
-    if (!state) return { ok: true, cancelled: false };
-    state.cancelled = true;
-    return { ok: true, cancelled: true };
+    return { ok: true, cancelled: cancelAnalysis(videoId) };
   });
 
   // v2: 跨视频 methodology LLM 汇总
@@ -8252,6 +8301,26 @@ app.whenReady().then(async () => {
   ipcMain.handle("analysis:getLastBudget", async (_event, videoId) => {
     const handle = activeAnalyses.get(videoId);
     return handle?.budget || null;
+  });
+
+  // 统一任务管理 IPC
+  ipcMain.handle("task:list", async () => {
+    const tasks = [];
+    for (const [analysisId, h] of activeTasks) {
+      tasks.push({
+        analysisId,
+        videoId: h.videoId,
+        pipelineId: h.pipelineId,
+        cancelled: h.cancelled,
+        startedAt: h.startedAt,
+        lastProgress: h.lastProgress,
+      });
+    }
+    return tasks;
+  });
+
+  ipcMain.handle("task:cancel", async (_event, analysisId) => {
+    return { cancelled: cancelTask(analysisId) };
   });
 
   ipcMain.handle("video:export", async (_event, { video, analysis, format }) => {
