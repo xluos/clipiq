@@ -43,6 +43,8 @@ interface AppState {
   setVideos: React.Dispatch<React.SetStateAction<Video[]>>;
   activeVideoId: string | null;
   setActiveVideoId: (id: string | null) => void;
+  activeAnalysisId: string | null;
+  setActiveAnalysisId: (id: string | null) => void;
 
   // v3 兼容别名 (旧 UI 用 projects/activeProjectId 的地方不崩)
   /** @deprecated use videos */
@@ -195,6 +197,7 @@ const SIDEBAR_COLLAPSED_KEY = "clipiq-sidebar-collapsed";
 // 模块切换时的默认子屏
 const MODULE_DEFAULT_SCREEN: Record<Exclude<AppModule, "settings" | "diagnostics">, AppLocation> = {
   analysis: { module: "analysis", screen: "home" },
+  video: { module: "video", screen: "list" },
   library: { module: "library", screen: "list" },
   account: { module: "account", screen: "list" },
   studio: { module: "studio", screen: "list" },
@@ -231,6 +234,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // 旧 useState<ScreenState>("home") 已被上方 currentLocation/currentScreen useMemo 取代
   const [videos, setVideos] = useState<Video[]>([]);
   const [activeVideoId, setActiveVideoId] = useState<string | null>(null);
+  const [activeAnalysisId, setActiveAnalysisId] = useState<string | null>(null);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [providers, setProviders] = useState<ModelProvider[]>(DEFAULT_PROVIDERS);
@@ -966,6 +970,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setVideos,
         activeVideoId,
         setActiveVideoId,
+        activeAnalysisId,
+        setActiveAnalysisId,
         collections,
         setCollections,
         pipelines,

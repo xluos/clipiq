@@ -5,6 +5,7 @@ import { UrlPullScreen } from './screens/UrlPullScreen';
 import { ProgressScreen } from './screens/ProgressScreen';
 import { WorkspaceScreen } from './screens/WorkspaceScreen';
 import { ReportScreen } from './screens/ReportScreen';
+import { VideoScreen } from './screens/VideoScreen';
 import { LibraryScreen } from './screens/LibraryScreen';
 import { AccountScreen } from './screens/AccountScreen';
 import { StudioScreen } from './screens/StudioScreen';
@@ -43,6 +44,7 @@ export default function App() {
                 {currentLocation.module === 'analysis' && currentLocation.screen === 'progress' && <ProgressScreen />}
                 {currentLocation.module === 'analysis' && currentLocation.screen === 'workspace' && <WorkspaceScreen />}
                 {currentLocation.module === 'analysis' && currentLocation.screen === 'report' && <ReportScreen />}
+                {currentLocation.module === 'video' && <VideoScreen />}
                 {currentLocation.module === 'library' && <LibraryScreen />}
                 {currentLocation.module === 'account' && <AccountScreen />}
                 {currentLocation.module === 'studio' && <StudioScreen />}

@@ -656,10 +656,11 @@ export type AppConfig = {
 
 // v2: 两层路由结构,替代扁平 ScreenState。
 // 老的 7 屏全部归到 module: "analysis" 下。新模块作为并列入口。
-export type AppModule = "analysis" | "library" | "account" | "studio" | "settings" | "diagnostics";
+export type AppModule = "analysis" | "video" | "library" | "account" | "studio" | "settings" | "diagnostics";
 
 export type AppLocation =
   | { module: "analysis";  screen: "home" | "progress" | "workspace" | "report" | "url_pull" }
+  | { module: "video";     screen: "list" | "detail" }
   | { module: "library";   screen: "list" | "upload" | "shot-list" | "shot-detail" }
   | { module: "account";   screen: "list" | "detail" | "methodology" }
   | { module: "studio";    screen: "list" | "editor" }

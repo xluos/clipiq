@@ -38,6 +38,7 @@ import {
   Loader2,
   AlertTriangle,
   Trash2,
+  BarChart3,
 } from "lucide-react";
 
 export function AccountScreen() {
@@ -1112,13 +1113,15 @@ function VideosTab({
   }
 
   // ── 二级详情页 ──
+  const [detailTab, setDetailTab] = useState<"content" | "pipeline">("content");
+
   if (selectedVideo) {
     const sv = selectedVideo;
     const svLive = liveProgress[sv.id];
     const svSummarizing = sv.summaryStatus === "summarizing" || launchedRef.current.has(sv.id);
     const svHasSummary = sv.summaryStatus === "done" && !!sv.videoSummary;
     const svFailed = sv.summaryStatus === "failed";
-    const svProj = sv.analysisProjectId ? projects.find((p) => p.id === sv.analysisProjectId) : undefined;
+    const hasPipelineAnalysis = sv.analysisProjectId;
 
     return (
       <div className="space-y-4">
@@ -1142,15 +1145,50 @@ function VideosTab({
               {sv.commentCount ? <span>· {formatCount(sv.commentCount)}评</span> : null}
               {sv.uploadDate && <span>· {formatUploadDate(sv.uploadDate)}</span>}
             </div>
-            <div className="flex items-center gap-2 mt-3">
+          </div>
+        </div>
+
+        {/* 双 tab 切换 */}
+        <div className="flex items-center gap-1 border-b border-slate-200 dark:border-slate-800">
+          <button
+            onClick={() => setDetailTab("content")}
+            className={`px-3 py-2 text-[13px] font-medium border-b-2 transition-colors ${
+              detailTab === "content"
+                ? "border-indigo-600 text-indigo-700 dark:text-indigo-300"
+                : "border-transparent text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+            }`}
+          >
+            <Sparkles className="w-3 h-3 inline mr-1" strokeWidth={2} />
+            内容分析
+            {svHasSummary && <span className="ml-1.5 px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-[10px]">完成</span>}
+            {svSummarizing && <span className="ml-1.5 px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 text-[10px]">分析中</span>}
+          </button>
+          <button
+            onClick={() => setDetailTab("pipeline")}
+            className={`px-3 py-2 text-[13px] font-medium border-b-2 transition-colors ${
+              detailTab === "pipeline"
+                ? "border-indigo-600 text-indigo-700 dark:text-indigo-300"
+                : "border-transparent text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+            }`}
+          >
+            <BarChart3 className="w-3 h-3 inline mr-1" strokeWidth={2} />
+            结构拆解
+            {hasPipelineAnalysis && <span className="ml-1.5 px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-[10px]">完成</span>}
+          </button>
+        </div>
+
+        {/* 内容分析 tab */}
+        {detailTab === "content" && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
               {!svHasSummary && !svSummarizing && !svFailed && (
                 <button onClick={() => setConfigTarget(sv.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white">
-                  <Sparkles className="w-3 h-3" strokeWidth={2} />内容分析
+                  <Sparkles className="w-3 h-3" strokeWidth={2} />开始内容分析
                 </button>
               )}
               {svFailed && (
                 <button onClick={() => setConfigTarget(sv.id)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300">
-                  <AlertTriangle className="w-3 h-3" strokeWidth={2} />重试分析
+                  <AlertTriangle className="w-3 h-3" strokeWidth={2} />重试
                 </button>
               )}
               {svSummarizing && (
@@ -1163,34 +1201,12 @@ function VideosTab({
                   <RefreshCw className="w-3 h-3" strokeWidth={2} />重新分析
                 </button>
               )}
-              {svHasSummary && !sv.analysisProjectId && (
-                <button
-                  onClick={() => fireAnalyze(sv)}
-                  disabled={analyzingIds.has(sv.id)}
-                  className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {analyzingIds.has(sv.id) ? (
-                    <><Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} />分析中…</>
-                  ) : (
-                    <><Play className="w-3 h-3" strokeWidth={2} />拆解分析</>
-                  )}
-                </button>
-              )}
-              {svProj && (
-                <button onClick={() => openVideoDetail(sv)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30">
-                  <ChevronRight className="w-3 h-3" strokeWidth={2} />查看拆解结果
-                </button>
-              )}
             </div>
-          </div>
-        </div>
-
-        {/* 分析进度 */}
-        {svSummarizing && (
-          <div className="rounded-lg border border-indigo-200 dark:border-indigo-800/50 bg-indigo-50/60 dark:bg-indigo-950/30 p-4">
-            <div className="flex items-center gap-2 text-[13px] font-medium text-indigo-800 dark:text-indigo-200">
-              <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
-              <span>{svLive?.message || "分析中"}</span>
+            {svSummarizing && (
+              <div className="rounded-lg border border-indigo-200 dark:border-indigo-800/50 bg-indigo-50/60 dark:bg-indigo-950/30 p-4">
+                <div className="flex items-center gap-2 text-[13px] font-medium text-indigo-800 dark:text-indigo-200">
+                  <Loader2 className="w-4 h-4 animate-spin" strokeWidth={2} />
+                  <span>{svLive?.message || "分析中"}</span>
               <span className="ml-auto font-mono">{svLive?.progress ?? 0}%</span>
             </div>
             <div className="mt-2 h-2 rounded-full bg-indigo-100 dark:bg-indigo-900/40 overflow-hidden">
@@ -1211,10 +1227,41 @@ function VideosTab({
           <SummaryDetail summary={sv.videoSummary!} analysisProjectId={sv.analysisProjectId} onOpenAnalysis={() => openVideoDetail(sv)} />
         )}
 
-        {/* 行错误 */}
-        {rowError[sv.id] && (
-          <div className="rounded-lg border border-rose-200 dark:border-rose-900/50 bg-rose-50 dark:bg-rose-950/30 p-3 text-[12.5px] text-rose-700 dark:text-rose-300">
-            {rowError[sv.id]}
+          {/* 行错误 */}
+          {rowError[sv.id] && (
+            <div className="rounded-lg border border-rose-200 dark:border-rose-900/50 bg-rose-50 dark:bg-rose-950/30 p-3 text-[12.5px] text-rose-700 dark:text-rose-300">
+              {rowError[sv.id]}
+            </div>
+          )}
+          </div>
+        )}
+
+        {/* 结构拆解 tab */}
+        {detailTab === "pipeline" && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => fireAnalyze(sv)}
+                disabled={analyzingIds.has(sv.id)}
+                className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {analyzingIds.has(sv.id) ? (
+                  <><Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} />分析中…</>
+                ) : (
+                  <><BarChart3 className="w-3 h-3" strokeWidth={2} />{hasPipelineAnalysis ? "重新拆解" : "开始拆解"}</>
+                )}
+              </button>
+              {hasPipelineAnalysis && (
+                <button onClick={() => openVideoDetail(sv)} className="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30">
+                  <ChevronRight className="w-3 h-3" strokeWidth={2} />查看完整报告
+                </button>
+              )}
+            </div>
+            {!hasPipelineAnalysis && !analyzingIds.has(sv.id) && (
+              <div className="rounded-lg border border-dashed border-slate-200 dark:border-slate-700 px-4 py-8 text-center text-[12.5px] text-slate-500">
+                还没有结构拆解记录。点击上方按钮开始完整的视频结构分析。
+              </div>
+            )}
           </div>
         )}
 

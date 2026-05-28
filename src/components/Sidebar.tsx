@@ -10,6 +10,7 @@ import { useYtDlpUpdateStatus } from "../hooks/useYtDlpUpdateStatus";
 import type { AppModule } from "../types";
 import {
   BarChart3,
+  Film,
   Folder,
   UserSquare,
   Wand2,
@@ -36,6 +37,7 @@ export function Sidebar() {
 
   const items: Item[] = [
     { id: "analysis", label: "分析",     icon: <BarChart3 className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },
+    { id: "video",    label: "视频",     icon: <Film className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },
     { id: "library",  label: "素材库",    icon: <Folder className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },
     { id: "account",  label: "账号分析",  icon: <UserSquare className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },
     { id: "studio",   label: "剪辑助手",  icon: <Wand2 className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },

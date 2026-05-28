@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, RefreshCw } from "lucide-react";
 import { Fragment, type FunctionComponent, useCallback, useEffect, useState } from "react";
+import { useApp } from "../AppContext";
 import type { FramesCheckpoint, TranscriptData } from "../electron-api";
 import type { AnalysisNode, AnalysisReport, Project, TokenUsageSummary } from "../types";
 import { PipelineStagePanel, fmtDuration, fmtTokens, type StageStat } from "./pipeline/PipelineStagePanel";
@@ -95,6 +96,7 @@ const StatBox: FunctionComponent<{ label: string; value: string; sub?: string }>
 );
 
 export const PipelineView: FunctionComponent<Props> = ({ projectId, project, onBack }) => {
+  const { activeAnalysisId: ctxAnalysisId } = useApp();
   const [data, setData] = useState<PipelineData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -109,7 +111,7 @@ export const PipelineView: FunctionComponent<Props> = ({ projectId, project, onB
       return;
     }
     try {
-      const analysisId = project?.currentAnalysisId || projectId;
+      const analysisId = ctxAnalysisId || project?.currentAnalysisId || projectId;
       const [reportRes, nodesRes, cpRes, trRes, tuRes] = await Promise.all([
         api.getAnalysis(analysisId),
         api.getAnalysis(analysisId),

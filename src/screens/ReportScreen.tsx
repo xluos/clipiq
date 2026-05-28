@@ -110,16 +110,20 @@ function formatDuration(ms: number) {
 }
 
 export function ReportScreen() {
-  const { setCurrentScreen, reportByAnalysis, activeProjectId, projects, setProjects, nodesByAnalysis, providers, startAnalysisForProject, analysisRecordsByProject } = useApp();
+  const { setCurrentScreen, reportByAnalysis, activeProjectId, activeAnalysisId, projects, setProjects, nodesByAnalysis, providers, startAnalysisForProject, analysisRecordsByProject, analysesByVideo } = useApp();
   const [exportStatus, setExportStatus] = useState("");
   const [activeSection, setActiveSection] = useState<string>("summary");
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const project = projects.find(p => p.id === activeProjectId);
-  const currentAnalysisId = project?.currentAnalysisId || "";
-  const report = reportByAnalysis[currentAnalysisId];
-  const nodes = nodesByAnalysis[currentAnalysisId] || [];
-  const currentRecord = (analysisRecordsByProject[project?.id || ""] || []).find((r) => r.id === currentAnalysisId);
+  // v3: 优先用 activeAnalysisId，fallback 到 video 的最新分析
+  const resolvedAnalysisId = activeAnalysisId
+    || project?.currentAnalysisId
+    || (analysesByVideo[activeProjectId || ""] || [])[0]?.id
+    || "";
+  const report = reportByAnalysis[resolvedAnalysisId];
+  const nodes = nodesByAnalysis[resolvedAnalysisId] || [];
+  const currentRecord = (analysisRecordsByProject[project?.id || ""] || []).find((r) => r.id === resolvedAnalysisId);
   const provider = providers.find(p => p.id === currentRecord?.providerId);
 
   useEffect(() => {

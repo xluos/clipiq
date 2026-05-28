@@ -28,10 +28,13 @@ const EMOTION_ZH: Record<DanmakuEmotionAxis | "neutral", string> = {
 };
 
 export function WorkspaceScreen() {
-  const { setCurrentScreen, projects, activeProjectId, nodesByAnalysis, setNodesForAnalysis, reportByAnalysis, startAnalysisForProject, analysisRecordsByProject, switchAnalysis } = useApp();
+  const { setCurrentScreen, projects, activeProjectId, activeAnalysisId: ctxAnalysisId, nodesByAnalysis, setNodesForAnalysis, reportByAnalysis, startAnalysisForProject, analysisRecordsByProject, analysesByVideo, switchAnalysis } = useApp();
 
   const project = projects.find(p => p.id === activeProjectId);
-  const currentAnalysisId = project?.currentAnalysisId || "";
+  const currentAnalysisId = ctxAnalysisId
+    || project?.currentAnalysisId
+    || (analysesByVideo[activeProjectId || ""] || [])[0]?.id
+    || "";
   const nodes = nodesByAnalysis[currentAnalysisId] || [];
   const report = currentAnalysisId ? reportByAnalysis[currentAnalysisId] : undefined;
   const shotContexts = report?.shotContexts || [];

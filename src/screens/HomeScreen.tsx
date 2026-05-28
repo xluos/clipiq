@@ -166,31 +166,44 @@ export function HomeScreen() {
   const canSubmit = source.kind === "url" || source.kind === "file";
 
   const { analysesByVideo } = useApp();
+
+  // 首页展示结构拆解分析记录（builtin-pipeline），按视频去重取最新
+  type AnalysisEntry = { analysis: import("../types").Analysis; video: Project };
   const { inProgress, completed, broken, all } = useMemo(() => {
-    // 只展示有分析记录的视频（或正在分析中的）
-    const withAnalyses = projects.filter((p) => {
-      const analyses = analysesByVideo[p.id];
-      return (analyses && analyses.length > 0) || p.status === "analyzing" || p.status === "downloading";
-    });
-    const sorted = withAnalyses.sort(
-      (a, b) =>
-        new Date(b.updatedAt || b.createdAt || 0).getTime() -
-        new Date(a.updatedAt || a.createdAt || 0).getTime(),
-    );
-    const inProgress: Project[] = [];
-    const completed: Project[] = [];
-    const broken: Project[] = [];
-    for (const p of sorted) {
-      const analyses = analysesByVideo[p.id] || [];
-      const latestStatus = analyses[0]?.status;
-      if (latestStatus === "completed" || p.status === "completed") completed.push(p);
-      else if (latestStatus === "failed" || p.status === "failed" || p.status === "download_failed") broken.push(p);
-      else inProgress.push(p);
+    const entries: AnalysisEntry[] = [];
+    const seen = new Set<string>();
+    // 遍历所有视频的分析记录
+    for (const video of projects) {
+      const analyses = analysesByVideo[video.id] || [];
+      const pipelineAnalyses = analyses.filter((a) => a.pipelineId === "builtin-pipeline");
+      if (pipelineAnalyses.length === 0) {
+        // 正在分析中的视频也展示
+        if (video.status === "analyzing" || video.status === "downloading") {
+          entries.push({ analysis: { id: "", videoId: video.id, pipelineId: "builtin-pipeline", status: "analyzing", startedAt: video.updatedAt, createdAt: video.updatedAt } as any, video });
+          seen.add(video.id);
+        }
+        continue;
+      }
+      const latest = pipelineAnalyses[0];
+      if (!seen.has(video.id)) {
+        entries.push({ analysis: latest, video });
+        seen.add(video.id);
+      }
     }
-    return { inProgress, completed, broken, all: sorted };
+    entries.sort((a, b) => new Date(b.analysis.createdAt || 0).getTime() - new Date(a.analysis.createdAt || 0).getTime());
+
+    const inProgress: AnalysisEntry[] = [];
+    const completed: AnalysisEntry[] = [];
+    const broken: AnalysisEntry[] = [];
+    for (const e of entries) {
+      if (e.analysis.status === "completed") completed.push(e);
+      else if (e.analysis.status === "failed") broken.push(e);
+      else inProgress.push(e);
+    }
+    return { inProgress, completed, broken, all: entries };
   }, [projects, analysesByVideo]);
 
-  const visibleProjects = useMemo(() => {
+  const visibleEntries = useMemo(() => {
     switch (tab) {
       case "inProgress": return inProgress;
       case "completed": return completed;
@@ -356,16 +369,25 @@ export function HomeScreen() {
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   };
 
-  const handleDelete = async (event: MouseEvent<HTMLButtonElement>, projectId: string) => {
+  const { setActiveAnalysisId, refreshAnalyses } = useApp();
+
+  const handleDeleteAnalysis = async (event: MouseEvent<HTMLButtonElement>, analysisId: string) => {
     event.stopPropagation();
     const ok = await confirm({
-      title: "删除项目",
-      description: "确定要删除这个项目吗?分析结果会一同删除。",
+      title: "删除分析记录",
+      description: "只删除这条分析记录，视频本体不受影响。",
       confirmLabel: "删除",
       destructive: true,
     });
     if (!ok) return;
-    removeProject(projectId);
+    if (window.videoAnalyzer) {
+      await window.videoAnalyzer.deleteAnalysis(analysisId).catch(() => {});
+    }
+    // 刷新分析列表
+    // 简单做法：重新加载所有视频的分析
+    for (const v of projects) {
+      refreshAnalyses(v.id);
+    }
   };
 
   const handleDragEnter = (event: DragEvent<HTMLElement>) => {
@@ -639,21 +661,29 @@ export function HomeScreen() {
                 <span>状态</span>
                 <span />
               </div>
-              {visibleProjects.length === 0 ? (
+              {visibleEntries.length === 0 ? (
                 <div className="text-center py-12 text-sm text-slate-400 dark:text-slate-500">
-                  {tab === "inProgress" && "暂无进行中项目"}
-                  {tab === "completed" && "暂无已完成项目"}
-                  {tab === "broken" && "暂无失败项目"}
-                  {tab === "all" && "暂无项目"}
+                  {tab === "inProgress" && "暂无进行中的分析"}
+                  {tab === "completed" && "暂无已完成的分析"}
+                  {tab === "broken" && "暂无失败的分析"}
+                  {tab === "all" && "暂无分析记录，粘贴链接或拖入视频开始"}
                 </div>
               ) : (
                 <div className="divide-y divide-slate-100 dark:divide-slate-900">
-                  {visibleProjects.map(proj => (
+                  {visibleEntries.map(({ analysis, video: proj }) => (
                     <ProjectRow
-                      key={proj.id}
+                      key={analysis.id || proj.id}
                       project={proj}
-                      onOpen={() => goToProject(proj)}
-                      onDelete={(e) => handleDelete(e, proj.id)}
+                      onOpen={() => {
+                        setActiveProjectId(proj.id);
+                        if (analysis.id && analysis.status === "completed") {
+                          setActiveAnalysisId(analysis.id);
+                          setCurrentScreen("report");
+                        } else {
+                          setCurrentScreen("progress");
+                        }
+                      }}
+                      onDelete={(e) => handleDeleteAnalysis(e, analysis.id)}
                       onReanalyze={(e) => {
                         e.stopPropagation();
                         startAnalysisForProject(proj.id);
