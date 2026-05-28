@@ -4665,20 +4665,19 @@ async function warmupLocalWhisperCpp(audioProvider) {
 }
 
 async function analyzeProject(event, { project, provider: _legacyProvider, audioProvider: _legacyAudio, options, slotOverrides }) {
-  if (activeAnalyses.has(project.id)) {
-    const stale = activeAnalyses.get(project.id);
+  // 只拦截同管线类型的重复分析，不同管线可以并行
+  if (isTaskActiveForVideo(project.id, "builtin-pipeline")) {
+    const stale = getTaskForVideo(project.id);
     if (stale?.cancelled) {
-      log.info("analyze:lifecycle", `analyzeProject: 发现已取消的旧 handle project=${project.id} staleAnalysisId=${stale.analysisId || "?"} cancelledAt=${stale.cancelledAt ? new Date(stale.cancelledAt).toISOString() : "?"}`);
-      clearAnalysis(project.id, stale);
+      log.info("analyze:lifecycle", `analyzeProject: 发现已取消的旧 handle project=${project.id} analysisId=${stale.analysisId || "?"}`);
+      clearTask(stale.analysisId);
     } else {
-      log.warn("analyze:lifecycle", `analyzeProject: 拒绝启动 — 已有未取消的分析在运行 project=${project.id} analysisId=${stale?.analysisId || "?"}`);
-      throw new Error("该项目已有分析任务在运行。");
+      log.warn("analyze:lifecycle", `analyzeProject: 拒绝启动 — 已有同类型分析在运行 project=${project.id} analysisId=${stale?.analysisId || "?"}`);
+      throw new Error("该视频已有结构拆解在运行。");
     }
   }
-  // 立即注册 handle 占位, 在后续任何 await 之前——防止第二个并发 IPC 调用通过 has() 检查。
-  // 前置校验失败时在 catch 里 clearAnalysis 清掉。
-  const handle = registerAnalysis(project.id);
   const analysisId = _crypto.randomUUID();
+  const handle = registerTask(analysisId, project.id, "builtin-pipeline");
   handle.analysisId = analysisId;
   const analysisStartedAt = Date.now();
   log.info("analyze", `[analysis:${analysisId}] 开始分析 project=${project.id} title="${project.videoName || project.title || ""}"`);
@@ -4720,7 +4719,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       }
     }
   } catch (setupErr) {
-    clearAnalysis(project.id, handle);
+    clearTask(analysisId);
     throw setupErr;
   }
 
@@ -6119,7 +6118,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     if (err && typeof err === "object") err._analysisId = analysisId;
     throw err;
   } finally {
-    const currentHandle = activeAnalyses.get(project.id);
+    const currentHandle = activeTasks.get(analysisId);
     const takenOver = currentHandle && currentHandle !== handle;
     log.info("analyze:lifecycle", `[analysis:${analysisId}] finally: outcome=${analysisOutcome} cancelled=${handle.cancelled} takenOverByNew=${takenOver} newAnalysisId=${takenOver ? currentHandle.analysisId : "n/a"} elapsed=${formatDuration(Date.now() - analysisStartedAt)}`);
     if (handle.cancelled) {
@@ -6154,7 +6153,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     } catch (sampleErr) {
       log.warn("eta-samples", "写埋点失败:", sampleErr?.message || sampleErr);
     }
-    clearAnalysis(project.id, handle);
+    clearTask(analysisId);
   }
 }
 
@@ -7038,8 +7037,10 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("videos:delete", async (_event, videoId) => {
     if (!videoId) return { ok: false, message: "缺少 videoId" };
-    cancelAnalysis(videoId);
-    clearAnalysis(videoId);
+    // 取消+清理该视频的所有活跃任务
+    for (const [aid, h] of activeTasks) {
+      if (h.videoId === videoId) { cancelTask(aid); clearTask(aid); }
+    }
     const db = getDb();
     db.prepare("DELETE FROM videos WHERE id = ?").run(videoId);
     try { await fs.rm(getVideoDir(videoId), { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -8221,12 +8222,16 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("analysis:start", async (event, args) => {
     const videoId = args?.videoId || args?.project?.id;
-    // v3: 从 DB 读 video 构造 analyzeProject 需要的 project 对象
+    log.info("analyze:lifecycle", `analysis:start videoId=${videoId} hasProject=${!!args?.project} pipelineId=${args?.pipelineId || "?"} activeTasks=${activeTasks.size}`);
     let videoTitle = "视频";
     let effectiveArgs = args;
     if (videoId && !args?.project) {
       const db = getDb();
       const vrow = db.prepare("SELECT * FROM videos WHERE id = ?").get(videoId);
+      if (!vrow) {
+        log.warn("analyze:lifecycle", `analysis:start: video ${videoId} 不在 DB 里`);
+        throw new Error(`视频 ${videoId} 不存在`);
+      }
       if (vrow) {
         const video = rowToVideo(vrow);
         videoTitle = video.title || videoTitle;
@@ -8260,7 +8265,7 @@ app.whenReady().then(async () => {
     } catch (err) {
       if (!(err instanceof AnalysisCancelledError)) {
         const msg = String(err?.message || err).slice(0, 200);
-        const handle = activeAnalyses.get(videoId);
+        const handle = getTaskForVideo(videoId);
         const failedAnalysisId = err?._analysisId || handle?.analysisId;
         if (handle && !handle.cancelled && handle.analysisId !== failedAnalysisId) {
           log.warn("analyze:lifecycle", `analysis:start catch: 旧分析失败但新分析已在跑, 跳过失败广播`);
@@ -8289,17 +8294,17 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("analysis:isActive", async (_event, videoId) => {
-    const handle = activeAnalyses.get(videoId);
-    return handle != null && !handle.cancelled;
+    // 只查结构拆解管线是否在跑（不同管线可以并行）
+    return isTaskActiveForVideo(videoId, "builtin-pipeline");
   });
 
   ipcMain.handle("analysis:getLastProgress", async (_event, videoId) => {
-    const handle = activeAnalyses.get(videoId);
+    const handle = getTaskForVideo(videoId);
     return handle?.lastProgress || null;
   });
 
   ipcMain.handle("analysis:getLastBudget", async (_event, videoId) => {
-    const handle = activeAnalyses.get(videoId);
+    const handle = getTaskForVideo(videoId);
     return handle?.budget || null;
   });
 
