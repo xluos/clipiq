@@ -7938,7 +7938,7 @@ app.whenReady().then(async () => {
   // v2: 跨视频 methodology LLM 汇总
   // 输入: { accountId, videoSummaries: [{title, summary, structure, pacing, editingStyle, composition}] }
   // 输出: AccountMethodology
-  ipcMain.handle("accounts:generateMethodology", async (_event, { accountName, videoSummaries } = {}) => {
+  ipcMain.handle("accounts:generateMethodology", async (_event, { accountId, accountName, videoSummaries } = {}) => {
     const provider = await loadComplexTextProvider();
     if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) {
       throw new Error("未配置 complex_text 任务槽位的 LLM 供应商");
@@ -7981,6 +7981,20 @@ app.whenReady().then(async () => {
         visual: parsed?.visual?.summary ? { summary: String(parsed.visual.summary), sampleVideoIds: [] } : undefined,
         generatedAt: new Date().toISOString(),
       };
+      // v3: 写入 methodologies 表
+      if (accountId) {
+        try {
+          const db = getDb();
+          const maxVer = db.prepare("SELECT MAX(version) as v FROM methodologies WHERE account_id = ?").get(accountId);
+          const version = (maxVer?.v || 0) + 1;
+          const methId = `meth-${accountId}-${version}`;
+          db.prepare(
+            "INSERT INTO methodologies (id, account_id, version, data, source_video_count, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+          ).run(methId, accountId, version, JSON.stringify(methodology), videoSummaries.length, Date.now());
+        } catch (e) {
+          log.warn("methodology", "写入 methodologies 表失败:", e?.message || e);
+        }
+      }
       return { ok: true, methodology };
     } catch (err) {
       throw new Error(`methodology LLM 失败: ${err?.message || String(err)}`);

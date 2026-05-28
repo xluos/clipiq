@@ -604,6 +604,7 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
     setGenerating(true);
     try {
       const result = await window.videoAnalyzer?.generateAccountMethodology?.({
+        accountId: account.id,
         accountName: account.name,
         videoSummaries,
       });

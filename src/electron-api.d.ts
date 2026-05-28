@@ -387,6 +387,7 @@ declare global {
 
       // 方法论
       generateAccountMethodology: (payload: {
+        accountId?: string;
         accountName: string;
         videoSummaries: Array<{ title: string; summary?: string; structure?: unknown; pacing?: string; editingStyle?: string; composition?: string }>;
       }) => Promise<{ ok: true; methodology: import("./types").AccountMethodology }>;

@@ -214,6 +214,7 @@ export type PipelineSlotConfig = {
 
 export type PipelineSlots = Record<PipelineId, PipelineSlotConfig>;
 
+/** @deprecated v3: use Video.sourceType/sourceUrl/platform */
 export type ProjectSource =
   | { type: "local_file"; originalPath: string }
   | {
@@ -222,6 +223,7 @@ export type ProjectSource =
       platform: "douyin" | "xiaohongshu" | "bilibili" | "tiktok" | "unknown";
     };
 
+/** @deprecated v3: use VideoStatus */
 export type ProjectStatus =
   | "not_analyzed"
   | "downloading"
@@ -232,8 +234,11 @@ export type ProjectStatus =
 
 export type AnalysisStatus = "analyzing" | "completed" | "failed";
 
+/** @deprecated use Analysis */
 export type AnalysisRecord = {
   id: string;
+  videoId?: string;
+  /** @deprecated use videoId */
   projectId: string;
   status: AnalysisStatus;
   providerId?: string;
@@ -247,6 +252,7 @@ export type AnalysisRecord = {
   createdAt: string;
 };
 
+/** @deprecated v3: use Video */
 export type Project = {
   id: string;
   source: ProjectSource;
@@ -537,6 +543,8 @@ export function defaultPresetToAnalysisOptions(d: DefaultAnalysis): AnalysisOpti
 }
 
 export type AnalysisProgressEvent = {
+  videoId?: string;
+  /** @deprecated use videoId */
   projectId: string;
   analysisId: string;
   progress: number;
@@ -570,6 +578,8 @@ export type AnalysisBudget = {
 };
 
 export type AnalysisBudgetEvent = {
+  videoId?: string;
+  /** @deprecated use videoId */
   projectId: string;
   analysisId: string;
   budget: AnalysisBudget;
@@ -601,6 +611,8 @@ export type PipelineStage = {
 };
 
 export type PipelineState = {
+  videoId?: string;
+  /** @deprecated use videoId */
   projectId: string;
   analysisId: string;
   progress: number;
@@ -677,6 +689,7 @@ export function locationToLegacyScreen(loc: AppLocation): ScreenState {
 }
 
 // Project.kind: v2 在共享底座上分类。旧数据默认 'analysis'。
+/** @deprecated v3: videos 表不再区分 kind */
 export type ProjectKind = "analysis" | "asset" | "account_video";
 
 // 单个镜头(Shot)— 素材分镜后的最小单位
@@ -704,6 +717,7 @@ export type AccountPlatform = "bilibili" | "douyin" | "xiaohongshu" | "youtube" 
 export type AccountFetchRange = "top10" | "recent20" | "all";
 
 // 账号下挂的"原始视频"。只存元数据,真正分析时再派生 Project。
+/** @deprecated v3: merged into Video table; kept for compat */
 export type AccountVideo = {
   id: string;                       // 内部 id: `av-${accountId}-${externalId}`
   accountId: string;
@@ -776,10 +790,12 @@ export type Account = {
   bio?: string;                     // 账号简介 / sign
   followers?: string;               // 格式化字符串 "1238万"
   tags?: string[];                  // ["科技", "影视"]
-  // legacy v2.0: 关联视频 Project id 列表;新数据用 account_videos 表存储,不再写这个字段
+  /** @deprecated v3: videos 表按 account_id 查 */
   videoIds?: string[];
-  totalVideoCount?: number;         // 该账号下的视频总数 (含未分析的)
-  methodology?: AccountMethodology; // 跨视频汇总产物;null 表示还未生成
+  totalVideoCount?: number;
+  /** @deprecated v3: use methodologies 表 */
+  methodology?: AccountMethodology;
+  /** @deprecated v3: use methodologies 表 */
   methodologyHistory?: AccountMethodology[];
   // 首次/上次拉取的范围设置;详情页 dropdown 可改
   fetchRange?: AccountFetchRange;
