@@ -7679,13 +7679,14 @@ app.whenReady().then(async () => {
     const sendStatus = (status, extra) => {
       broadcastToWindows("analysis:summary:status", { videoId, status, ...extra });
     };
-    const updateAv = (patch) => {
-      // v3: 不再有 account_videos 表，摘要状态可以记在 analyses 表里
-      // 这里暂时只更新内存对象
-      Object.assign(av, patch);
-    };
 
-    updateAv({ summaryStatus: "summarizing", summaryError: undefined });
+    // v3: 创建 analyses 记录来追踪内容分析
+    const analysisId = `content-${videoId}-${Date.now()}`;
+    const analysisStartedAt = Date.now();
+    db.prepare(
+      "INSERT INTO analyses (id, video_id, pipeline_id, status, started_at, created_at) VALUES (?, ?, 'builtin-content', 'analyzing', ?, ?)"
+    ).run(analysisId, videoId, analysisStartedAt, analysisStartedAt);
+
     sendStatus("summarizing", { progress: 0 });
 
     try {
@@ -7891,23 +7892,24 @@ app.whenReady().then(async () => {
       };
       log.info("summary", `[6/6] 内容分析完成, summary=${videoSummary.summary.length}字 topic=${videoSummary.topic} frames=${frameEntries.length} transcriptSegs=${transcriptSegments.length} tags=${videoSummary.tags.join(",")}`);
 
-      // 7) 落库
-      updateAv({
-        videoSummary,
-        summaryStatus: "done",
-        summaryError: undefined,
-        localVideoPath: createExternalMediaUrl(videoPath),
-      });
+      // 7) 落库 — 写入 analyses 表
+      db.prepare(
+        "UPDATE analyses SET status = 'completed', result = ?, completed_at = ? WHERE id = ?"
+      ).run(JSON.stringify(videoSummary), Date.now(), analysisId);
+      // 更新 video 的本地路径
+      if (videoPath) {
+        db.prepare("UPDATE videos SET local_path = ?, updated_at = ? WHERE id = ?")
+          .run(videoPath, Date.now(), videoId);
+      }
       sendStatus("done", { summary: videoSummary, progress: 100 });
       return { ok: true, summary: videoSummary };
 
     } catch (err) {
       const msg = err?.message || String(err);
       const isCancel = msg === "__cancelled__" || state.cancelled;
-      updateAv({
-        summaryStatus: isCancel ? "idle" : "failed",
-        summaryError: isCancel ? undefined : msg,
-      });
+      db.prepare(
+        "UPDATE analyses SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?"
+      ).run(isCancel ? null : msg, Date.now(), analysisId);
       sendStatus(isCancel ? "idle" : "failed", { error: isCancel ? undefined : msg });
       if (!isCancel) throw err;
     } finally {

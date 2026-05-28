@@ -738,23 +738,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!window.videoAnalyzer?.onVideoSummaryStatus) return;
     const off = window.videoAnalyzer.onVideoSummaryStatus((evt) => {
-      setAccountVideosByAccountId((prev: Record<string, AccountVideo[]>) => {
-        for (const accId of Object.keys(prev)) {
-          const videos = prev[accId];
-          const idx = videos.findIndex((v: AccountVideo) => v.id === evt.videoId);
-          if (idx >= 0) {
-            const updated = [...videos];
-            updated[idx] = {
-              ...updated[idx],
-              summaryStatus: evt.status === "idle" ? undefined : evt.status,
-              videoSummary: evt.summary ?? updated[idx].videoSummary,
-              summaryError: evt.error,
-            };
-            return { ...prev, [accId]: updated };
-          }
-        }
-        return prev;
-      });
+      // v3: 内容分析结果在 analyses 表，完成/失败时刷新 analysesByVideo
+      if (evt.videoId && (evt.status === "done" || evt.status === "failed")) {
+        refreshAnalyses(evt.videoId);
+      }
     });
     return () => { off?.(); };
   }, []);

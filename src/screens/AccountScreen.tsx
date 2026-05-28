@@ -516,7 +516,7 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
   const ctx = useApp();
   const {
     accounts, setLocation, videos, projects, setProjects, reportByAnalysis, upsertAccount,
-    accountFetchUi,
+    accountFetchUi, analysesByVideo,
     setActiveProjectId,
   } = ctx;
   const id = activeAccountId();
@@ -525,7 +525,24 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState("");
 
-  const accountVideos = useMemo(() => (id ? videos.filter((v) => v.accountId === id) : []), [videos, id]);
+  // v3: 从 analysesByVideo 推导每个视频的内容分析状态，merge 到 video 对象上
+  const accountVideos = useMemo(() => {
+    if (!id) return [];
+    return videos.filter((v) => v.accountId === id).map((v) => {
+      const analyses = analysesByVideo[v.id] || [];
+      const contentAnalysis = analyses.find((a) => a.pipelineId === "builtin-content" && a.status === "completed");
+      const contentRunning = analyses.find((a) => a.pipelineId === "builtin-content" && a.status === "analyzing");
+      const contentFailed = analyses.find((a) => a.pipelineId === "builtin-content" && a.status === "failed");
+      const pipelineAnalysis = analyses.find((a) => a.pipelineId === "builtin-pipeline" && a.status === "completed");
+      return {
+        ...v,
+        videoSummary: contentAnalysis?.result as any || undefined,
+        summaryStatus: contentAnalysis ? "done" as const : contentRunning ? "summarizing" as const : contentFailed ? "failed" as const : "idle" as const,
+        summaryError: contentFailed?.errorMessage,
+        analysisProjectId: pipelineAnalysis ? v.id : undefined,
+      };
+    });
+  }, [videos, id, analysesByVideo]);
 
   const fetchingUi = id ? accountFetchUi[id] : undefined;
   const fetching = !!fetchingUi || account?.fetchPhase === "fetching";
@@ -535,8 +552,8 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
     [accountVideos],
   );
   const completedVideos = useMemo(
-    () => accountVideos.filter((v) => v.analysisProjectId && projects.find((p) => p.id === v.analysisProjectId && p.status === "completed")),
-    [accountVideos, projects],
+    () => accountVideos.filter((v) => v.analysisProjectId),
+    [accountVideos],
   );
   const methodologySourceCount = summarizedVideos.length + completedVideos.filter((v) => !summarizedVideos.find((s) => s.id === v.id)).length;
 
