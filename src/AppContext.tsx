@@ -457,38 +457,34 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const startAnalysis = useCallback(
     (videoId: string, pipelineId: string = "builtin-pipeline", optionsOverride?: AnalysisOptions) => {
-      const projectId = videoId;
-      // 如果该项目已有分析在运行，只跳转到进度屏
-      const currentProject = videosRef.current.find((p) => p.id === projectId);
-      if (currentProject?.status === "analyzing") {
-        setActiveVideoId(projectId);
-        setCurrentLocation({ module: "analysis", screen: "progress" });
-        return;
-      }
-      // 清掉上一轮分析的 progress/pipeline/budget，防止重试时短暂闪现旧缓存标记
-      const oldAid = currentProject?.currentAnalysisId;
-      if (oldAid) {
-        dismissedAnalysisIds.current.add(oldAid);
-        setProgressByAnalysis((prev) => { const n = { ...prev }; delete n[oldAid]; return n; });
-        setPipelineByAnalysis((prev) => { const n = { ...prev }; delete n[oldAid]; return n; });
-        setBudgetByAnalysis((prev) => { const n = { ...prev }; delete n[oldAid]; return n; });
-      }
-      setActiveAnalysisForProject((prev) => {
-        if (!(projectId in prev)) return prev;
-        const n = { ...prev }; delete n[projectId]; return n;
-      });
-      setVideos((prev) =>
-        prev.map((p) => {
-          if (p.id !== projectId) return p;
-          return {
-            ...p,
-            status: "analyzing" as const,
-            updatedAt: new Date().toISOString(),
-          };
-        }),
-      );
-      setActiveVideoId(projectId);
+      setActiveVideoId(videoId);
+      setActiveAnalysisId(null);
       setCurrentLocation({ module: "analysis", screen: "progress" });
+
+      // fire-and-forget: 发起 IPC 但不等结果，ProgressScreen 通过 task:progress 监听进度
+      if (window.videoAnalyzer?.analyzeVideo) {
+        window.videoAnalyzer.analyzeVideo({
+          videoId,
+          pipelineId,
+          options: optionsOverride,
+        }).then((analysis) => {
+          // 分析完成：刷新记录
+          if (analysis?.id) {
+            setActiveAnalysisId(analysis.id);
+            const result = (analysis as any).result;
+            if (result?.nodes?.length) setNodesByAnalysis((prev) => ({ ...prev, [analysis.id]: result.nodes }));
+            if (result?.report) setReportByAnalysis((prev) => ({ ...prev, [analysis.id]: result.report }));
+          }
+          refreshAnalyses(videoId);
+        }).catch((err) => {
+          const msg = String(err?.message || err);
+          // "已有分析在运行"不是错误，只是重复触发
+          if (!/已有.*在运行|already/i.test(msg)) {
+            console.warn("startAnalysis failed:", msg);
+          }
+          refreshAnalyses(videoId);
+        });
+      }
     },
     [],
   );

@@ -290,65 +290,22 @@ export function ProgressScreen() {
       // 这是 main 端的 lastProgress 一次性回灌, 真实事件流走 AppContext 全局订阅 → pipelineByAnalysis。
     };
 
-    const launchOrAttach = async () => {
-      // 先查后端是否已有同管线在跑，或者 DB 里已有 analyzing 记录
-      const alreadyRunning = await window.videoAnalyzer!.isAnalysisActive(project.id);
-      // 也查 analysesByVideo 里是否有 analyzing 状态的同管线记录（覆盖后端 task 已注册但 isActive 还没返回的 race）
-      const dbAnalyzing = (analysisRecordsByProject[project.id] || []).some(
-        (a) => a.status === "analyzing" && (a as any).pipelineId === "builtin-pipeline"
-      );
-      if (alreadyRunning || dbAnalyzing) {
-        inAttachMode.current = true;
-        // 进入 attach 模式前清掉上轮的 handled 标记。reset effect 只在 project.id 变化时跑,
-        // 重试时 (同 project, status failed → analyzing) 不重置,残留的 true 会让本轮
-        // onAnalysisProgress 的 "完成"/"失败" event 静默 (走 !ref.current 防重入)。
-        completionHandledRef.current = false;
-        failureHandledRef.current = false;
-        try {
-          const last = await window.videoAnalyzer!.getLastAnalysisProgress(project.id);
-          if (last) applyProgressSnapshot(last);
-          else setStageLabel("后台分析任务运行中");
-        } catch {
-          setStageLabel("后台分析任务运行中");
-        }
-        // attach 模式: budget broadcast 已经在我们订阅前发完了, 拉一次补回 cache
-        try {
-          const budgetEvt = await window.videoAnalyzer!.getLastAnalysisBudget(project.id);
-          if (budgetEvt?.budget && budgetEvt.analysisId) setBudgetForAnalysis(budgetEvt.analysisId, budgetEvt.budget);
-        } catch { /* 老 main / 没装 handler → 静默 fallback 到线性外推 */ }
-        return;
-      }
+    // ProgressScreen 只展示进度，不发起 IPC。分析由 AppContext.startAnalysis 发起。
+    // 挂载时拉一次后端最新进度快照，防止导航过来时进度条从 0 开始。
+    inAttachMode.current = true;
+    completionHandledRef.current = false;
+    failureHandledRef.current = false;
+    (async () => {
+      if (!window.videoAnalyzer) return;
       try {
-        const slotOverrides = pendingSlotOverrides[project.id];
-        if (slotOverrides) setPendingSlotOverrides((prev) => { const n = { ...prev }; delete n[project.id]; return n; });
-        const analysis = await window.videoAnalyzer!.analyzeVideo({ videoId: project.id, pipelineId: "builtin-pipeline", options, slotOverrides });
-        if (cancelledRef.current) return;
-        const aResult = analysis?.result as any;
-        if (aResult?.nodes?.length) setNodesForAnalysis(analysis.id, aResult.nodes);
-        if (aResult?.report) setReportForAnalysis(analysis.id, aResult.report);
-        refreshAnalysisRecords(project.id);
-        setProgress(100);
-        setStageLabel("完成");
-        // 完成 / 失败 log 由 main 进程的 "完成" event 走 AppContext 统一记录, 不在这里重复。
-        window.setTimeout(() => setCurrentScreen("workspace"), 1800);
-      } catch (err) {
-        if (cancelledRef.current) return;
-        const raw = err instanceof Error ? err.message : String(err);
-        const message = raw.replace(/^Error invoking remote method '[^']+': Error: /, "");
-        if (/cancel|取消/i.test(message)) return;
-        // 如果是"已有分析在运行"，进 attach 模式而不是显示失败
-        if (/已有.*在运行|already.*running/i.test(message)) {
-          inAttachMode.current = true;
-          completionHandledRef.current = false;
-          failureHandledRef.current = false;
-          setStageLabel("后台分析任务运行中");
-          return;
-        }
-        setError(message);
-        refreshAnalysisRecords(project.id);
-      }
-    };
-    launchOrAttach();
+        const last = await window.videoAnalyzer.getLastAnalysisProgress(project.id);
+        if (last) applyProgressSnapshot(last);
+      } catch { /* noop */ }
+      try {
+        const budgetEvt = await window.videoAnalyzer.getLastAnalysisBudget(project.id);
+        if (budgetEvt?.budget && budgetEvt.analysisId) setBudgetForAnalysis(budgetEvt.analysisId, budgetEvt.budget);
+      } catch { /* noop */ }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.id, project?.status]);
 
