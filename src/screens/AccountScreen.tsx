@@ -37,6 +37,7 @@ import {
   Play,
   Loader2,
   AlertTriangle,
+  Trash2,
 } from "lucide-react";
 
 export function AccountScreen() {
@@ -1360,6 +1361,16 @@ function VideosTab({
                     <RefreshCw className="w-3 h-3" strokeWidth={2} />重新分析
                   </span>
                 )}
+                <button
+                  onClick={() => {
+                    if (window.videoAnalyzer) window.videoAnalyzer.deleteVideo(v.id).catch(() => {});
+                    ctx.removeVideo(v.id);
+                  }}
+                  title="删除视频"
+                  className="w-7 h-7 rounded-md flex items-center justify-center text-slate-400 dark:text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/30"
+                >
+                  <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                </button>
               </div>
               {clickable && <ChevronRight className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500 shrink-0" strokeWidth={1.5} />}
             </div>
