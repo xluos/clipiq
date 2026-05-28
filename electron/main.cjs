@@ -1292,8 +1292,8 @@ async function persistEarlySnapshot(project, analysisId, nodes, report, timings,
   }
   try {
     const db = getDb();
-    db.prepare("UPDATE analyses SET nodes = ?, report = ? WHERE id = ?")
-      .run(JSON.stringify(nodes), JSON.stringify(snapshotReport), analysisId);
+    db.prepare("UPDATE analyses SET result = ? WHERE id = ?")
+      .run(JSON.stringify({ nodes, report: snapshotReport }), analysisId);
   } catch (err) {
     await appendPersistErrorLog(project.id, "persistEarlySnapshot SQLite", err);
   }
@@ -4676,18 +4676,10 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   {
     const db = getDb();
     db.prepare(
-      "INSERT INTO analyses (id, project_id, data, created_at) VALUES (?, ?, ?, ?)"
-    ).run(analysisId, project.id, JSON.stringify(analysisRecord), analysisStartedAt);
-    // 更新 project.currentAnalysisId + status
-    const projRow = db.prepare("SELECT data FROM projects WHERE id = ?").get(project.id);
-    if (projRow) {
-      const proj = JSON.parse(projRow.data);
-      proj.currentAnalysisId = analysisId;
-      proj.status = "analyzing";
-      proj.updatedAt = new Date().toISOString();
-      db.prepare("UPDATE projects SET data = ?, updated_at = ? WHERE id = ?")
-        .run(JSON.stringify(proj), Date.now(), project.id);
-    }
+      "INSERT INTO analyses (id, video_id, pipeline_id, status, options, started_at, created_at) VALUES (?, ?, ?, 'analyzing', ?, ?, ?)"
+    ).run(analysisId, project.id, "builtin-pipeline", JSON.stringify(analysisRecord.analysisOptions || null), analysisStartedAt, analysisStartedAt);
+    db.prepare("UPDATE videos SET status = 'downloading', updated_at = ? WHERE id = ?")
+      .run(Date.now(), project.id);
   }
 
   // 阶段耗时记录:每次 send 检测 stage 字符串变化,把上一个 stage 的 duration 推入
@@ -4740,8 +4732,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       currentStage = null; // 幂等: finally 路径会再 close 一次, 避免重复 push
       try {
         const db = getDb();
-        db.prepare("UPDATE analyses SET data = json_set(data, '$.stageSnapshot', json(?)) WHERE id = ?")
-          .run(JSON.stringify(timings), analysisId);
+        // stageSnapshot 不再存 analyses 表，只落磁盘 timings.json
       } catch { /* best-effort */ }
     }
     currentStageMeta = {};
@@ -4759,7 +4750,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   try {
     const db = getDb();
     const priorRow = db.prepare(
-      "SELECT id FROM analyses WHERE project_id = ? AND id != ? ORDER BY created_at DESC LIMIT 1"
+      "SELECT id FROM analyses WHERE video_id = ? AND id != ? ORDER BY created_at DESC LIMIT 1"
     ).get(project.id, analysisId);
     if (priorRow?.id) {
       const priorUsage = await readJson(
@@ -6041,18 +6032,18 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     try {
       const db = getDb();
       const now = new Date().toISOString();
-      const finalRecord = {
-        ...analysisRecord,
-        status: mainAnalysisFailed ? "failed" : "completed",
-        completedAt: now,
-        totalDurationMs,
-        ...(mainAnalysisFailed ? { lastErrorMessage: "主分析失败", lastErrorAt: now } : {}),
-      };
-      db.prepare("UPDATE analyses SET data = ?, nodes = ?, report = ? WHERE id = ?")
-        .run(JSON.stringify(finalRecord), JSON.stringify(nodes), JSON.stringify(report), analysisId);
+      const finalStatus = mainAnalysisFailed ? "failed" : "completed";
+      const resultJson = JSON.stringify({ nodes, report });
+      const tokenUsageJson = tokenUsage ? JSON.stringify(tokenUsage) : null;
       db.prepare(
-        "INSERT INTO projects (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
-      ).run(updatedProject.id, JSON.stringify(updatedProject), Date.now());
+        "UPDATE analyses SET status = ?, result = ?, token_usage = ?, duration_ms = ?, error_message = ?, completed_at = ? WHERE id = ?"
+      ).run(
+        finalStatus, resultJson, tokenUsageJson, totalDurationMs,
+        mainAnalysisFailed ? "主分析失败" : null,
+        Date.now(), analysisId,
+      );
+      db.prepare("UPDATE videos SET status = ?, thumbnail_url = COALESCE(?, thumbnail_url), title = COALESCE(?, title), updated_at = ? WHERE id = ?")
+        .run(finalStatus === "completed" ? "ready" : "failed", updatedProject.thumbnailUrl || null, updatedProject.videoName || null, Date.now(), updatedProject.id);
     } catch (persistError) {
       log.warn("clipiq", "main 端 SQLite 持久化失败,JSON 会兜底:", persistError);
       await appendPersistErrorLog(project.id, "analyzeProject finalize", persistError);
@@ -6074,8 +6065,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       try {
         const db = getDb();
         const now = new Date().toISOString();
-        const cancelledRecord = { ...analysisRecord, status: "failed", completedAt: now, lastErrorMessage: "用户取消了分析。", lastErrorAt: now };
-        db.prepare("UPDATE analyses SET data = ? WHERE id = ?").run(JSON.stringify(cancelledRecord), analysisId);
+        db.prepare("UPDATE analyses SET status = 'failed', error_message = '用户取消了分析。', completed_at = ? WHERE id = ?")
+          .run(Date.now(), analysisId);
       } catch { /* best-effort */ }
     }
     try {
@@ -8425,7 +8416,7 @@ app.whenReady().then(async () => {
     }
 
     const useProjectId = projectId || `proj-url-${Date.now()}`;
-    const useMediaDir = mediaDir || path.join(app.getPath("userData"), "projects", useProjectId, "media");
+    const useMediaDir = mediaDir || path.join(getVideoDir(useProjectId), "media");
     await fs.mkdir(useMediaDir, { recursive: true });
 
     const outputPattern = path.join(useMediaDir, "%(extractor)s_%(id)s.%(ext)s");
@@ -8535,7 +8526,7 @@ app.whenReady().then(async () => {
     }
 
     const projectId = `proj-url-${Date.now()}`;
-    const mediaDir = path.join(app.getPath("userData"), "projects", projectId, "media");
+    const mediaDir = path.join(getVideoDir(projectId), "media");
     await fs.mkdir(mediaDir, { recursive: true });
 
     const handle = registerAnalysis(projectId);
@@ -8806,10 +8797,9 @@ app.whenReady().then(async () => {
   // 诊断: 按 analysisId 读 token-usage.json
   ipcMain.handle("diagnostics:getTokenUsage", async (_event, analysisId) => {
     const db = getDb();
-    const row = db.prepare("SELECT data FROM analyses WHERE id = ?").get(analysisId);
+    const row = db.prepare("SELECT video_id FROM analyses WHERE id = ?").get(analysisId);
     if (!row) return { ok: true, data: null };
-    const record = JSON.parse(row.data);
-    const analysisDir = getAnalysisDir(record.projectId, analysisId);
+    const analysisDir = getAnalysisDir(row.video_id, analysisId);
     try {
       return { ok: true, data: await readJson(path.join(analysisDir, "token-usage.json"), null) };
     } catch {
@@ -8818,7 +8808,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("diagnostics:getFramesCheckpoint", async (_event, projectId) => {
-    const projectDir = path.join(app.getPath("userData"), "projects", projectId);
+    const projectDir = getVideoDir(projectId);
     try {
       return { ok: true, data: await readJson(path.join(projectDir, "frames-checkpoint.json"), null) };
     } catch {
@@ -8827,7 +8817,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("diagnostics:getTranscript", async (_event, projectId) => {
-    const projectDir = path.join(app.getPath("userData"), "projects", projectId);
+    const projectDir = getVideoDir(projectId);
     try {
       return { ok: true, data: await readJson(path.join(projectDir, "artifacts", "transcript.json"), null) };
     } catch {
