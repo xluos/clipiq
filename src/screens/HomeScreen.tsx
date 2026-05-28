@@ -165,8 +165,14 @@ export function HomeScreen() {
   const source = useMemo(() => detectSource(inputValue), [inputValue]);
   const canSubmit = source.kind === "url" || source.kind === "file";
 
+  const { analysesByVideo } = useApp();
   const { inProgress, completed, broken, all } = useMemo(() => {
-    const sorted = [...projects].filter((p) => !p.accountId).sort(
+    // 只展示有分析记录的视频（或正在分析中的）
+    const withAnalyses = projects.filter((p) => {
+      const analyses = analysesByVideo[p.id];
+      return (analyses && analyses.length > 0) || p.status === "analyzing" || p.status === "downloading";
+    });
+    const sorted = withAnalyses.sort(
       (a, b) =>
         new Date(b.updatedAt || b.createdAt || 0).getTime() -
         new Date(a.updatedAt || a.createdAt || 0).getTime(),
@@ -175,12 +181,14 @@ export function HomeScreen() {
     const completed: Project[] = [];
     const broken: Project[] = [];
     for (const p of sorted) {
-      if (p.status === "completed") completed.push(p);
-      else if (p.status === "failed" || p.status === "download_failed") broken.push(p);
+      const analyses = analysesByVideo[p.id] || [];
+      const latestStatus = analyses[0]?.status;
+      if (latestStatus === "completed" || p.status === "completed") completed.push(p);
+      else if (latestStatus === "failed" || p.status === "failed" || p.status === "download_failed") broken.push(p);
       else inProgress.push(p);
     }
     return { inProgress, completed, broken, all: sorted };
-  }, [projects]);
+  }, [projects, analysesByVideo]);
 
   const visibleProjects = useMemo(() => {
     switch (tab) {
