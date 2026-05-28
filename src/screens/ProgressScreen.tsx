@@ -383,8 +383,8 @@ export function ProgressScreen() {
           <div className="flex items-end justify-between gap-4 mb-5">
             <div className="min-w-0">
               <div className="text-[11px] font-mono uppercase tracking-wider text-slate-500 mb-1">当前任务</div>
-              <h2 className="text-[18px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 truncate" title={project.videoName}>
-                {project.videoName}
+              <h2 className="text-[18px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 truncate" title={project.title}>
+                {project.title}
               </h2>
               <div className="font-mono text-[11px] uppercase tracking-wider text-slate-500 mt-1">
                 {formatElapsed(project.durationSec * 1000)} · {presetLabel}

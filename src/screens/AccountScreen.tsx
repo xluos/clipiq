@@ -983,20 +983,20 @@ function VideosTab({
     window.videoAnalyzer?.cancelSummarizeVideo(avId).catch(() => {});
   }, []);
 
-  const fireAnalyze = useCallback(async (av: AccountVideo) => {
+  const fireAnalyze = useCallback(async (av: any) => {
     if (launchedRef.current.has(av.id)) return;
     launchedRef.current.add(av.id);
     setRowError((m) => { const n = { ...m }; delete n[av.id]; return n; });
     try {
       if (!window.videoAnalyzer) throw new Error("浏览器预览环境不支持分析");
-      const dl = await window.videoAnalyzer.downloadVideo(av.externalUrl);
+      const dl = await window.videoAnalyzer.downloadVideo(av.sourceUrl);
       const projectId = dl.videoId || `proj-${Date.now()}-${av.id}`;
       const now = new Date().toISOString();
       const newVideo: import("../types").Video = {
         id: projectId,
         title: dl.title || av.title,
         sourceType: "url",
-        sourceUrl: av.externalUrl,
+        sourceUrl: av.sourceUrl,
         platform: (av.platform === "bilibili" || av.platform === "douyin" || av.platform === "xiaohongshu" || av.platform === "tiktok") ? av.platform : "unknown",
         localPath: dl.filePath,
         durationSec: dl.durationSec || av.durationSec,
@@ -1122,7 +1122,7 @@ function VideosTab({
 
         {/* 视频信息 */}
         <div className="flex gap-4 items-start">
-          <VideoThumbnail localVideoPath={sv.localVideoPath} thumbnailUrl={sv.thumbnailUrl} title={sv.title} />
+          <VideoThumbnail localVideoPath={sv.localVideoPath || sv.localPath} thumbnailUrl={sv.thumbnailUrl} title={sv.title} />
           <div className="flex-1 min-w-0">
             <h3 className="text-[16px] font-semibold text-slate-900 dark:text-slate-100">{sv.title}</h3>
             <div className="text-[11px] font-mono tracking-wider text-slate-500 dark:text-slate-400 mt-1.5 flex items-center gap-2 flex-wrap">

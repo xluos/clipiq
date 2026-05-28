@@ -57,10 +57,10 @@ function LibraryListScreen() {
         const shots = shotsByAsset[a.id] || a.shots || [];
         if (!shots.some((s) => s.isFavorite)) return false;
       }
-      if (tagFilter && !(a.assetTags || []).includes(tagFilter)) return false;
+      if (tagFilter && !(a.tags || []).includes(tagFilter)) return false;
       if (query) {
         const q = query.toLowerCase();
-        if (!a.videoName.toLowerCase().includes(q) && !(a.assetTags || []).some((t) => t.toLowerCase().includes(q))) {
+        if (!a.title.toLowerCase().includes(q) && !(a.tags || []).some((t) => t.toLowerCase().includes(q))) {
           return false;
         }
       }
@@ -190,21 +190,21 @@ const AssetCard: FunctionComponent<{ asset: Project; shots: Shot[]; onClick: () 
     >
       <div className="aspect-video bg-gradient-to-br from-slate-700 to-slate-900 relative">
         {asset.thumbnailUrl && (
-          <img src={asset.thumbnailUrl} alt={asset.videoName} className="absolute inset-0 w-full h-full object-cover" />
+          <img src={asset.thumbnailUrl} alt={asset.title} className="absolute inset-0 w-full h-full object-cover" />
         )}
         <span className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/70 text-white font-mono text-[10px]">
           {formatDuration(asset.durationSec)}
         </span>
       </div>
       <div className="px-2.5 py-2">
-        <div className="text-[12.5px] font-medium text-slate-900 dark:text-slate-100 truncate" title={asset.videoName}>{asset.videoName}</div>
+        <div className="text-[12.5px] font-medium text-slate-900 dark:text-slate-100 truncate" title={asset.title}>{asset.title}</div>
         <div className="mt-1 flex items-center gap-1.5 text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400">
           <span>{shotCount} 镜头</span>
           {asset.updatedAt && <span>· {formatDate(asset.updatedAt)}</span>}
         </div>
-        {(asset.assetTags?.length ?? 0) > 0 && (
+        {(asset.tags?.length ?? 0) > 0 && (
           <div className="flex flex-wrap gap-1 mt-1.5">
-            {asset.assetTags!.slice(0, 3).map((t) => (
+            {asset.tags!.slice(0, 3).map((t) => (
               <span key={t} className="text-[10px] font-mono px-1 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
                 {t}
               </span>
@@ -353,7 +353,7 @@ function ShotListScreen() {
 
   // 真分镜 — ffmpeg scenedetect
   const reanalyzeShots = async () => {
-    if (!asset.localFilePath) return;
+    if (!asset.localPath) return;
     setReanalyzing(true);
     try {
       const result = await window.videoAnalyzer?.analyzeVideoShots?.({
@@ -384,7 +384,7 @@ function ShotListScreen() {
           素材库
         </button>
         <div className="w-px h-4 bg-slate-200 dark:bg-slate-800" />
-        <h1 className="text-[14px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 truncate max-w-xl">{asset.videoName}</h1>
+        <h1 className="text-[14px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 truncate max-w-xl">{asset.title}</h1>
         <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
           {formatDuration(asset.durationSec)} · {shots.length} 镜头
         </span>
@@ -399,10 +399,10 @@ function ShotListScreen() {
         {/* 左:视频预览 + 镜头边界 timeline */}
         <div className="p-5 flex flex-col border-r border-slate-200 dark:border-slate-800 min-w-0">
           <div className="flex-1 min-h-0 relative rounded-lg overflow-hidden bg-gradient-to-br from-slate-800 to-slate-950 flex items-center justify-center">
-            {asset.localVideoPath ? (
+            {asset.localPath ? (
               <video
                 key={asset.id}
-                src={asset.localVideoPath}
+                src={asset.localPath}
                 controls
                 className="max-w-full max-h-full"
               />
@@ -449,7 +449,7 @@ function ShotListScreen() {
               </p>
               <button
                 onClick={reanalyzeShots}
-                disabled={reanalyzing || !asset.localFilePath}
+                disabled={reanalyzing || !asset.localPath}
                 className="mt-3 inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
               >
                 <Sparkles className="w-3 h-3" strokeWidth={1.5} />

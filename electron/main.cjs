@@ -940,6 +940,15 @@ function rowToVideo(r) {
     tags: r.tags ? JSON.parse(r.tags) : undefined,
     createdAt: new Date(r.created_at).toISOString(),
     updatedAt: new Date(r.updated_at).toISOString(),
+    // v2 兼容字段 (旧 UI 代码用)
+    videoName: r.title || "",
+    localVideoPath: r.local_path ? `media://local/${encodeURIComponent(r.local_path)}` : undefined,
+    localFilePath: r.local_path || undefined,
+    source: r.source_type === "url"
+      ? { type: "url", url: r.source_url || "", platform: r.platform || "unknown" }
+      : { type: "local_file", originalPath: r.local_path || "" },
+    kind: r.account_id ? "account_video" : "analysis",
+    assetTags: r.tags ? JSON.parse(r.tags) : [],
   };
 }
 

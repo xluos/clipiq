@@ -216,7 +216,7 @@ function StudioEditorScreen() {
           })),
           assets: usedAssets.map((p) => ({
             id: p.id,
-            name: p.videoName,
+            name: p.title,
             durationSec: p.durationSec,
             shotCount: p.shots?.length ?? 0,
           })),
@@ -378,10 +378,10 @@ function StudioEditorScreen() {
                 }`}
               >
                 <div className="w-12 h-7 rounded bg-slate-300 dark:bg-slate-700 shrink-0 overflow-hidden">
-                  {p.thumbnailUrl && <img src={p.thumbnailUrl} alt={p.videoName} className="w-full h-full object-cover" />}
+                  {p.thumbnailUrl && <img src={p.thumbnailUrl} alt={p.title} className="w-full h-full object-cover" />}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-[12px] text-slate-900 dark:text-slate-100 truncate">{p.videoName}</div>
+                  <div className="text-[12px] text-slate-900 dark:text-slate-100 truncate">{p.title}</div>
                   <div className="text-[10.5px] font-mono text-slate-500 dark:text-slate-400">
                     {p.shots?.length ?? 0} 镜头 · {formatTimeShort(p.durationSec)}
                   </div>

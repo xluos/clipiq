@@ -799,13 +799,13 @@ const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDel
 
   useEffect(() => {
     if (thumb || captureAttemptedRef.current) return;
-    if (!project.localVideoPath) return;
+    if (!project.localPath) return;
     captureAttemptedRef.current = true;
     const video = document.createElement("video");
     video.muted = true;
     video.crossOrigin = "anonymous";
     video.preload = "metadata";
-    video.src = project.localVideoPath;
+    video.src = project.localPath;
     const cleanup = () => {
       video.removeAttribute("src");
       video.load();
@@ -841,7 +841,7 @@ const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDel
     };
     video.onerror = cleanup;
     return cleanup;
-  }, [project.localVideoPath, thumb, onThumbnailReady]);
+  }, [project.localPath, thumb, onThumbnailReady]);
 
   return (
     <div
@@ -850,7 +850,7 @@ const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDel
     >
       <div className="w-[80px] h-[48px] rounded-md relative overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-[#1c1e24]">
         {thumb ? (
-          <img src={thumb} alt={project.videoName} className="absolute inset-0 h-full w-full object-cover" />
+          <img src={thumb} alt={project.title} className="absolute inset-0 h-full w-full object-cover" />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center text-slate-400 dark:text-slate-600">
             <Film className="h-4 w-4" />
@@ -858,7 +858,7 @@ const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDel
         )}
       </div>
       <div className="min-w-0">
-        <div className="font-medium text-[13.5px] text-slate-900 dark:text-slate-100 truncate">{project.videoName}</div>
+        <div className="font-medium text-[13.5px] text-slate-900 dark:text-slate-100 truncate">{project.title}</div>
         <div className="flex items-center gap-2 text-[11px] font-mono uppercase tracking-wide text-slate-500 dark:text-slate-500 mt-0.5">
           {resolution && <span>{resolution}</span>}
           {resolution && <span className="text-slate-300 dark:text-slate-700">·</span>}
