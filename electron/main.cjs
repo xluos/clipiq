@@ -7532,102 +7532,77 @@ app.whenReady().then(async () => {
       });
       sendProgress(95, "落库", `${result.videos.length} 条视频`);
 
-      // 把视频写入 account_videos 表 (按 externalUrl/externalId 去重)
-      // 先清理: 该账号下没被分析过的旧 av 行删除, 已分析过的保留 (analysisProjectId 链回报告)
-      // 这样接口变更 / 范围切换不会留下"上次拉到但这次没拉到"的尸位
+      // v3: 把视频写入 videos 表
       const db = getDb();
-      try {
-        const oldRows = db.prepare("SELECT id, data FROM account_videos WHERE account_id = ?").all(accountId);
-        const stmtDel = db.prepare("DELETE FROM account_videos WHERE id = ?");
-        for (const row of oldRows) {
-          try {
-            const old = JSON.parse(row.data);
-            if (!old?.analysisProjectId) stmtDel.run(row.id);
-          } catch { stmtDel.run(row.id); }
-        }
-      } catch (e) {
-        log.warn("accounts:fetch", "清理旧 av 失败:", e?.message || e);
-      }
-      const existsStmt = db.prepare("SELECT id FROM account_videos WHERE id = ?");
-      const insertStmt = db.prepare(
-        "INSERT INTO account_videos (id, account_id, data, added_at) VALUES (?, ?, ?, ?) " +
-        "ON CONFLICT(id) DO UPDATE SET data = excluded.data"
-      );
       const now = Date.now();
       const platform = result.accountPlatform;
-      const newAccountVideos = [];
+      const upsertVideoStmt = db.prepare(`
+        INSERT INTO videos (id, title, source_type, source_url, platform, external_id, local_path,
+          duration_sec, width, height, orientation, thumbnail_url, account_id, status,
+          upload_date, view_count, like_count, comment_count, share_count, collect_count,
+          tags, created_at, updated_at)
+        VALUES (?, ?, 'url', ?, ?, ?, NULL, ?, 0, 0, 'landscape', ?, ?, 'ready', ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          title=excluded.title, source_url=excluded.source_url, thumbnail_url=excluded.thumbnail_url,
+          upload_date=excluded.upload_date, view_count=excluded.view_count, like_count=excluded.like_count,
+          comment_count=excluded.comment_count, share_count=excluded.share_count, collect_count=excluded.collect_count,
+          updated_at=excluded.updated_at
+      `);
+      const newVideos = [];
       for (const v of result.videos) {
-        const avId = `av-${accountId}-${v.id}`;
-        const av = {
-          id: avId,
-          accountId,
-          externalId: v.id,
-          externalUrl: v.externalUrl,
-          title: v.title,
-          durationSec: v.durationSec,
-          thumbnailUrl: v.thumbnailUrl || undefined,
-          uploadDate: v.uploadDate || null,
-          viewCount: v.viewCount || 0,
-          likeCount: v.likeCount || undefined,
-          commentCount: v.commentCount || undefined,
-          shareCount: v.shareCount || undefined,
-          collectCount: v.collectCount || undefined,
-          playUrl: v.playUrl || undefined,
-          platform,
-          addedAt: new Date(now).toISOString(),
-        };
-        // 保留已有 analysisProjectId + 摘要数据
-        const existing = existsStmt.get(avId);
-        if (existing) {
-          const oldRow = db.prepare("SELECT data FROM account_videos WHERE id = ?").get(avId);
-          if (oldRow) {
-            try {
-              const old = JSON.parse(oldRow.data);
-              if (old.analysisProjectId) av.analysisProjectId = old.analysisProjectId;
-              if (old.videoSummary) av.videoSummary = old.videoSummary;
-              if (old.summaryStatus) av.summaryStatus = old.summaryStatus;
-              if (old.localVideoPath) av.localVideoPath = old.localVideoPath;
-              av.addedAt = old.addedAt || av.addedAt;
-            } catch { /* noop */ }
-          }
-        }
-        insertStmt.run(avId, accountId, JSON.stringify(av), Date.parse(av.addedAt) || now);
-        newAccountVideos.push(av);
+        const videoId = `av-${accountId}-${v.id}`;
+        upsertVideoStmt.run(
+          videoId, v.title || "", v.externalUrl || null, platform || null, v.id || null,
+          v.durationSec || 0, v.thumbnailUrl || null, accountId,
+          v.uploadDate || null, v.viewCount ?? null, v.likeCount ?? null,
+          v.commentCount ?? null, v.shareCount ?? null, v.collectCount ?? null,
+          now, now,
+        );
+        newVideos.push(rowToVideo(db.prepare("SELECT * FROM videos WHERE id = ?").get(videoId)));
       }
 
-      // 更新 Account 元数据
-      const accRow = db.prepare("SELECT data FROM accounts WHERE id = ?").get(accountId);
+      // 确保该账号有 collection, 把新视频加入
+      const collId = `col-account-${accountId}`;
+      db.prepare(`
+        INSERT OR IGNORE INTO collections (id, name, kind, account_id, created_at, updated_at)
+        VALUES (?, ?, 'account', ?, ?, ?)
+      `).run(collId, result.accountUploader || result.accountTitle || "账号视频", accountId, now, now);
+      const addColVideo = db.prepare("INSERT OR IGNORE INTO collection_videos (collection_id, video_id, position, added_at) VALUES (?, ?, ?, ?)");
+      for (let i = 0; i < newVideos.length; i++) {
+        addColVideo.run(collId, newVideos[i].id, i, now);
+      }
+
+      // 更新 Account 元数据 (v3: 结构化列)
       let accountPatch = {};
-      if (accRow) {
-        try {
-          const acc = JSON.parse(accRow.data);
-          const patched = {
-            ...acc,
-            name: result.accountUploader || result.accountTitle || acc.name,
-            avatarUrl: result.accountAvatarUrl || acc.avatarUrl,
-            followers: result.accountFollowers || acc.followers,
-            bio: result.accountBio || acc.bio,
-            externalId: result.accountExternalId || acc.externalId,
-            platform: result.accountPlatform || acc.platform,
-            totalVideoCount: result.totalVideoCount || acc.totalVideoCount,
-            fetchPhase: "ready",
-            fetchError: undefined,
-            lastFetchedAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          };
-          accountPatch = patched;
-          db.prepare(
-            "INSERT INTO accounts (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
-          ).run(accountId, JSON.stringify(patched), Date.now());
-        } catch (e) {
-          log.warn("accounts:fetch", "update Account 失败", e?.message || e);
-        }
+      try {
+        const accNow = Date.now();
+        db.prepare(`
+          UPDATE accounts SET
+            name = COALESCE(?, name), avatar_url = COALESCE(?, avatar_url),
+            followers = COALESCE(?, followers), bio = COALESCE(?, bio),
+            external_id = COALESCE(?, external_id), platform = COALESCE(?, platform),
+            fetch_phase = 'ready', fetch_error = NULL, last_fetched_at = ?,
+            updated_at = ?
+          WHERE id = ?
+        `).run(
+          result.accountUploader || result.accountTitle || null,
+          result.accountAvatarUrl || null,
+          result.accountFollowers || null,
+          result.accountBio || null,
+          result.accountExternalId || null,
+          result.accountPlatform || null,
+          accNow, accNow, accountId,
+        );
+        const accRow = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId);
+        if (accRow) accountPatch = rowToAccount(accRow);
+      } catch (e) {
+        log.warn("accounts:fetch", "update Account 失败", e?.message || e);
       }
 
-      sendProgress(100, "完成", `${newAccountVideos.length} 条视频`);
+      sendProgress(100, "完成", `${newVideos.length} 条视频`);
       broadcast("account:fetch:done", {
         accountId,
-        videos: newAccountVideos,
+        videos: newVideos,
         account: accountPatch,
         warnings: result.warnings,
       });
@@ -7638,19 +7613,9 @@ app.whenReady().then(async () => {
       // 写 fetchPhase=failed 到 Account
       try {
         const db = getDb();
-        const accRow = db.prepare("SELECT data FROM accounts WHERE id = ?").get(accountId);
-        if (accRow) {
-          const acc = JSON.parse(accRow.data);
-          const patched = {
-            ...acc,
-            fetchPhase: isCancel ? "idle" : "failed",
-            fetchError: isCancel ? undefined : finalMsg,
-            updatedAt: new Date().toISOString(),
-          };
-          db.prepare(
-            "INSERT INTO accounts (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
-          ).run(accountId, JSON.stringify(patched), Date.now());
-        }
+        db.prepare(`
+          UPDATE accounts SET fetch_phase = ?, fetch_error = ?, updated_at = ? WHERE id = ?
+        `).run(isCancel ? "idle" : "failed", isCancel ? null : finalMsg, Date.now(), accountId);
       } catch { /* noop */ }
       broadcast("account:fetch:failed", { accountId, error: finalMsg });
     } finally {
@@ -7667,14 +7632,8 @@ app.whenReady().then(async () => {
     // 把 Account.fetchPhase 立即标 fetching
     try {
       const db = getDb();
-      const accRow = db.prepare("SELECT data FROM accounts WHERE id = ?").get(accountId);
-      if (accRow) {
-        const acc = JSON.parse(accRow.data);
-        const patched = { ...acc, fetchPhase: "fetching", fetchError: undefined, updatedAt: new Date().toISOString() };
-        db.prepare(
-          "INSERT INTO accounts (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
-        ).run(accountId, JSON.stringify(patched), Date.now());
-      }
+      db.prepare("UPDATE accounts SET fetch_phase = 'fetching', fetch_error = NULL, updated_at = ? WHERE id = ?")
+        .run(Date.now(), accountId);
     } catch { /* noop */ }
     // fire-and-forget
     runAccountFetch({ accountId, url, range }).catch((err) => {
@@ -7702,24 +7661,28 @@ app.whenReady().then(async () => {
   if (!global.__summaryInFlight) global.__summaryInFlight = new Map();
   const summaryInFlight = global.__summaryInFlight;
 
-  async function summarizeAccountVideo(accountVideoId, slotOverrides, customPrompt) {
-    log.info("summary", `开始摘要 accountVideoId=${accountVideoId}`);
+  async function summarizeAccountVideo(videoId, slotOverrides, customPrompt) {
+    const accountVideoId = videoId;
+    log.info("summary", `开始摘要 videoId=${videoId}`);
     const db = getDb();
-    const row = db.prepare("SELECT data FROM account_videos WHERE id = ?").get(accountVideoId);
-    if (!row) throw new Error("视频不存在");
-    const av = JSON.parse(row.data);
-    log.info("summary", `视频: ${av.title?.slice(0, 40)} url=${av.externalUrl?.slice(0, 60)}`);
+    const videoRow = db.prepare("SELECT * FROM videos WHERE id = ?").get(videoId);
+    if (!videoRow) throw new Error("视频不存在");
+    const av = rowToVideo(videoRow);
+    // 兼容旧字段: summarizeAccountVideo 内部仍用 av.externalUrl / av.playUrl 等
+    av.externalUrl = av.sourceUrl;
+    av.localVideoPath = av.localPath;
+    log.info("summary", `视频: ${av.title?.slice(0, 40)} url=${av.sourceUrl?.slice(0, 60)}`);
 
     const state = { cancelled: false, startedAt: Date.now() };
-    summaryInFlight.set(accountVideoId, state);
+    summaryInFlight.set(videoId, state);
 
     const sendStatus = (status, extra) => {
-      broadcastToWindows("account:video:summary:status", { accountVideoId, status, ...extra });
+      broadcastToWindows("analysis:summary:status", { videoId, status, ...extra });
     };
     const updateAv = (patch) => {
+      // v3: 不再有 account_videos 表，摘要状态可以记在 analyses 表里
+      // 这里暂时只更新内存对象
       Object.assign(av, patch);
-      db.prepare("UPDATE account_videos SET data = ? WHERE id = ?")
-        .run(JSON.stringify(av), accountVideoId);
     };
 
     updateAv({ summaryStatus: "summarizing", summaryError: undefined });
@@ -7952,19 +7915,19 @@ app.whenReady().then(async () => {
     }
   }
 
-  ipcMain.handle("accounts:summarizeVideo", async (_event, { accountVideoId, slotOverrides, customPrompt } = {}) => {
-    if (!accountVideoId) throw new Error("accounts:summarizeVideo 需要 accountVideoId");
-    if (summaryInFlight.has(accountVideoId)) {
+  ipcMain.handle("analysis:summarize", async (_event, { videoId, slotOverrides, customPrompt } = {}) => {
+    if (!videoId) throw new Error("analysis:summarize 需要 videoId");
+    if (summaryInFlight.has(videoId)) {
       return { ok: true, accepted: false, reason: "already in flight" };
     }
-    summarizeAccountVideo(accountVideoId, slotOverrides || undefined, customPrompt || undefined).catch((err) => {
-      log.warn("accounts:summarizeVideo", "unhandled", err?.message || err);
+    summarizeAccountVideo(videoId, slotOverrides || undefined, customPrompt || undefined).catch((err) => {
+      log.warn("analysis:summarize", "unhandled", err?.message || err);
     });
     return { ok: true, accepted: true };
   });
 
-  ipcMain.handle("accounts:cancelSummarize", async (_event, accountVideoId) => {
-    const state = summaryInFlight.get(accountVideoId);
+  ipcMain.handle("analysis:cancelSummarize", async (_event, videoId) => {
+    const state = summaryInFlight.get(videoId);
     if (!state) return { ok: true, cancelled: false };
     state.cancelled = true;
     return { ok: true, cancelled: true };
