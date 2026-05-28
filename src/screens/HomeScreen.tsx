@@ -8,7 +8,7 @@ import { type ChangeEvent, type DragEvent, type FunctionComponent, type Keyboard
 import type { InspectedVideo } from "../electron-api";
 import { BrandLogo } from "../components/BrandLogo";
 import { useConfirm } from "../components/ConfirmDialog";
-import type { AnalysisOptions, SlotAssignment, SlotOverrides, TaskSlotKey, ModelProvider, Project, ProjectSource, VideoGenre } from "../types";
+import type { AnalysisOptions, SlotAssignment, SlotOverrides, TaskSlotKey, ModelProvider, Video, ProjectSource, VideoGenre } from "../types";
 import { PipelineRow, type PipelineStage, type SlotMeta } from "../components/PipelineSlotPicker";
 import { useSidecarReadiness } from "../hooks/useSidecarReadiness";
 
@@ -168,7 +168,7 @@ export function HomeScreen() {
   const { analysesByVideo } = useApp();
 
   // 首页展示结构拆解分析记录（builtin-pipeline），按视频去重取最新
-  type AnalysisEntry = { analysis: import("../types").Analysis; video: Project };
+  type AnalysisEntry = { analysis: import("../types").Analysis; video: Video };
   const { inProgress, completed, broken, all } = useMemo(() => {
     const entries: AnalysisEntry[] = [];
     const seen = new Set<string>();
@@ -216,7 +216,7 @@ export function HomeScreen() {
     setProjects(prev => prev.map(p => p.id === projectId ? { ...p, thumbnailUrl: dataUrl } : p));
   };
 
-  const goToProject = (proj: Project) => {
+  const goToProject = (proj: Video) => {
     if (proj.status === "completed") {
       setActiveProjectId(proj.id);
       setCurrentScreen("workspace");
@@ -822,7 +822,7 @@ function SourceChip({ source, status }: { source: SourceState; status: "idle" | 
 }
 
 type ProjectRowProps = {
-  project: Project;
+  project: Video;
   onOpen: () => void;
   onDelete: (e: MouseEvent<HTMLButtonElement>) => void;
   onReanalyze: (e: MouseEvent<HTMLButtonElement>) => void;
@@ -936,7 +936,7 @@ const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDel
   );
 };
 
-function StatusBadge({ status }: { status: Project["status"] }) {
+function StatusBadge({ status }: { status: Video["status"] }) {
   const base = "inline-flex items-center gap-1 h-5 px-1.5 rounded text-[10.5px] font-mono uppercase tracking-wider";
   switch (status) {
     case "completed":

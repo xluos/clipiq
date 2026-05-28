@@ -4,7 +4,7 @@
 
 import { type FunctionComponent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useApp, type ModelDownloadProgress } from "../AppContext";
-import type { Project } from "../types";
+import type { Video } from "../types";
 import { Cpu, X, ChevronRight, AlertTriangle, UserSquare2, Download, Sparkles } from "lucide-react";
 
 // ─── 通用任务条目类型 ─────────────────────────────────

@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, ReactNode } from "react";
-import { Project, ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AnalysisRecord, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, SlotOverrides, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, AnalysisBudget, PIPELINE_STAGE_DEFS, PipelineState, PipelineStage, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot, PipelineId, PipelineSlots, PipelineSlotConfig, Video, Collection, Pipeline, Analysis } from "./types";
+import { ScreenState, ModelProvider, AnalysisNode, AnalysisReport, AppConfig, TaskSlots, TaskSlotKey, SlotAssignment, SlotOverrides, DefaultAnalysis, AppLocation, AppModule, AnalysisOptions, AnalysisProgressEvent, AnalysisBudget, PIPELINE_STAGE_DEFS, PipelineState, PipelineStage, legacyScreenToLocation, locationToLegacyScreen, defaultPresetToAnalysisOptions, Account, AccountVideo, StudioSession, Shot, PipelineId, PipelineSlots, PipelineSlotConfig, Video, Collection, Pipeline, Analysis } from "./types";
 import type { DownloadedVideo } from "./electron-api";
 
 function createEmptyPipeline(projectId: string, analysisId: string): PipelineState {

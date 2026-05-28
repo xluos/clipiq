@@ -3,7 +3,7 @@ import { ArrowLeft, RefreshCw } from "lucide-react";
 import { Fragment, type FunctionComponent, useCallback, useEffect, useState } from "react";
 import { useApp } from "../AppContext";
 import type { FramesCheckpoint, TranscriptData } from "../electron-api";
-import type { AnalysisNode, AnalysisReport, Project, TokenUsageSummary } from "../types";
+import type { AnalysisNode, AnalysisReport, Video, TokenUsageSummary } from "../types";
 import { PipelineStagePanel, fmtDuration, fmtTokens, type StageStat } from "./pipeline/PipelineStagePanel";
 import { StageSceneDetect } from "./pipeline/StageSceneDetect";
 import { StageExtractFrames } from "./pipeline/StageExtractFrames";
@@ -16,7 +16,7 @@ import { StageMethodologyAudit } from "./pipeline/StageMethodologyAudit";
 
 type Props = {
   projectId: string;
-  project?: Project;
+  project?: Video;
   onBack: () => void;
 };
 

@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { ArrowLeft, RefreshCw, ChevronDown, ChevronRight, Clock, Zap, Hash, Database, GitBranch, Trash2 } from "lucide-react";
 import { type FunctionComponent, useCallback, useEffect, useMemo, useState } from "react";
 import type { AnalysisSample, AnalysisSampleStage } from "../electron-api";
-import type { Project } from "../types";
+import type { Video } from "../types";
 import { PipelineView } from "./PipelineView";
 
 // stage 已经是中文，过滤掉"完成"/"就绪"等纯状态标记行（不含实际耗时）
@@ -117,7 +117,7 @@ function extractStageMeta(stages: AnalysisSampleStage[]) {
 
 const SampleCard: FunctionComponent<{
   sample: AnalysisSample;
-  project?: Project;
+  project?: Video;
   onViewPipeline?: () => void;
   onDelete?: () => void;
 }> = ({ sample, project, onViewPipeline, onDelete }) => {
@@ -339,10 +339,10 @@ export function DiagnosticsScreen() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterOutcome>("all");
   const [viewMode, setViewMode] = useState<"list" | "pipeline">("list");
-  const [pipelineProjectId, setPipelineProjectId] = useState<string | null>(null);
+  const [pipelineVideoId, setPipelineVideoId] = useState<string | null>(null);
 
   const projectMap = useMemo(() => {
-    const m = new Map<string, Project>();
+    const m = new Map<string, Video>();
     for (const p of projects) m.set(p.id, p);
     return m;
   }, [projects]);
@@ -410,12 +410,12 @@ export function DiagnosticsScreen() {
     };
   }, [samples]);
 
-  if (viewMode === "pipeline" && pipelineProjectId) {
+  if (viewMode === "pipeline" && pipelineVideoId) {
     return (
       <PipelineView
-        projectId={pipelineProjectId}
-        project={projectMap.get(pipelineProjectId)}
-        onBack={() => { setViewMode("list"); setPipelineProjectId(null); }}
+        projectId={pipelineVideoId}
+        project={projectMap.get(pipelineVideoId)}
+        onBack={() => { setViewMode("list"); setPipelineVideoId(null); }}
       />
     );
   }
@@ -516,7 +516,7 @@ export function DiagnosticsScreen() {
                 key={`${s.projectId}-${s.startedAt}-${i}`}
                 sample={s}
                 project={projectMap.get(s.projectId)}
-                onViewPipeline={() => { setPipelineProjectId(s.projectId); setViewMode("pipeline"); }}
+                onViewPipeline={() => { setPipelineVideoId(s.projectId); setViewMode("pipeline"); }}
                 onDelete={() => handleDeleteSample(s.projectId, s.startedAt)}
               />
             ))}

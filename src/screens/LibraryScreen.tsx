@@ -4,7 +4,7 @@
 
 import { type FunctionComponent, type ReactNode, useMemo, useState } from "react";
 import { useApp } from "../AppContext";
-import type { AppLocation, Project, Shot } from "../types";
+import type { AppLocation, Video, Shot } from "../types";
 import {
   Folder,
   Upload as UploadIcon,
@@ -181,7 +181,7 @@ function EmptyLibrary({ onUpload }: { onUpload: () => void }) {
   );
 }
 
-const AssetCard: FunctionComponent<{ asset: Project; shots: Shot[]; onClick: () => void }> = ({ asset, shots, onClick }) => {
+const AssetCard: FunctionComponent<{ asset: Video; shots: Shot[]; onClick: () => void }> = ({ asset, shots, onClick }) => {
   const shotCount = shots.length;
   return (
     <button

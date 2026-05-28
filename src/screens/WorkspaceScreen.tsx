@@ -6,7 +6,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { FileText, Play, Pause, ArrowLeft, Folder, Search, Star, ExternalLink, Copy, Check, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { AnalysisNode, AnalysisNodeType, DanmakuEmotionAxis, Project } from "../types";
+import { AnalysisNode, AnalysisNodeType, DanmakuEmotionAxis, Video } from "../types";
 import { formatTime } from "@/lib/utils";
 
 // 弹幕情绪 → 颜色 / 中文标签 (用于时间轴情绪带 + 节点卡片小标签)
@@ -946,7 +946,7 @@ export function WorkspaceScreen() {
   );
 }
 
-function SourceBadge({ project, copied, onCopy }: { project: Project; copied: boolean; onCopy: () => void }) {
+function SourceBadge({ project, copied, onCopy }: { project: Video; copied: boolean; onCopy: () => void }) {
   const source = project.source;
   const isUrl = source.type === "url";
   const value = isUrl ? source.url : (project.localFilePath || source.originalPath);

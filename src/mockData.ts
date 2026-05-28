@@ -1,4 +1,4 @@
-import { Project, AnalysisNode, AnalysisReport } from "./types";
+import { Video, AnalysisNode, AnalysisReport } from "./types";
 
 export const generateMockNodes = (duration: number = 180): AnalysisNode[] => {
   return [
