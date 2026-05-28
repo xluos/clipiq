@@ -1,4 +1,5 @@
 import { useApp } from "../AppContext";
+import { SummaryDetail } from "./AccountScreen";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ArrowLeft, CheckCircle2, Download, FileText, AlertTriangle, Search, RefreshCw } from "lucide-react";
@@ -185,7 +186,7 @@ export function ReportScreen() {
     setActiveSection(id);
   };
 
-  // 内容分析管线: 展示摘要结果
+  // 内容分析管线: 复用 SummaryDetail 展示摘要结果
   if (isContentPipeline && analysisResult && project) {
     return (
       <div className="flex-1 flex flex-col bg-slate-50 dark:bg-[#0A0A0B] overflow-y-auto">
@@ -197,52 +198,7 @@ export function ReportScreen() {
             <div className="text-[10.5px] font-mono tracking-[0.14em] uppercase text-slate-500 dark:text-slate-400">内容分析 · CONTENT</div>
             <h1 className="text-[22px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 mt-1">{project.title || project.videoName}</h1>
           </div>
-          {analysisResult.topic && (
-            <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-5">
-              <div className="text-[10.5px] font-mono uppercase tracking-wider text-slate-500 mb-2">核心主题</div>
-              <div className="text-[15px] font-medium text-slate-900 dark:text-slate-100">{analysisResult.topic}</div>
-            </div>
-          )}
-          {analysisResult.target && (
-            <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-5">
-              <div className="text-[10.5px] font-mono uppercase tracking-wider text-slate-500 mb-2">目标受众</div>
-              <div className="text-[14px] text-slate-700 dark:text-slate-300">{analysisResult.target}</div>
-            </div>
-          )}
-          {analysisResult.summary && (
-            <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-5">
-              <div className="text-[10.5px] font-mono uppercase tracking-wider text-slate-500 mb-2">内容摘要</div>
-              <div className="text-[14px] text-slate-700 dark:text-slate-300 leading-relaxed whitespace-pre-wrap">{analysisResult.summary}</div>
-            </div>
-          )}
-          {analysisResult.tags?.length > 0 && (
-            <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-5">
-              <div className="text-[10.5px] font-mono uppercase tracking-wider text-slate-500 mb-2">标签</div>
-              <div className="flex flex-wrap gap-2">
-                {analysisResult.tags.map((tag: string, i: number) => (
-                  <span key={i} className="px-2.5 py-1 rounded-full text-[12px] bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/50">
-                    {tag}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-          {analysisResult.frames?.length > 0 && (
-            <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-5">
-              <div className="text-[10.5px] font-mono uppercase tracking-wider text-slate-500 mb-3">关键画面</div>
-              <div className="grid grid-cols-3 gap-2">
-                {analysisResult.frames.slice(0, 12).map((f: any, i: number) => (
-                  <img key={i} src={f.url} alt="" className="rounded border border-slate-200 dark:border-slate-700 w-full aspect-video object-cover" />
-                ))}
-              </div>
-            </div>
-          )}
-          {analysisResult.transcript?.text && (
-            <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-5">
-              <div className="text-[10.5px] font-mono uppercase tracking-wider text-slate-500 mb-2">字幕文稿</div>
-              <div className="text-[13px] text-slate-600 dark:text-slate-400 leading-relaxed max-h-60 overflow-y-auto whitespace-pre-wrap">{analysisResult.transcript.text}</div>
-            </div>
-          )}
+          <SummaryDetail summary={analysisResult} onOpenAnalysis={() => setCurrentScreen("home")} />
         </div>
       </div>
     );

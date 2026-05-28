@@ -1450,7 +1450,7 @@ function VideosTab({
   );
 }
 
-function SummaryDetail({ summary, analysisProjectId, onOpenAnalysis }: {
+export function SummaryDetail({ summary, analysisProjectId, onOpenAnalysis }: {
   summary: VideoContentAnalysis | string;
   analysisProjectId?: string;
   onOpenAnalysis: () => void;
