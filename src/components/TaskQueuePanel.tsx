@@ -5,7 +5,7 @@
 import { type FunctionComponent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useApp, type ModelDownloadProgress } from "../AppContext";
 import type { Project } from "../types";
-import { Cpu, X, ChevronRight, AlertTriangle, UserSquare2, Download } from "lucide-react";
+import { Cpu, X, ChevronRight, AlertTriangle, UserSquare2, Download, Sparkles } from "lucide-react";
 
 // ─── 通用任务条目类型 ─────────────────────────────────
 
@@ -22,26 +22,38 @@ type TaskEntry = {
 // ─── 数据汇聚 hook ────────────────────────────────────
 
 export function useTaskQueueData() {
-  const { projects, accounts, accountFetchUi, progressByAnalysis, activeAnalysisForProject, modelDownloads } = useApp();
+  const { videos, accounts, accountFetchUi, progressByAnalysis, activeAnalysisForProject, analysesByVideo, modelDownloads } = useApp();
 
   return useMemo(() => {
-    // 视频分析任务
+    // v3: 从 analysesByVideo 读正在跑的分析（不依赖 video.status）
     const analysisTasks: TaskEntry[] = [];
-    const failedProjects: Project[] = [];
-    for (const p of projects) {
-      if (p.status === "analyzing" || p.status === "downloading") {
-        const aid = activeAnalysisForProject[p.id] || p.currentAnalysisId;
-        const evt = aid ? progressByAnalysis[aid] : undefined;
-        const isDownloading = p.status === "downloading";
-        analysisTasks.push({
-          id: p.id,
-          title: p.videoName,
-          progress: Math.round(evt?.progress ?? (isDownloading ? 5 : 50)),
-          stage: evt?.stage || (isDownloading ? "下载视频" : "分析中"),
-          message: evt?.message,
-        });
-      } else if (p.status === "failed" || p.status === "download_failed") {
-        failedProjects.push(p);
+    const contentTasks: TaskEntry[] = [];
+    const failedAnalyses: Array<{ videoTitle: string; analysisId: string; pipelineId: string; error?: string }> = [];
+
+    for (const v of videos) {
+      const analyses = analysesByVideo[v.id] || [];
+      for (const a of analyses) {
+        if (a.status === "analyzing") {
+          const evt = progressByAnalysis[a.id] || (activeAnalysisForProject[v.id] === a.id ? progressByAnalysis[a.id] : undefined);
+          const isContent = a.pipelineId === "builtin-content";
+          const entry: TaskEntry = {
+            id: a.id,
+            title: v.title || v.videoName || v.id.slice(0, 12),
+            progress: Math.round(evt?.progress ?? 50),
+            stage: evt?.stage || "分析中",
+            message: evt?.message,
+            icon: isContent ? <Sparkles className="w-3.5 h-3.5 text-indigo-500 shrink-0" strokeWidth={1.5} /> : undefined,
+          };
+          if (isContent) contentTasks.push(entry);
+          else analysisTasks.push(entry);
+        } else if (a.status === "failed") {
+          failedAnalyses.push({
+            videoTitle: v.title || v.videoName || v.id.slice(0, 12),
+            analysisId: a.id,
+            pipelineId: a.pipelineId,
+            error: a.errorMessage,
+          });
+        }
       }
     }
 
@@ -72,9 +84,9 @@ export function useTaskQueueData() {
       icon: <Download className="w-3.5 h-3.5 text-slate-500 shrink-0" strokeWidth={1.5} />,
     }));
 
-    const totalRunning = analysisTasks.length + accountTasks.length + downloadTasks.length;
-    return { analysisTasks, accountTasks, downloadTasks, failedProjects, totalRunning };
-  }, [projects, progressByAnalysis, activeAnalysisForProject, accounts, accountFetchUi, modelDownloads]);
+    const totalRunning = analysisTasks.length + contentTasks.length + accountTasks.length + downloadTasks.length;
+    return { analysisTasks, contentTasks, accountTasks, downloadTasks, failedAnalyses, totalRunning };
+  }, [videos, analysesByVideo, progressByAnalysis, activeAnalysisForProject, accounts, accountFetchUi, modelDownloads]);
 }
 
 function fmtSize(n: number): string | null {
@@ -95,7 +107,7 @@ function fmtSpeed(bps: number): string {
 export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ collapsed }) => {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const { totalRunning, failedProjects } = useTaskQueueData();
+  const { totalRunning, failedAnalyses } = useTaskQueueData();
   const sidebarWidth = collapsed ? 56 : 220;
 
   useEffect(() => {
@@ -142,7 +154,7 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
               {totalRunning}
             </span>
           )}
-          {totalRunning === 0 && failedProjects.length > 0 && (
+          {totalRunning === 0 && failedAnalyses.length > 0 && (
             <span
               className="absolute -top-1 -right-1.5 min-w-[14px] h-[14px] px-1 rounded-full bg-rose-500 text-white font-mono font-semibold flex items-center justify-center leading-none"
               style={{ fontSize: 9 }}
@@ -172,10 +184,10 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
 
 const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: number }> = ({ onClose, sidebarWidth }) => {
   const { setLocation, setActiveProjectId, setCurrentScreen } = useApp();
-  const { analysisTasks, accountTasks, downloadTasks, failedProjects, totalRunning } = useTaskQueueData();
+  const { analysisTasks, contentTasks, accountTasks, downloadTasks, failedAnalyses, totalRunning } = useTaskQueueData();
 
-  const openProject = (projectId: string) => {
-    setActiveProjectId(projectId);
+  const openProject = (videoId: string) => {
+    setActiveProjectId(videoId);
     setLocation({ module: "analysis", screen: "progress" });
     onClose();
   };
@@ -205,8 +217,11 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
       </div>
 
       <div className="max-h-[460px] overflow-y-auto">
-        {/* 视频分析 */}
-        <TaskSection title="视频分析" entries={analysisTasks} onClickEntry={(t) => openProject(t.id)} />
+        {/* 结构拆解 */}
+        <TaskSection title="结构拆解" entries={analysisTasks} onClickEntry={(t) => openProject(t.id)} />
+
+        {/* 内容分析 */}
+        <TaskSection title="内容分析" entries={contentTasks} onClickEntry={(t) => openProject(t.id)} />
 
         {/* 模型下载 */}
         <TaskSection title="模型下载" entries={downloadTasks} onClickEntry={() => openSettings()} />
@@ -214,24 +229,34 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
         {/* 账号拉取 */}
         <TaskSection title="账号拉取" entries={accountTasks} onClickEntry={(t) => openAccount(t.id)} />
 
-        {/* 失败 */}
-        {failedProjects.length > 0 && (
-          <Section title="失败 · 可重试" count={failedProjects.length} tone="danger">
-            {failedProjects.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => openProject(p.id)}
-                className="w-full text-left px-4 py-2.5 hover:bg-slate-50 dark:hover:bg-slate-800/40 border-b border-slate-100 dark:border-slate-800/60 last:border-b-0 flex items-center gap-2"
+        {/* 失败记录 */}
+        {failedAnalyses.length > 0 && (
+          <Section title="失败记录" count={failedAnalyses.length} tone="danger">
+            {failedAnalyses.map((a) => (
+              <div
+                key={a.analysisId}
+                className="px-4 py-2.5 border-b border-slate-100 dark:border-slate-800/60 last:border-b-0 flex items-center gap-2"
               >
                 <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" strokeWidth={1.5} />
-                <div className="text-[12.5px] text-slate-900 dark:text-slate-100 truncate flex-1">{p.videoName}</div>
-                <ChevronRight className="w-3 h-3 text-slate-400" strokeWidth={1.5} />
-              </button>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[12.5px] text-slate-900 dark:text-slate-100 truncate">{a.videoTitle}</div>
+                  <div className="text-[10.5px] text-slate-500">{a.pipelineId === "builtin-content" ? "内容分析" : "结构拆解"}{a.error ? ` · ${a.error.slice(0, 40)}` : ""}</div>
+                </div>
+                <button
+                  onClick={async () => {
+                    await window.videoAnalyzer?.deleteAnalysis(a.analysisId).catch(() => {});
+                  }}
+                  title="删除失败记录"
+                  className="w-6 h-6 rounded flex items-center justify-center text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30 shrink-0"
+                >
+                  <X className="w-3 h-3" strokeWidth={1.5} />
+                </button>
+              </div>
             ))}
           </Section>
         )}
 
-        {totalRunning === 0 && failedProjects.length === 0 && (
+        {totalRunning === 0 && failedAnalyses.length === 0 && (
           <div className="px-4 py-8 text-center">
             <p className="text-[12.5px] text-slate-500 dark:text-slate-400 leading-relaxed">
               当前没有任务在运行
