@@ -7680,7 +7680,18 @@ app.whenReady().then(async () => {
       broadcastToWindows("analysis:summary:status", { videoId, status, ...extra });
     };
 
-    // v3: 创建 analyses 记录来追踪内容分析
+    // v3: 如果已有 completed 的内容分析，直接返回
+    const existingAnalysis = db.prepare(
+      "SELECT id, result FROM analyses WHERE video_id = ? AND pipeline_id = 'builtin-content' AND status = 'completed' ORDER BY created_at DESC LIMIT 1"
+    ).get(videoId);
+    if (existingAnalysis?.result) {
+      log.info("summary", `已有完成的内容分析 ${existingAnalysis.id}，直接返回`);
+      const cached = JSON.parse(existingAnalysis.result);
+      sendStatus("done", { summary: cached, progress: 100 });
+      summaryInFlight.delete(videoId);
+      return { ok: true, summary: cached };
+    }
+
     const analysisId = `content-${videoId}-${Date.now()}`;
     const analysisStartedAt = Date.now();
     db.prepare(
@@ -7700,7 +7711,9 @@ app.whenReady().then(async () => {
       await fs.mkdir(artifactDir, { recursive: true });
       log.info("summary", `artifactDir=${artifactDir}`);
 
-      let videoPath = av.localVideoPath;
+      let videoPath = av.localPath || av.localVideoPath;
+      // localVideoPath 可能是 media:// URL，取 localPath 真实磁盘路径
+      if (videoPath && videoPath.startsWith("media://")) videoPath = null;
       log.info("summary", `已有本地路径=${videoPath || "(无)"} 存在=${videoPath ? fsSync.existsSync(videoPath) : false}`);
       if (!videoPath || !fsSync.existsSync(videoPath)) {
         log.info("summary", "本地无缓存, 开始下载");
@@ -7785,7 +7798,13 @@ app.whenReady().then(async () => {
       log.info("summary", `[5/6] 识别字幕, hasAudio=${inspected.hasAudio}`);
       sendStatus("summarizing", { progress: 52, message: "识别字幕" });
       let transcript = null;
-      if (inspected.hasAudio) {
+      // 优先复用已有的 transcript 缓存
+      const transcriptCachePath = path.join(artifactDir, "transcript.json");
+      const cachedTranscript = await readJson(transcriptCachePath, null);
+      if (cachedTranscript?.text) {
+        transcript = cachedTranscript;
+        log.info("summary", `复用已有字幕缓存: ${transcript.text.length} 字, segments=${transcript.segments?.length || 0}`);
+      } else if (inspected.hasAudio) {
         const audioProvider = resolveAudioProvider(cfg);
         log.info("summary", `音频提供者: ${audioProvider?.id || "(null)"} type=${audioProvider?.endpointType || "?"}`);
         if (audioProvider) {
@@ -7798,6 +7817,10 @@ app.whenReady().then(async () => {
             (p) => sendStatus("summarizing", { progress: 52 + Math.round(18 * (p?.progress || 0)), message: "识别字幕" }),
           );
           log.info("summary", `字幕识别完成: ${transcript?.text?.length || 0} 字, segments=${transcript?.segments?.length || 0}`);
+          // 写入缓存
+          if (transcript) {
+            await writeJson(transcriptCachePath, transcript).catch(() => {});
+          }
         } else {
           log.warn("summary", "未配置音频提供者, 跳过字幕识别");
         }
