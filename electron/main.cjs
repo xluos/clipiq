@@ -1113,11 +1113,9 @@ function getDb() {
   db.exec("PRAGMA journal_mode=WAL");
   db.exec("PRAGMA foreign_keys=ON");
 
-  // v3: 清除所有旧表，从干净状态建新 schema
+  // 清除 v2 旧表（只删不再使用的表，不动 v3 新表）
   db.exec(`
     DROP TABLE IF EXISTS account_videos;
-    DROP TABLE IF EXISTS shots;
-    DROP TABLE IF EXISTS analyses;
     DROP TABLE IF EXISTS projects;
     DROP TABLE IF EXISTS analysis_nodes;
     DROP TABLE IF EXISTS analysis_reports;
