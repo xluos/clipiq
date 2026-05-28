@@ -183,7 +183,7 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
 // ─── Drawer ────────────────────────────────────────────
 
 const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: number }> = ({ onClose, sidebarWidth }) => {
-  const { setLocation, setActiveProjectId, setCurrentScreen } = useApp();
+  const { setLocation, setActiveProjectId, setCurrentScreen, refreshAnalyses, videos } = useApp();
   const { analysisTasks, contentTasks, accountTasks, downloadTasks, failedAnalyses, totalRunning } = useTaskQueueData();
 
   const openProject = (videoId: string) => {
@@ -245,6 +245,7 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
                 <button
                   onClick={async () => {
                     await window.videoAnalyzer?.deleteAnalysis(a.analysisId).catch(() => {});
+                    for (const v of videos) refreshAnalyses(v.id);
                   }}
                   title="删除失败记录"
                   className="w-6 h-6 rounded flex items-center justify-center text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30 shrink-0"

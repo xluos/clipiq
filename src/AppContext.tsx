@@ -742,8 +742,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!window.videoAnalyzer?.onVideoSummaryStatus) return;
     const off = window.videoAnalyzer.onVideoSummaryStatus((evt) => {
-      // v3: 内容分析结果在 analyses 表，完成/失败时刷新 analysesByVideo
-      if (evt.videoId && (evt.status === "done" || evt.status === "failed")) {
+      if (!evt.videoId) return;
+      // 把内容分析进度注入 progressByAnalysis，让 TaskQueuePanel 能看到
+      if (evt.status === "summarizing") {
+        const fakeAnalysisId = `content-${evt.videoId}`;
+        setProgressByAnalysis((prev) => ({
+          ...prev,
+          [fakeAnalysisId]: {
+            projectId: evt.videoId!,
+            videoId: evt.videoId,
+            analysisId: fakeAnalysisId,
+            progress: evt.progress ?? 0,
+            stage: evt.message || "内容分析",
+            message: evt.message,
+          } as any,
+        }));
+      }
+      if (evt.status === "done" || evt.status === "failed") {
+        // 清理临时进度
+        const fakeAnalysisId = `content-${evt.videoId}`;
+        setProgressByAnalysis((prev) => {
+          const n = { ...prev };
+          delete n[fakeAnalysisId];
+          return n;
+        });
         refreshAnalyses(evt.videoId);
       }
     });
