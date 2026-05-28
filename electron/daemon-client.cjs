@@ -11,6 +11,9 @@ const os = require("node:os");
 const log = require("./logger.cjs");
 const sidecarUtils = require("./sidecar-utils.cjs");
 
+const DEFAULT_HTTP_PORT = 19190;
+const CLIENT_NAME = "clipiq";
+
 function daemonStorageDir() {
   if (process.platform === "darwin") {
     return path.join(os.homedir(), "Library", "Application Support", "AIModels");
@@ -135,33 +138,72 @@ async function findDaemonBinary() {
 }
 
 let daemonProcess = null;
+let registeredClientId = null;
 
-function killOrphanByPidFile() {
-  const pf = pidPath();
+function clientId() {
+  return `${CLIENT_NAME}-${process.pid}`;
+}
+
+function httpPort() {
+  const env = process.env.AI_DAEMON_HTTP_PORT;
+  if (env && Number.isFinite(Number(env))) return Number(env);
+  return DEFAULT_HTTP_PORT;
+}
+
+function registerClientSync() {
   try {
-    const raw = fsSync.readFileSync(pf, "utf8").trim();
-    const pid = parseInt(raw, 10);
-    if (Number.isFinite(pid) && sidecarUtils.pidAlive(pid)) {
-      log.info("daemon-client", `killing orphan daemon pid=${pid}`);
-      sidecarUtils.killPidSyncWait(pid, 800);
-    }
-  } catch { /* no pid file or unreadable */ }
-  try { fsSync.unlinkSync(pf); } catch {}
+    const body = JSON.stringify({ id: clientId(), name: CLIENT_NAME, pid: process.pid });
+    const req = http.request({
+      socketPath: socketPath(),
+      path: "/api/clients/register",
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Length": Buffer.byteLength(body) },
+    });
+    req.on("error", () => {});
+    req.write(body);
+    req.end();
+    registeredClientId = clientId();
+  } catch { /* best effort */ }
+}
+
+async function registerClient() {
+  if (registeredClientId === clientId()) return;
+  try {
+    await request("POST", "/api/clients/register", { id: clientId(), name: CLIENT_NAME, pid: process.pid });
+    registeredClientId = clientId();
+    log.info("daemon-client", `registered as client ${clientId()}`);
+  } catch (err) {
+    log.warn("daemon-client", `register failed: ${err.message}`);
+  }
+}
+
+function deregisterClientSync() {
+  if (!registeredClientId) return;
+  try {
+    const body = JSON.stringify({ id: registeredClientId });
+    const req = http.request({
+      socketPath: socketPath(),
+      path: "/api/clients/deregister",
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Length": Buffer.byteLength(body) },
+    });
+    req.on("error", () => {});
+    req.write(body);
+    req.end();
+  } catch { /* best effort */ }
+  registeredClientId = null;
 }
 
 function shutdownSync() {
-  if (daemonProcess) {
-    try { daemonProcess.kill("SIGTERM"); } catch {}
-    daemonProcess = null;
-  }
-  killOrphanByPidFile();
-  try { fsSync.unlinkSync(socketPath()); } catch {}
+  deregisterClientSync();
+  daemonProcess = null;
 }
 
 async function ensureDaemon() {
-  if (await isDaemonRunning()) return;
-
-  killOrphanByPidFile();
+  if (await isDaemonRunning()) {
+    await registerClient();
+    return;
+  }
 
   const binary = await findDaemonBinary();
   if (!binary) {
@@ -172,10 +214,8 @@ async function ensureDaemon() {
 
   await fs.mkdir(daemonStorageDir(), { recursive: true });
 
-  const sock = socketPath();
-  try { await fs.unlink(sock); } catch { /* ignore */ }
-
-  const child = spawn(binary, ["serve"], {
+  const port = httpPort();
+  const child = spawn(binary, ["serve", "--http", `:${port}`], {
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });
@@ -204,7 +244,9 @@ async function ensureDaemon() {
 
   child.unref();
   daemonProcess = child;
-  log.info("daemon-client", `daemon started pid=${child.pid}`);
+  log.info("daemon-client", `daemon started pid=${child.pid}, http=:${port}`);
+
+  await registerClient();
 }
 
 async function getStatus() {
@@ -361,6 +403,8 @@ module.exports = {
   ensureDaemon,
   isDaemonRunning,
   shutdownSync,
+  registerClient,
+  deregisterClientSync,
   getStatus,
   listModels,
   getModelStatus,
