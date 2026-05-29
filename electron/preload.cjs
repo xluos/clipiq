@@ -52,6 +52,7 @@ const CHANNELS = [
   { method: "addVideoToCollection", channel: "collections:addVideo", kind: "invoke" },
   { method: "removeVideoFromCollection", channel: "collections:removeVideo", kind: "invoke" },
   { method: "listCollectionVideos", channel: "collections:listVideos", kind: "invoke" },
+  { method: "generateCollectionMethodology", channel: "collections:generateMethodology", kind: "invoke" },
 
   // ── pipelines ──
   { method: "listPipelines", channel: "pipelines:list", kind: "invoke" },

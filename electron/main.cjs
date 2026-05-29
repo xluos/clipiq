@@ -7449,7 +7449,25 @@ app.whenReady().then(async () => {
   ipcMain.handle("collections:list", async () => {
     const db = getDb();
     const rows = db.prepare("SELECT * FROM collections ORDER BY updated_at DESC").all();
-    return rows.map(rowToCollection);
+    const collections = rows.map(rowToCollection);
+    // 回填 methodology(最新一份)+ methodologyHistory(全部,version DESC)。
+    // 镜像 accounts:list 的回填:methodology 存独立表,渲染端从这里读回,避免 upsert 丢字段。
+    try {
+      const methRows = db.prepare("SELECT collection_id, data, version FROM methodologies ORDER BY version DESC").all();
+      const byColl = {};
+      for (const m of methRows) {
+        if (!byColl[m.collection_id]) byColl[m.collection_id] = [];
+        try { byColl[m.collection_id].push(JSON.parse(m.data)); } catch { /* 跳过坏 JSON */ }
+      }
+      for (const c of collections) {
+        const list = byColl[c.id];
+        if (list && list.length > 0) {
+          c.methodology = list[0];
+          c.methodologyHistory = list.slice(1);
+        }
+      }
+    } catch (e) { log.warn("collections:list", "回填 methodology 失败:", e?.message || e); }
+    return collections;
   });
 
   ipcMain.handle("collections:upsert", async (_event, col) => {
@@ -8496,6 +8514,93 @@ app.whenReady().then(async () => {
       return { ok: true, methodology };
     } catch (err) {
       throw new Error(`methodology LLM 失败: ${err?.message || String(err)}`);
+    }
+  });
+
+  // 收藏夹维度的「创作手册」生成 — 服务端按 collectionId 聚合该集合视频的内容分析产物
+  // (summary/topic/target/tags),抽共性 + 给可复用创作方法,辅助创作。每条挂样本视频。
+  ipcMain.handle("collections:generateMethodology", async (_event, { collectionId } = {}) => {
+    if (!collectionId) throw new Error("collections:generateMethodology 需要 collectionId");
+    const provider = await loadComplexTextProvider();
+    if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) {
+      throw new Error("未配置 complex_text 任务槽位的 LLM 供应商");
+    }
+    const db = getDb();
+    const coll = db.prepare("SELECT id, name, account_id FROM collections WHERE id = ?").get(collectionId);
+    if (!coll) throw new Error(`收藏夹 ${collectionId} 不存在`);
+
+    // 取集合视频 + 各自最新已完成的内容分析(builtin-content)产物
+    const videoRows = db.prepare(
+      "SELECT v.id, v.title FROM videos v JOIN collection_videos cv ON cv.video_id = v.id WHERE cv.collection_id = ? ORDER BY cv.position",
+    ).all(collectionId);
+    const items = [];
+    for (const vr of videoRows) {
+      const a = db.prepare(
+        "SELECT result FROM analyses WHERE video_id = ? AND pipeline_id = 'builtin-content' AND status = 'completed' ORDER BY created_at DESC LIMIT 1",
+      ).get(vr.id);
+      if (!a?.result) continue;
+      let r;
+      try { r = JSON.parse(a.result); } catch { continue; }
+      if (!r?.summary && !r?.topic) continue;
+      items.push({ videoId: vr.id, title: vr.title || "未命名", summary: r.summary, topic: r.topic, target: r.target, tags: r.tags });
+    }
+    if (items.length === 0) throw new Error("该收藏夹至少需要 1 条已做内容分析的视频");
+
+    const lines = [`# 收藏夹: ${coll.name || "未命名"}`, `# 视频数: ${items.length}`, ""];
+    items.slice(0, 16).forEach((v, i) => {
+      lines.push(`## 视频 ${i + 1} (videoId=${v.videoId}) · ${v.title}`);
+      if (v.topic) lines.push(`选题: ${String(v.topic).slice(0, 120)}`);
+      if (v.target) lines.push(`受众: ${String(v.target).slice(0, 120)}`);
+      if (Array.isArray(v.tags) && v.tags.length) lines.push(`标签: ${v.tags.join("、")}`);
+      if (v.summary) lines.push(`内容摘要: ${String(v.summary).slice(0, 500)}`);
+      lines.push("");
+    });
+    lines.push("请输出 JSON(commonalities = 共性洞察,playbook = 可复用创作方法),格式:");
+    lines.push('{"commonalities":[{"title":"小标题","detail":"1-3 句具体描述","sampleVideoIds":["上面给的 videoId"]}],');
+    lines.push(' "playbook":[{"title":"方法名","detail":"可照做的具体步骤/公式/模板","sampleVideoIds":["videoId"]}]}');
+
+    try {
+      const result = await openaiClient.callJsonCompletion(provider, {
+        systemText:
+          "你是短视频创作教练。给定同一收藏夹里若干视频的内容摘要,请帮创作者:\n" +
+          "1) commonalities:抽取这组视频反复出现的共性 —— 选题角度、开场钩子、内容结构模板、节奏卡点、视觉/表达签名(挑真正重复出现的,3-6 条)。\n" +
+          "2) playbook:给出可直接照做的创作方法 —— 选题公式、开场钩子模板、脚本结构骨架、节奏建议、拍剪要点(具体可操作,3-6 条)。\n" +
+          "规则:\n" +
+          "- 每条 title 简短、detail 具体(忌空泛套话),用中文。\n" +
+          "- sampleVideoIds 必须从用户给的 videoId 里选 1-3 个最能代表该条的视频,不要编造 id。\n" +
+          "- 面向'怎么做出类似的视频',不是逐个拆解单条视频。\n" +
+          "- 直接返回 JSON,不要 markdown 围栏,不要思考过程。",
+        userText: lines.join("\n"),
+        temperature: 0.5,
+      });
+      const parsed = result.parsed || {};
+      const validIds = new Set(items.map((v) => v.videoId));
+      const normItems = (arr) => (Array.isArray(arr) ? arr : [])
+        .map((it) => ({
+          title: String(it?.title || "").trim(),
+          detail: String(it?.detail || "").trim(),
+          sampleVideoIds: Array.isArray(it?.sampleVideoIds) ? it.sampleVideoIds.filter((id) => validIds.has(id)) : [],
+        }))
+        .filter((it) => it.title || it.detail);
+      const methodology = {
+        commonalities: normItems(parsed.commonalities),
+        playbook: normItems(parsed.playbook),
+        generatedAt: new Date().toISOString(),
+        sourceVideoCount: items.length,
+      };
+      if (methodology.commonalities.length === 0 && methodology.playbook.length === 0) {
+        throw new Error("模型未产出有效内容");
+      }
+      // 写库:按 collection_id 存,version++;col-account 收藏夹带上 account_id(accounts:list 回填用)
+      const maxVer = db.prepare("SELECT MAX(version) AS v FROM methodologies WHERE collection_id = ?").get(collectionId);
+      const version = (maxVer?.v || 0) + 1;
+      const methId = `meth-${collectionId}-${version}`;
+      db.prepare(
+        "INSERT INTO methodologies (id, collection_id, account_id, version, data, source_video_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run(methId, collectionId, coll.account_id || null, version, JSON.stringify(methodology), items.length, Date.now());
+      return { ok: true, methodology };
+    } catch (err) {
+      throw new Error(`创作手册生成失败: ${err?.message || String(err)}`);
     }
   });
 

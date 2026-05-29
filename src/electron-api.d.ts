@@ -430,6 +430,8 @@ declare global {
         accountName: string;
         videoSummaries: Array<{ title: string; summary?: string; structure?: unknown; pacing?: string; editingStyle?: string; composition?: string }>;
       }) => Promise<{ ok: true; methodology: import("./types").AccountMethodology }>;
+      // 收藏夹维度「创作手册」:服务端按 collectionId 聚合该集合视频的内容分析产物生成
+      generateCollectionMethodology: (payload: { collectionId: string }) => Promise<{ ok: true; methodology: import("./types").CollectionMethodology }>;
 
       // studio
       generateStudioSteps: (payload: {
