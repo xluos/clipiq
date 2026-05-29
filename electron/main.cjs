@@ -2163,10 +2163,17 @@ function parseBilibiliMid(url) {
   return m ? m[1] : null;
 }
 
-// 抖音用户主页 https://www.douyin.com/user/MS4w... 提取 sec_uid
+// 从抖音用户 URL 提取 sec_uid。支持两种:
+//   - 主页    https://www.douyin.com/user/MS4w...
+//   - PC 分享短链 https://www.iesdouyin.com/share/user/MS4w...?from_ssr=1&...
+// (query 串里也可能带 sec_uid,但路径段是首选)
 function parseDouyinSecUid(url) {
-  const m = String(url || "").match(/douyin\.com\/user\/([A-Za-z0-9_-]+)/);
-  return m ? m[1] : null;
+  const s = String(url || "");
+  const m = s.match(/(?:ies)?douyin\.com\/(?:share\/)?user\/([A-Za-z0-9_-]+)/);
+  if (m) return m[1];
+  // 兜底:有些分享链把 sec_uid 放在 query(sec_user_id / sec_uid)
+  const q = s.match(/[?&]sec_(?:user_)?id=([A-Za-z0-9_-]+)/);
+  return q ? q[1] : null;
 }
 
 // 中文/英文格式化粉丝数
@@ -7685,7 +7692,7 @@ app.whenReady().then(async () => {
           log.info("accounts:fetch", `抖音账号: ${profile.nickname} 粉丝=${profile.followerCount} 作品=${profile.awemeCount}`);
         }
       } else {
-        nativeCardError = "无法从抖音 URL 解析出 sec_user_id (期望格式: douyin.com/user/MS4w...)";
+        nativeCardError = "无法从抖音 URL 解析出 sec_user_id (支持 douyin.com/user/MS4w... 或分享短链 iesdouyin.com/share/user/MS4w...)";
       }
     }
 
