@@ -1015,6 +1015,7 @@ function rowToVideo(r) {
     title: r.title || "",
     sourceType: r.source_type || "local",
     sourceUrl: r.source_url || undefined,
+    playUrl: r.play_url || undefined,
     platform: r.platform || undefined,
     externalId: r.external_id || undefined,
     localPath: r.local_path || undefined,
@@ -1192,6 +1193,7 @@ function getDb() {
       title TEXT NOT NULL DEFAULT '',
       source_type TEXT NOT NULL DEFAULT 'local',
       source_url TEXT,
+      play_url TEXT,
       platform TEXT,
       external_id TEXT,
       local_path TEXT,
@@ -1338,6 +1340,10 @@ function getDb() {
   ]) {
     try { db.exec(`ALTER TABLE analyses ADD COLUMN ${col}`); } catch { /* 列已存在 */ }
   }
+
+  // 增量迁移: videos 加 play_url(抖音 play_addr 直链)。老库没这列会导致拉取时抓到的
+  // 直链落库即丢,抖音视频下载只能走 yt-dlp(现需 cookie)而失败。
+  try { db.exec("ALTER TABLE videos ADD COLUMN play_url TEXT"); } catch { /* 列已存在 */ }
 
   // 插入内置管线
   const now = Date.now();
@@ -7254,13 +7260,14 @@ app.whenReady().then(async () => {
     const db = getDb();
     const now = Date.now();
     db.prepare(`
-      INSERT INTO videos (id, title, source_type, source_url, platform, external_id, local_path,
+      INSERT INTO videos (id, title, source_type, source_url, play_url, platform, external_id, local_path,
         duration_sec, width, height, orientation, thumbnail_url, account_id, status,
         upload_date, view_count, like_count, comment_count, share_count, collect_count,
         tags, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title=excluded.title, source_type=excluded.source_type, source_url=excluded.source_url,
+        play_url=excluded.play_url,
         platform=excluded.platform, external_id=excluded.external_id, local_path=excluded.local_path,
         duration_sec=excluded.duration_sec, width=excluded.width, height=excluded.height,
         orientation=excluded.orientation, thumbnail_url=excluded.thumbnail_url, account_id=excluded.account_id,
@@ -7269,6 +7276,7 @@ app.whenReady().then(async () => {
         collect_count=excluded.collect_count, tags=excluded.tags, updated_at=excluded.updated_at
     `).run(
       video.id, video.title || "", video.sourceType || "local", video.sourceUrl || null,
+      video.playUrl || null,
       video.platform || null, video.externalId || null, video.localPath || null,
       video.durationSec || 0, video.width || 0, video.height || 0, video.orientation || "landscape",
       video.thumbnailUrl || null, video.accountId || null, video.status || "ready",
@@ -7879,13 +7887,13 @@ app.whenReady().then(async () => {
       const now = Date.now();
       const platform = result.accountPlatform;
       const upsertVideoStmt = db.prepare(`
-        INSERT INTO videos (id, title, source_type, source_url, platform, external_id, local_path,
+        INSERT INTO videos (id, title, source_type, source_url, play_url, platform, external_id, local_path,
           duration_sec, width, height, orientation, thumbnail_url, account_id, status,
           upload_date, view_count, like_count, comment_count, share_count, collect_count,
           tags, created_at, updated_at)
-        VALUES (?, ?, 'url', ?, ?, ?, NULL, ?, 0, 0, 'landscape', ?, ?, 'ready', ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        VALUES (?, ?, 'url', ?, ?, ?, ?, NULL, ?, 0, 0, 'landscape', ?, ?, 'ready', ?, ?, ?, ?, ?, ?, NULL, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
-          title=excluded.title, source_url=excluded.source_url, thumbnail_url=excluded.thumbnail_url,
+          title=excluded.title, source_url=excluded.source_url, play_url=excluded.play_url, thumbnail_url=excluded.thumbnail_url,
           upload_date=excluded.upload_date, view_count=excluded.view_count, like_count=excluded.like_count,
           comment_count=excluded.comment_count, share_count=excluded.share_count, collect_count=excluded.collect_count,
           updated_at=excluded.updated_at
@@ -7903,7 +7911,7 @@ app.whenReady().then(async () => {
       for (const v of result.videos) {
         const videoId = `av-${accountId}-${v.id}`;
         upsertVideoStmt.run(
-          videoId, v.title || "", v.externalUrl || null, platform || null, v.id || null,
+          videoId, v.title || "", v.externalUrl || null, v.playUrl || null, platform || null, v.id || null,
           v.durationSec || 0, coverByVideoId[videoId] || v.thumbnailUrl || null, accountId,
           v.uploadDate || null, v.viewCount ?? null, v.likeCount ?? null,
           v.commentCount ?? null, v.shareCount ?? null, v.collectCount ?? null,
@@ -8065,37 +8073,49 @@ app.whenReady().then(async () => {
       log.info("summary", `已有本地路径=${videoPath || "(无)"} 存在=${videoPath ? fsSync.existsSync(videoPath) : false}`);
       if (!videoPath || !fsSync.existsSync(videoPath)) {
         log.info("summary", "本地无缓存, 开始下载");
-        try {
+        // play_addr 直连(抖音 yt-dlp 现需 fresh cookie,直连更快更稳)
+        const downloadViaPlayUrl = async () => {
+          send(10, "下载视频", "直连下载");
+          const filePath = path.join(artifactDir, `${av.externalId || "video"}.mp4`);
+          const partPath = filePath + ".part";
+          const res = await fetch(av.playUrl, {
+            headers: {
+              "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+              referer: "https://www.douyin.com/",
+              range: "bytes=0-",
+            },
+          });
+          if (!res.ok) throw new Error(`直连下载失败: HTTP ${res.status}`);
+          const { createWriteStream } = require("node:fs");
+          const { pipeline } = require("node:stream/promises");
+          const { Readable } = require("node:stream");
+          await pipeline(Readable.fromWeb(res.body), createWriteStream(partPath));
+          await fs.rename(partPath, filePath);
+          log.info("summary", `play_url 直连下载完成: ${filePath}`);
+          return filePath;
+        };
+        const runYtDlp = async () => {
           const dl = await performUrlDownloadFlow(av.externalUrl, {
             projectId: `summary-${accountVideoId}`,
             mediaDir: artifactDir,
             handle,
             onProgress: (p, s, m) => send(5 + Math.round(p * 0.2), "下载视频", m || s),
           });
-          videoPath = dl.filePath;
-        } catch (dlErr) {
-          log.warn("summary", `yt-dlp 下载失败: ${dlErr?.message || dlErr}, 尝试 play_url 直连`);
-          // fallback: 用 play_url 直连下载 (参考 douyin-crawler-demo)
-          if (av.playUrl) {
-            send(10, "内容分析", "直连下载");
-            const filePath = path.join(artifactDir, `${av.externalId || "video"}.mp4`);
-            const partPath = filePath + ".part";
-            const res = await fetch(av.playUrl, {
-              headers: {
-                "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
-                referer: "https://www.douyin.com/",
-                range: "bytes=0-",
-              },
-            });
-            if (!res.ok) throw new Error(`直连下载失败: HTTP ${res.status}`);
-            const { createWriteStream } = require("node:fs");
-            const { pipeline } = require("node:stream/promises");
-            const { Readable } = require("node:stream");
-            await pipeline(Readable.fromWeb(res.body), createWriteStream(partPath));
-            await fs.rename(partPath, filePath);
-            videoPath = filePath;
-            log.info("summary", `play_url 直连下载完成: ${filePath}`);
-          } else {
+          return dl.filePath;
+        };
+        // 有 play_addr 直链就先直连(省掉抖音 yt-dlp 必然失败的 ~9s);否则/失败再走 yt-dlp。
+        if (av.playUrl) {
+          try {
+            videoPath = await downloadViaPlayUrl();
+          } catch (directErr) {
+            log.warn("summary", `play_url 直连失败: ${directErr?.message || directErr}, 回退 yt-dlp`);
+            videoPath = await runYtDlp();
+          }
+        } else {
+          try {
+            videoPath = await runYtDlp();
+          } catch (dlErr) {
+            log.warn("summary", `yt-dlp 下载失败且无 play_url: ${dlErr?.message || dlErr}`);
             throw dlErr;
           }
         }
