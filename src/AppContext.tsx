@@ -210,8 +210,8 @@ export function useApp(): AppState {
       const analysis = await window.videoAnalyzer.getAnalysis(analysisId);
       if (!analysis) return;
       const result = analysis.result as any;
-      if (result?.nodes?.length) cache.setNodesForAnalysis(analysisId, result.nodes);
-      if (result?.report) cache.setReportForAnalysis(analysisId, result.report);
+      // 冷加载是"读",用 hydrate 只回灌内存,不要再写回 DB —— 否则分两次 partial 写会自我覆盖。
+      cache.hydrateAnalysis(analysisId, { nodes: result?.nodes, report: result?.report });
     } catch (err) {
       console.warn("switchAnalysis failed", err);
     }

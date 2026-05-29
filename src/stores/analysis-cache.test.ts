@@ -39,6 +39,25 @@ describe("analysis-cache: setReportForAnalysis", () => {
   });
 });
 
+describe("analysis-cache: hydrateAnalysis 不回落库", () => {
+  it("写入 nodes/report 到 store,但不触发 updateAnalysisResult(冷加载读取专用)", () => {
+    const nodes = [node("n1")];
+    const r = report();
+    useAnalysisCacheStore.getState().hydrateAnalysis("a1", { nodes, report: r });
+    const st = useAnalysisCacheStore.getState();
+    expect(st.nodesByAnalysis.a1).toEqual(nodes);
+    expect(st.reportByAnalysis.a1).toEqual(r);
+    const api = (window as unknown as { videoAnalyzer: { updateAnalysisResult: ReturnType<typeof vi.fn> } }).videoAnalyzer;
+    expect(api.updateAnalysisResult).not.toHaveBeenCalled();
+  });
+
+  it("只传 nodes 时不动 report", () => {
+    useAnalysisCacheStore.setState({ reportByAnalysis: { a1: report() } });
+    useAnalysisCacheStore.getState().hydrateAnalysis("a1", { nodes: [node("x")] });
+    expect(useAnalysisCacheStore.getState().reportByAnalysis.a1).toBeDefined();
+  });
+});
+
 describe("analysis-cache: 批量清理", () => {
   it("clearForAnalysisIds 清掉指定 id 的 nodes + report", () => {
     const s = useAnalysisCacheStore.getState();

@@ -7224,9 +7224,19 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("analyses:updateResult", async (_event, analysisId, result) => {
     const db = getDb();
-    db.prepare("UPDATE analyses SET result = ? WHERE id = ?").run(
-      result != null ? JSON.stringify(result) : null, analysisId,
-    );
+    if (result == null) {
+      db.prepare("UPDATE analyses SET result = ? WHERE id = ?").run(null, analysisId);
+      return { ok: true };
+    }
+    // 合并而非覆盖:renderer 的缓存 store 分两次 partial 写 { nodes } / { report },
+    // 整列覆盖会让后写的把先写的冲掉(典型:写 report 把 nodes 抹没,下次冷加载节点全空)。
+    const row = db.prepare("SELECT result FROM analyses WHERE id = ?").get(analysisId);
+    let existing = {};
+    if (row?.result) {
+      try { existing = JSON.parse(row.result) || {}; } catch { existing = {}; }
+    }
+    const merged = { ...existing, ...result };
+    db.prepare("UPDATE analyses SET result = ? WHERE id = ?").run(JSON.stringify(merged), analysisId);
     return { ok: true };
   });
 
@@ -7336,7 +7346,30 @@ app.whenReady().then(async () => {
   ipcMain.handle("accounts:list", async () => {
     const db = getDb();
     const rows = db.prepare("SELECT * FROM accounts ORDER BY updated_at DESC").all();
-    return rows.map(rowToAccount);
+    const accounts = rows.map(rowToAccount);
+    // 回填 methodology(最新)+ methodologyHistory(全部)。methodology 存在独立的 methodologies 表
+    // (generateMethodology 写入),accounts 表没有这两列、upsert 会丢弃,所以读取时从 methodologies 表重建。
+    // 一次查全部再 JS 分组,避免每账号一次的 N+1。
+    try {
+      const methRows = db.prepare("SELECT account_id, data FROM methodologies ORDER BY version DESC").all();
+      const byAccount = {};
+      for (const m of methRows) {
+        if (!m.data) continue;
+        let parsed;
+        try { parsed = JSON.parse(m.data); } catch { continue; }
+        (byAccount[m.account_id] ||= []).push(parsed); // 已按 version DESC,最新在前
+      }
+      for (const a of accounts) {
+        const hist = byAccount[a.id];
+        if (hist?.length) {
+          a.methodology = hist[0];
+          a.methodologyHistory = hist.slice(0, 10);
+        }
+      }
+    } catch (e) {
+      log.warn("accounts:list", "回填 methodology 失败", e?.message || e);
+    }
+    return accounts;
   });
 
   ipcMain.handle("accounts:upsert", async (_event, account) => {
