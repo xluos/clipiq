@@ -6,6 +6,12 @@ build/*
 dist/
 release/
 coverage/
+
+# electron 侧 TS 渐进迁移:.ts 的编译产物(同名 .js/.js.map)不入库。
+# *.test.js 是真源码(vitest 跑),用否定规则排除在忽略之外。
+electron/**/*.js
+electron/**/*.js.map
+!electron/**/*.test.js
 .DS_Store
 *.log
 .env*

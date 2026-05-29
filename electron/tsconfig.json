@@ -1,0 +1,16 @@
+{
+  "comment": "electron 侧 .ts 的类型检查配置。CommonJS 语义(__dirname / require 可用),与 root tsconfig 的 ESNext/bundler 分开。只检 .ts,electron 的 .cjs 仍由 root tsconfig 检。esbuild 负责真正的编译,这里只 noEmit 类型检查。",
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node10",
+    "allowJs": false,
+    "checkJs": false,
+    "allowImportingTsExtensions": false,
+    "esModuleInterop": true,
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["**/*.test.ts", "**/*.d.ts"]
+}

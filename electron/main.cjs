@@ -1,4 +1,10 @@
 const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, protocol, session, shell } = require("electron");
+// 渐进式 TS:非打包(dev / electron:preview)时挂 tsx 的 require-hook,
+// 让 require("./foo")(无后缀)能解析到 foo.ts。打包后 isPackaged 为 true,
+// 走的是 build 阶段 esbuild 预编译出的同名 foo.js,不依赖 tsx(devDep 已被剥离)。
+if (!app.isPackaged) {
+  require("tsx/cjs");
+}
 // IPC 契约 fail-fast:包一层 ipcMain.handle 记录已注册的 invoke channel,
 // whenReady 末尾比对 ipc-contract.cjs 的 manifest —— 缺 handler 直接在启动时报,
 // 而不是等用户点到那个功能才发现静默坏掉。
