@@ -9,6 +9,15 @@ export function useAnalyses(videoId: string | null | undefined) {
   });
 }
 
+// 单 query 订阅全部分析(列表/状态派生用)。result 列不在此返回,详情走 useAnalysis/getAnalysis。
+// 有了这个 active observer,invalidateQueries(["analyses"]) 才会真正 refetch。
+export function useAllAnalyses() {
+  return useQuery({
+    queryKey: ["analyses"],
+    queryFn: () => ipc.listAllAnalyses(),
+  });
+}
+
 export function useAnalysis(analysisId: string | null | undefined) {
   return useQuery({
     queryKey: ["analysis", analysisId],
@@ -22,8 +31,8 @@ export function useDeleteAnalysis() {
   return useMutation({
     mutationFn: ({ analysisId, videoId }: { analysisId: string; videoId: string }) =>
       ipc.deleteAnalysis(analysisId),
-    onSuccess: (_data, { videoId }) => {
-      qc.invalidateQueries({ queryKey: ["analyses", videoId] });
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["analyses"] });
       qc.invalidateQueries({ queryKey: ["videos"] });
     },
   });

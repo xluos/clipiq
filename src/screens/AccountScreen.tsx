@@ -115,8 +115,19 @@ const AccountAvatar: FunctionComponent<{
 function AccountListScreen() {
   const ctx = useApp();
   const { accounts, accountFetchUi, setLocation, setActiveAccountId } = useAccountNav();
-  const { videos } = useApp();
+  const { videos, analysesByVideo } = useApp();
   const [addOpen, setAddOpen] = useState(false);
+
+  // 每个视频是否已完成结构拆解(builtin-pipeline completed)→ 账号卡片"已拆解 / 总数"分数。
+  const analyzedByAccount = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const v of videos) {
+      if (!v.accountId) continue;
+      const done = (analysesByVideo[v.id] || []).some((a) => a.pipelineId === "builtin-pipeline" && a.status === "completed");
+      if (done) m[v.accountId] = (m[v.accountId] || 0) + 1;
+    }
+    return m;
+  }, [videos, analysesByVideo]);
 
   const detailLoc: AppLocation = { module: "account", screen: "detail" };
   const totalVideos = useMemo(
@@ -159,6 +170,7 @@ function AccountListScreen() {
                   key={a.id}
                   account={a}
                   videos={videos.filter((v) => v.accountId === a.id)}
+                  analyzed={analyzedByAccount[a.id] || 0}
                   fetchUi={accountFetchUi[a.id]}
                   onClick={() => {
                     setActiveAccountId(a.id);
@@ -214,12 +226,12 @@ function EmptyAccounts({ onAdd }: { onAdd: () => void }) {
 const AccountCard: FunctionComponent<{
   account: Account;
   videos: AccountVideo[];
+  analyzed: number;
   fetchUi?: { stage: string; progress: number; message?: string };
   onClick: () => void;
   onDelete: () => void;
-}> = ({ account, videos, fetchUi, onClick, onDelete }) => {
+}> = ({ account, videos, analyzed, fetchUi, onClick, onDelete }) => {
   const fetching = !!fetchUi || account.fetchPhase === "fetching";
-  const analyzed = videos.filter((v) => !!v.analysisProjectId).length;
   const total = videos.length || account.totalVideoCount || 0;
   const ratioComplete = total > 0 && analyzed === total;
   const methodologySummary = (() => {
@@ -1362,7 +1374,7 @@ function VideosTab({
           const proj = v.analysisProjectId ? projects.find((p) => p.id === v.analysisProjectId) : undefined;
           const rawStatus = proj?.status || "not_analyzed";
           const analysisStatus: "completed" | "analyzing" | "downloading" | "failed" | "not_analyzed" | "ready" | "download_failed" =
-            rawStatus === "download_failed" ? "failed" : rawStatus;
+            rawStatus === "download_failed" ? "failed" : (rawStatus === "cancelled" || rawStatus === "interrupted") ? "not_analyzed" : rawStatus;
           const err = rowError[v.id];
           const hasSummary = v.summaryStatus === "done" && !!v.videoSummary;
           const isSummarizing = v.summaryStatus === "summarizing" || launchedRef.current.has(v.id);
@@ -1396,6 +1408,7 @@ function VideosTab({
                   )}
                   {summaryFailed && <span className="px-1.5 py-0.5 rounded bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300">失败</span>}
                   {hasSummary && <span className="px-1.5 py-0.5 rounded bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300">已分析</span>}
+                  {v.analysisProjectId && <span className="px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300">已拆解</span>}
                   {hasSummary && typeof v.videoSummary === "object" && v.videoSummary.topic && (
                     <span className="text-slate-600 dark:text-slate-300 normal-case tracking-normal">{v.videoSummary.topic}</span>
                   )}

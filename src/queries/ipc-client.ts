@@ -33,6 +33,8 @@ export const ipc = {
   // analyses
   listAnalyses: (videoId: string): Promise<Analysis[]> =>
     api()?.listAnalyses(videoId) ?? Promise.resolve([]),
+  listAllAnalyses: (): Promise<Analysis[]> =>
+    api()?.listAllAnalyses() ?? Promise.resolve([]),
   getAnalysis: (analysisId: string): Promise<Analysis | null> =>
     api()?.getAnalysis(analysisId) ?? Promise.resolve(null),
   deleteAnalysis: (analysisId: string) =>
@@ -88,6 +90,8 @@ export const ipc = {
   // analysis actions
   analyzeVideo: (payload: { videoId: string; pipelineId: string; options?: AnalysisOptions; slotOverrides?: SlotOverrides }) =>
     api()?.analyzeVideo(payload) ?? Promise.reject(new Error("Electron API not available")),
+  resumeAnalysis: (analysisId: string) =>
+    api()?.resumeAnalysis(analysisId) ?? Promise.reject(new Error("Electron API not available")),
   cancelAnalysis: (videoId: string) =>
     api()?.cancelAnalysis(videoId) ?? Promise.resolve({ cancelled: false }),
   isAnalysisActive: (videoId: string) =>

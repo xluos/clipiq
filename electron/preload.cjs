@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
 
   // v3: analyses (result 统一列)
   listAnalyses: (videoId) => ipcRenderer.invoke("analyses:list", videoId),
+  listAllAnalyses: () => ipcRenderer.invoke("analyses:listAll"),
   getAnalysis: (analysisId) => ipcRenderer.invoke("analyses:get", analysisId),
   deleteAnalysis: (analysisId) => ipcRenderer.invoke("analyses:delete", analysisId),
   updateAnalysisResult: (analysisId, result) => ipcRenderer.invoke("analyses:updateResult", analysisId, result),
@@ -88,6 +89,7 @@ contextBridge.exposeInMainWorld("videoAnalyzer", {
 
   // 分析
   analyzeVideo: (payload) => ipcRenderer.invoke("analysis:start", payload),
+  resumeAnalysis: (analysisId) => ipcRenderer.invoke("analysis:resume", analysisId),
   cancelAnalysis: (videoId) => ipcRenderer.invoke("analysis:cancel", videoId),
   isAnalysisActive: (videoId) => ipcRenderer.invoke("analysis:isActive", videoId),
   getLastAnalysisProgress: (videoId) => ipcRenderer.invoke("analysis:getLastProgress", videoId),

@@ -41,6 +41,7 @@ interface ProgressState {
   setBudget: (analysisId: string, budget: AnalysisBudget) => void;
   setActiveAnalysisForProject: (projectId: string, analysisId: string) => void;
   updatePipeline: (analysisId: string, evt: AnalysisProgressEvent) => void;
+  seedFromSnapshot: (snapshot: { analysisId: string; projectId: string; progress?: number; stage?: string; stageIndex?: number; message?: string }) => void;
   setModelDownload: (modelKey: string, dl: ModelDownloadProgress | null) => void;
   setWhisperDownload: (modelKey: string, dl: ModelDownloadProgress | null) => void;
   setAccountFetchUi: (accountId: string, state: AccountFetchUiState | null) => void;
@@ -100,6 +101,33 @@ export const useProgressStore = create<ProgressState>((set) => ({
       return st;
     });
     return { pipelineByAnalysis: { ...s.pipelineByAnalysis, [analysisId]: { ...pipeline, progress: evt.progress, stages } } };
+  }),
+
+  // 从持久化的 analyses 快照回灌进度 + 流水线。用于重开页面 / app 重启后恢复:
+  // 后端是真相源,这里把 DB 里存的 progress/stageIndex 在前端重建出来。
+  // 已有 live 数据(本会话正在收事件)则不覆盖,避免用更旧的 DB 快照倒退。
+  seedFromSnapshot: ({ analysisId, projectId, progress = 0, stage, stageIndex, message }) => set((s) => {
+    if (!analysisId) return s;
+    const next: Partial<ProgressState> = {};
+    if (!s.progressByAnalysis[analysisId]) {
+      next.progressByAnalysis = {
+        ...s.progressByAnalysis,
+        [analysisId]: { projectId, analysisId, progress, stage: stage || "", message: message || "", stageIndex } as AnalysisProgressEvent,
+      };
+    }
+    if (!s.pipelineByAnalysis[analysisId] && stageIndex != null) {
+      const base = createEmptyPipeline(projectId, analysisId);
+      const stages: PipelineStage[] = base.stages.map((st, i) => {
+        if (i < stageIndex) return { ...st, status: "done" as const };
+        if (i === stageIndex) return { ...st, status: progress >= 100 ? "done" as const : "active" as const, detail: message || st.detail };
+        return st;
+      });
+      next.pipelineByAnalysis = { ...s.pipelineByAnalysis, [analysisId]: { ...base, progress, stages } };
+    }
+    if (!s.activeAnalysisForProject[projectId]) {
+      next.activeAnalysisForProject = { ...s.activeAnalysisForProject, [projectId]: analysisId };
+    }
+    return next as ProgressState;
   }),
 
   setModelDownload: (modelKey, dl) => set((s) => {

@@ -13,6 +13,13 @@ import { useProgressStore, type ModelDownloadProgress, type AccountFetchUiState 
 import { useAnalysisCacheStore } from "./stores/analysis-cache";
 import { initIpcSubscriptions } from "./stores/subscriptions";
 import { queryClient } from "./queries/client";
+import { useVideos } from "./queries/videos";
+import { useAccounts } from "./queries/accounts";
+import { useSessions } from "./queries/sessions";
+import { useCollections } from "./queries/collections";
+import { usePipelines } from "./queries/pipelines";
+import { useShots } from "./queries/shots";
+import { useAllAnalyses } from "./queries/analyses";
 import { useStartAnalysis } from "./hooks/useStartAnalysis";
 import { useRemoveVideo } from "./hooks/useRemoveVideo";
 
@@ -67,6 +74,7 @@ interface AppState {
   removeProject: (videoId: string) => void;
   startAnalysis: (videoId: string, pipelineId: string, optionsOverride?: AnalysisOptions) => void;
   startAnalysisForProject: (videoId: string, optionsOverride?: AnalysisOptions) => void;
+  resumeAnalysis: (analysisId: string, videoId: string) => void;
   nodesByAnalysis: Record<string, AnalysisNode[]>;
   setNodesForAnalysis: (analysisId: string, nodes: AnalysisNode[]) => void;
   reportByAnalysis: Record<string, AnalysisReport>;
@@ -90,6 +98,7 @@ interface AppState {
   budgetByAnalysis: Record<string, AnalysisBudget>;
   activeAnalysisForProject: Record<string, string>;
   setBudgetForAnalysis: (analysisId: string, budget: AnalysisBudget) => void;
+  seedProgressSnapshot: (snapshot: { analysisId: string; projectId: string; progress?: number; stage?: string; stageIndex?: number; message?: string }) => void;
   modelDownloads: Record<string, ModelDownloadProgress>;
   whisperDownloads: Record<string, ModelDownloadProgress>;
 }
@@ -107,48 +116,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
           const config = await window.videoAnalyzer.loadConfig();
           if (config) useConfigStore.getState().hydrate(config);
 
-          // Seed TanStack Query cache with initial data
-          const videoList = await window.videoAnalyzer.listVideos();
-          queryClient.setQueryData(["videos", {}], videoList);
-
-          if (window.videoAnalyzer.listAccounts) {
-            const [accs, sess, allShots] = await Promise.all([
-              window.videoAnalyzer.listAccounts().catch(() => []),
-              window.videoAnalyzer.listSessions().catch(() => []),
-              window.videoAnalyzer.listShots(undefined).catch(() => [] as Shot[]),
-            ]);
-            queryClient.setQueryData(["accounts"], accs);
-            queryClient.setQueryData(["sessions"], sess);
-            queryClient.setQueryData(["shots", undefined], allShots);
-            if (window.videoAnalyzer.listCollections)
-              queryClient.setQueryData(["collections"], await window.videoAnalyzer.listCollections().catch(() => []));
-            if (window.videoAnalyzer.listPipelines)
-              queryClient.setQueryData(["pipelines"], await window.videoAnalyzer.listPipelines().catch(() => []));
-          }
-
-          // Load analyses for each video + populate analysis cache
-          const analysesMap: Record<string, Analysis[]> = {};
-          await Promise.all(
-            videoList.map(async (v) => {
-              if (!window.videoAnalyzer?.listAnalyses) return;
-              const records = await window.videoAnalyzer.listAnalyses(v.id).catch(() => [] as Analysis[]);
-              if (records.length) analysesMap[v.id] = records;
-              queryClient.setQueryData(["analyses", v.id], records);
-              const latest = records.find((r) => r.status === "completed");
-              if (latest?.result) {
-                const result = latest.result as any;
-                if (result.nodes) useAnalysisCacheStore.getState().setNodesForAnalysis = useAnalysisCacheStore.getState().setNodesForAnalysis; // already stored
-                const cache = useAnalysisCacheStore.getState();
-                if (result.nodes) cache.nodesByAnalysis[latest.id] = result.nodes;
-                if (result.report) cache.reportByAnalysis[latest.id] = result.report;
-              }
-            }),
-          );
-          // Bulk set analysis cache (bypass the IPC persist since we just loaded from it)
-          useAnalysisCacheStore.setState({
-            nodesByAnalysis: { ...useAnalysisCacheStore.getState().nodesByAnalysis },
-            reportByAnalysis: { ...useAnalysisCacheStore.getState().reportByAnalysis },
-          });
+          // 数据(videos/accounts/sessions/shots/collections/pipelines/analyses)由 useApp 里的
+          // useQuery 自行拉取,不再手动 setQueryData。analysis 的 nodes/report(重数据)按需在
+          // Workspace/Report 屏冷加载,不在启动预热。
 
           // Reconnect in-flight account fetch progress
           if (window.videoAnalyzer.listAccountFetchInFlight) {
@@ -207,30 +177,31 @@ export function useApp(): AppState {
   const startAnalysis = useStartAnalysis();
   const removeVideo = useRemoveVideo();
 
-  // TanStack Query data — read from cache synchronously for compat
-  const videos: Video[] = queryClient.getQueryData(["videos", {}]) || [];
-  const accounts: Account[] = queryClient.getQueryData(["accounts"]) || [];
-  const sessions: StudioSession[] = queryClient.getQueryData(["sessions"]) || [];
-  const collections: Collection[] = queryClient.getQueryData(["collections"]) || [];
-  const pipelines: Pipeline[] = queryClient.getQueryData(["pipelines"]) || [];
+  // TanStack Query data — 真正用 useQuery 订阅:缓存变化自动重渲染,invalidateQueries 会真正 refetch。
+  // (旧写法是 queryClient.getQueryData 同步读,不订阅,导致到处要手动 setQueryData/refetch。)
+  const videos: Video[] = useVideos().data ?? [];
+  const accounts: Account[] = useAccounts().data ?? [];
+  const sessions: StudioSession[] = useSessions().data ?? [];
+  const collections: Collection[] = useCollections().data ?? [];
+  const pipelines: Pipeline[] = usePipelines().data ?? [];
+  const allShots: Shot[] = useShots(undefined).data ?? [];
+  const allAnalyses: Analysis[] = useAllAnalyses().data ?? [];
 
-  // Build analysesByVideo from query cache
+  // 按 videoId 分组(单 query 的全量数组 → 派生 map)
   const analysesByVideo: Record<string, Analysis[]> = {};
-  for (const v of videos) {
-    const data: Analysis[] | undefined = queryClient.getQueryData(["analyses", v.id]);
-    if (data?.length) analysesByVideo[v.id] = data;
+  for (const a of allAnalyses) {
+    if (a.videoId) (analysesByVideo[a.videoId] ||= []).push(a);
   }
 
-  // Build shotsByVideo from query cache
-  const allShots: Shot[] = queryClient.getQueryData(["shots", undefined]) || [];
   const shotsByVideo: Record<string, Shot[]> = {};
   for (const s of allShots) {
     const vid = s.videoId || s.assetProjectId;
     if (vid) (shotsByVideo[vid] ||= []).push(s);
   }
 
-  const refreshAnalyses = async (videoId: string) => {
-    await queryClient.invalidateQueries({ queryKey: ["analyses", videoId] });
+  const refreshAnalyses = async (_videoId?: string) => {
+    // useAllAnalyses() 订阅了 ["analyses"],invalidate 会真正 refetch 全量并自动重渲染。
+    await queryClient.invalidateQueries({ queryKey: ["analyses"] });
   };
 
   const switchAnalysis = async (_videoId: string, analysisId: string) => {
@@ -319,6 +290,25 @@ export function useApp(): AppState {
     removeProject: removeVideo,
     startAnalysis,
     startAnalysisForProject: (videoId: string, opts?: AnalysisOptions) => startAnalysis(videoId, "builtin-pipeline", opts),
+    resumeAnalysis: (analysisId: string, videoId: string) => {
+      sel.setActiveVideoId(videoId);
+      sel.setActiveAnalysisId(analysisId);
+      nav.setLocation({ module: "analysis", screen: "progress" });
+      // 乐观把视频切回 analyzing,让进度屏立刻进入"分析中"视图。
+      const prevVideos: Video[] = queryClient.getQueryData(["videos", {}]) || [];
+      queryClient.setQueryData(["videos", {}], prevVideos.map((v) =>
+        v.id === videoId ? { ...v, status: "analyzing" as const, currentAnalysisId: analysisId } : v));
+      window.videoAnalyzer?.resumeAnalysis?.(analysisId)
+        .then(() => {
+          queryClient.invalidateQueries({ queryKey: ["analyses"] });
+          queryClient.invalidateQueries({ queryKey: ["videos"] });
+        })
+        .catch((err) => {
+          console.warn("resumeAnalysis failed", err);
+          queryClient.invalidateQueries({ queryKey: ["analyses"] });
+          queryClient.invalidateQueries({ queryKey: ["videos"] });
+        });
+    },
     // AnalysisCacheStore
     nodesByAnalysis: cache.nodesByAnalysis,
     setNodesForAnalysis: cache.setNodesForAnalysis,
@@ -364,6 +354,7 @@ export function useApp(): AppState {
     budgetByAnalysis: prog.budgetByAnalysis,
     activeAnalysisForProject: prog.activeAnalysisForProject,
     setBudgetForAnalysis: prog.setBudget,
+    seedProgressSnapshot: prog.seedFromSnapshot,
     modelDownloads: prog.modelDownloads,
     whisperDownloads: prog.whisperDownloads,
   };

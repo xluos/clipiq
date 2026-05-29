@@ -1,4 +1,5 @@
 import { useApp } from "../AppContext";
+import { useProgressStore } from "../stores/progress";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { generateMockNodes, generateMockReport } from "../mockData";
 import { ArrowRight, CheckCircle2, Settings } from "lucide-react";
@@ -29,6 +30,7 @@ export function ProgressScreen() {
     budgetByAnalysis, activeAnalysisForProject, setBudgetForAnalysis, startAnalysisForProject,
     analysisRecordsByProject, refreshAnalysisRecords,
     pendingSlotOverrides, setPendingSlotOverrides,
+    resumeAnalysis, seedProgressSnapshot,
   } = useApp();
 
   const project = projects.find(p => p.id === activeProjectId);
@@ -37,26 +39,35 @@ export function ProgressScreen() {
   const visibleStageDefs = PIPELINE_STAGE_DEFS.filter((s) => s.key !== "download" || isUrlSource);
 
   const analysisActive = project?.status === "analyzing" || project?.status === "downloading";
+  const isInterrupted = project?.status === "interrupted";
+
+  // 当前分析记录:优先 currentAnalysisId,否则取该视频最新的结构拆解记录。
+  // currentAnalysisId 不落 DB,重开页面/重启后为空,必须从持久化的 analyses 列表兜底,
+  // 否则恢复不出进度。这是"后端有状态、前端纯视图"的关键。
+  const currentAnalysisRecord = useMemo(() => {
+    if (!project) return undefined;
+    const records = analysisRecordsByProject[project.id] || [];
+    if (project.currentAnalysisId) {
+      const hit = records.find((r) => r.id === project.currentAnalysisId);
+      if (hit) return hit;
+    }
+    return records.find((r) => (r.pipelineId ?? "builtin-pipeline") === "builtin-pipeline") || records[0];
+  }, [project?.id, project?.currentAnalysisId, analysisRecordsByProject]);
 
   const activeAnalysisId = project
-    ? (activeAnalysisForProject[project.id] || project.currentAnalysisId)
+    ? (activeAnalysisForProject[project.id] || project.currentAnalysisId || currentAnalysisRecord?.id)
     : undefined;
-  const liveSnapshot = (activeAnalysisId && analysisActive) ? progressByAnalysis[activeAnalysisId] : undefined;
-  const pipeline = (activeAnalysisId && analysisActive) ? pipelineByAnalysis[activeAnalysisId] : undefined;
+  // 进度/流水线/预算直接读 store(由 live 事件 + 持久化快照回灌共同填充),不再用 analysisActive 闸门。
+  const liveSnapshot = activeAnalysisId ? progressByAnalysis[activeAnalysisId] : undefined;
+  const pipeline = activeAnalysisId ? pipelineByAnalysis[activeAnalysisId] : undefined;
   const budget = (activeAnalysisId && analysisActive) ? budgetByAnalysis[activeAnalysisId] : undefined;
 
-  const [progress, setProgress] = useState(liveSnapshot?.progress ?? 0);
-  const [stageLabel, setStageLabel] = useState(liveSnapshot?.stage ?? PIPELINE_STAGE_DEFS[0].label);
-  const [detail, setDetail] = useState(liveSnapshot?.message ?? "");
+  const [progress, setProgress] = useState(liveSnapshot?.progress ?? currentAnalysisRecord?.progress ?? 0);
+  const [stageLabel, setStageLabel] = useState(liveSnapshot?.stage ?? currentAnalysisRecord?.stage ?? PIPELINE_STAGE_DEFS[0].label);
+  const [detail, setDetail] = useState(liveSnapshot?.message ?? currentAnalysisRecord?.message ?? "");
   const [error, setError] = useState("");
   const [isCancelling, setIsCancelling] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
-
-  const currentAnalysisRecord = useMemo(() => {
-    if (!project?.currentAnalysisId) return undefined;
-    const records = analysisRecordsByProject[project.id] || [];
-    return records.find((r) => r.id === project.currentAnalysisId);
-  }, [project?.id, project?.currentAnalysisId, analysisRecordsByProject]);
 
   const startedAt = useMemo(() => {
     if (currentAnalysisRecord?.startedAt) return new Date(currentAnalysisRecord.startedAt).getTime();
@@ -74,13 +85,30 @@ export function ProgressScreen() {
   const completionHandledRef = useRef(false);
   const failureHandledRef = useRef(false);
 
+  // 从持久化快照回灌进度 + 流水线。重开页面 / app 重启后 store 是空的,
+  // 这一步让后端存的 progress/stageIndex 在前端重建出来(后端是真相源)。
+  useEffect(() => {
+    const rec = currentAnalysisRecord;
+    if (!project || !rec) return;
+    if (rec.progress == null && rec.stageIndex == null) return;
+    seedProgressSnapshot({
+      analysisId: rec.id,
+      projectId: project.id,
+      progress: rec.progress ?? 0,
+      stage: rec.stage,
+      stageIndex: rec.stageIndex,
+      message: rec.message,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id, currentAnalysisRecord?.id, currentAnalysisRecord?.progress, currentAnalysisRecord?.stageIndex]);
+
   // project 切换时重置 UI 状态和流程 ref。
   useEffect(() => {
     if (!project) return;
-    const snap = (activeAnalysisId && analysisActive) ? progressByAnalysis[activeAnalysisId] : undefined;
-    setProgress(snap?.progress ?? 0);
-    setStageLabel(snap?.stage ?? visibleStageDefs[0].label);
-    setDetail(snap?.message ?? "");
+    const snap = activeAnalysisId ? progressByAnalysis[activeAnalysisId] : undefined;
+    setProgress(snap?.progress ?? currentAnalysisRecord?.progress ?? 0);
+    setStageLabel(snap?.stage ?? currentAnalysisRecord?.stage ?? visibleStageDefs[0].label);
+    setDetail(snap?.message ?? currentAnalysisRecord?.message ?? "");
     setError("");
     setIsCancelling(false);
     completionHandledRef.current = false;
@@ -154,7 +182,10 @@ export function ProgressScreen() {
       }
       setIsCancelling(false);
     }
-    setProjects(prev => prev.map(p => p.id === project.id ? { ...p, status: "failed", updatedAt: new Date().toISOString() } : p));
+    setProjects(prev => prev.map(p => p.id === project.id ? { ...p, status: "cancelled", updatedAt: new Date().toISOString() } : p));
+    // 刷新 analyses,让被取消的记录从任务队列"进行中"挪走(main 已把它标 cancelled)。
+    if (activeAnalysisId) useProgressStore.getState().clearProgress(activeAnalysisId);
+    refreshAnalysisRecords(project.id);
     setCurrentScreen("home");
   };
 
@@ -234,6 +265,18 @@ export function ProgressScreen() {
       setProgress(0);
       setError(currentAnalysisRecord?.lastErrorMessage || "上次分析失败。点击下方'重试'重新运行。");
       setStageLabel("已结束 · 失败");
+      return;
+    }
+    if (project.status === "cancelled") {
+      setProgress(0);
+      setError("分析已取消。点击下方'重试'重新运行。");
+      setStageLabel("已结束 · 已取消");
+      return;
+    }
+    if (project.status === "interrupted") {
+      // 不重置进度:保留从快照回灌的值,显示停在哪,让用户点"继续"从断点续跑。
+      setError("分析被中断(上次退出或重启)。点击下方'继续'从断点接着跑。");
+      if (currentAnalysisRecord?.stage) setStageLabel(currentAnalysisRecord.stage);
       return;
     }
     if (project.status === "completed") {
@@ -393,6 +436,10 @@ export function ProgressScreen() {
                 去设置
               </button>
             </div>
+          ) : (project.status === "cancelled" || project.status === "interrupted") ? (
+            <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 px-3.5 py-2.5 text-[13px] text-slate-600 dark:text-slate-400">
+              {error}
+            </div>
           ) : (
             <div className="rounded-lg border border-rose-200 dark:border-rose-900/40 bg-rose-50 dark:bg-rose-950/30 px-3.5 py-2.5 text-[13px] text-rose-700 dark:text-rose-300">
               {error}
@@ -459,7 +506,26 @@ export function ProgressScreen() {
 
         {/* Actions */}
         <div className="flex justify-end gap-2.5">
-          {project.status === "failed" || project.status === "download_failed" ? (
+          {project.status === "interrupted" ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setCurrentScreen("home")}
+                className="inline-flex items-center h-10 px-4 rounded-lg text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 text-[13.5px] transition-colors"
+              >
+                返回
+              </button>
+              <button
+                type="button"
+                onClick={() => currentAnalysisRecord && resumeAnalysis(currentAnalysisRecord.id, project.id)}
+                disabled={!currentAnalysisRecord}
+                className="inline-flex items-center gap-1.5 h-10 px-5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[13.5px] font-medium transition-colors disabled:opacity-50"
+              >
+                继续
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            </>
+          ) : project.status === "failed" || project.status === "download_failed" || project.status === "cancelled" ? (
             <>
               <button
                 type="button"

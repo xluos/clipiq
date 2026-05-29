@@ -111,7 +111,7 @@ function formatDuration(ms: number) {
 }
 
 export function ReportScreen() {
-  const { setCurrentScreen, reportByAnalysis, activeProjectId, activeAnalysisId, projects, setProjects, nodesByAnalysis, providers, startAnalysisForProject, analysisRecordsByProject, analysesByVideo } = useApp();
+  const { setCurrentScreen, reportByAnalysis, activeProjectId, activeAnalysisId, projects, setProjects, nodesByAnalysis, providers, startAnalysisForProject, analysisRecordsByProject, analysesByVideo, switchAnalysis } = useApp();
   const [exportStatus, setExportStatus] = useState("");
   const [activeSection, setActiveSection] = useState<string>("summary");
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -131,6 +131,14 @@ export function ReportScreen() {
   const nodes = nodesByAnalysis[resolvedAnalysisId] || analysisResult?.nodes || [];
   const currentRecord = (analysisRecordsByProject[project?.id || ""] || []).find((r) => r.id === resolvedAnalysisId);
   const provider = providers.find(p => p.id === currentRecord?.providerId);
+
+  // 冷加载:analyses 列表已不含 result,缓存里没有 report 就按需取(switchAnalysis → getAnalysis)。
+  useEffect(() => {
+    if (resolvedAnalysisId && activeProjectId && !reportByAnalysis[resolvedAnalysisId]) {
+      switchAnalysis(activeProjectId, resolvedAnalysisId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedAnalysisId, activeProjectId]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;

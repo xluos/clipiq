@@ -38,7 +38,15 @@ export function WorkspaceScreen() {
   const nodes = nodesByAnalysis[currentAnalysisId] || [];
   const report = currentAnalysisId ? reportByAnalysis[currentAnalysisId] : undefined;
   const shotContexts = report?.shotContexts || [];
-  
+
+  // 冷加载:nodes/report 不再在启动预热,缓存里没有就按需从 DB 取(switchAnalysis → getAnalysis)。
+  useEffect(() => {
+    if (currentAnalysisId && activeProjectId && !nodesByAnalysis[currentAnalysisId]) {
+      switchAnalysis(activeProjectId, currentAnalysisId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentAnalysisId, activeProjectId]);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   
@@ -306,7 +314,8 @@ export function WorkspaceScreen() {
             <div className="relative w-full h-full max-w-full max-h-full flex items-center justify-center rounded-xl overflow-hidden bg-black shadow-xl border border-slate-200/50 dark:border-slate-800/50">
               <video 
                 ref={videoRef}
-                src={project.localVideoPath} 
+                src={project.localVideoPath}
+                poster={project.thumbnailUrl}
                 className={`w-full h-full object-contain`}
                 onClick={togglePlay}
               />

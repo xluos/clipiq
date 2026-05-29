@@ -177,9 +177,10 @@ export function HomeScreen() {
       const analyses = analysesByVideo[video.id] || [];
       const pipelineAnalyses = analyses.filter((a) => a.pipelineId === "builtin-pipeline");
       if (pipelineAnalyses.length === 0) {
-        // 正在分析中的视频也展示
-        if (video.status === "analyzing" || video.status === "downloading") {
-          entries.push({ analysis: { id: "", videoId: video.id, pipelineId: "builtin-pipeline", status: "analyzing", startedAt: video.updatedAt, createdAt: video.updatedAt } as any, video });
+        // 进行中 / 已中断的视频(分析记录可能还没加载到)也合成占位条目展示。
+        if (video.status === "analyzing" || video.status === "downloading" || video.status === "interrupted") {
+          const synthStatus = video.status === "interrupted" ? "interrupted" : "analyzing";
+          entries.push({ analysis: { id: "", videoId: video.id, pipelineId: "builtin-pipeline", status: synthStatus, startedAt: video.updatedAt, createdAt: video.updatedAt } as any, video });
           seen.add(video.id);
         }
         continue;
@@ -198,6 +199,7 @@ export function HomeScreen() {
     for (const e of entries) {
       if (e.analysis.status === "completed") completed.push(e);
       else if (e.analysis.status === "failed") broken.push(e);
+      else if (e.analysis.status === "cancelled") { /* 取消:只进“全部”,不算进行中也不算失败 */ }
       else inProgress.push(e);
     }
     return { inProgress, completed, broken, all: entries };
@@ -243,7 +245,10 @@ export function HomeScreen() {
     const now = new Date().toISOString();
     setProjects(prev => [{
       id: newProjectId,
+      title: video.filename,
+      sourceType: "local" as const,
       source: { type: "local_file", originalPath: video.filePath },
+      localPath: video.filePath,
       localVideoPath: video.mediaUrl,
       localFilePath: video.filePath,
       videoName: video.filename,
@@ -255,8 +260,8 @@ export function HomeScreen() {
       createdAt: now,
       updatedAt: now,
     }, ...prev]);
-    setActiveProjectId(newProjectId);
-    setCurrentScreen("progress");
+    // 发起分析(发起方直接调 IPC);startAnalysisForProject 会切 activeVideo 并跳进度屏。
+    startAnalysisForProject(newProjectId);
   };
 
   const handleFilePicker = async () => {
@@ -678,7 +683,8 @@ export function HomeScreen() {
                         setActiveProjectId(proj.id);
                         if (analysis.id && analysis.status === "completed") {
                           setActiveAnalysisId(analysis.id);
-                          setCurrentScreen("report");
+                          // 结构拆解完成 → 先到工作台(节点时间轴),不是直接报告页。
+                          setCurrentScreen("workspace");
                         } else {
                           setCurrentScreen("progress");
                         }
@@ -955,6 +961,14 @@ function StatusBadge({ status }: { status: Video["status"] }) {
     case "download_failed":
       return <span className={`${base} bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-400`}>
         <XCircle className="w-3 h-3" /> 失败
+      </span>;
+    case "cancelled":
+      return <span className={`${base} bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400`}>
+        <XCircle className="w-3 h-3" /> 已取消
+      </span>;
+    case "interrupted":
+      return <span className={`${base} bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400`}>
+        <Clock className="w-3 h-3" /> 已中断
       </span>;
     case "not_analyzed":
     default:

@@ -232,7 +232,7 @@ export type ProjectStatus =
   | "completed"
   | "failed";
 
-export type AnalysisStatus = "analyzing" | "completed" | "failed";
+export type AnalysisStatus = "analyzing" | "completed" | "failed" | "cancelled" | "interrupted";
 
 /** @deprecated use Analysis */
 export type AnalysisRecord = {
@@ -838,7 +838,7 @@ export type StudioStep = {
 
 // ==================== v3 数据模型 ====================
 
-export type VideoStatus = "ready" | "downloading" | "download_failed" | "failed" | "analyzing" | "not_analyzed" | "completed";
+export type VideoStatus = "ready" | "downloading" | "download_failed" | "failed" | "cancelled" | "interrupted" | "analyzing" | "not_analyzed" | "completed";
 
 export type Video = {
   id: string;
@@ -929,6 +929,12 @@ export type Analysis = {
   startedAt: string;
   completedAt?: string;
   createdAt: string;
+  // 运行时进度快照(持久化在 analyses 行,供前端纯视图 / 重启恢复读取)
+  progress?: number;
+  stage?: string;
+  stageIndex?: number;
+  message?: string;
+  heartbeatAt?: number;
   /** @deprecated v2 compat — use options */
   analysisOptions?: AnalysisOptions;
   /** @deprecated v2 compat — use providerSnapshot */

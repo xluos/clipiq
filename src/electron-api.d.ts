@@ -71,6 +71,7 @@ export type DownloadedVideo = InspectedVideo & {
   videoId: string;
   platform: "douyin" | "xiaohongshu" | "bilibili" | "tiktok" | "unknown";
   title?: string | null;
+  thumbnailUrl?: string | null;
   fromCache?: boolean;
 };
 
@@ -317,6 +318,7 @@ declare global {
 
       // v3: analyses
       listAnalyses: (videoId: string) => Promise<Analysis[]>;
+      listAllAnalyses: () => Promise<Analysis[]>;
       getAnalysis: (analysisId: string) => Promise<Analysis | null>;
       deleteAnalysis: (analysisId: string) => Promise<{ ok: true }>;
       updateAnalysisResult: (analysisId: string, result: unknown) => Promise<{ ok: true }>;
@@ -366,6 +368,7 @@ declare global {
         options?: AnalysisOptions;
         slotOverrides?: import("./types").SlotOverrides;
       }) => Promise<Analysis>;
+      resumeAnalysis: (analysisId: string) => Promise<{ resumed: boolean; alreadyRunning?: boolean; analysisId: string }>;
       cancelAnalysis: (videoId: string) => Promise<{ cancelled: boolean }>;
       isAnalysisActive: (videoId: string) => Promise<boolean>;
       getLastAnalysisProgress: (videoId: string) => Promise<AnalysisProgressEvent | null>;

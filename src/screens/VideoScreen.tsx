@@ -203,7 +203,13 @@ function VideoDetailScreen() {
 
   const goBack = () => setLocation({ module: "video", screen: "list" });
 
-  const openAnalysis = (analysisId: string) => {
+  // 结构拆解 → 工作台(节点时间轴);内容分析 → 报告。
+  const openStructure = (analysisId: string) => {
+    setActiveVideoId(video.id);
+    setActiveAnalysisId(analysisId);
+    setLocation({ module: "analysis", screen: "workspace" });
+  };
+  const openContent = (analysisId: string) => {
     setActiveVideoId(video.id);
     setActiveAnalysisId(analysisId);
     setLocation({ module: "analysis", screen: "report" });
@@ -279,7 +285,7 @@ function VideoDetailScreen() {
             title="内容分析"
             icon={<Sparkles className="w-4 h-4" strokeWidth={1.5} />}
             analyses={contentAnalyses}
-            onOpen={openAnalysis}
+            onOpen={openContent}
             emptyHint="还没有内容分析记录"
             renderPreview={(a) => {
               const result = a.result as any;
@@ -292,7 +298,7 @@ function VideoDetailScreen() {
             title="结构拆解"
             icon={<BarChart3 className="w-4 h-4" strokeWidth={1.5} />}
             analyses={pipelineAnalyses}
-            onOpen={openAnalysis}
+            onOpen={openStructure}
             emptyHint="还没有结构拆解记录"
             renderPreview={(a) => {
               const result = a.result as any;
@@ -316,17 +322,23 @@ const AnalysisGroup: FunctionComponent<{
   emptyHint: string;
   renderPreview: (a: Analysis) => ReactNode;
 }> = ({ title, icon, analyses, onOpen, emptyHint, renderPreview }) => {
-  const { removeVideo } = useApp();
+  const { refreshAnalyses } = useApp();
+  const confirm = useConfirm();
 
-  const handleDeleteAnalysis = async (analysisId: string) => {
-    if (!window.videoAnalyzer) return;
-    await window.videoAnalyzer.deleteAnalysis(analysisId);
+  const handleDeleteAnalysis = async (analysisId: string, videoId: string) => {
+    const ok = await confirm({ title: "删除分析记录", description: "只删除这条分析记录,视频本体不受影响。", confirmLabel: "删除", destructive: true });
+    if (!ok) return;
+    if (window.videoAnalyzer) await window.videoAnalyzer.deleteAnalysis(analysisId).catch(() => {});
+    // 主动刷新,否则列表里被删的记录还留着("删除没用")。
+    if (videoId) await refreshAnalyses(videoId);
   };
 
   const statusIcon = (status: string) => {
     if (status === "completed") return <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" strokeWidth={1.5} />;
     if (status === "analyzing") return <Loader2 className="w-3.5 h-3.5 text-indigo-600 animate-spin" strokeWidth={1.5} />;
     if (status === "failed") return <XCircle className="w-3.5 h-3.5 text-rose-500" strokeWidth={1.5} />;
+    if (status === "cancelled") return <XCircle className="w-3.5 h-3.5 text-slate-400" strokeWidth={1.5} />;
+    if (status === "interrupted") return <Clock className="w-3.5 h-3.5 text-amber-500" strokeWidth={1.5} />;
     return <Clock className="w-3.5 h-3.5 text-slate-400" strokeWidth={1.5} />;
   };
 
@@ -357,7 +369,7 @@ const AnalysisGroup: FunctionComponent<{
                 {a.errorMessage && <div className="text-[11px] text-rose-500 mt-0.5 truncate">{a.errorMessage}</div>}
               </div>
               <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
-                <button onClick={() => handleDeleteAnalysis(a.id)} title="删除分析记录" className="w-6 h-6 rounded flex items-center justify-center text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30">
+                <button onClick={() => handleDeleteAnalysis(a.id, a.videoId)} title="删除分析记录" className="w-6 h-6 rounded flex items-center justify-center text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30">
                   <Trash2 className="w-3 h-3" strokeWidth={1.5} />
                 </button>
               </div>

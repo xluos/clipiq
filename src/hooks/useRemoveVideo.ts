@@ -14,8 +14,9 @@ export function useRemoveVideo() {
       const { activeVideoId, setActiveVideoId } = useSelectionStore.getState();
       if (activeVideoId === videoId) setActiveVideoId(null);
 
-      const analyses: Analysis[] = qc.getQueryData(["analyses", videoId]) || [];
-      const aidsToClear = new Set(analyses.map((a) => a.id));
+      // 从全量 analyses cache(["analyses"])里挑出该视频的记录,清掉对应的 nodes/进度缓存。
+      const allAnalyses: Analysis[] = qc.getQueryData(["analyses"]) || [];
+      const aidsToClear = new Set(allAnalyses.filter((a) => a.videoId === videoId).map((a) => a.id));
       if (aidsToClear.size > 0) {
         useAnalysisCacheStore.getState().clearForAnalysisIds(aidsToClear);
         useProgressStore.getState().clearForAnalysisIds(aidsToClear);
@@ -23,7 +24,7 @@ export function useRemoveVideo() {
 
       await ipc.deleteVideo(videoId);
       qc.invalidateQueries({ queryKey: ["videos"] });
-      qc.removeQueries({ queryKey: ["analyses", videoId] });
+      qc.invalidateQueries({ queryKey: ["analyses"] });
     },
     [qc],
   );

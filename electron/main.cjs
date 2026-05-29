@@ -52,6 +52,8 @@ const CACHE_VERSIONS = {
   // (引导小模型把多个 shot 合并成 4-7 个逻辑节点, 不要 1:1 映射)。旧 cache 输出仍是
   // 1 shot=1 node 的退化结果, 必须失效让新 prompt 生效。
   mainAnalysis: "v2",
+  // 分段拉片的单段缓存:让中途取消/重启续跑时只补没跑完的 chunk(跟 mainAnalysis 同 prompt 版本对齐)。
+  mainAnalysisChunk: "v2",
   danmakuEmotion: "v1",
 };
 
@@ -1026,6 +1028,11 @@ function rowToAnalysis(r) {
     tokenUsage: r.token_usage ? JSON.parse(r.token_usage) : undefined,
     durationMs: r.duration_ms || undefined,
     errorMessage: r.error_message || undefined,
+    progress: r.progress ?? undefined,
+    stage: r.stage || undefined,
+    stageIndex: r.stage_index ?? undefined,
+    message: r.message || undefined,
+    heartbeatAt: r.heartbeat_at || undefined,
     startedAt: new Date(r.started_at).toISOString(),
     completedAt: r.completed_at ? new Date(r.completed_at).toISOString() : undefined,
     createdAt: new Date(r.created_at).toISOString(),
@@ -1268,6 +1275,18 @@ function getDb() {
     );
   `);
 
+  // 增量迁移: analyses 加运行时进度快照列(老 DB 没有这些列)。
+  // 这些列让进度成为持久化状态,前端纯视图读它、app 重启也能恢复到上次停的地方。
+  for (const col of [
+    "progress INTEGER DEFAULT 0",
+    "stage TEXT",
+    "stage_index INTEGER",
+    "message TEXT",
+    "heartbeat_at INTEGER",
+  ]) {
+    try { db.exec(`ALTER TABLE analyses ADD COLUMN ${col}`); } catch { /* 列已存在 */ }
+  }
+
   // 插入内置管线
   const now = Date.now();
   const insertPipeline = db.prepare(
@@ -1301,6 +1320,18 @@ function getDb() {
   // 启动时清理：上次退出时停在 fetching 的账号 → idle
   try {
     db.prepare("UPDATE accounts SET fetch_phase = 'idle' WHERE fetch_phase = 'fetching'").run();
+  } catch { /* noop */ }
+
+  // 启动时 reconcile：进程退出会带走内存里的编排循环,DB 里残留的"进行中"状态都是孤儿。
+  // - 分析停在 analyzing → interrupted(磁盘 checkpoint 还在,可由用户点"继续"续跑)
+  // - 视频停在 analyzing → interrupted(跟随其分析)
+  // - 视频停在 downloading → download_failed(下载不可续,需重新发起)
+  try {
+    db.prepare("UPDATE analyses SET status = 'interrupted' WHERE status = 'analyzing'").run();
+    db.prepare("UPDATE videos SET status = 'interrupted' WHERE status = 'analyzing'").run();
+    db.prepare("UPDATE videos SET status = 'download_failed' WHERE status = 'downloading'").run();
+    // 存量修正:已完成结构拆解但状态还停在旧的 'ready' 的视频 → 'completed'(否则 UI 显示"待开始")。
+    db.prepare("UPDATE videos SET status = 'completed' WHERE status = 'ready' AND id IN (SELECT video_id FROM analyses WHERE pipeline_id = 'builtin-pipeline' AND status = 'completed')").run();
   } catch { /* noop */ }
 
   _db = db;
@@ -2949,6 +2980,38 @@ async function extractFrame(ffmpeg, inputPath, outputPath, second, width = 420, 
   ], {}, handle);
 }
 
+// 把远程封面下载到 videos/<videoId>/cover.<ext>,返回可离线播放的 media:// URL;失败返回 null。
+// 远程封面(尤其抖音 p*-pc-sign 签名 URL)会过期,落到本地后封面就不会再"破"。
+async function downloadCoverImage(remoteUrl, videoId) {
+  if (!remoteUrl || !/^https?:\/\//i.test(remoteUrl)) return null;
+  try {
+    const res = await fetch(remoteUrl);
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (!buf.length) return null;
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    const ext = ct.includes("png") ? "png" : ct.includes("webp") ? "webp" : "jpg";
+    const dir = getVideoDir(videoId);
+    await fs.mkdir(dir, { recursive: true });
+    const dest = path.join(dir, `cover.${ext}`);
+    await fs.writeFile(dest, buf);
+    return createExternalMediaUrl(dest);
+  } catch { return null; }
+}
+
+// 没有远程封面时,用 ffmpeg 抽视频第一帧当封面。返回 media:// URL;失败返回 null。
+async function extractFirstFrameCover(videoPath, videoId) {
+  if (!videoPath || !fsSync.existsSync(videoPath)) return null;
+  try {
+    const ffmpeg = bundledFfmpegPath() || await commandPath("ffmpeg");
+    if (!ffmpeg) return null;
+    const dest = path.join(getVideoDir(videoId), "cover-frame.jpg");
+    await extractFrame(ffmpeg, videoPath, dest, 0, 520);
+    if (fsSync.existsSync(dest)) return createExternalMediaUrl(dest);
+    return null;
+  } catch { return null; }
+}
+
 // PR2 金字塔管线: 把 shots 里的 representativeFrameIndex / frames / subtitleSegments
 // 按时间区间 overlap 匹配, 挂到大模型出的 nodes 上, 让 UI 能渲染镜头级 evidence。
 function attachShotEvidenceToNodes(nodes, shots, projectId) {
@@ -4308,14 +4371,37 @@ async function runChunkedAnalysis({
     if (handle?.cancelled) throw new AnalysisCancelledError();
     const chunk = chunks[i];
     sendProgress?.(i, chunks.length, "chunk", chunk);
+    // 单段缓存 key:本段帧内容 + shots + 时间区间 + 全局上下文 + 模型。命中则跳过这段 LLM 调用,
+    // 这样取消/重启续跑时已跑完的 chunk 不重跑(outer main-analysis 缓存只在整段跑完才写,救不了中途)。
+    let chunkCacheKey = null;
+    if (cacheStore.isConfigured() && effectiveProvider?.model) {
+      try {
+        const frameShas = await Promise.all((chunk.frames || []).map((f) => cacheStore.sha256File(f.framePath).catch(() => null)));
+        if (frameShas.every(Boolean)) {
+          chunkCacheKey = cacheStore.makeKey({
+            scope: "main-analysis-chunk",
+            frames: frameShas,
+            shots: (chunk.shots || []).map((s) => ({ s: Math.round((s.startSec ?? 0) * 1000), e: Math.round((s.endSec ?? 0) * 1000) })),
+            startSec: Math.round((chunk.startSec ?? 0) * 1000),
+            endSec: Math.round((chunk.endSec ?? 0) * 1000),
+            totalChunks: chunks.length,
+            globalSummary: (globalContext?.globalSummary || "").slice(0, 2000),
+            options: { detectedGenre: options?.detectedGenre, manualGenre: options?.manualGenre, preset: options?.preset },
+            model: effectiveProvider.model,
+            baseUrl: effectiveProvider.baseUrl,
+            version: CACHE_VERSIONS.mainAnalysisChunk,
+          });
+        }
+      } catch { /* 算 key 失败 → 不缓存这段 */ }
+    }
     let chunkOk = false;
     for (let attempt = 0; attempt <= CHUNK_MAX_RETRIES; attempt++) {
       if (handle?.cancelled) throw new AnalysisCancelledError();
       try {
-        const nodes = await runChunkPass({
+        const nodes = await runWithCache("main-analysis-chunk", chunkCacheKey, () => runChunkPass({
           effectiveProvider, project, methodology, globalContext, chunk,
           totalChunks: chunks.length, options, reserveOutput, handle,
-        });
+        }));
         nodes.forEach((n, j) => {
           n._originalId = n.id || `chunk-${i + 1}-node-${j + 1}`;
         });
@@ -4671,7 +4757,7 @@ async function warmupLocalWhisperCpp(audioProvider) {
   return { modelId, elapsedMs: Date.now() - t0 };
 }
 
-async function analyzeProject(event, { project, provider: _legacyProvider, audioProvider: _legacyAudio, options, slotOverrides }) {
+async function analyzeProject(event, { project, provider: _legacyProvider, audioProvider: _legacyAudio, options, slotOverrides, resumeAnalysisId }) {
   // 只拦截同管线类型的重复分析，不同管线可以并行
   if (isTaskActiveForVideo(project.id, "builtin-pipeline")) {
     const stale = getTaskForVideo(project.id);
@@ -4683,11 +4769,13 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       throw new Error("该视频已有结构拆解在运行。");
     }
   }
-  const analysisId = _crypto.randomUUID();
+  // resumeAnalysisId 非空 = 续跑一个被中断的分析:复用同一 analysisId + 磁盘 checkpoint,不新建记录。
+  const isResume = !!resumeAnalysisId;
+  const analysisId = resumeAnalysisId || _crypto.randomUUID();
   const handle = registerTask(analysisId, project.id, "builtin-pipeline");
   handle.analysisId = analysisId;
   const analysisStartedAt = Date.now();
-  log.info("analyze", `[analysis:${analysisId}] 开始分析 project=${project.id} title="${project.videoName || project.title || ""}"`);
+  log.info("analyze", `[analysis:${analysisId}] ${isResume ? "续跑(复用 checkpoint)" : "开始"}分析 project=${project.id} title="${project.videoName || project.title || ""}"`);
 
   // 在管线开始时一次性快照 config + 从 taskSlots/audioSlot 解析各任务的 effective provider,
   // 避免运行中用户改设置导致竞争。renderer 传入的 provider/audioProvider 入参作废。
@@ -4743,10 +4831,16 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   };
   {
     const db = getDb();
-    db.prepare(
-      "INSERT INTO analyses (id, video_id, pipeline_id, status, options, started_at, created_at) VALUES (?, ?, ?, 'analyzing', ?, ?, ?)"
-    ).run(analysisId, project.id, "builtin-pipeline", JSON.stringify(analysisRecord.analysisOptions || null), analysisStartedAt, analysisStartedAt);
-    db.prepare("UPDATE videos SET status = 'downloading', updated_at = ? WHERE id = ?")
+    if (isResume) {
+      // 续跑:行已存在,只把状态切回 analyzing、清掉上次的结束态。
+      db.prepare("UPDATE analyses SET status = 'analyzing', completed_at = NULL, error_message = NULL WHERE id = ?")
+        .run(analysisId);
+    } else {
+      db.prepare(
+        "INSERT INTO analyses (id, video_id, pipeline_id, status, options, started_at, created_at) VALUES (?, ?, ?, 'analyzing', ?, ?, ?)"
+      ).run(analysisId, project.id, "builtin-pipeline", JSON.stringify(analysisRecord.analysisOptions || null), analysisStartedAt, analysisStartedAt);
+    }
+    db.prepare("UPDATE videos SET status = 'analyzing', updated_at = ? WHERE id = ?")
       .run(Date.now(), project.id);
   }
 
@@ -4868,6 +4962,19 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     handle.lastProgress = payload;
     handle.lastProgressAt = Date.now();
     broadcastToWindows("analysis:progress", payload);
+
+    // 持久化进度快照到 analyses 行(节流:换 stage 立即写,否则 ≥1s 写一次)。
+    // 这是"后端有状态"的核心:任意时刻 DB 里都有最新进度,前端纯视图读它,重启也能回灌。
+    const persistNow = Date.now();
+    if (stage !== handle._lastPersistStage || persistNow - (handle._lastPersistAt || 0) >= 1000) {
+      handle._lastPersistStage = stage;
+      handle._lastPersistAt = persistNow;
+      try {
+        getDb().prepare(
+          "UPDATE analyses SET progress = ?, stage = ?, stage_index = ?, message = ?, heartbeat_at = ? WHERE id = ?"
+        ).run(Math.round(progress), stage, si != null ? si : null, message || "", persistNow, analysisId);
+      } catch { /* best-effort, 不阻塞分析 */ }
+    }
   };
 
   // ETA baseline: 根据 project.durationSec + providers + machine baseline 算出各 stage 预算,
@@ -6059,6 +6166,15 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       }
     }
 
+    // 封面优先级:已有封面 > 视频第一帧。不再用分析关键帧。
+    // 已有封面若是会过期的远程 URL,顺手下到本地;都没有则抽视频第一帧。
+    let coverUrl = project.thumbnailUrl || null;
+    if (coverUrl && /^https?:\/\//i.test(coverUrl)) {
+      coverUrl = (await downloadCoverImage(coverUrl, project.id)) || coverUrl;
+    }
+    if (!coverUrl) {
+      coverUrl = await extractFirstFrameCover(inputPath, project.id);
+    }
     const updatedProject = {
       ...project,
       localFilePath: inputPath,
@@ -6069,7 +6185,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       orientation: inspected.orientation || project.orientation,
       status: mainAnalysisFailed ? "failed" : "completed",
       currentAnalysisId: analysisId,
-      thumbnailUrl: frames[0]?.framePath ? createProjectMediaUrl(project.id, frames[0].framePath) : project.thumbnailUrl,
+      thumbnailUrl: coverUrl || project.thumbnailUrl,
       ...(generatedTitle ? { videoName: generatedTitle, titleAutoGenerated: true } : {}),
       updatedAt: new Date().toISOString(),
     };
@@ -6112,7 +6228,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         Date.now(), analysisId,
       );
       db.prepare("UPDATE videos SET status = ?, thumbnail_url = COALESCE(?, thumbnail_url), title = COALESCE(?, title), updated_at = ? WHERE id = ?")
-        .run(finalStatus === "completed" ? "ready" : "failed", updatedProject.thumbnailUrl || null, updatedProject.videoName || null, Date.now(), updatedProject.id);
+        .run(finalStatus === "completed" ? "completed" : "failed", updatedProject.thumbnailUrl || null, updatedProject.videoName || null, Date.now(), updatedProject.id);
     } catch (persistError) {
       log.warn("clipiq", "main 端 SQLite 持久化失败,JSON 会兜底:", persistError);
       await appendPersistErrorLog(project.id, "analyzeProject finalize", persistError);
@@ -6133,9 +6249,11 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       analysisOutcome = "cancelled";
       try {
         const db = getDb();
-        const now = new Date().toISOString();
-        db.prepare("UPDATE analyses SET status = 'failed', error_message = '用户取消了分析。', completed_at = ? WHERE id = ?")
+        db.prepare("UPDATE analyses SET status = 'cancelled', error_message = '用户取消了分析。', completed_at = ? WHERE id = ?")
           .run(Date.now(), analysisId);
+        // 视频本体回到"已取消",不要停在 analyzing 也不要标失败。
+        db.prepare("UPDATE videos SET status = 'cancelled', updated_at = ? WHERE id = ?")
+          .run(Date.now(), project.id);
       } catch { /* best-effort */ }
     }
     try {
@@ -6571,7 +6689,8 @@ app.whenReady().then(async () => {
       const projectId = decodeURIComponent(segs[0]);
       const rel = segs.slice(1).map(decodeURIComponent).join(path.sep);
       filePath = path.join(getProjectDir(projectId), rel);
-    } else if (url.host === "external") {
+    } else if (url.host === "external" || url.host === "local") {
+      // external 与 local 都把绝对路径编码在 pathname 里(rowToVideo 用 media://local/<abs>)。
       filePath = decodeURIComponent(url.pathname.slice(1));
     } else {
       return new Response(`Unknown media host: ${url.host}`, { status: 400 });
@@ -7059,8 +7178,18 @@ app.whenReady().then(async () => {
   ipcMain.handle("analyses:list", async (_event, videoId) => {
     const db = getDb();
     const rows = db.prepare(
-      "SELECT id, video_id, pipeline_id, status, options, provider_snapshot, result, token_usage, duration_ms, error_message, started_at, completed_at, created_at FROM analyses WHERE video_id = ? ORDER BY created_at DESC"
+      "SELECT id, video_id, pipeline_id, status, options, provider_snapshot, result, token_usage, duration_ms, error_message, progress, stage, stage_index, message, heartbeat_at, started_at, completed_at, created_at FROM analyses WHERE video_id = ? ORDER BY created_at DESC"
     ).all(videoId);
+    return rows.map(rowToAnalysis);
+  });
+
+  // 一次性列出全部分析 — 前端用单个 useQuery(["analyses"]) 订阅,避免 N+1 + 让 invalidate 真正生效。
+  // 含 result(账号摘要 / 报告页 inline 读它);本地 IPC 无网络成本,可接受整表重传。
+  ipcMain.handle("analyses:listAll", async () => {
+    const db = getDb();
+    const rows = db.prepare(
+      "SELECT id, video_id, pipeline_id, status, options, provider_snapshot, result, token_usage, duration_ms, error_message, progress, stage, stage_index, message, heartbeat_at, started_at, completed_at, created_at FROM analyses ORDER BY created_at DESC"
+    ).all();
     return rows.map(rowToAnalysis);
   });
 
@@ -7610,12 +7739,21 @@ app.whenReady().then(async () => {
           comment_count=excluded.comment_count, share_count=excluded.share_count, collect_count=excluded.collect_count,
           updated_at=excluded.updated_at
       `);
+      // 把远程封面下到本地(并行),避免签名 URL 过期后封面"破"。失败则回退原远程 URL。
+      const coverByVideoId = {};
+      await Promise.all(result.videos.map(async (v) => {
+        if (!v.thumbnailUrl) return;
+        const videoId = `av-${accountId}-${v.id}`;
+        const local = await downloadCoverImage(v.thumbnailUrl, videoId);
+        coverByVideoId[videoId] = local || v.thumbnailUrl;
+      }));
+
       const newVideos = [];
       for (const v of result.videos) {
         const videoId = `av-${accountId}-${v.id}`;
         upsertVideoStmt.run(
           videoId, v.title || "", v.externalUrl || null, platform || null, v.id || null,
-          v.durationSec || 0, v.thumbnailUrl || null, accountId,
+          v.durationSec || 0, coverByVideoId[videoId] || v.thumbnailUrl || null, accountId,
           v.uploadDate || null, v.viewCount ?? null, v.likeCount ?? null,
           v.commentCount ?? null, v.shareCount ?? null, v.collectCount ?? null,
           now, now,
@@ -8228,9 +8366,9 @@ app.whenReady().then(async () => {
 
   // (旧 shots:list/shots:setForAsset handlers 已删除，v3 版在上方 CRUD 块注册)
 
-  ipcMain.handle("analysis:start", async (event, args) => {
+  const runAnalysisStart = async (event, args) => {
     const videoId = args?.videoId || args?.project?.id;
-    log.info("analyze:lifecycle", `analysis:start videoId=${videoId} hasProject=${!!args?.project} pipelineId=${args?.pipelineId || "?"} activeTasks=${activeTasks.size}`);
+    log.info("analyze:lifecycle", `analysis:start videoId=${videoId} hasProject=${!!args?.project} resume=${args?.resumeAnalysisId || "-"} pipelineId=${args?.pipelineId || "?"} activeTasks=${activeTasks.size}`);
     let videoTitle = "视频";
     let effectiveArgs = args;
     if (videoId && !args?.project) {
@@ -8295,6 +8433,28 @@ app.whenReady().then(async () => {
       }
       throw err;
     }
+  };
+
+  ipcMain.handle("analysis:start", (event, args) => runAnalysisStart(event, args));
+
+  // 续跑被中断的分析:复用同一 analysisId + 磁盘 checkpoint,从上次停的阶段接着跑。
+  ipcMain.handle("analysis:resume", async (event, analysisId) => {
+    if (!analysisId) throw new Error("analysis:resume 需要 analysisId");
+    const db = getDb();
+    const row = db.prepare("SELECT id, video_id, pipeline_id, status, options FROM analyses WHERE id = ?").get(analysisId);
+    if (!row) throw new Error(`分析记录 ${analysisId} 不存在`);
+    if (row.status === "analyzing" && isTaskActiveForVideo(row.video_id, "builtin-pipeline")) {
+      // 已经在跑(比如只是关了又开窗口),不重复发起。
+      return { resumed: false, alreadyRunning: true, analysisId };
+    }
+    const options = row.options ? JSON.parse(row.options) : undefined;
+    await runAnalysisStart(event, {
+      videoId: row.video_id,
+      pipelineId: row.pipeline_id || "builtin-pipeline",
+      options,
+      resumeAnalysisId: analysisId,
+    });
+    return { resumed: true, analysisId };
   });
 
   ipcMain.handle("analysis:cancel", async (_event, videoId) => {
@@ -8562,12 +8722,15 @@ app.whenReady().then(async () => {
           }
         }
         const vid = projectId || `proj-url-${Date.now()}`;
+        const cachedCover = (await downloadCoverImage(cached.ytdlpInfo?.thumbnail, vid))
+          || (await extractFirstFrameCover(cached.filePath, vid));
         return {
           videoId: vid,
           projectId: vid,
           platform: inferPlatform(url),
           ...inspected,
           title: title || null,
+          thumbnailUrl: cachedCover || null,
           fromCache: true,
         };
       } catch {
@@ -8637,11 +8800,16 @@ app.whenReady().then(async () => {
         uploader: j.uploader || j.channel || j.creator,
         uploadDate: j.upload_date,
         duration: j.duration,
+        thumbnail: j.thumbnail || pickBestThumbnail(j.thumbnails),
       };
     } catch { /* info.json 缺失 */ }
 
     onProgress?.(92, "下载视频", "读取视频信息");
     const inspected = await inspectVideo(latest.filePath);
+    // 封面:优先下远程封面,没有则抽视频第一帧。落本地避免远程 URL 过期。
+    onProgress?.(94, "下载视频", "保存封面");
+    let thumbnailUrl = await downloadCoverImage(ytdlpInfo?.thumbnail, useProjectId);
+    if (!thumbnailUrl) thumbnailUrl = await extractFirstFrameCover(latest.filePath, useProjectId);
     onProgress?.(96, "下载视频", "生成标题");
     const mp = await loadMediumTextProvider();
     const titleResult = await generateProjectTitle(mp, { rawInput, url, ytdlpInfo });
@@ -8660,6 +8828,7 @@ app.whenReady().then(async () => {
       platform: inferPlatform(url),
       ...inspected,
       title: title || null,
+      thumbnailUrl: thumbnailUrl || null,
       fromCache: false,
     };
   }
