@@ -7,6 +7,8 @@ type VideoFilter = {
   collectionId?: string;
   platform?: string;
   status?: string;
+  /** 既不属于任何账号、也不在任何收藏夹的散视频。 */
+  unassigned?: boolean;
 };
 
 export function useVideos(filter?: VideoFilter) {

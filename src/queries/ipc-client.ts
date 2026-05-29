@@ -17,6 +17,7 @@ type VideoFilter = {
   collectionId?: string;
   platform?: string;
   status?: string;
+  unassigned?: boolean;
 };
 
 const api = () => window.videoAnalyzer;
@@ -59,6 +60,10 @@ export const ipc = {
     api()?.deleteCollection(collectionId) ?? Promise.resolve({ ok: true as const }),
   listCollectionVideos: (collectionId: string): Promise<Video[]> =>
     api()?.listCollectionVideos(collectionId) ?? Promise.resolve([]),
+  addVideoToCollection: (collectionId: string, videoId: string) =>
+    api()?.addVideoToCollection(collectionId, videoId) ?? Promise.resolve({ ok: true as const }),
+  removeVideoFromCollection: (collectionId: string, videoId: string) =>
+    api()?.removeVideoFromCollection(collectionId, videoId) ?? Promise.resolve({ ok: true as const }),
 
   // pipelines
   listPipelines: (): Promise<Pipeline[]> =>

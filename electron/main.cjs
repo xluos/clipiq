@@ -7148,6 +7148,13 @@ app.whenReady().then(async () => {
       return db.prepare(sql).all(filter.collectionId, ...params).map(rowToVideo);
     }
 
+    // 「其他视频」:不属于任何账号、也不在任何收藏夹的散视频。
+    if (filter.unassigned) {
+      const extra = conditions.length > 0 ? " AND " + conditions.join(" AND ") : "";
+      const sql = `SELECT * FROM videos WHERE account_id IS NULL AND id NOT IN (SELECT video_id FROM collection_videos)${extra} ORDER BY updated_at DESC`;
+      return db.prepare(sql).all(...params).map(rowToVideo);
+    }
+
     return db.prepare(`SELECT * FROM videos${where} ORDER BY updated_at DESC`).all(...params).map(rowToVideo);
   });
 
