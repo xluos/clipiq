@@ -820,8 +820,8 @@ function createExternalMediaUrl(absPath) {
   return `media://external/${encodeURIComponent(absPath)}`;
 }
 
-function createProjectMediaUrl(projectId, framePath) {
-  const projectDir = getProjectDir(projectId);
+function createVideoMediaUrl(projectId, framePath) {
+  const projectDir = getVideoDir(projectId);
   const rel = path.isAbsolute(framePath) ? path.relative(projectDir, framePath) : framePath;
   const encoded = rel.split(path.sep).map(encodeURIComponent).join("/");
   return `media://project/${encodeURIComponent(projectId)}/${encoded}`;
@@ -989,9 +989,6 @@ function getVideoDir(videoId) {
 function getAnalysisDir(videoId, analysisId) {
   return path.join(getVideoDir(videoId), "analyses", analysisId);
 }
-
-// 兼容: 旧代码引用 getProjectDir 的地方用 getVideoDir
-const getProjectDir = getVideoDir;
 
 // --- row → object 转换 (SQLite 列 → JS 对象) ---
 
@@ -1419,7 +1416,7 @@ async function persistEarlySnapshot(project, analysisId, nodes, report, timings,
 // console 在 packaged app 里没 stdout 落盘, 这里直接 append 到项目目录, 出问题能事后查。
 async function appendPersistErrorLog(projectId, where, err) {
   try {
-    const dir = getProjectDir(projectId);
+    const dir = getVideoDir(projectId);
     await fs.mkdir(dir, { recursive: true });
     const msg = err?.stack || err?.message || String(err);
     await fs.appendFile(
@@ -3049,7 +3046,7 @@ function attachShotEvidenceToNodes(nodes, shots, projectId) {
     if (!best) continue;
 
     const toFrameCtx = (f) => ({
-      thumbnailUrl: createProjectMediaUrl(projectId, f.framePath),
+      thumbnailUrl: createVideoMediaUrl(projectId, f.framePath),
       framePath: f.framePath,
       midSec: f.midSec,
       caption: f.prefilterTag?.caption,
@@ -5049,7 +5046,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         throw new Error("找不到本地视频文件，无法开始分析。");
       }
       send(1, "下载视频", "视频文件缺失,正在重新下载…");
-      const projectDir = getProjectDir(project.id);
+      const projectDir = getVideoDir(project.id);
       const mediaDir = path.join(projectDir, "media");
       await fs.mkdir(mediaDir, { recursive: true });
       const video = await performUrlDownloadFlow(sourceUrl, {
@@ -5077,7 +5074,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       throw new Error("未检测到 ffmpeg/ffprobe，无法生成关键帧和媒体清单。");
     }
 
-    const projectDir = getProjectDir(project.id);
+    const projectDir = getVideoDir(project.id);
     const artifactDir = path.join(projectDir, "artifacts");
     await fs.mkdir(artifactDir, { recursive: true });
 
@@ -5562,7 +5559,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       localNodeForSegment(
         frame,
         projectMeta,
-        createProjectMediaUrl(project.id, frame.framePath),
+        createVideoMediaUrl(project.id, frame.framePath),
         transcript?.segments
       )
     );
@@ -5702,7 +5699,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         // shotContexts 完整形态: 带帧 URL + 字幕分段, 供 UI 镜头时间线渲染
         // (旧 report 里只存了 framesInShot 数量和 subtitleText 字符串, 现在保留向后兼容字段)
         const toFrameCtx = (f) => ({
-          thumbnailUrl: createProjectMediaUrl(project.id, f.framePath),
+          thumbnailUrl: createVideoMediaUrl(project.id, f.framePath),
           framePath: f.framePath,
           midSec: Number(f.midSec) || 0,
           caption: f.prefilterTag?.caption,
@@ -6704,7 +6701,7 @@ app.whenReady().then(async () => {
       if (segs.length < 2) return new Response("Bad project URL", { status: 400 });
       const projectId = decodeURIComponent(segs[0]);
       const rel = segs.slice(1).map(decodeURIComponent).join(path.sep);
-      filePath = path.join(getProjectDir(projectId), rel);
+      filePath = path.join(getVideoDir(projectId), rel);
     } else if (url.host === "external" || url.host === "local") {
       // external 与 local 都把绝对路径编码在 pathname 里(rowToVideo 用 media://local/<abs>)。
       filePath = decodeURIComponent(url.pathname.slice(1));
