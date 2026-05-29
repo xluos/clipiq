@@ -2549,13 +2549,74 @@ function parseDouyinBridgeResponse(result) {
   };
 }
 
-// 抖音用户资料 — 通过 user/profile/other API 获取 (不需要 BrowserWindow / 插件桥, Node.js fetch 即可).
+const DOUYIN_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
+
+function pickAvatarUrl(u) {
+  const url =
+    u?.avatar_larger?.url_list?.[0] ||
+    u?.avatar_medium?.url_list?.[0] ||
+    u?.avatar_thumb?.url_list?.[0] ||
+    "";
+  return url.replace(/^http:\/\//, "https://") || null;
+}
+
+// 分享域 user/info 接口 — PC 端分享链(v.douyin.com → iesdouyin.com/share/user/...)的账号信息
+// 纯 HTTP 即可拿到 (普通浏览器 UA),不需要签名 / cookie / BrowserWindow。
+// 注意: 账号信息能纯 HTTP 拿, 视频列表不一定 (那条接口常返回 200 + 空 body, 仍需 BrowserWindow)。
+async function fetchDouyinUserProfileViaShareApi(secUid) {
+  // 该接口偶发 200 + 空 body(风控抖动),重试几次再判失败。
+  let text = "";
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(
+        `https://www.iesdouyin.com/web/api/v2/user/info/?sec_uid=${encodeURIComponent(secUid)}`,
+        {
+          headers: {
+            "user-agent": DOUYIN_UA,
+            referer: `https://www.iesdouyin.com/share/user/${encodeURIComponent(secUid)}`,
+            accept: "application/json, text/plain, */*",
+          },
+        },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      text = (await res.text()).trim();
+      if (text) break;
+      lastErr = new Error("空响应");
+    } catch (e) {
+      lastErr = e;
+    }
+    if (attempt < 3) await new Promise((r) => setTimeout(r, 500 * attempt));
+  }
+  if (!text) throw lastErr || new Error("空响应");
+  const data = JSON.parse(text);
+  const u = data?.user_info || data?.user;
+  if (!u) throw new Error("API 未返回 user_info 字段");
+  return {
+    nickname: u.nickname || null,
+    avatarUrl: pickAvatarUrl(u),
+    signature: u.signature || null,
+    followerCount: Number(u.follower_count ?? u.fans_count) || 0,
+    followingCount: Number(u.following_count) || 0,
+    awemeCount: Number(u.aweme_count) || 0,
+    uid: u.uid || u.short_id || null,
+    secUid: u.sec_uid || secUid,
+  };
+}
+
+// 抖音用户资料 — 先走分享域 user/info(纯 HTTP, 对 PC 分享链最稳),失败再退 www.douyin.com
+// 的 user/profile/other(需签名/cookie, 普通 fetch 常空)。两条都 Node.js fetch, 不用 BrowserWindow。
 async function fetchDouyinUserProfile(secUid) {
-  const DEFAULT_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
+  try {
+    const profile = await fetchDouyinUserProfileViaShareApi(secUid);
+    if (profile?.nickname) return profile;
+  } catch (e) {
+    log.warn("douyin:profile", `分享域 user/info 失败, 回退 profile/other: ${e?.message || e}`);
+  }
   const params = new URLSearchParams({ sec_user_id: secUid, aid: "6383" });
   const res = await fetch(`https://www.douyin.com/aweme/v1/web/user/profile/other/?${params}`, {
     headers: {
-      "user-agent": DEFAULT_UA,
+      "user-agent": DOUYIN_UA,
       referer: `https://www.douyin.com/user/${encodeURIComponent(secUid)}`,
       accept: "application/json, text/plain, */*",
     },
@@ -2567,7 +2628,7 @@ async function fetchDouyinUserProfile(secUid) {
   if (!u) throw new Error("API 未返回 user 字段");
   return {
     nickname: u.nickname || null,
-    avatarUrl: (u.avatar_larger?.url_list?.[0] || u.avatar_medium?.url_list?.[0] || "").replace(/^http:\/\//, "https://") || null,
+    avatarUrl: pickAvatarUrl(u),
     signature: u.signature || null,
     followerCount: Number(u.follower_count) || 0,
     followingCount: Number(u.following_count) || 0,
