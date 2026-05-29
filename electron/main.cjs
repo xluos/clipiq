@@ -1292,6 +1292,28 @@ function getDb() {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    -- 通用后台任务队列(electron/task-queue.ts 的 Task 模型落库)。
+    -- payload 是 kind 专属参数的 JSON;status 见 TaskStatus;进度不随每个 tick 落库,
+    -- 只在状态迁移时 upsert。重启时 running → interrupted、queued 重新调度。
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued',
+      title TEXT NOT NULL DEFAULT '',
+      payload TEXT,
+      ref_id TEXT,
+      dedupe_key TEXT,
+      progress INTEGER DEFAULT 0,
+      stage TEXT,
+      message TEXT,
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      started_at INTEGER,
+      finished_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+    CREATE INDEX IF NOT EXISTS idx_tasks_kind ON tasks(kind);
   `);
 
   // 增量迁移: analyses 加运行时进度快照列(老 DB 没有这些列)。
