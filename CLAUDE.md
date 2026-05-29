@@ -7,8 +7,8 @@ ClipIQ 是一个 Electron 桌面视频分析工具。看视频 → 抽帧 + 字�
 ## Repo overview
 
 - **Electron 桌面应用**,不是纯 Web。React 19 + Vite + Tailwind 4 渲染层,Node main 进程(`electron/main.cjs`)负责本地能力。
-- **Main 进程**:ffmpeg / ffprobe / yt-dlp / SQLite 项目存储 / `media://` 协议 / 本地 sidecar(llama.cpp + whisper.cpp)/ 分析管线编排。
-- **Renderer**:SPA 单 React app。屏幕切换用 `AppContext` 内的 `ScreenState`,不用 react-router。
+- **Main 进程**:ffmpeg / ffprobe / yt-dlp / SQLite 元数据存储 / `media://` 协议 / 本地 sidecar(llama.cpp + whisper.cpp)/ 分析管线编排。
+- **Renderer**:SPA 单 React app。屏幕切换用 navigation store 的两层 `AppLocation`(`currentLocation` / `setLocation`),不用 react-router;旧 `ScreenState` / `setCurrentScreen` 是迁移期兼容层。
 - **IPC 表面**:只通过 `electron/preload.cjs` 暴露的 `window.videoAnalyzer.*`,类型在 `src/electron-api.d.ts`。renderer 不直接 import `electron`。
 - **浏览器预览模式**:`npm run dev` 单跑(不带 Electron)走 fallback,本地能力不可用,UI 显示"浏览器预览环境"提示。这是有意保留的 fallback,不要让代码假设 `window.videoAnalyzer` 一定存在。
 
@@ -20,6 +20,7 @@ ClipIQ 是一个 Electron 桌面视频分析工具。看视频 → 抽帧 + 字�
 | 仅前端预览 | `npm run dev` (port 5757) |
 | 生产 build 联调 | `npm run electron:preview` — 测 `base:"./"` 那条路径,真实加载方式 |
 | Type 校验 | `npm run lint` (= `tsc --noEmit`) |
+| 测试 | `npm test`(Vitest 一次性)/ `npm run test:watch` |
 | 生产 build | `npm run build` |
 
 `electron:dev` 改 renderer 走 HMR;**改 `electron/*.cjs`(main / preload / runtime)必须 kill concurrently 重启,Vite HMR 不重载 main 进程**。
@@ -89,7 +90,7 @@ npm run dev                # vite 起 dev server (端口 5757,被占则 5758)
 
 ## 链接拉取与本地视频
 
-URL 拉取通过 `window.videoAnalyzer.downloadVideo(url)` 调 yt-dlp,返回 `DownloadedVideo`(含 `projectId / title / mediaUrl / filePath / platform / fromCache`)。
+URL 拉取通过 `window.videoAnalyzer.downloadVideo(url)` 调 yt-dlp,返回 `DownloadedVideo`(含 `videoId / title / mediaUrl / filePath / platform / fromCache`)。
 
 `fromCache: true` 表示 url-cache 命中,没真跑 yt-dlp 二次下载。新加 url-cache 入口时不要破坏 fromCache 反馈。
 
@@ -97,20 +98,31 @@ URL 拉取通过 `window.videoAnalyzer.downloadVideo(url)` 调 yt-dlp,返回 `Do
 
 ## 不要做的事
 
-- 不要把 ScreenState 里的 `url_pull` 当主入口 —— 已合并到 Home composer,只保留文件不删,避免破坏外部引用,但用户不再从那里发起。
+- 不要把 `url_pull` screen 当主入口 —— 已合并到 Home composer(`AppLocation` 仍保留该 screen 并路由到 HomeScreen,避免破坏外部引用,但用户不再从那里发起)。
 - 不要在拉片管线代码里直接拼 console.log;用 main.cjs 的 progress event 通过 `onAnalysisProgress` 上报,UI 由 Progress 屏的 log feed 累积渲染。
 - 不要在 settings 里同时存"deprecated derived getter"和 v2 schema 字段;v2 已完成,getter 是迁移期残留。
 
 ## 架构关键文件
 
 - `electron/main.cjs` — IPC 注册 + 项目生命周期 + 分析管线(prefilter → shot-merger → summarizer → 主分析)。
-- `electron/preload.cjs` — 唯一 `window.videoAnalyzer.*` 暴露面。
+- `electron/ipc-contract.cjs` — IPC channel manifest 的入口(实际 `CHANNELS` 数组定义在 `preload.cjs`,本文件反向 re-export 给 main/测试 + 派生启动校验用的 channel 列表)。
+- `electron/preload.cjs` — 唯一 `window.videoAnalyzer.*` 暴露面;**从顶部 `CHANNELS` manifest 循环生成,不手写**。详见下方"渐进式升级约定"。
 - `electron/llama-runtime.cjs` — 本地 llama.cpp sidecar。**单例 server,同一时刻只跑一个 model;切换先 stop 再 start**(5–15s 冷启动)。从 `local-models.manifest.cjs` 读模型清单。
 - `electron/whisper-cpp-runtime.cjs` — 本地 whisper.cpp sidecar(同样单例结构)。
 - `electron/daemon-client.cjs` — ai-model-daemon IPC 客户端(模型下载 / 硬件检测 / fit 计算 / 推荐排序)。
-- `src/AppContext.tsx` — 屏幕路由 + projects / providers / taskSlots / audioSlot / defaultAnalysis 持久化。debounced 250ms 后 saveConfig。
-- `src/screens/SettingsScreen.tsx` — 6 个 section:供应商 / 任务分配 / 本地推理 / 本地依赖 / 默认分析 / 项目数据。每个 section 独立组件。
+- `src/AppContext.tsx` — 兼容门面(`useApp`),聚合 navigation / selection / config / progress 四个 zustand store + TanStack Query 数据;屏幕路由实际在 navigation store,config 持久化(debounced 250ms `saveConfig`)实际在 `src/stores/config.ts`。
+- `src/screens/SettingsScreen.tsx` — 7 个 section(`SECTIONS` 数组):供应商 / 任务分配 / 本地推理 / 本地依赖 / 默认分析 / 浏览器插件桥 / 项目数据。每个 section 独立组件。
 - `src/types.ts` — `AppConfig` / `AnalysisOptions` / `LocalModelEntry` / `MachineSpecs` / `TaskSlots` schema source of truth。
+
+## 渐进式升级约定(数据层 / IPC 契约 / TS)
+
+**总原则:不做 big-bang 重写。后面迭代碰到哪块,就把那块升级掉(touch-it-then-upgrade)。** 下面几条都按这个节奏走,不要为了"统一"去全量改 `main.cjs`(1.5 万行,全量改正是回归高发区)。
+
+- **数据层:逐步退役手写 SQL + `rowToX` 映射。** 现状是 `main.cjs` 里 ~95 个 handler 各自 `db.prepare(...)` + 手列字段 + 手写 row↔对象映射,已酿成两次数据丢失 bug(见铁律)。方向是收进一层薄 repo/数据访问层(列↔字段映射读写**共用一份**、upsert 带显式 merge/replace 语义、JSON 列统一序列化),将来可在这层后面换 ORM。**选型已定:Drizzle**(跟 `agentara/` 一致、原生支持 better-sqlite3 sync、schema 即类型)。**碰到哪张表的读写就把它收编进 repo 层,别一次性全迁;repo 层就是以后换 Drizzle 的接缝。**
+- **铁律(repo 层存在的根本原因,任何 DB 写法都要守):** ① partial 写 JSON 列(如 `analyses.result`)落库端必须 **merge,不能整列覆盖**;② **"读取"路径绝不能触发"写回"副作用**。两次真实事故:`analyses:updateResult` 整列覆盖 + 缓存分两次 partial 写,冷加载读时把 nodes 冲没(已改合并 + 冷加载用 `hydrateAnalysis` 只灌内存不写回);methodology 存独立 `methodologies` 表但 renderer 从不读回、`accounts:upsert` 又没这列,重启即丢(已在 `accounts:list` 批量回填)。整行 upsert(videos/accounts/sessions/…)目前靠调用方 spread 完整对象才安全,属脆弱,收编时改掉。
+- **TS:渐进式切换。** main/preload/runtime 现在是裸 `.cjs`(无编译/类型检查步骤,这也是 ORM 类型收益暂时被堵的原因)。碰到要改的 `.cjs/.js` 模块,在合理范围内顺手迁到 TS;不为迁而迁、不一次性全切。
+- **IPC 契约已 manifest 化:** 加 / 改 IPC **只改 `preload.cjs` 顶部的 `CHANNELS` 数组**(manifest 唯一源)。preload 由它循环生成方法,不要手写;main 启动 `assertIpcContract` 对缺 handler 直接 fail-fast。⚠️ preload 在 Electron sandbox 下只能 `require("electron")`、**不能 require 本地文件**,所以 manifest 定义在 preload 自身、`ipc-contract.cjs` 反向 re-export。
+- **测试:已有 Vitest 套件(`npm test` / `npm run test:watch`)。** 改到 stores / 后端纯模块 / IPC 时顺手补测;`test/contract.test.ts` 守 IPC 三层一致(改 manifest 后它会校验),`*.test.{js,ts,tsx}` 就近放。
 
 ## 本地模型扩展
 
@@ -162,9 +174,11 @@ node scripts/cdp-driver.cjs 9223 "document.title"          # 跑 JS,返回值
 
 Electron userData(macOS):`~/Library/Application Support/clipiq/`
 
-- `config.json` — providers / taskSlots / audioSlot / defaultAnalysis / lastLlamaModelKey
-- `data.db` — SQLite 项目元数据
-- `projects/<projectId>/` — 抽帧 / 转码 / 分析结果 artifact
+- `config.json` — electron-store 写入;providers / taskSlots / audioSlot / pipelineSlots / defaultAnalysis / localModelOverrides / lastLlamaModelKey
+- `data.db` — SQLite 元数据(videos / analyses / collections / accounts / pipelines / methodologies / studio_sessions)
+- `videos/<videoId>/` — 抽帧 / 转码 / 分析结果 artifact(如 `analyses/<analysisId>/analysis-result.json`)。统一走 `getVideoDir`(旧 `projects/` 目录与 `getProjectDir` 别名已在一次性迁移中清除)
+- `accounts/<accountId>/` — 账号视频下载的媒体文件(`videos.local_path` 指向这里)
+- `media://project/<videoId>/<rel>` 协议解析到 `videos/<videoId>/<rel>`(host 字面量仍叫 `project`,是历史命名,URL 存在 DB thumbnail_url 里,未改)
 - `models/llama/<modelKey>/` — 本地 LLM 权重(GGUF + mmproj)
 - `models/whisper/` — whisper.cpp 模型
 - `bin/llama-cpp-<release>/`、`bin/whisper-cpp/` — sidecar 二进制
