@@ -1,4 +1,20 @@
 const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, protocol, session, shell } = require("electron");
+// IPC 契约 fail-fast:包一层 ipcMain.handle 记录已注册的 invoke channel,
+// whenReady 末尾比对 ipc-contract.cjs 的 manifest —— 缺 handler 直接在启动时报,
+// 而不是等用户点到那个功能才发现静默坏掉。
+const { INVOKE_CHANNELS: _CONTRACT_INVOKE_CHANNELS } = require("./ipc-contract.cjs");
+const _registeredInvokeChannels = new Set();
+const _origIpcHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, listener) => {
+  _registeredInvokeChannels.add(channel);
+  return _origIpcHandle(channel, listener);
+};
+function assertIpcContract() {
+  const missing = _CONTRACT_INVOKE_CHANNELS.filter((c) => !_registeredInvokeChannels.has(c));
+  if (missing.length) {
+    throw new Error(`[ipc-contract] 这些 invoke channel 在 manifest 里声明了但没注册 ipcMain.handle: ${missing.join(", ")}`);
+  }
+}
 const { execFile, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
 const execFileAsync = promisify(execFile);
@@ -9184,6 +9200,8 @@ app.whenReady().then(async () => {
       return { ok: false, error: err?.message || String(err) };
     }
   });
+
+  assertIpcContract(); // 所有 ipcMain.handle 已注册,校验 manifest 无遗漏
 
   await createWindow();
   createTray();
