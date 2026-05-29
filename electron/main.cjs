@@ -1488,10 +1488,11 @@ function migrateProviderV1(raw) {
   };
 }
 
-// 远程 model id → capabilities 推断,规则表与辅助函数都在 model-detection-rules.cjs.
+// 远程 model id → capabilities 推断,规则表与辅助函数都在 model-detection-rules.ts.
 // 规则集对齐 cherry-studio main 分支 config/models/{vision,reasoning,embedding}.ts,
 // 覆盖 GPT-4/5 / Claude 3-4 / Gemini 1.5-3 / Qwen-VL / GLM / Doubao / Kimi 等主流家族.
-const { inferCapabilitiesFromRemoteId } = require("./model-detection-rules.cjs");
+// 无后缀 require:dev 经 tsx hook 命中 .ts,prod 命中 esbuild 预编译的 .js。
+const { inferCapabilitiesFromRemoteId } = require("./model-detection-rules");
 
 // 把远程 /models 里的一条原始 entry map 成 ModelDescriptor
 function remoteEntryToDescriptor(entry) {
@@ -1500,7 +1501,7 @@ function remoteEntryToDescriptor(entry) {
   const capabilities = inferCapabilitiesFromRemoteId(id);
   // 远程 thinking 模型推断: cherry-studio 的规则表已经把 OpenAI o1/o3、DeepSeek-R1、Qwen3-*、
   // GLM-4-thinking 等映成 capabilities=["reasoning",...], 直接复用。后续如果发现 capabilities
-  // 标得不对(例如 R1-distill 系列其实不走 reasoning_content), 在 model-detection-rules.cjs 修。
+  // 标得不对(例如 R1-distill 系列其实不走 reasoning_content), 在 model-detection-rules.ts 修。
   return {
     source: "remote",
     id,
