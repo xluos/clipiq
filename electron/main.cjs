@@ -508,7 +508,7 @@ let taskScheduler = null;
 // 每个 kind 的并发上限(可调)。analysis / summary 串行排队 —— 即用户要的"只能同时跑
 // 一个,其余排队";本地 llama 单例 + ai-model 服务自身也有并发队列,这里不必放开。
 // 以后想让云端分析并行,把对应值调大即可。
-const TASK_CONCURRENCY = { analysis: 1, summary: 1 };
+const TASK_CONCURRENCY = { analysis: 1, summary: 1, "account-fetch": 2 };
 
 let learnedBaselines = { providers: {} };
 
@@ -8043,29 +8043,35 @@ app.whenReady().then(async () => {
     }
   };
 
-  ipcMain.handle("accounts:startFetch", async (_event, { accountId, url, range = "top10" } = {}) => {
+  ipcMain.handle("accounts:startFetch", async (_event, { accountId, url, range = "top10", name } = {}) => {
     if (!accountId) throw new Error("accounts:startFetch 需要 accountId");
     if (!url) throw new Error("accounts:startFetch 需要 url");
-    if (accountFetchInFlight.has(accountId)) {
-      return { ok: true, accepted: false, reason: "already in flight" };
-    }
-    // 把 Account.fetchPhase 立即标 fetching
+    // 把 Account.fetchPhase 立即标 fetching(排队/运行都算"拉取中",卡片角标据此)
     try {
       const db = getDb();
       db.prepare("UPDATE accounts SET fetch_phase = 'fetching', fetch_error = NULL, updated_at = ? WHERE id = ?")
         .run(Date.now(), accountId);
     } catch { /* noop */ }
-    // fire-and-forget
-    runAccountFetch({ accountId, url, range }).catch((err) => {
-      log.warn("accounts:startFetch", "runAccountFetch unhandled", err?.message || err);
+    if (!taskScheduler) {
+      // 兜底:调度器还没就绪,走旧 fire-and-forget。
+      if (accountFetchInFlight.has(accountId)) return { ok: true, accepted: false, reason: "already in flight" };
+      runAccountFetch({ accountId, url, range }).catch((err) => log.warn("accounts:startFetch", "unhandled", err?.message || err));
+      return { ok: true, accepted: true };
+    }
+    const task = taskScheduler.enqueue("account-fetch", { accountId, url, range }, {
+      refId: accountId,
+      title: name || "账号拉取",
     });
-    return { ok: true, accepted: true };
+    return { ok: true, accepted: true, taskId: task.id, status: task.status };
   });
 
   ipcMain.handle("accounts:cancelFetch", async (_event, accountId) => {
+    // 先取消调度器里的任务(排队中直接移除 / 运行中经 abort → inFlight.cancelled)
+    const t = taskScheduler?.list().find((x) => x.refId === accountId && x.kind === "account-fetch" && (x.status === "queued" || x.status === "running"));
+    if (t) taskScheduler.cancel(t.id);
     const state = accountFetchInFlight.get(accountId);
-    if (!state) return { ok: true, cancelled: false };
-    state.cancelled = true;
+    if (state) state.cancelled = true;
+    if (!t && !state) return { ok: true, cancelled: false };
     return { ok: true, cancelled: true };
   });
 
@@ -8715,6 +8721,21 @@ app.whenReady().then(async () => {
       run: (task, ctx) => {
         ctx.signal.addEventListener("abort", () => { cancelAnalysis(task.payload.videoId); });
         return summarizeAccountVideo(task.payload.videoId, task.payload.slotOverrides, task.payload.customPrompt);
+      },
+    });
+    // 账号拉取:runAccountFetch 本体不动(仍发 account:fetch:* 事件、维护 accountFetchInFlight,
+    // 账号卡片角标 / listFetchInFlight 全部照旧),调度器只在其上加并发上限 + 排队可见 + 面板取消。
+    // abort → 置 inFlight.cancelled,复用 runAccountFetch 内部的取消检查点。
+    taskScheduler.registerKind("account-fetch", {
+      concurrency: TASK_CONCURRENCY["account-fetch"],
+      dedupeKey: (p) => `account-fetch:${p.accountId}`,
+      title: (p) => p.title || "账号拉取",
+      run: (task, ctx) => {
+        ctx.signal.addEventListener("abort", () => {
+          const s = accountFetchInFlight.get(task.payload.accountId);
+          if (s) s.cancelled = true;
+        });
+        return runAccountFetch({ accountId: task.payload.accountId, url: task.payload.url, range: task.payload.range });
       },
     });
     // 重启恢复:running → interrupted,queued 重新调度起跑。

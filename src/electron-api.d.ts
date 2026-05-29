@@ -380,7 +380,7 @@ declare global {
       setShotsForVideo: (videoId: string, shots: Shot[]) => Promise<{ ok: true }>;
 
       // 后台拉取
-      startAccountFetch: (payload: { accountId: string; url: string; range: AccountFetchRange }) => Promise<{ ok: true; accepted: boolean; reason?: string }>;
+      startAccountFetch: (payload: { accountId: string; url: string; range: AccountFetchRange; name?: string }) => Promise<{ ok: true; accepted: boolean; reason?: string; taskId?: string; status?: QueueTaskStatus }>;
       cancelAccountFetch: (accountId: string) => Promise<{ ok: true; cancelled: boolean }>;
       listAccountFetchInFlight: () => Promise<Array<{ accountId: string; stage: string; progress: number; message?: string }>>;
       onAccountFetchProgress: (callback: (event: AccountFetchProgress) => void) => () => void;

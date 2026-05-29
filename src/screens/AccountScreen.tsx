@@ -396,7 +396,7 @@ function AddAccountDialog({ onClose, ctx }: { onClose: () => void; ctx: ReturnTy
     // 2) 触发后台拉取
     try {
       if (window.videoAnalyzer?.startAccountFetch) {
-        await window.videoAnalyzer.startAccountFetch({ accountId: accId, url: url.trim(), range });
+        await window.videoAnalyzer.startAccountFetch({ accountId: accId, url: url.trim(), range, name: resolvedName || undefined });
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -563,7 +563,7 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
     try {
       if (window.videoAnalyzer.upsertAccount) await window.videoAnalyzer.upsertAccount(patched);
     } catch (err) { console.warn("upsertAccount before fetch failed", err); }
-    window.videoAnalyzer.startAccountFetch({ accountId: account.id, url: account.externalUrl, range })
+    window.videoAnalyzer.startAccountFetch({ accountId: account.id, url: account.externalUrl, range, name: account.name || undefined })
       .catch((err) => console.warn("startAccountFetch failed", err));
   };
 

@@ -296,7 +296,7 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
 // ─── 通用任务 Section ──────────────────────────────────
 
 // 排队中的任务:还没拿到运行槽位,可直接取消(从队列里拿掉,不会启动)。
-const KIND_LABEL: Record<string, string> = { analysis: "结构拆解", summary: "内容分析" };
+const KIND_LABEL: Record<string, string> = { analysis: "结构拆解", summary: "内容分析", "account-fetch": "账号拉取" };
 
 const QueuedSection: FunctionComponent<{ tasks: QueueTask[] }> = ({ tasks }) => {
   if (tasks.length === 0) return null;
