@@ -238,9 +238,6 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
       </div>
 
       <div className="max-h-[460px] overflow-y-auto">
-        {/* 排队中(后台任务调度器:等待空闲槽位)*/}
-        <QueuedSection tasks={queued} />
-
         {/* 结构拆解 */}
         <TaskSection title="结构拆解" entries={analysisTasks} onClickEntry={(t) => openProject(t.id)} />
 
@@ -252,6 +249,9 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
 
         {/* 账号拉取 */}
         <TaskSection title="账号拉取" entries={accountTasks} onClickEntry={(t) => openAccount(t.id)} />
+
+        {/* 排队中(后台任务调度器:等待空闲槽位)—— 放在运行中的下面 */}
+        <QueuedSection tasks={queued} />
 
         {/* 失败记录 */}
         {failedAnalyses.length > 0 && (
