@@ -813,10 +813,10 @@ export type Account = {
   /** @deprecated v3: videos 表按 account_id 查 */
   videoIds?: string[];
   totalVideoCount?: number;
-  /** @deprecated v3: use methodologies 表 */
-  methodology?: AccountMethodology;
-  /** @deprecated v3: use methodologies 表 */
-  methodologyHistory?: AccountMethodology[];
+  /** accounts:list 回填(来自该账号 col-account 收藏夹的 methodology);新老结构兼容 */
+  methodology?: AnyMethodology;
+  /** accounts:list 回填 */
+  methodologyHistory?: AnyMethodology[];
   // 首次/上次拉取的范围设置;详情页 dropdown 可改
   fetchRange?: AccountFetchRange;
   // 后台拉取阶段。fetching → ready/failed,UI 用来挂"拉取中"角标

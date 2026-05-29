@@ -10,8 +10,10 @@
 // - 视频列表行: 已分析 → 跳 workspace; 未分析 → 行内"开始分析"按钮 (先下载再 analyzeProject)
 
 import { type FunctionComponent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useApp } from "../AppContext";
 import { useTaskQueueStore, selectTaskByRef } from "../stores/tasks";
+import { MethodologyPanel } from "../components/MethodologyPanel";
 import { ImageGallery, ImageView, VideoThumbnail } from "../components/MediaViewer";
 import { ModelConfigDialog, type ModelConfigResult } from "../components/ModelConfigDialog";
 import type {
@@ -220,6 +222,8 @@ const AccountCard: FunctionComponent<{
   const methodologySummary = (() => {
     const m = account.methodology;
     if (!m) return null;
+    const fresh = [...(m.commonalities || []), ...(m.playbook || [])].map((it) => it.title).filter(Boolean);
+    if (fresh.length) return fresh.slice(0, 4).join(" · ");
     return [m.hooks?.summary, m.pacing?.summary, m.structure?.summary, m.visual?.summary].filter(Boolean).join(" ");
   })();
   const failed = account.fetchPhase === "failed";
@@ -516,6 +520,7 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
     accountFetchUi, analysesByVideo,
     setActiveProjectId,
   } = ctx;
+  const qc = useQueryClient();
   const id = activeAccountId();
   const account = accounts.find((a) => a.id === id);
   const [tab, setTab] = useState<"methodology" | "videos" | "hooks">(initialTab);
@@ -552,7 +557,8 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
     () => accountVideos.filter((v) => v.analysisProjectId),
     [accountVideos],
   );
-  const methodologySourceCount = summarizedVideos.length + completedVideos.filter((v) => !summarizedVideos.find((s) => s.id === v.id)).length;
+  // 新引擎按 builtin-content(内容分析)产物聚合,源 = 已做内容分析的视频
+  const methodologySourceCount = summarizedVideos.length;
 
   const triggerFetch = async (range: AccountFetchRange) => {
     if (!account || !account.externalUrl) return;
@@ -567,50 +573,16 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
       .catch((err) => console.warn("startAccountFetch failed", err));
   };
 
+  // 账号方法论统一走收藏夹引擎:生成它那个 col-account 收藏夹的创作手册,
+  // 服务端按 collection_videos 聚合内容分析产物。结果回填进 account.methodology(按 account_id)。
   const generateMethodology = async () => {
     if (!account) return;
-    const videoSummaries: Array<{ title: string; summary?: string; structure?: unknown; pacing?: string; editingStyle?: string; composition?: string }> = [];
-
-    for (const v of summarizedVideos) {
-      const s = v.videoSummary;
-      videoSummaries.push({
-        title: v.title,
-        summary: typeof s === "string" ? s : s?.summary || "",
-      });
-    }
-
-    for (const v of completedVideos) {
-      if (summarizedVideos.find((s) => s.id === v.id)) continue;
-      const proj = projects.find((p) => p.id === v.analysisProjectId);
-      const r = proj?.currentAnalysisId ? reportByAnalysis[proj.currentAnalysisId] : undefined;
-      videoSummaries.push({
-        title: v.title,
-        summary: r?.globalSummary || r?.summary || "",
-        structure: r?.structure,
-        pacing: r?.pacing,
-        editingStyle: r?.editingStyle,
-        composition: r?.composition,
-      });
-    }
-
-    if (videoSummaries.length === 0) {
-      setGenError("至少需要 1 条已分析的视频。");
-      return;
-    }
     setGenError("");
     setGenerating(true);
     try {
-      const result = await window.videoAnalyzer?.generateAccountMethodology?.({
-        accountId: account.id,
-        accountName: account.name,
-        videoSummaries,
-      });
-      if (result?.methodology) {
-        const newMethodology = { ...result.methodology, sourceVideoCount: videoSummaries.length };
-        const history = [...(account.methodologyHistory || [])];
-        if (account.methodology?.generatedAt) history.push(account.methodology);
-        upsertAccount({ ...account, methodology: newMethodology, methodologyHistory: history.slice(-10), updatedAt: new Date().toISOString() });
-      }
+      await window.videoAnalyzer?.generateCollectionMethodology?.({ collectionId: `col-account-${account.id}` });
+      qc.invalidateQueries({ queryKey: ["accounts"] });
+      qc.invalidateQueries({ queryKey: ["collections"] });
     } catch (e) {
       setGenError(e instanceof Error ? e.message : String(e));
     }
@@ -681,11 +653,6 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
           <X className="w-3.5 h-3.5" strokeWidth={1.5} />
         </button>
       </header>
-      {genError && (
-        <div className="mx-6 mt-2 rounded-md border border-rose-200 dark:border-rose-900/50 bg-rose-50 dark:bg-rose-950/30 px-3 py-2 text-[12.5px] text-rose-700 dark:text-rose-300">
-          {genError}
-        </div>
-      )}
       {fetchingUi && (
         <div className="mx-6 mt-2 rounded-md border border-indigo-200 dark:border-indigo-900/50 bg-indigo-50 dark:bg-indigo-950/30 px-3 py-2 text-[12.5px] text-indigo-700 dark:text-indigo-300 flex items-center gap-2">
           <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} />
@@ -739,12 +706,19 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
           </div>
 
           {tab === "methodology" && (
-            <MethodologyTab
+            <MethodologyPanel
               methodology={account.methodology}
               history={account.methodologyHistory}
               sourceCount={methodologySourceCount}
               generating={generating}
+              error={genError}
               onGenerate={generateMethodology}
+              videos={accountVideos}
+              onClickSample={(vid) => {
+                const v = accountVideos.find((x) => x.id === vid);
+                if (v?.analysisProjectId) { setActiveProjectId(v.id); setLocation({ module: "analysis", screen: "workspace" }); }
+              }}
+              noun="方法论"
             />
           )}
           {tab === "videos" && (
@@ -802,106 +776,6 @@ const RangeDropdown: FunctionComponent<{
     </div>
   );
 };
-
-function MethodologyTab({ methodology, history, sourceCount, generating, onGenerate }: {
-  methodology?: AccountMethodology;
-  history?: AccountMethodology[];
-  sourceCount: number;
-  generating: boolean;
-  onGenerate: () => void;
-}) {
-  const [viewIdx, setViewIdx] = useState<number | null>(null);
-  const allVersions = useMemo(() => {
-    const list: AccountMethodology[] = [];
-    if (methodology?.generatedAt) list.push(methodology);
-    if (history?.length) list.push(...[...history].reverse());
-    return list;
-  }, [methodology, history]);
-  const viewing = viewIdx !== null ? allVersions[viewIdx] : methodology;
-
-  const hasContent = viewing && (viewing.hooks || viewing.pacing || viewing.structure || viewing.visual);
-
-  return (
-    <div className="space-y-4">
-      {/* 操作栏 */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <button
-          onClick={onGenerate}
-          disabled={generating || sourceCount === 0}
-          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50"
-        >
-          {generating ? <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} /> : <Sparkles className="w-3 h-3" strokeWidth={2} />}
-          {generating ? "生成中…" : methodology ? `重新生成 (${sourceCount} 条视频)` : `生成方法论 (${sourceCount} 条视频)`}
-        </button>
-        {sourceCount === 0 && (
-          <span className="text-[11.5px] text-slate-500">需要先分析至少 1 条视频</span>
-        )}
-        <div className="flex-1" />
-        {allVersions.length > 1 && (
-          <div className="flex items-center gap-1">
-            <span className="text-[10.5px] font-mono text-slate-500 mr-1">历史</span>
-            {allVersions.map((v, i) => (
-              <button
-                key={v.generatedAt || i}
-                onClick={() => setViewIdx(i === 0 ? null : i)}
-                className={`h-6 px-2 rounded text-[10.5px] font-mono ${
-                  (viewIdx === null && i === 0) || viewIdx === i
-                    ? "bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800"
-                    : "text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700"
-                }`}
-              >
-                {i === 0 ? "最新" : new Date(v.generatedAt || "").toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* 内容 */}
-      {!hasContent ? (
-        <div className="border border-dashed border-slate-300 dark:border-slate-700 rounded-xl bg-white/50 dark:bg-slate-900/30 px-8 py-12 text-center">
-          <Sparkles className="w-5 h-5 mx-auto text-slate-400 dark:text-slate-500 mb-2" strokeWidth={1.5} />
-          <p className="text-[13.5px] text-slate-600 dark:text-slate-400">
-            方法论还未生成。
-            <br />
-            先分析该账号下的视频，再点击上方按钮生成。
-          </p>
-        </div>
-      ) : (
-        <>
-          {viewing?.generatedAt && (
-            <div className="text-[10.5px] font-mono text-slate-400">
-              生成于 {new Date(viewing.generatedAt).toLocaleString("zh-CN")}
-              {viewing.sourceVideoCount ? ` · 基于 ${viewing.sourceVideoCount} 条视频` : ""}
-            </div>
-          )}
-          <MethodologyCards methodology={viewing!} />
-        </>
-      )}
-    </div>
-  );
-}
-
-function MethodologyCards({ methodology }: { methodology: AccountMethodology }) {
-  const items: Array<{ k: string; m?: { summary: string; sampleVideoIds?: string[] } }> = [
-    { k: "开场风格 / Hooks", m: methodology.hooks },
-    { k: "节奏画像", m: methodology.pacing },
-    { k: "结构模板", m: methodology.structure },
-    { k: "视觉风格", m: methodology.visual },
-  ];
-  return (
-    <div className="grid gap-3 grid-cols-1 md:grid-cols-2">
-      {items.map(({ k, m }) =>
-        m ? (
-          <div key={k} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 p-4">
-            <h3 className="text-[14px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 mb-2">{k}</h3>
-            <p className="text-[13px] leading-relaxed text-slate-700 dark:text-slate-300">{m.summary}</p>
-          </div>
-        ) : null,
-      )}
-    </div>
-  );
-}
 
 function formatVideoDuration(sec: number): string {
   if (!sec || sec <= 0) return "—";

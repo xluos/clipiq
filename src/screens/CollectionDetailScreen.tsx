@@ -1,6 +1,7 @@
 // 收藏夹二级页(module account / screen collection)。
 // 看收藏夹内视频、关联已有视频(可选账号下的)、新增视频(可选发起分析)、移出、改名、删除。
 import { useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useApp } from "../AppContext";
 import {
   useCollections,
@@ -11,6 +12,7 @@ import {
 } from "../queries/collections";
 import { useVideos, useUpsertVideo } from "../queries/videos";
 import { VideoRow, VideoRowList } from "../components/VideoRow";
+import { MethodologyPanel } from "../components/MethodologyPanel";
 import { useConfirm } from "../components/ConfirmDialog";
 import { activeCollectionId } from "./ContentLibraryScreen";
 import type { Collection, Video } from "../types";
@@ -19,6 +21,7 @@ import { ArrowLeft, Plus, Link2, Trash2, X, Search, Check, FolderOpen, Loader2, 
 export function CollectionDetailScreen() {
   const { goBack, accounts, analysesByVideo, setActiveVideoId, setLocation } = useApp();
   const confirm = useConfirm();
+  const qc = useQueryClient();
 
   const id = activeCollectionId();
   const collection = (useCollections().data ?? []).find((c) => c.id === id);
@@ -33,6 +36,26 @@ export function CollectionDetailScreen() {
   const [addOpen, setAddOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
+  const [genMeth, setGenMeth] = useState(false);
+  const [genMethErr, setGenMethErr] = useState("");
+
+  // 已做内容分析(builtin-content 完成)的视频数 —— 创作手册的数据源
+  const contentDoneCount = useMemo(
+    () => videos.filter((v) => (analysesByVideo[v.id] || []).some((a) => a.pipelineId === "builtin-content" && a.status === "completed")).length,
+    [videos, analysesByVideo],
+  );
+  const generateMethodology = async () => {
+    if (!id) return;
+    setGenMethErr("");
+    setGenMeth(true);
+    try {
+      await window.videoAnalyzer?.generateCollectionMethodology?.({ collectionId: id });
+      qc.invalidateQueries({ queryKey: ["collections"] });
+    } catch (e) {
+      setGenMethErr(e instanceof Error ? e.message : String(e));
+    }
+    setGenMeth(false);
+  };
 
   if (!id || !collection) {
     return (
@@ -123,7 +146,24 @@ export function CollectionDetailScreen() {
       </header>
 
       <main className="flex-1 overflow-y-auto px-8">
-        <div className="max-w-6xl mx-auto py-6">
+        <div className="max-w-6xl mx-auto py-6 space-y-8">
+          {/* 创作手册:抽这组视频的共性 + 可复用创作方法 */}
+          <section>
+            <div className="text-[10.5px] font-mono tracking-[0.14em] uppercase text-slate-500 dark:text-slate-400 mb-3">创作手册</div>
+            <MethodologyPanel
+              methodology={collection.methodology}
+              history={collection.methodologyHistory}
+              sourceCount={contentDoneCount}
+              generating={genMeth}
+              error={genMethErr}
+              onGenerate={generateMethodology}
+              videos={videos}
+              onClickSample={(vid) => open(vid)}
+              noun="创作手册"
+            />
+          </section>
+
+          {/* 视频列表 */}
           {videos.length === 0 ? (
             <div className="text-center py-16 text-[13px] text-slate-500">
               <FolderOpen className="w-10 h-10 mx-auto mb-3 text-slate-300 dark:text-slate-600" strokeWidth={1} />
