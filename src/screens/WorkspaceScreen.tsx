@@ -198,6 +198,13 @@ export function WorkspaceScreen() {
   });
 
   const isPortrait = project.orientation === "portrait";
+  // 左区(视频)宽度按朝向取比例,右区(节点)拿剩下(flex-1)。
+  // 竖屏视频窄,左区给小;横屏视频宽,左区给大。横屏/方形在窄屏上下堆叠,故 w-full md:w-[..]。
+  const leftWidthClass = isPortrait
+    ? "w-[36%]"
+    : project.orientation === "square"
+      ? "w-full md:w-[50%]"
+      : "w-full md:w-[62%]";
 
   const totalNodes = nodes.length;
   const highlightCount = nodes.filter(n => n.isHighlight).length;
@@ -309,7 +316,7 @@ export function WorkspaceScreen() {
       <div className={`flex-1 flex overflow-hidden ${isPortrait ? 'flex-row' : 'flex-col md:flex-row'}`}>
         
         {/* Left: Video Player Area */}
-        <div className={`flex flex-col relative ${isPortrait ? 'w-auto max-w-[45%]' : 'flex-1'} min-h-0 bg-slate-100/50 dark:bg-black/20`}>
+        <div className={`flex flex-col relative shrink-0 ${leftWidthClass} min-h-0 bg-slate-100/50 dark:bg-black/20`}>
           <div className="flex-1 relative flex items-center justify-center p-4 min-h-0">
             <div className="relative w-full h-full max-w-full max-h-full flex items-center justify-center rounded-xl overflow-hidden bg-black shadow-xl border border-slate-200/50 dark:border-slate-800/50">
               <video 
@@ -451,7 +458,7 @@ export function WorkspaceScreen() {
         </div>
 
         {/* Right: Nodes List Sidebar */}
-        <div className={`${isPortrait ? 'flex-1' : 'w-full md:w-[540px]'} border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] flex flex-col min-h-0 shadow-sm z-10`}>
+        <div className={`flex-1 min-w-0 border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] flex flex-col min-h-0 shadow-sm z-10`}>
           <div className="p-3 border-b border-slate-200 dark:border-slate-800 flex-none bg-slate-50/80 dark:bg-[#0E0E10] space-y-3">
             {report?.globalSummary && (
               <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-3">
