@@ -437,6 +437,7 @@ export type DanmakuEmotionWindow = {
   dominantEmotion: DanmakuEmotionAxis | "neutral";
   intensities: DanmakuEmotionScores;
   sampleTexts: string[];                 // 代表性弹幕 (≤5 条)
+  summary?: string;
 };
 
 // 顶层 report.danmaku 块: 仅 bilibili 项目产出
@@ -928,6 +929,12 @@ export type Analysis = {
   startedAt: string;
   completedAt?: string;
   createdAt: string;
+  /** @deprecated v2 compat — use options */
+  analysisOptions?: AnalysisOptions;
+  /** @deprecated v2 compat — use providerSnapshot */
+  providerId?: string;
+  /** @deprecated v2 compat */
+  lastErrorMessage?: string;
 };
 
 export type Methodology = {

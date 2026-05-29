@@ -404,8 +404,8 @@ export function ProgressScreen() {
         <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-4 md:p-5">
           <div className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500 mb-3 font-medium">流水线</div>
           <ul className="space-y-1">
-            {(pipeline?.stages ?? PIPELINE_STAGE_DEFS).filter((s) => s.key !== "download" || isUrlSource).map((s) => {
-              const idx = (pipeline?.stages ?? PIPELINE_STAGE_DEFS).indexOf(s);
+            {((pipeline?.stages ?? PIPELINE_STAGE_DEFS) as Array<{ key: string; label: string; status?: string; startedAt?: number; completedAt?: number; fromCache?: boolean; detail?: string }>).filter((s) => s.key !== "download" || isUrlSource).map((s) => {
+              const idx = (pipeline?.stages ?? PIPELINE_STAGE_DEFS).findIndex((x) => x.key === s.key);
               const stage = pipeline?.stages[idx];
               const done = stage?.status === "done" || progress >= 100;
               const active = stage?.status === "active" && progress < 100;

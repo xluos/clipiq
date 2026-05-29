@@ -22,7 +22,7 @@ import type {
   AccountVideo,
   VideoContentAnalysis,
   SlotOverrides,
-  Project,
+  Video,
 } from "../types";
 import { defaultPresetToAnalysisOptions } from "../types";
 import {
@@ -953,7 +953,7 @@ function VideosTab({
 }: {
   account: Account;
   videos: AccountVideo[];
-  projects: Project[];
+  projects: Video[];
   onReload: () => void;
   fetching: boolean;
   ctx: ReturnType<typeof useApp>;
@@ -1361,7 +1361,7 @@ function VideosTab({
         {videos.map((v) => {
           const proj = v.analysisProjectId ? projects.find((p) => p.id === v.analysisProjectId) : undefined;
           const rawStatus = proj?.status || "not_analyzed";
-          const analysisStatus: "completed" | "analyzing" | "downloading" | "failed" | "not_analyzed" =
+          const analysisStatus: "completed" | "analyzing" | "downloading" | "failed" | "not_analyzed" | "ready" | "download_failed" =
             rawStatus === "download_failed" ? "failed" : rawStatus;
           const err = rowError[v.id];
           const hasSummary = v.summaryStatus === "done" && !!v.videoSummary;

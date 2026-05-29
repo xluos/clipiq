@@ -1,7 +1,6 @@
 import { useApp } from './AppContext';
 import { HomeScreen } from './screens/HomeScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
-// UrlPullScreen 已合并到 HomeScreen composer
 import { ProgressScreen } from './screens/ProgressScreen';
 import { WorkspaceScreen } from './screens/WorkspaceScreen';
 import { ReportScreen } from './screens/ReportScreen';

@@ -23,6 +23,19 @@ const etaLearner = require("./eta-learner.cjs");
 const cacheStore = require("./cache-store.cjs");
 const extensionBridge = require("./extension-bridge.cjs");
 const log = require("./logger.cjs");
+const ElectronStore = require("electron-store");
+
+let _cfgStore = null;
+function cfgStore() {
+  if (!_cfgStore) _cfgStore = new ElectronStore({ name: "config" });
+  return _cfgStore;
+}
+function readConfig() {
+  return cfgStore().store;
+}
+function writeConfig(data) {
+  cfgStore().store = data;
+}
 const { getTranscriber } = require("./transcribe/index.cjs");
 const OpenCC = require("opencc-js");
 
@@ -57,7 +70,7 @@ function resolveCacheConfig(config) {
 }
 
 async function initializeCacheStore() {
-  const raw = await readJson(getConfigPath(), null);
+  const raw = readConfig();
   const { dir, maxBytes } = resolveCacheConfig(raw);
   cacheStore.configure({ dir, maxBytes });
 }
@@ -945,10 +958,6 @@ async function directorySize(dirPath) {
     }
   }
   return total;
-}
-
-function getConfigPath() {
-  return path.join(app.getPath("userData"), "config.json");
 }
 
 function getDbPath() {
@@ -1980,7 +1989,7 @@ async function generateProjectTitle(provider, sources = {}, handle = null) {
 
 async function loadMediumTextProvider() {
   try {
-    const cfg = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+    const cfg = migrateConfigV1ToV2(readConfig());
     return resolveSlotProvider(cfg, "medium_text");
   } catch {
     return null;
@@ -1989,7 +1998,7 @@ async function loadMediumTextProvider() {
 
 async function loadComplexTextProvider() {
   try {
-    const cfg = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+    const cfg = migrateConfigV1ToV2(readConfig());
     // v2 任务槽位: complex_text 用于复杂文本(方法论汇总 / Studio steps);
     // 没配的话 fallback 到 medium_text
     return resolveSlotProvider(cfg, "complex_text") || resolveSlotProvider(cfg, "medium_text");
@@ -4684,7 +4693,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
   // 避免运行中用户改设置导致竞争。renderer 传入的 provider/audioProvider 入参作废。
   let cfgSnapshot, complexVisionProvider, mediumTextProvider, audioProvider, provider;
   try {
-    cfgSnapshot = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+    cfgSnapshot = migrateConfigV1ToV2(readConfig());
     const pipelineCfg = resolvePipelineConfig(cfgSnapshot, "pipeline");
     cfgSnapshot = { ...cfgSnapshot, taskSlots: pipelineCfg.taskSlots, audioSlot: pipelineCfg.audioSlot };
     if (slotOverrides) cfgSnapshot = applySlotOverrides(cfgSnapshot, slotOverrides);
@@ -4953,7 +4962,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     let localPrefilterReady = false;
     let prefilterModelKey = null;
     {
-      const cfg = await readJson(getConfigPath(), null).catch(() => null);
+      let cfg = null;
+      try { cfg = readConfig(); } catch { /* noop */ }
       const preferredModel = cfg?.lastLlamaModelKey;
       if (preferredModel) {
         const daemonClient = require("./daemon-client.cjs");
@@ -6527,7 +6537,7 @@ app.whenReady().then(async () => {
   // ctx override 解析器,供 llama:start / autoResume 使用
   contextResolver = async (modelKey) => {
     try {
-      const cfg = (await readJson(getConfigPath(), null)) || {};
+      const cfg = (readConfig()) || {};
       const override = cfg?.localModelOverrides?.[modelKey]?.contextSize;
       return Number(override) > 0 ? Number(override) : null;
     } catch {
@@ -6629,7 +6639,7 @@ app.whenReady().then(async () => {
     return {
       userDataPath: userData,
       videosPath: videosDir,
-      configPath: getConfigPath(),
+      configPath: cfgStore().path,
       dbPath: getDbPath(),
       videoCount,
       totalBytes,
@@ -6698,9 +6708,9 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("cache:setMaxBytes", async (_event, bytes) => {
     const next = Math.max(0, Math.floor(Number(bytes) || 0));
-    const cur = await readJson(getConfigPath(), null);
+    const cur = readConfig();
     if (cur) {
-      await writeJson(getConfigPath(), { ...cur, cacheMaxBytes: next, savedAt: new Date().toISOString() });
+      writeConfig( { ...cur, cacheMaxBytes: next, savedAt: new Date().toISOString() });
     }
     cacheStore.configure({
       dir: cacheStore.getCacheDir() || getDefaultCacheDir(),
@@ -6714,9 +6724,9 @@ app.whenReady().then(async () => {
     if (!dir) return { ok: false, message: "目录路径为空" };
     try {
       const result = await cacheStore.migrate(dir);
-      const cur = await readJson(getConfigPath(), null);
+      const cur = readConfig();
       if (cur) {
-        await writeJson(getConfigPath(), { ...cur, cacheDir: cacheStore.getCacheDir(), savedAt: new Date().toISOString() });
+        writeConfig( { ...cur, cacheDir: cacheStore.getCacheDir(), savedAt: new Date().toISOString() });
       }
       return { ok: true, cacheDir: cacheStore.getCacheDir(), mode: result.mode };
     } catch (err) {
@@ -6742,15 +6752,15 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("cache:getPolicy", async () => {
-    const cfg = await readJson(getConfigPath(), null);
+    const cfg = readConfig();
     return cfg?.cachePolicy || { enabled: true, stages: {} };
   });
 
   ipcMain.handle("cache:setPolicy", async (_event, policy) => {
-    const cur = await readJson(getConfigPath(), null) || {};
+    const cur = readConfig() || {};
     cur.cachePolicy = policy;
     cur.savedAt = new Date().toISOString();
-    await writeJson(getConfigPath(), cur);
+    writeConfig( cur);
     return { ok: true };
   });
 
@@ -6941,19 +6951,19 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("config:load", async () => {
-    const raw = await readJson(getConfigPath(), null);
+    const raw = readConfig();
     return migrateConfigV1ToV2(raw);
   });
 
   ipcMain.handle("config:getField", async (_event, key) => {
-    const cfg = await readJson(getConfigPath(), null);
+    const cfg = readConfig();
     return cfg?.[key] ?? null;
   });
 
   ipcMain.handle("config:setField", async (_event, key, value) => {
-    const cfg = (await readJson(getConfigPath(), null)) || {};
+    const cfg = (readConfig()) || {};
     cfg[key] = value;
-    await writeJson(getConfigPath(), { ...cfg, savedAt: new Date().toISOString() });
+    writeConfig( { ...cfg, savedAt: new Date().toISOString() });
     return { ok: true };
   });
 
@@ -6961,7 +6971,7 @@ app.whenReady().then(async () => {
     // 落盘前再过一次 migrate,保证 builtin 永远存在 + schema 永远是 v2
     // 合并磁盘上的 lastLlamaModelKey / localModelOverrides 等 renderer 可能不持有的字段,
     // 避免单字段更新打回时把别的字段抹掉。
-    const cur = await readJson(getConfigPath(), null);
+    const cur = readConfig();
     const merged = {
       ...cur,
       ...config,
@@ -6969,7 +6979,7 @@ app.whenReady().then(async () => {
       localModelOverrides: config?.localModelOverrides ?? cur?.localModelOverrides ?? {},
     };
     const migrated = migrateConfigV1ToV2(merged);
-    await writeJson(getConfigPath(), { ...migrated, savedAt: new Date().toISOString() });
+    writeConfig( { ...migrated, savedAt: new Date().toISOString() });
     // maxBytes 改了就同步 cache-store; cacheDir 走专门的 cache:setDir IPC, 这里不动
     try {
       const { maxBytes } = resolveCacheConfig(migrated);
@@ -7839,7 +7849,7 @@ app.whenReady().then(async () => {
 
       // 5) 识别字幕
       // 统一读取并补丁 config
-      let cfg = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+      let cfg = migrateConfigV1ToV2(readConfig());
       const contentCfg = resolvePipelineConfig(cfg, "content");
       cfg = { ...cfg, taskSlots: contentCfg.taskSlots, audioSlot: contentCfg.audioSlot };
       if (slotOverrides) cfg = applySlotOverrides(cfg, slotOverrides);
@@ -8730,7 +8740,7 @@ app.whenReady().then(async () => {
   // 让 fit/memPercent 反映用户实际调过的 ctx 值, 不是 manifest 默认。
   async function readCtxOverrides() {
     try {
-      const cfg = (await readJson(getConfigPath(), null)) || {};
+      const cfg = (readConfig()) || {};
       const overrides = cfg.localModelOverrides || {};
       const out = {};
       for (const [k, v] of Object.entries(overrides)) {
@@ -9025,8 +9035,8 @@ app.whenReady().then(async () => {
 });
 
 async function persistLastLlamaModelKey(modelKey) {
-  const cur = (await readJson(getConfigPath(), null)) || {};
-  await writeJson(getConfigPath(), {
+  const cur = (readConfig()) || {};
+  writeConfig( {
     ...cur,
     lastLlamaModelKey: modelKey || null,
     savedAt: new Date().toISOString(),
@@ -9034,14 +9044,14 @@ async function persistLastLlamaModelKey(modelKey) {
 }
 
 async function getLocalModelMirror() {
-  const cfg = (await readJson(getConfigPath(), null)) || {};
+  const cfg = (readConfig()) || {};
   return cfg.localModelMirror === "modelscope" ? "modelscope" : "hf-mirror";
 }
 
 async function persistLocalModelMirror(value) {
   const next = value === "modelscope" ? "modelscope" : "hf-mirror";
-  const cur = (await readJson(getConfigPath(), null)) || {};
-  await writeJson(getConfigPath(), {
+  const cur = (readConfig()) || {};
+  writeConfig( {
     ...cur,
     localModelMirror: next,
     savedAt: new Date().toISOString(),
@@ -9053,7 +9063,7 @@ function scheduleLlamaAutoResume() {
   setTimeout(async () => {
     try {
       const daemonClient = require("./daemon-client.cjs");
-      const cfg = await readJson(getConfigPath(), null);
+      const cfg = readConfig();
       const lastKey = cfg?.lastLlamaModelKey;
       if (!lastKey) return;
       const bins = await daemonClient.getBinariesStatus();
