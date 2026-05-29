@@ -153,6 +153,35 @@ async function streamSSE(response, onEvent) {
  *   signal?: AbortSignal
  * @returns {Promise<{ text: string, usage: ?object, model: ?string }>}
  */
+// 一过性失败做有限重试。网关(如 new-api / 各代理)常返回 502 "Upstream request failed"
+// 或 503/504/429,多是上游瞬时抖动 —— 单次即挂体验差。非一过性(其它 4xx)直接抛,不浪费时间。
+// 只在"还没开始读流"阶段(response.ok 检查)重试,不影响已消费的 SSE。abort 不重试。
+async function fetchWithTransientRetry(endpoint, init, { signal, label } = {}) {
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    if (signal?.aborted) throw new Error("已取消");
+    let response;
+    try {
+      response = await fetch(endpoint, init);
+    } catch (err) {
+      if (signal?.aborted) throw err; // abort 不算一过性
+      if (attempt === MAX_ATTEMPTS) throw err;
+      log.warn("openai-client", `${label || "LLM 请求"} 网络错误,第 ${attempt}/${MAX_ATTEMPTS} 次,退避重试: ${err?.message || err}`);
+      await new Promise((r) => setTimeout(r, 800 * attempt));
+      continue;
+    }
+    if (response.ok) return response;
+    const transient = response.status >= 500 || response.status === 429;
+    const detail = await response.text().catch(() => "");
+    if (!transient || attempt === MAX_ATTEMPTS) {
+      throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
+    }
+    log.warn("openai-client", `${label || "LLM 请求"} ${response.status},第 ${attempt}/${MAX_ATTEMPTS} 次,退避重试: ${detail.slice(0, 120)}`);
+    await new Promise((r) => setTimeout(r, 800 * attempt));
+  }
+  throw new Error("LLM 请求失败"); // 不可达
+}
+
 async function callOpenAIChatCompletionsRaw(provider, opts) {
   const {
     systemText,
@@ -210,7 +239,7 @@ async function callOpenAIChatCompletionsRaw(provider, opts) {
       `enable_thinking=${body.chat_template_kwargs?.enable_thinking} ` +
       `(enableThinkingOpt=${enableThinking} providerEnableThinking=${provider.enableThinking})`,
     );
-    const response = await fetch(endpoint, {
+    const response = await fetchWithTransientRetry(endpoint, {
       method: "POST",
       signal,
       headers: {
@@ -219,11 +248,7 @@ async function callOpenAIChatCompletionsRaw(provider, opts) {
         accept: "text/event-stream",
       },
       body: JSON.stringify(body),
-    });
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
-    }
+    }, { signal, label: `chat/completions ${body.model}` });
     let text = "";
     let reasoning = "";
     let usageRaw = null;
@@ -280,7 +305,7 @@ async function callOpenAIResponsesRaw(provider, opts) {
       // 调用方传 responseFormat 时这里忽略, 避免在不支持的端点发生错误。
     };
     void responseFormat;
-    const response = await fetch(endpoint, {
+    const response = await fetchWithTransientRetry(endpoint, {
       method: "POST",
       signal,
       headers: {
@@ -289,11 +314,7 @@ async function callOpenAIResponsesRaw(provider, opts) {
         accept: "text/event-stream",
       },
       body: JSON.stringify(body),
-    });
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`模型请求失败 ${response.status}: ${detail.slice(0, 500)}`);
-    }
+    }, { signal, label: `responses ${body.model}` });
     let text = "";
     let usageRaw = null;
     let modelEcho = null;
