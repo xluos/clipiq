@@ -45,6 +45,7 @@ const etaLearner = require("./eta-learner.cjs");
 const cacheStore = require("./cache-store.cjs");
 const extensionBridge = require("./extension-bridge.cjs");
 const log = require("./logger.cjs");
+const { createTaskScheduler } = require("./task-queue");
 const ElectronStore = require("electron-store");
 
 let _cfgStore = null;
@@ -498,6 +499,16 @@ const activeAnalyses = {
   has(videoId) { return [...activeTasks.values()].some((h) => h.videoId === videoId && !h.cancelled); },
   get(videoId) { return [...activeTasks.values()].find((h) => h.videoId === videoId && !h.cancelled); },
 };
+
+// ── 通用后台任务调度器(electron/task-queue.ts)──
+// 在 whenReady 里实例化(需要 db + runAnalysisStart / summarizeAccountVideo 都已定义)。
+// 各 IPC handler 通过这个 module-level 引用调度。activeTasks 退化成 runner 内部的
+// 运行态/取消机制,排队 / 并发 / 持久化 / 统一 task 记录都在调度器这层。
+let taskScheduler = null;
+// 每个 kind 的并发上限(可调)。analysis / summary 串行排队 —— 即用户要的"只能同时跑
+// 一个,其余排队";本地 llama 单例 + ai-model 服务自身也有并发队列,这里不必放开。
+// 以后想让云端分析并行,把对应值调大即可。
+const TASK_CONCURRENCY = { analysis: 1, summary: 1 };
 
 let learnedBaselines = { providers: {} };
 
@@ -1377,6 +1388,57 @@ function getDb() {
 
   _db = db;
   return db;
+}
+
+// ── tasks 表读写(task-queue 调度器的持久层)──
+// 列↔字段映射只此一份。进度不随 tick 落库,只在状态迁移时 upsert。
+function rowToTask(r) {
+  return {
+    id: r.id,
+    kind: r.kind,
+    status: r.status,
+    title: r.title || "",
+    payload: r.payload ? JSON.parse(r.payload) : {},
+    refId: r.ref_id ?? null,
+    dedupeKey: r.dedupe_key ?? null,
+    progress: r.progress ?? 0,
+    stage: r.stage || "",
+    message: r.message || "",
+    error: r.error ?? null,
+    createdAt: r.created_at,
+    startedAt: r.started_at ?? null,
+    finishedAt: r.finished_at ?? null,
+  };
+}
+
+function createTasksRepo(db) {
+  // 启动时清掉历史终态行(hydrate 只恢复 queued/running,终态行不再被读),防表无限增长。
+  try { db.prepare("DELETE FROM tasks WHERE status NOT IN ('queued','running')").run(); } catch { /* noop */ }
+  const upsertStmt = db.prepare(`
+    INSERT INTO tasks (id, kind, status, title, payload, ref_id, dedupe_key, progress, stage, message, error, created_at, started_at, finished_at)
+    VALUES (@id, @kind, @status, @title, @payload, @ref_id, @dedupe_key, @progress, @stage, @message, @error, @created_at, @started_at, @finished_at)
+    ON CONFLICT(id) DO UPDATE SET
+      status=excluded.status, title=excluded.title, payload=excluded.payload, ref_id=excluded.ref_id,
+      dedupe_key=excluded.dedupe_key, progress=excluded.progress, stage=excluded.stage,
+      message=excluded.message, error=excluded.error, started_at=excluded.started_at, finished_at=excluded.finished_at
+  `);
+  const removeStmt = db.prepare("DELETE FROM tasks WHERE id = ?");
+  // 只恢复未结束的 —— 终态任务是历史,不重新进调度器。
+  const listStmt = db.prepare("SELECT * FROM tasks WHERE status IN ('queued','running') ORDER BY created_at ASC");
+  return {
+    upsert(t) {
+      upsertStmt.run({
+        id: t.id, kind: t.kind, status: t.status, title: t.title || "",
+        payload: JSON.stringify(t.payload || {}),
+        ref_id: t.refId ?? null, dedupe_key: t.dedupeKey ?? null,
+        progress: t.progress ?? 0, stage: t.stage ?? null, message: t.message ?? null,
+        error: t.error ?? null, created_at: t.createdAt,
+        started_at: t.startedAt ?? null, finished_at: t.finishedAt ?? null,
+      });
+    },
+    remove(id) { removeStmt.run(id); },
+    list() { return listStmt.all().map(rowToTask); },
+  };
 }
 
 async function readJson(filePath, fallback) {
@@ -8221,18 +8283,28 @@ app.whenReady().then(async () => {
     }
   }
 
+  // 入队 summary kind(fire-and-forget:沿用旧契约立即返回,完成走 onVideoSummaryStatus 事件)。
+  // dedupe 按 videoId,替代原来的 isTaskActiveForVideo 拒绝。
   ipcMain.handle("analysis:summarize", async (_event, { videoId, slotOverrides, customPrompt } = {}) => {
     if (!videoId) throw new Error("analysis:summarize 需要 videoId");
-    if (isTaskActiveForVideo(videoId, "builtin-content")) {
-      return { ok: true, accepted: false, reason: "already in flight" };
+    if (!taskScheduler) {
+      if (isTaskActiveForVideo(videoId, "builtin-content")) return { ok: true, accepted: false, reason: "already in flight" };
+      summarizeAccountVideo(videoId, slotOverrides || undefined, customPrompt || undefined).catch((err) => {
+        log.warn("analysis:summarize", "unhandled", err?.message || err);
+      });
+      return { ok: true, accepted: true };
     }
-    summarizeAccountVideo(videoId, slotOverrides || undefined, customPrompt || undefined).catch((err) => {
-      log.warn("analysis:summarize", "unhandled", err?.message || err);
-    });
-    return { ok: true, accepted: true };
+    const task = taskScheduler.enqueue("summary", {
+      videoId,
+      slotOverrides: slotOverrides || undefined,
+      customPrompt: customPrompt || undefined,
+    }, { refId: videoId });
+    return { ok: true, accepted: true, taskId: task.id, status: task.status };
   });
 
   ipcMain.handle("analysis:cancelSummarize", async (_event, videoId) => {
+    const t = taskScheduler?.list().find((x) => x.refId === videoId && x.kind === "summary" && (x.status === "queued" || x.status === "running"));
+    if (t) return { ok: true, cancelled: taskScheduler.cancel(t.id) };
     return { ok: true, cancelled: cancelAnalysis(videoId) };
   });
 
@@ -8517,7 +8589,64 @@ app.whenReady().then(async () => {
     }
   };
 
-  ipcMain.handle("analysis:start", (event, args) => runAnalysisStart(event, args));
+  // ── 实例化通用后台任务调度器 + 注册 kind ──
+  // analysis / summary 退化成 kind 的 runner;runAnalysisStart / summarizeAccountVideo
+  // 当执行体复用,activeTasks 的 abort/子进程/进度仍是 runner 内部机制。
+  // 取消:scheduler 收到 cancel → abort signal → 这里转调 cancelAnalysis(videoId)
+  //   触发底层 analyzeProject 抛 AnalysisCancelledError,runner promise reject → scheduler 标 cancelled。
+  {
+    const tasksRepo = createTasksRepo(getDb());
+    taskScheduler = createTaskScheduler({
+      now: () => Date.now(),
+      genId: () => require("crypto").randomUUID(),
+      persist: (t) => { try { tasksRepo.upsert(t); } catch (err) { log.warn("task-queue", "persist 失败:", err?.message || err); } },
+      removePersisted: (id) => { try { tasksRepo.remove(id); } catch { /* noop */ } },
+      emit: (e) => {
+        if (e.type === "task") broadcastToWindows("taskqueue:update", e.task);
+        else broadcastToWindows("taskqueue:removed", { id: e.id });
+      },
+    });
+    taskScheduler.registerKind("analysis", {
+      concurrency: TASK_CONCURRENCY.analysis,
+      dedupeKey: (p) => `analysis:${p.videoId}`,
+      title: (p) => p.title || "结构拆解",
+      run: (task, ctx) => {
+        ctx.signal.addEventListener("abort", () => { cancelAnalysis(task.payload.videoId); });
+        return runAnalysisStart(null, {
+          videoId: task.payload.videoId,
+          pipelineId: task.payload.pipelineId || "builtin-pipeline",
+          options: task.payload.options,
+          resumeAnalysisId: task.payload.resumeAnalysisId,
+        });
+      },
+    });
+    taskScheduler.registerKind("summary", {
+      concurrency: TASK_CONCURRENCY.summary,
+      dedupeKey: (p) => `summary:${p.videoId}`,
+      title: (p) => p.title || "内容分析",
+      run: (task, ctx) => {
+        ctx.signal.addEventListener("abort", () => { cancelAnalysis(task.payload.videoId); });
+        return summarizeAccountVideo(task.payload.videoId, task.payload.slotOverrides, task.payload.customPrompt);
+      },
+    });
+    // 重启恢复:running → interrupted,queued 重新调度起跑。
+    try { taskScheduler.hydrate(tasksRepo.list()); } catch (err) { log.warn("task-queue", "hydrate 失败:", err?.message || err); }
+  }
+
+  // analysis:start → 入队 analysis kind,await 任务跑完(保持原本"await 拿分析结果"的 IPC 语义,
+  // useStartAnalysis 依赖 .then(analysis => analysis.id/result))。排队期间这个 promise 挂起。
+  ipcMain.handle("analysis:start", (event, args) => {
+    const videoId = args?.videoId || args?.project?.id;
+    if (!videoId || !taskScheduler) return runAnalysisStart(event, args); // 兜底
+    const task = taskScheduler.enqueue("analysis", {
+      videoId,
+      pipelineId: args?.pipelineId || "builtin-pipeline",
+      options: args?.options,
+      resumeAnalysisId: args?.resumeAnalysisId,
+      title: args?.project?.videoName || args?.project?.title,
+    }, { refId: videoId });
+    return taskScheduler.whenSettled(task.id);
+  });
 
   // 续跑被中断的分析:复用同一 analysisId + 磁盘 checkpoint,从上次停的阶段接着跑。
   ipcMain.handle("analysis:resume", async (event, analysisId) => {
@@ -8530,16 +8659,28 @@ app.whenReady().then(async () => {
       return { resumed: false, alreadyRunning: true, analysisId };
     }
     const options = row.options ? JSON.parse(row.options) : undefined;
-    await runAnalysisStart(event, {
-      videoId: row.video_id,
-      pipelineId: row.pipeline_id || "builtin-pipeline",
-      options,
-      resumeAnalysisId: analysisId,
-    });
+    if (taskScheduler) {
+      const task = taskScheduler.enqueue("analysis", {
+        videoId: row.video_id,
+        pipelineId: row.pipeline_id || "builtin-pipeline",
+        options,
+        resumeAnalysisId: analysisId,
+      }, { refId: row.video_id });
+      await taskScheduler.whenSettled(task.id);
+    } else {
+      await runAnalysisStart(event, {
+        videoId: row.video_id,
+        pipelineId: row.pipeline_id || "builtin-pipeline",
+        options,
+        resumeAnalysisId: analysisId,
+      });
+    }
     return { resumed: true, analysisId };
   });
 
   ipcMain.handle("analysis:cancel", async (_event, videoId) => {
+    const t = taskScheduler?.list().find((x) => x.refId === videoId && x.kind === "analysis" && (x.status === "queued" || x.status === "running"));
+    if (t) return { cancelled: taskScheduler.cancel(t.id) };
     return { cancelled: cancelAnalysis(videoId) };
   });
 
@@ -8577,6 +8718,11 @@ app.whenReady().then(async () => {
   ipcMain.handle("task:cancel", async (_event, analysisId) => {
     return { cancelled: cancelTask(analysisId) };
   });
+
+  // ── 通用任务队列 IPC(渲染端 tasks store 的单一数据源)──
+  ipcMain.handle("taskqueue:list", async () => (taskScheduler ? taskScheduler.list() : []));
+  ipcMain.handle("taskqueue:cancel", async (_event, id) => ({ cancelled: taskScheduler ? taskScheduler.cancel(id) : false }));
+  ipcMain.handle("taskqueue:remove", async (_event, id) => ({ removed: taskScheduler ? taskScheduler.remove(id) : false }));
 
   ipcMain.handle("video:export", async (_event, { video, analysis, format }) => {
     const title = video?.title || "video-analysis";

@@ -102,6 +102,13 @@ const CHANNELS = [
   { method: "listActiveTasks", channel: "task:list", kind: "invoke" },
   { method: "cancelTask", channel: "task:cancel", kind: "invoke" },
 
+  // ── 通用后台任务队列(task-queue 调度器)──
+  { method: "listQueueTasks", channel: "taskqueue:list", kind: "invoke" },
+  { method: "cancelQueueTask", channel: "taskqueue:cancel", kind: "invoke" },
+  { method: "removeQueueTask", channel: "taskqueue:remove", kind: "invoke" },
+  { method: "onQueueTaskUpdate", channel: "taskqueue:update", kind: "event" },
+  { method: "onQueueTaskRemoved", channel: "taskqueue:removed", kind: "event" },
+
   // ── provider ──
   { method: "testProvider", channel: "provider:testConnection", kind: "invoke" },
 

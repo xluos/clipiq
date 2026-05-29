@@ -11,6 +11,7 @@
 
 import { type FunctionComponent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../AppContext";
+import { useTaskQueueStore, selectTaskByRef } from "../stores/tasks";
 import { ImageGallery, ImageView, VideoThumbnail } from "../components/MediaViewer";
 import { ModelConfigDialog, type ModelConfigResult } from "../components/ModelConfigDialog";
 import type {
@@ -961,8 +962,8 @@ function VideosTab({
   const selectedVideo = selectedVideoId ? videos.find((v) => v.id === selectedVideoId) : null;
   const [configTarget, setConfigTarget] = useState<string | null>(null);
 
-  // ── 队列 ──
-  const [queue, setQueue] = useState<{ type: "summary" | "analyze"; ids: string[]; index: number; cancelled: boolean } | null>(null);
+  // ── 后台任务队列(单一数据源在 main 进程,切走页面不丢)──
+  const tasksById = useTaskQueueStore((s) => s.tasksById);
   const launchedRef = useRef<Set<string>>(new Set());
 
   // 订阅实时摘要进度
@@ -1032,58 +1033,45 @@ function VideosTab({
     }
   }, [account.id, ctx, setProjects]);
 
-  // ── 队列处理：依赖 videos 状态变化推进 ──
-  useEffect(() => {
-    if (!queue || queue.cancelled) return;
-    if (queue.index >= queue.ids.length) {
-      setQueue(null);
-      return;
-    }
-    const currentId = queue.ids[queue.index];
-    const av = videos.find((v) => v.id === currentId);
-    if (!av) {
-      setQueue((q) => q ? { ...q, index: q.index + 1 } : null);
-      return;
-    }
-
-    if (queue.type === "summary") {
-      if (av.summaryStatus === "done" || av.summaryStatus === "failed") {
-        setQueue((q) => q && !q.cancelled ? { ...q, index: q.index + 1 } : null);
-        return;
-      }
-      if (av.summaryStatus !== "summarizing" && !launchedRef.current.has(av.id)) {
-        fireSummarize(av.id, account.analysisConfig?.slotOverrides, account.analysisConfig?.customPrompt);
-      }
-    } else {
-      if (av.analysisProjectId) {
-        setQueue((q) => q && !q.cancelled ? { ...q, index: q.index + 1 } : null);
-        return;
-      }
-      if (!launchedRef.current.has(av.id)) {
-        fireAnalyze(av);
-      }
-    }
-  }, [queue?.index, queue?.cancelled, queue?.type, videos, fireSummarize, fireAnalyze]);
-
+  // ── 批量发起:把每条 enqueue 到 main 的任务调度器,排队/串行/持久化都在后台 ──
+  // 不再用组件内的逐条 useEffect 推进 —— 那会随页面卸载丢失。调度器 dedupe 防重复入队。
   const startBatch = (type: "summary" | "analyze") => {
-    if (queue) return;
-    let ids: string[];
+    const api = window.videoAnalyzer;
+    if (!api) return;
     if (type === "summary") {
-      ids = videos.filter((v) => !v.videoSummary && v.summaryStatus !== "summarizing" && v.summaryStatus !== "done").map((v) => v.id);
+      const ids = videos
+        .filter((v) => !v.videoSummary && v.summaryStatus !== "summarizing" && v.summaryStatus !== "done")
+        .map((v) => v.id);
+      for (const id of ids) {
+        api.summarizeVideo({
+          videoId: id,
+          slotOverrides: account.analysisConfig?.slotOverrides,
+          customPrompt: account.analysisConfig?.customPrompt,
+        }).catch(() => { /* 失败会作为 failed task 出现在任务队列 */ });
+      }
     } else {
-      ids = videos.filter((v) => v.summaryStatus === "done" && !v.analysisProjectId).map((v) => v.id);
+      // 可拆解的都已摘要完成(此时已有本地文件),直接入队结构拆解,无需先下载。
+      const ids = videos
+        .filter((v) => v.summaryStatus === "done" && !v.analysisProjectId)
+        .map((v) => v.id);
+      for (const id of ids) {
+        api.analyzeVideo?.({ videoId: id, pipelineId: "builtin-pipeline" }).catch(() => { /* 同上 */ });
+      }
     }
-    if (ids.length === 0) return;
-    setQueue({ type, ids, index: 0, cancelled: false });
   };
 
-  const cancelQueue = () => {
-    if (!queue) return;
-    const currentId = queue.ids[queue.index];
-    setQueue((q) => q ? { ...q, cancelled: true } : null);
-    if (currentId && queue.type === "summary") cancelSummarize(currentId);
-    setTimeout(() => setQueue(null), 100);
-  };
+  // 本账号视频里正在排队/运行的后台任务(用于工具栏指示 + 禁用重复点击)。
+  const accountQueue = useMemo(() => {
+    const ids = new Set(videos.map((v) => v.id));
+    let running = 0;
+    let queued = 0;
+    for (const t of Object.values(tasksById)) {
+      if (!t.refId || !ids.has(t.refId)) continue;
+      if (t.status === "running") running++;
+      else if (t.status === "queued") queued++;
+    }
+    return { running, queued, total: running + queued };
+  }, [tasksById, videos]);
 
   const openVideoDetail = (av: AccountVideo) => {
     if (!av.analysisProjectId) return;
@@ -1288,25 +1276,14 @@ function VideosTab({
 
   return (
     <div className="space-y-3">
-      {/* ── 队列进度条 ── */}
-      {queue && !queue.cancelled && (
+      {/* ── 批量进度指示(读后台任务队列,取消/管理在侧边栏任务队列面板)── */}
+      {accountQueue.total > 0 && (
         <div className="flex items-center gap-3 rounded-lg border border-indigo-200 dark:border-indigo-800/50 bg-indigo-50/60 dark:bg-indigo-950/30 px-4 py-2.5">
           <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600 dark:text-indigo-400 shrink-0" strokeWidth={2} />
-          <div className="flex-1 min-w-0">
-            <div className="text-[12.5px] font-medium text-indigo-800 dark:text-indigo-200">
-              {queue.type === "summary" ? "批量摘要" : "批量拆解"} · {Math.min(queue.index + 1, queue.ids.length)}/{queue.ids.length}
-            </div>
-            <div className="mt-1.5 h-1 rounded-full bg-indigo-100 dark:bg-indigo-900/40 overflow-hidden">
-              <div className="h-full bg-indigo-600 dark:bg-indigo-500 rounded-full transition-all" style={{ width: `${((queue.index) / queue.ids.length) * 100}%` }} />
-            </div>
+          <div className="flex-1 min-w-0 text-[12.5px] font-medium text-indigo-800 dark:text-indigo-200">
+            后台处理中 · 运行 {accountQueue.running}{accountQueue.queued > 0 ? ` · 排队 ${accountQueue.queued}` : ""}
           </div>
-          <button
-            onClick={cancelQueue}
-            className="shrink-0 inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-[11.5px] font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/30"
-          >
-            <X className="w-3 h-3" strokeWidth={2} />
-            取消
-          </button>
+          <span className="shrink-0 text-[11px] font-mono text-indigo-500 dark:text-indigo-400">任务队列可取消</span>
         </div>
       )}
 
@@ -1319,7 +1296,7 @@ function VideosTab({
         {summarizedNotAnalyzedCount > 0 && (
           <button
             onClick={() => startBatch("analyze")}
-            disabled={!!queue}
+            disabled={accountQueue.total > 0}
             className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
           >
             <Play className="w-3 h-3" strokeWidth={2} />
@@ -1329,7 +1306,7 @@ function VideosTab({
         {unsummarizedCount > 0 && (
           <button
             onClick={() => startBatch("summary")}
-            disabled={!!queue}
+            disabled={accountQueue.total > 0}
             className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200 disabled:opacity-50"
           >
             <Sparkles className="w-3 h-3" strokeWidth={2} />
@@ -1362,7 +1339,8 @@ function VideosTab({
           const isSummarizing = v.summaryStatus === "summarizing" || launchedRef.current.has(v.id);
           const summaryFailed = v.summaryStatus === "failed";
           const live = liveProgress[v.id];
-          const inQueue = queue && !queue.cancelled && queue.ids.includes(v.id) && queue.ids.indexOf(v.id) > queue.index;
+          // "排队中" 读后台任务队列(单一数据源):有该视频的 queued 任务即排队中。
+          const inQueue = selectTaskByRef(tasksById, v.id)?.status === "queued";
           const clickable = isSummarizing || hasSummary || summaryFailed || !!v.analysisProjectId;
 
           return (

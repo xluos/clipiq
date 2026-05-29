@@ -4,8 +4,10 @@
 
 import { type FunctionComponent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useApp, type ModelDownloadProgress } from "../AppContext";
+import { useTaskQueueStore } from "../stores/tasks";
+import type { QueueTask } from "../electron-api";
 import type { Video } from "../types";
-import { Cpu, X, ChevronRight, AlertTriangle, UserSquare2, Download, Sparkles } from "lucide-react";
+import { Cpu, X, ChevronRight, AlertTriangle, UserSquare2, Download, Sparkles, Clock } from "lucide-react";
 
 // ─── 通用任务条目类型 ─────────────────────────────────
 
@@ -23,8 +25,15 @@ type TaskEntry = {
 
 export function useTaskQueueData() {
   const { videos, accounts, accountFetchUi, progressByAnalysis, activeAnalysisForProject, analysesByVideo, modelDownloads } = useApp();
+  const tasksById = useTaskQueueStore((s) => s.tasksById);
 
-  return useMemo(() => {
+  // 后台任务队列里"排队中"的任务(运行中的仍由下面各 section 按 analysesByVideo 展示详细进度)。
+  const queued = useMemo(
+    () => Object.values(tasksById).filter((t) => t.status === "queued").sort((a, b) => a.createdAt - b.createdAt),
+    [tasksById],
+  );
+
+  const base = useMemo(() => {
     // v3: 从 analysesByVideo 读正在跑的分析（不依赖 video.status）
     const analysisTasks: TaskEntry[] = [];
     const contentTasks: TaskEntry[] = [];
@@ -87,6 +96,8 @@ export function useTaskQueueData() {
     const totalRunning = analysisTasks.length + contentTasks.length + accountTasks.length + downloadTasks.length;
     return { analysisTasks, contentTasks, accountTasks, downloadTasks, failedAnalyses, totalRunning };
   }, [videos, analysesByVideo, progressByAnalysis, activeAnalysisForProject, accounts, accountFetchUi, modelDownloads]);
+
+  return { ...base, queued, totalQueued: queued.length };
 }
 
 function fmtSize(n: number): string | null {
@@ -107,7 +118,8 @@ function fmtSpeed(bps: number): string {
 export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ collapsed }) => {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const { totalRunning, failedAnalyses } = useTaskQueueData();
+  const { totalRunning, totalQueued, failedAnalyses } = useTaskQueueData();
+  const totalActive = totalRunning + totalQueued;
   const sidebarWidth = collapsed ? 56 : 220;
 
   useEffect(() => {
@@ -146,15 +158,15 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
       >
         <span className="relative flex shrink-0">
           <Cpu className="w-4 h-4" strokeWidth={1.5} />
-          {totalRunning > 0 && (
+          {totalActive > 0 && (
             <span
               className="absolute -top-1 -right-1.5 min-w-[14px] h-[14px] px-1 rounded-full bg-indigo-600 text-white font-mono font-semibold flex items-center justify-center leading-none"
               style={{ fontSize: 9 }}
             >
-              {totalRunning}
+              {totalActive}
             </span>
           )}
-          {totalRunning === 0 && failedAnalyses.length > 0 && (
+          {totalActive === 0 && failedAnalyses.length > 0 && (
             <span
               className="absolute -top-1 -right-1.5 min-w-[14px] h-[14px] px-1 rounded-full bg-rose-500 text-white font-mono font-semibold flex items-center justify-center leading-none"
               style={{ fontSize: 9 }}
@@ -166,9 +178,9 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
         {!collapsed && (
           <span className="flex-1 flex items-center gap-2">
             任务队列
-            {totalRunning > 0 && (
+            {totalActive > 0 && (
               <span className="text-[10.5px] font-mono text-slate-500 dark:text-slate-400">
-                · {totalRunning} 运行中
+                · {totalRunning} 运行{totalQueued > 0 ? ` · ${totalQueued} 排队` : ""}
               </span>
             )}
           </span>
@@ -184,7 +196,7 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
 
 const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: number }> = ({ onClose, sidebarWidth }) => {
   const { setLocation, setActiveProjectId, setCurrentScreen, refreshAnalyses, videos } = useApp();
-  const { analysisTasks, contentTasks, accountTasks, downloadTasks, failedAnalyses, totalRunning } = useTaskQueueData();
+  const { analysisTasks, contentTasks, accountTasks, downloadTasks, failedAnalyses, totalRunning, queued } = useTaskQueueData();
 
   const openProject = (videoId: string) => {
     setActiveProjectId(videoId);
@@ -217,6 +229,9 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
       </div>
 
       <div className="max-h-[460px] overflow-y-auto">
+        {/* 排队中(后台任务调度器:等待空闲槽位)*/}
+        <QueuedSection tasks={queued} />
+
         {/* 结构拆解 */}
         <TaskSection title="结构拆解" entries={analysisTasks} onClickEntry={(t) => openProject(t.id)} />
 
@@ -257,7 +272,7 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
           </Section>
         )}
 
-        {totalRunning === 0 && failedAnalyses.length === 0 && (
+        {totalRunning === 0 && queued.length === 0 && failedAnalyses.length === 0 && (
           <div className="px-4 py-8 text-center">
             <p className="text-[12.5px] text-slate-500 dark:text-slate-400 leading-relaxed">
               当前没有任务在运行
@@ -270,6 +285,38 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
 };
 
 // ─── 通用任务 Section ──────────────────────────────────
+
+// 排队中的任务:还没拿到运行槽位,可直接取消(从队列里拿掉,不会启动)。
+const KIND_LABEL: Record<string, string> = { analysis: "结构拆解", summary: "内容分析" };
+
+const QueuedSection: FunctionComponent<{ tasks: QueueTask[] }> = ({ tasks }) => {
+  if (tasks.length === 0) return null;
+  return (
+    <Section title="排队中" count={tasks.length}>
+      {tasks.map((t) => (
+        <div
+          key={t.id}
+          className="px-4 py-2.5 border-b border-slate-100 dark:border-slate-800/60 last:border-b-0 flex items-center gap-2"
+        >
+          <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" strokeWidth={1.5} />
+          <div className="flex-1 min-w-0">
+            <div className="text-[12.5px] text-slate-900 dark:text-slate-100 truncate">{t.title}</div>
+            <div className="text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400">
+              {KIND_LABEL[t.kind] || t.kind} · 等待运行
+            </div>
+          </div>
+          <button
+            onClick={() => window.videoAnalyzer?.cancelQueueTask(t.id).catch(() => {})}
+            title="取消排队"
+            className="w-6 h-6 rounded flex items-center justify-center text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30 shrink-0"
+          >
+            <X className="w-3 h-3" strokeWidth={1.5} />
+          </button>
+        </div>
+      ))}
+    </Section>
+  );
+};
 
 const TaskSection: FunctionComponent<{
   title: string;

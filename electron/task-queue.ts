@@ -93,13 +93,48 @@ export interface EnqueueOptions {
 
 const ACTIVE: ReadonlySet<TaskStatus> = new Set<TaskStatus>(["queued", "running"]);
 
+interface Settler {
+  promise: Promise<unknown>;
+  resolve: (v: unknown) => void;
+  reject: (e: unknown) => void;
+}
+
 export class TaskScheduler {
   private kinds = new Map<string, KindDef>();
   private tasks = new Map<string, Task>();
   private controllers = new Map<string, AbortController>();
   private children = new Map<string, Set<KillableChild>>();
+  // 完成待:让 IPC handler 能 await 某个 task 跑完拿到 runner 返回值(analysis:start 用)
+  private settlers = new Map<string, Settler>();
+  private results = new Map<string, unknown>();
 
   constructor(private deps: SchedulerDeps) {}
+
+  /**
+   * 返回一个在该 task 进入终态时 settle 的 promise:succeeded → resolve(runner 返回值),
+   * failed → reject(error),cancelled/interrupted → reject。已是终态则立即 settle。
+   * 用于把"队列化 + await 完成"接回原本同步 await analyzeProject 的 IPC 语义。
+   */
+  whenSettled(id: string): Promise<unknown> {
+    const task = this.tasks.get(id);
+    if (!task) return Promise.reject(new Error(`task ${id} not found`));
+    if (task.status === "succeeded") return Promise.resolve(this.results.get(id));
+    if (task.status === "failed") return Promise.reject(new Error(task.error || "任务失败"));
+    if (task.status === "cancelled") return Promise.reject(new Error("任务已取消"));
+    if (task.status === "interrupted") return Promise.reject(new Error("任务被中断"));
+    let s = this.settlers.get(id);
+    if (!s) {
+      let resolve!: (v: unknown) => void;
+      let reject!: (e: unknown) => void;
+      const promise = new Promise<unknown>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      s = { promise, resolve, reject };
+      this.settlers.set(id, s);
+    }
+    return s.promise;
+  }
 
   registerKind(kind: string, def: KindDef): void {
     this.kinds.set(kind, { concurrency: 1, ...def });
@@ -165,6 +200,7 @@ export class TaskScheduler {
       task.finishedAt = this.deps.now();
       this.deps.persist(task);
       this.deps.emit({ type: "task", task });
+      this.rejectSettler(id, "任务已取消");
       this.schedule();
       return true;
     }
@@ -191,9 +227,19 @@ export class TaskScheduler {
     this.tasks.delete(id);
     this.controllers.delete(id);
     this.children.delete(id);
+    this.results.delete(id);
     this.deps.removePersisted(id);
     this.deps.emit({ type: "removed", id });
+    this.rejectSettler(id, "任务已移除");
     return true;
+  }
+
+  private rejectSettler(id: string, reason: string): void {
+    const s = this.settlers.get(id);
+    if (s) {
+      this.settlers.delete(id);
+      s.reject(new Error(reason));
+    }
   }
 
   list(): Task[] {
@@ -263,7 +309,10 @@ export class TaskScheduler {
       return;
     }
     result.then(
-      () => this.finish(task, "succeeded"),
+      (value) => {
+        this.results.set(task.id, value);
+        this.finish(task, "succeeded");
+      },
       (err: unknown) => {
         if (ac.signal.aborted) this.finish(task, "cancelled");
         else this.finish(task, "failed", err instanceof Error ? err.message : String(err));
@@ -286,6 +335,14 @@ export class TaskScheduler {
     this.children.delete(task.id);
     this.deps.persist(task);
     this.deps.emit({ type: "task", task });
+    // settle whenSettled() 的等待方
+    const s = this.settlers.get(task.id);
+    if (s) {
+      this.settlers.delete(task.id);
+      if (status === "succeeded") s.resolve(this.results.get(task.id));
+      else if (status === "cancelled") s.reject(new Error("任务已取消"));
+      else s.reject(new Error(error || "任务失败"));
+    }
     this.deps.onSettled?.(task);
     this.schedule();
   }

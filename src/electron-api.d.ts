@@ -22,6 +22,32 @@ import type {
   VideoContentAnalysis,
 } from "./types";
 
+export type QueueTaskStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+/** 通用后台任务队列里的一条任务(electron/task-queue.ts 的 Task 镜像) */
+export type QueueTask = {
+  id: string;
+  kind: string;
+  status: QueueTaskStatus;
+  title: string;
+  payload: Record<string, unknown>;
+  refId: string | null;
+  dedupeKey: string | null;
+  progress: number;
+  stage: string;
+  message: string;
+  error: string | null;
+  createdAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+};
+
 export type RuntimeStatus = {
   ffmpeg: string | null;
   ffprobe: string | null;
@@ -377,11 +403,17 @@ declare global {
       listActiveTasks: () => Promise<Array<{ analysisId: string; videoId: string; pipelineId: string; cancelled: boolean; startedAt: number; lastProgress: AnalysisProgressEvent | null }>>;
       cancelTask: (analysisId: string) => Promise<{ cancelled: boolean }>;
       onTaskProgress: (callback: (event: AnalysisProgressEvent & { pipelineId?: string }) => void) => () => void;
+      // 通用后台任务队列(task-queue 调度器)
+      listQueueTasks: () => Promise<QueueTask[]>;
+      cancelQueueTask: (id: string) => Promise<{ cancelled: boolean }>;
+      removeQueueTask: (id: string) => Promise<{ removed: boolean }>;
+      onQueueTaskUpdate: (callback: (task: QueueTask) => void) => () => void;
+      onQueueTaskRemoved: (callback: (payload: { id: string }) => void) => () => void;
       onAnalysisProgress: (callback: (event: AnalysisProgressEvent) => void) => () => void;
       onAnalysisBudget: (callback: (event: AnalysisBudgetEvent) => void) => () => void;
 
       // 轻量视频摘要 (内容分析管线)
-      summarizeVideo: (payload: { videoId: string; slotOverrides?: import("./types").SlotOverrides; customPrompt?: string }) => Promise<{ ok: true; accepted: boolean; reason?: string }>;
+      summarizeVideo: (payload: { videoId: string; slotOverrides?: import("./types").SlotOverrides; customPrompt?: string }) => Promise<{ ok: true; accepted: boolean; reason?: string; taskId?: string; status?: QueueTaskStatus }>;
       cancelSummarizeVideo: (videoId: string) => Promise<{ ok: true; cancelled: boolean }>;
       onVideoSummaryStatus: (callback: (event: {
         videoId: string;

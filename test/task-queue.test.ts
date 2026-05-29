@@ -205,6 +205,51 @@ describe("TaskScheduler: 进度", () => {
   });
 });
 
+describe("TaskScheduler: whenSettled(接回 await 完成的 IPC 语义)", () => {
+  it("成功 → resolve runner 返回值", async () => {
+    const { sched } = makeScheduler();
+    const d = deferred();
+    sched.registerKind("serial", { concurrency: 1, run: () => d.promise });
+    const a = sched.enqueue("serial", {});
+    const settled = sched.whenSettled(a.id);
+    d.resolve({ id: "analysis-1", result: { nodes: [1] } });
+    await expect(settled).resolves.toEqual({ id: "analysis-1", result: { nodes: [1] } });
+  });
+
+  it("失败 → reject 带 error message", async () => {
+    const { sched } = makeScheduler();
+    const d = deferred();
+    sched.registerKind("serial", { concurrency: 1, run: () => d.promise });
+    const a = sched.enqueue("serial", {});
+    const settled = sched.whenSettled(a.id);
+    d.reject(new Error("模型挂了"));
+    await expect(settled).rejects.toThrow("模型挂了");
+  });
+
+  it("排队中的任务被取消 → whenSettled reject", async () => {
+    const { sched } = makeScheduler();
+    sched.registerKind("serial", { concurrency: 1, run: () => deferred().promise });
+    sched.enqueue("serial", {}); // 占用
+    const q = sched.enqueue("serial", {}); // 排队
+    const settled = sched.whenSettled(q.id);
+    sched.cancel(q.id);
+    await expect(settled).rejects.toThrow("已取消");
+  });
+
+  it("多个 whenSettled 共享同一 settle(dedupe 命中时多方 await)", async () => {
+    const { sched } = makeScheduler();
+    const d = deferred();
+    sched.registerKind("serial", { concurrency: 1, run: () => d.promise, dedupeKey: (p) => `v:${p.v}` });
+    const a = sched.enqueue("serial", { v: 1 });
+    const b = sched.enqueue("serial", { v: 1 }); // dedupe → 同一 task
+    expect(b.id).toBe(a.id);
+    const p1 = sched.whenSettled(a.id);
+    const p2 = sched.whenSettled(b.id);
+    d.resolve("ok");
+    await expect(Promise.all([p1, p2])).resolves.toEqual(["ok", "ok"]);
+  });
+});
+
 describe("TaskScheduler: 重启恢复(hydrate)", () => {
   let rows: Task[];
   beforeEach(() => {

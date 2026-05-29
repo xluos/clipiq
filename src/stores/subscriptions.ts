@@ -1,6 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { useProgressStore } from "./progress";
 import type { ModelDownloadProgress } from "./progress";
+import { useTaskQueueStore } from "./tasks";
 
 type Unsub = (() => void) | undefined;
 
@@ -8,6 +9,17 @@ export function initIpcSubscriptions(queryClient: QueryClient): () => void {
   const api = window.videoAnalyzer;
   if (!api) return () => {};
   const unsubs: Unsub[] = [];
+
+  // 通用后台任务队列:启动拉一次全量,之后增量订阅(单一数据源,与页面挂载无关)。
+  if (api.listQueueTasks) {
+    api.listQueueTasks().then((tasks) => useTaskQueueStore.getState().replaceAll(tasks)).catch(() => {});
+  }
+  if (api.onQueueTaskUpdate) {
+    unsubs.push(api.onQueueTaskUpdate((task) => useTaskQueueStore.getState().upsert(task)));
+  }
+  if (api.onQueueTaskRemoved) {
+    unsubs.push(api.onQueueTaskRemoved(({ id }) => useTaskQueueStore.getState().remove(id)));
+  }
 
   // useApp 用 useQuery 订阅了 ["analyses"] / ["videos", {}],invalidate 会真正 refetch + 自动重渲染。
   const invalidateAnalyses = () => queryClient.invalidateQueries({ queryKey: ["analyses"] });
