@@ -120,7 +120,12 @@ URL 拉取通过 `window.videoAnalyzer.downloadVideo(url)` 调 yt-dlp,返回 `Do
 
 - **数据层:逐步退役手写 SQL + `rowToX` 映射。** 现状是 `main.cjs` 里 ~95 个 handler 各自 `db.prepare(...)` + 手列字段 + 手写 row↔对象映射,已酿成两次数据丢失 bug(见铁律)。方向是收进一层薄 repo/数据访问层(列↔字段映射读写**共用一份**、upsert 带显式 merge/replace 语义、JSON 列统一序列化),将来可在这层后面换 ORM。**选型已定:Drizzle**(跟 `agentara/` 一致、原生支持 better-sqlite3 sync、schema 即类型)。**碰到哪张表的读写就把它收编进 repo 层,别一次性全迁;repo 层就是以后换 Drizzle 的接缝。**
 - **铁律(repo 层存在的根本原因,任何 DB 写法都要守):** ① partial 写 JSON 列(如 `analyses.result`)落库端必须 **merge,不能整列覆盖**;② **"读取"路径绝不能触发"写回"副作用**。两次真实事故:`analyses:updateResult` 整列覆盖 + 缓存分两次 partial 写,冷加载读时把 nodes 冲没(已改合并 + 冷加载用 `hydrateAnalysis` 只灌内存不写回);methodology 存独立 `methodologies` 表但 renderer 从不读回、`accounts:upsert` 又没这列,重启即丢(已在 `accounts:list` 批量回填)。整行 upsert(videos/accounts/sessions/…)目前靠调用方 spread 完整对象才安全,属脆弱,收编时改掉。
-- **TS:渐进式切换。** main/preload/runtime 现在是裸 `.cjs`(无编译/类型检查步骤,这也是 ORM 类型收益暂时被堵的原因)。碰到要改的 `.cjs/.js` 模块,在合理范围内顺手迁到 TS;不为迁而迁、不一次性全切。
+- **TS:渐进式切换,地基已就位。** electron 侧已能让 `.ts` 与现存 `.cjs` 共存运行,迁哪块迁哪块、不会"写完 TS 跑不起来":
+  - **怎么迁一个模块**:`git mv foo.cjs foo.ts` → 把 `module.exports` 改 `export`、补类型;**调用方的 require 去掉后缀**(`require("./foo")`,不是 `./foo.cjs` 也不是 `./foo.ts`)。范例见 `electron/model-detection-rules.ts` + `main.cjs` 的 require 点。
+  - **两条加载路径**:dev(`!app.isPackaged`)走 `main.cjs` 顶部的 `require("tsx/cjs")` hook 直接跑 `.ts`;prod 走 `scripts/build-electron.cjs`(esbuild 逐文件 `format:cjs` 编成同名 `.js`,`npm run build` 自动带上,打进 asar)。两条都靠"无后缀 require"对齐。
+  - **关键约束**:① 编译产物 `.js` 必须是 CJS —— 靠 `electron/package.json`(`{"type":"commonjs"}`)把本目录从根的 `type:module` 里拽回 CJS,**别删**;② 编译 `.js`/`.js.map` 已 gitignore(`*.test.js` 是真源码,用否定规则保住);③ `electron:dev` 启动前跑 `clean-electron-ts-js.cjs` 清旧产物,避免 prod build 残留的 `.js` 在 dev 反向遮蔽 `.ts`。
+  - **类型检查**:`npm run lint` = root tsc(检 src + electron `.cjs`)+ `electron/tsconfig.json`(CommonJS 语义,只检 electron `.ts`)。新 `.ts` 自动纳入。
+  - **不在范围**:preload 暂留 `.cjs`(sandbox 子进程加载,main 的 require-hook 管不到,迁 TS 需单独预编译)。main.cjs(40 万字节)不重写,继续 touch-it-then-upgrade。
 - **IPC 契约已 manifest 化:** 加 / 改 IPC **只改 `preload.cjs` 顶部的 `CHANNELS` 数组**(manifest 唯一源)。preload 由它循环生成方法,不要手写;main 启动 `assertIpcContract` 对缺 handler 直接 fail-fast。⚠️ preload 在 Electron sandbox 下只能 `require("electron")`、**不能 require 本地文件**,所以 manifest 定义在 preload 自身、`ipc-contract.cjs` 反向 re-export。
 - **测试:已有 Vitest 套件(`npm test` / `npm run test:watch`)。** 改到 stores / 后端纯模块 / IPC 时顺手补测;`test/contract.test.ts` 守 IPC 三层一致(改 manifest 后它会校验),`*.test.{js,ts,tsx}` 就近放。
 
