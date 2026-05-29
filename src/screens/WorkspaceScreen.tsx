@@ -28,7 +28,7 @@ const EMOTION_ZH: Record<DanmakuEmotionAxis | "neutral", string> = {
 };
 
 export function WorkspaceScreen() {
-  const { setCurrentScreen, projects, activeProjectId, activeAnalysisId: ctxAnalysisId, nodesByAnalysis, setNodesForAnalysis, reportByAnalysis, startAnalysisForProject, analysisRecordsByProject, analysesByVideo, switchAnalysis } = useApp();
+  const { setCurrentScreen, goBack, projects, activeProjectId, activeAnalysisId: ctxAnalysisId, nodesByAnalysis, setNodesForAnalysis, reportByAnalysis, startAnalysisForProject, analysisRecordsByProject, analysesByVideo, switchAnalysis } = useApp();
 
   const project = projects.find(p => p.id === activeProjectId);
   const currentAnalysisId = ctxAnalysisId
@@ -242,7 +242,7 @@ export function WorkspaceScreen() {
       {/* Top Toolbar */}
       <header className="h-14 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0A0A0B]/80 backdrop-blur flex flex-none items-center justify-between px-4 z-10 shrink-0">
         <div className="flex items-center gap-4 min-w-0">
-          <Button variant="ghost" size="icon" onClick={() => setCurrentScreen("home")} className="text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100">
+          <Button variant="ghost" size="icon" onClick={() => goBack()} className="text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100">
             <ArrowLeft className="w-5 h-5" />
           </Button>
           <div className="h-4 w-px bg-slate-200 dark:bg-slate-800" />

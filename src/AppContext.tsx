@@ -29,6 +29,7 @@ interface AppState {
   currentLocation: AppLocation;
   setLocation: (loc: AppLocation) => void;
   goModule: (m: AppModule) => void;
+  goBack: (fallback?: AppLocation) => void;
   sidebarCollapsed: boolean;
   setSidebarCollapsed: (collapsed: boolean) => void;
   currentScreen: ScreenState;
@@ -238,6 +239,7 @@ export function useApp(): AppState {
     currentLocation: nav.currentLocation,
     setLocation: nav.setLocation,
     goModule: nav.goModule,
+    goBack: nav.goBack,
     sidebarCollapsed: nav.sidebarCollapsed,
     setSidebarCollapsed: nav.setSidebarCollapsed,
     currentScreen: locationToLegacyScreen(nav.currentLocation),
