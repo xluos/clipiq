@@ -44,7 +44,7 @@ const PLATFORM_LABEL: Record<string, string> = {
 // ─────────────────────────────────────────────
 // 视频列表
 function VideoListScreen() {
-  const { videos, accounts, analysesByVideo, setLocation, setActiveVideoId, removeVideo } = useApp();
+  const { videos, accounts, analysesByVideo, setLocation, setActiveVideoId, removeVideo, goBack } = useApp();
   const confirm = useConfirm();
   const [query, setQuery] = useState("");
   const [platformFilter, setPlatformFilter] = useState<string | null>(null);
@@ -85,6 +85,9 @@ function VideoListScreen() {
     <div className="flex-1 flex flex-col bg-slate-50 dark:bg-[#0A0A0B] overflow-hidden">
       <header className="border-b border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/40 px-8 py-5 shrink-0">
         <div className="max-w-6xl mx-auto">
+          <button onClick={() => goBack({ module: "account", screen: "hub" })} className="inline-flex items-center gap-1.5 text-[12.5px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 mb-3">
+            <ArrowLeft className="w-3.5 h-3.5" strokeWidth={1.5} />返回内容库
+          </button>
           <div className="text-[10.5px] font-mono tracking-[0.14em] uppercase text-slate-500 dark:text-slate-400">
             视频管理 · VIDEOS
           </div>

@@ -73,6 +73,20 @@ describe("navigation: 临时屏(progress)不作为返回目标", () => {
   });
 });
 
+describe("navigation: 内容库默认落 hub", () => {
+  it("goModule('account') 落到 hub(内容库三 Tab 落地页)", () => {
+    nav().goModule("account");
+    expect(nav().currentLocation).toEqual({ module: "account", screen: "hub" });
+  });
+
+  it("从内容库 hub 进收藏夹详情,返回回到 hub", () => {
+    nav().goModule("account"); // hub
+    nav().setLocation({ module: "account", screen: "collection" });
+    nav().goBack();
+    expect(nav().currentLocation).toEqual({ module: "account", screen: "hub" });
+  });
+});
+
 describe("navigation: 去重 + 兼容", () => {
   it("连续导航到相同 location 不压栈", () => {
     nav().setLocation(WORKSPACE);

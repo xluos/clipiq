@@ -10,9 +10,8 @@ import { useYtDlpUpdateStatus } from "../hooks/useYtDlpUpdateStatus";
 import type { AppModule } from "../types";
 import {
   BarChart3,
-  Film,
+  Library,
   Folder,
-  UserSquare,
   Wand2,
   Settings,
   ChevronLeft,
@@ -30,16 +29,17 @@ type Item = {
 
 export function Sidebar() {
   const { currentLocation, goModule, sidebarCollapsed, setSidebarCollapsed } = useApp();
-  const activeModule = currentLocation.module;
+  // 视频管理页(module video)是内容库的二级页,侧边栏没有独立入口 ——
+  // 落在它上面时让「内容库」保持高亮,避免无任何高亮的脱节感。
+  const activeModule = currentLocation.module === "video" ? "account" : currentLocation.module;
   const collapsed = sidebarCollapsed;
   const ytDlpInfo = useYtDlpUpdateStatus();
   const settingsBadge = ytDlpInfo && (!ytDlpInfo.installed || ytDlpInfo.updateAvailable);
 
   const items: Item[] = [
     { id: "analysis", label: "分析",     icon: <BarChart3 className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },
-    { id: "video",    label: "视频",     icon: <Film className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },
+    { id: "account",  label: "内容库",    icon: <Library className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },
     { id: "library",  label: "素材库",    icon: <Folder className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },
-    { id: "account",  label: "账号分析",  icon: <UserSquare className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },
     { id: "studio",   label: "剪辑助手",  icon: <Wand2 className="w-4 h-4 shrink-0" strokeWidth={1.5} /> },
   ];
 

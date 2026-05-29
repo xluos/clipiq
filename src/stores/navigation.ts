@@ -8,7 +8,7 @@ const MODULE_DEFAULT_SCREEN: Record<Exclude<AppModule, "settings" | "diagnostics
   analysis: { module: "analysis", screen: "home" },
   video: { module: "video", screen: "list" },
   library: { module: "library", screen: "list" },
-  account: { module: "account", screen: "list" },
+  account: { module: "account", screen: "hub" },
   studio: { module: "studio", screen: "list" },
 };
 

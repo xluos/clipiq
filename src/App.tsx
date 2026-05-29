@@ -6,7 +6,7 @@ import { WorkspaceScreen } from './screens/WorkspaceScreen';
 import { ReportScreen } from './screens/ReportScreen';
 import { VideoScreen } from './screens/VideoScreen';
 import { LibraryScreen } from './screens/LibraryScreen';
-import { AccountScreen } from './screens/AccountScreen';
+import { ContentLibraryScreen } from './screens/ContentLibraryScreen';
 import { StudioScreen } from './screens/StudioScreen';
 import { DiagnosticsScreen } from './screens/DiagnosticsScreen';
 import { AnimatePresence, motion } from 'motion/react';
@@ -45,7 +45,7 @@ export default function App() {
                 {currentLocation.module === 'analysis' && currentLocation.screen === 'report' && <ReportScreen />}
                 {currentLocation.module === 'video' && <VideoScreen />}
                 {currentLocation.module === 'library' && <LibraryScreen />}
-                {currentLocation.module === 'account' && <AccountScreen />}
+                {currentLocation.module === 'account' && <ContentLibraryScreen />}
                 {currentLocation.module === 'studio' && <StudioScreen />}
                 {currentLocation.module === 'settings' && <SettingsScreen />}
                 {currentLocation.module === 'diagnostics' && <DiagnosticsScreen />}

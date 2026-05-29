@@ -663,7 +663,7 @@ export type AppLocation =
   | { module: "analysis";  screen: "home" | "progress" | "workspace" | "report" | "url_pull" }
   | { module: "video";     screen: "list" | "detail" }
   | { module: "library";   screen: "list" | "upload" | "shot-list" | "shot-detail" }
-  | { module: "account";   screen: "list" | "detail" | "methodology" }
+  | { module: "account";   screen: "hub" | "list" | "detail" | "methodology" | "collection" }
   | { module: "studio";    screen: "list" | "editor" }
   | { module: "settings" }
   | { module: "diagnostics" };

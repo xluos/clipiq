@@ -41,17 +41,11 @@ import {
   BarChart3,
 } from "lucide-react";
 
-export function AccountScreen() {
-  const { currentLocation } = useApp();
-  if (currentLocation.module !== "account") return null;
-  const screen = currentLocation.screen;
-  if (screen === "detail") return <AccountDetailScreen />;
-  if (screen === "methodology") return <AccountDetailScreen tab="methodology" />;
-  return <AccountListScreen />;
-}
+// 账号视图现在是「内容库」的一个 Tab(见 ContentLibraryScreen),不再是独立模块入口。
+// 这里只导出可内嵌的 AccountGrid(账号网格)和 AccountDetailScreen(账号详情)。
 
 // ─────────────────────────────────────────────────────────────
-// 账号列表
+// 账号网格(内容库「账号」Tab 内容)
 
 const PLATFORM_LABEL: Record<AccountPlatform, string> = {
   bilibili: "BILIBILI",
@@ -112,7 +106,7 @@ const AccountAvatar: FunctionComponent<{
   );
 };
 
-function AccountListScreen() {
+export function AccountGrid() {
   const ctx = useApp();
   const { accounts, accountFetchUi, setLocation, setActiveAccountId } = useAccountNav();
   const { videos, analysesByVideo } = useApp();
@@ -136,53 +130,41 @@ function AccountListScreen() {
   );
 
   return (
-    <div className="flex-1 flex flex-col bg-slate-50 dark:bg-[#0A0A0B] overflow-hidden">
-      <header className="border-b border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/40 px-8 py-5 shrink-0">
-        <div className="max-w-6xl mx-auto">
-          <div className="text-[10.5px] font-mono tracking-[0.14em] uppercase text-slate-500 dark:text-slate-400">
-            账号分析 · BENCHMARK
-          </div>
-          <div className="flex items-baseline gap-3 mt-1.5">
-            <h1 className="text-[22px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">账号分析</h1>
-            <span className="text-[11.5px] font-mono text-slate-500 dark:text-slate-400">
-              {accounts.length} 位 · {totalVideos} 条视频
-            </span>
-            <div className="flex-1" />
-            <button
-              onClick={() => setAddOpen(true)}
-              className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-[13px] font-medium"
-            >
-              <Plus className="w-3.5 h-3.5" strokeWidth={2} />
-              添加账号
-            </button>
-          </div>
-        </div>
-      </header>
+    <div>
+      <div className="flex items-center gap-3 mb-5">
+        <span className="text-[11.5px] font-mono text-slate-500 dark:text-slate-400">
+          {accounts.length} 位 · {totalVideos} 条视频
+        </span>
+        <div className="flex-1" />
+        <button
+          onClick={() => setAddOpen(true)}
+          className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-[13px] font-medium"
+        >
+          <Plus className="w-3.5 h-3.5" strokeWidth={2} />
+          添加账号
+        </button>
+      </div>
 
-      <main className="flex-1 overflow-y-auto">
-        <div className="max-w-6xl mx-auto px-8 py-8">
-          {accounts.length === 0 ? (
-            <EmptyAccounts onAdd={() => setAddOpen(true)} />
-          ) : (
-            <div className="grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
-              {accounts.map((a) => (
-                <AccountCard
-                  key={a.id}
-                  account={a}
-                  videos={videos.filter((v) => v.accountId === a.id)}
-                  analyzed={analyzedByAccount[a.id] || 0}
-                  fetchUi={accountFetchUi[a.id]}
-                  onClick={() => {
-                    setActiveAccountId(a.id);
-                    setLocation(detailLoc);
-                  }}
-                  onDelete={() => ctx.removeAccount(a.id)}
-                />
-              ))}
-            </div>
-          )}
+      {accounts.length === 0 ? (
+        <EmptyAccounts onAdd={() => setAddOpen(true)} />
+      ) : (
+        <div className="grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+          {accounts.map((a) => (
+            <AccountCard
+              key={a.id}
+              account={a}
+              videos={videos.filter((v) => v.accountId === a.id)}
+              analyzed={analyzedByAccount[a.id] || 0}
+              fetchUi={accountFetchUi[a.id]}
+              onClick={() => {
+                setActiveAccountId(a.id);
+                setLocation(detailLoc);
+              }}
+              onDelete={() => ctx.removeAccount(a.id)}
+            />
+          ))}
         </div>
-      </main>
+      )}
 
       {addOpen && <AddAccountDialog onClose={() => setAddOpen(false)} ctx={ctx} />}
     </div>
@@ -526,7 +508,7 @@ const Field: FunctionComponent<{ label: string; children: ReactNode }> = ({ labe
 // ─────────────────────────────────────────────────────────────
 // 账号详情屏
 
-function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "methodology" | "videos" | "hooks" }) {
+export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "methodology" | "videos" | "hooks" }) {
   const ctx = useApp();
   const {
     accounts, setLocation, videos, projects, setProjects, reportByAnalysis, upsertAccount,
@@ -634,7 +616,7 @@ function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?: "metho
     setGenerating(false);
   };
 
-  const backToList: AppLocation = { module: "account", screen: "list" };
+  const backToList: AppLocation = { module: "account", screen: "hub" };
 
   if (!account) {
     return (
