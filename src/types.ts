@@ -771,7 +771,7 @@ export type AccountFetchProgress = {
   message?: string;
 };
 
-// 跨视频汇总产物 — 一份 manifest 描述该 UP 主的方法论
+// 旧版方法论(偏结构拆解的 4 维)。保留以兼容渲染历史记录。
 export type AccountMethodology = {
   hooks?: { summary: string; sampleVideoIds?: string[] };
   pacing?: { summary: string; sampleVideoIds?: string[] };
@@ -780,6 +780,24 @@ export type AccountMethodology = {
   generatedAt?: string;
   sourceVideoCount?: number;
 };
+
+// 收藏夹/集合维度的方法论 — 抽共性 + 给可复用创作方法,辅助创作。
+// 每条 item 可挂样本视频(sampleVideoIds 从该集合的视频里选)。
+export type MethodologyItem = {
+  title: string;
+  detail: string;
+  sampleVideoIds?: string[];
+};
+
+export type CollectionMethodology = {
+  commonalities?: MethodologyItem[]; // 共性洞察:选题/钩子/结构/节奏/视觉 的反复模式
+  playbook?: MethodologyItem[];      // 创作方法:可照做的公式/模板
+  generatedAt?: string;
+  sourceVideoCount?: number;
+};
+
+// 渲染层会同时遇到新老两种形态(老记录是 AccountMethodology)。
+export type AnyMethodology = CollectionMethodology & Partial<AccountMethodology>;
 
 export type Account = {
   id: string;
@@ -896,6 +914,9 @@ export type Collection = {
   accountId?: string;
   createdAt: string;
   updatedAt: string;
+  // 方法论(创作手册)— collections:list 回填,最新一份 + 历史快照
+  methodology?: AnyMethodology;
+  methodologyHistory?: AnyMethodology[];
 };
 
 export type PipelineStageDefinition = {
@@ -945,9 +966,10 @@ export type Analysis = {
 
 export type Methodology = {
   id: string;
-  accountId: string;
+  collectionId: string;   // 主绑定:方法论挂在收藏夹上
+  accountId?: string;     // 冗余:col-account 收藏夹才有,便于按账号查/兼容
   version: number;
-  data: AccountMethodology;
+  data: AnyMethodology;
   sourceVideoCount: number;
   createdAt: string;
 };
