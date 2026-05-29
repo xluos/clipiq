@@ -21,6 +21,14 @@ type TaskEntry = {
   onClick?: () => void;
 };
 
+const ACCOUNT_PLATFORM_LABEL: Record<string, string> = {
+  douyin: "抖音",
+  bilibili: "B 站",
+  xiaohongshu: "小红书",
+  youtube: "YouTube",
+  tiktok: "TikTok",
+};
+
 // ─── 数据汇聚 hook ────────────────────────────────────
 
 export function useTaskQueueData() {
@@ -73,7 +81,8 @@ export function useTaskQueueData() {
       const acc = accounts.find((a) => a.id === accountId);
       accountTasks.push({
         id: accountId,
-        title: acc?.name || accountId,
+        // 新账号首次拉取时 name 还没回填(拉到资料才有昵称),别露出裸 acc-<时间戳> id。
+        title: acc?.name?.trim() || `${ACCOUNT_PLATFORM_LABEL[acc?.platform ?? ""] || "新"}账号`,
         progress: Math.round(ui.progress || 0),
         stage: ui.stage,
         message: ui.message,
