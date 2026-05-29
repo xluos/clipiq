@@ -379,4 +379,11 @@ async function mergeShots({ shots, provider, batchSize, concurrency: concurrency
   return result;
 }
 
-module.exports = { mergeShots };
+module.exports = {
+  mergeShots,
+  // 纯函数,导出仅供单测 (batch 选择逻辑易回归)
+  clampBatchSize,
+  ctxToBatchCap,
+  estimateShotPromptTokens,
+  chooseBatchSize,
+};

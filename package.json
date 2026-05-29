@@ -12,6 +12,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist release",
     "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "dist": "npm run build && node scripts/build-daemon.cjs && electron-builder",
     "dist:mac": "npm run build && node scripts/build-daemon.cjs --mac && electron-builder --mac",
     "dist:win": "npm run build && node scripts/build-daemon.cjs --win && electron-builder --win",
@@ -120,6 +122,8 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "@types/ws": "^8.18.1",
@@ -127,10 +131,12 @@
     "concurrently": "^9.2.1",
     "electron": "^42.0.1",
     "electron-builder": "^25.1.8",
+    "jsdom": "^29.1.1",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3",
+    "vitest": "^2.1.9",
     "wait-on": "^9.0.10"
   }
 }

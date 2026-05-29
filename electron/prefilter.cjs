@@ -345,4 +345,8 @@ module.exports = {
   refineByTags,
   signatureSimilarity,
   SCENE_TYPES,
+  // 纯函数,导出仅供单测 (sanitize/parse 逻辑易回归)
+  sanitizeTag,
+  extractJsonFromText,
+  neutralTag,
 };
