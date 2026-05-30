@@ -1168,6 +1168,16 @@ function getDb() {
     DROP TABLE IF EXISTS analysis_reports;
   `);
 
+  // methodologies:旧 schema(account_id NOT NULL、无 collection_id)直接弃掉旧数据重建,不迁移。
+  // 必须在下方建表/建索引前跑,否则给旧表的 collection_id 列建索引会抛 no such column。
+  try {
+    const mc = db.prepare("PRAGMA table_info(methodologies)").all();
+    if (mc.length > 0 && !mc.some((c) => c.name === "collection_id")) {
+      db.exec("DROP TABLE methodologies");
+      log.info("db-migrate", "methodologies 旧表已弃(老方法论数据不保留),将以新 schema 重建");
+    }
+  } catch { /* 表不存在,忽略 */ }
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS accounts (
       id TEXT PRIMARY KEY,
@@ -1349,32 +1359,7 @@ function getDb() {
   // 直链落库即丢,抖音视频下载只能走 yt-dlp(现需 cookie)而失败。
   try { db.exec("ALTER TABLE videos ADD COLUMN play_url TEXT"); } catch { /* 列已存在 */ }
 
-  // 增量迁移: methodologies 绑定从 account 下沉到 collection。
-  // 老 schema 是 account_id NOT NULL,无法 ALTER 放松,只能重建表。
-  // 检测无 collection_id 列才跑一次:把旧行的 account_id 映射到其 col-account-<id> 收藏夹。
-  try {
-    const methCols = db.prepare("PRAGMA table_info(methodologies)").all();
-    if (methCols.length > 0 && !methCols.some((c) => c.name === "collection_id")) {
-      db.exec(`
-        CREATE TABLE methodologies_new (
-          id TEXT PRIMARY KEY,
-          collection_id TEXT NOT NULL,
-          account_id TEXT,
-          version INTEGER NOT NULL DEFAULT 1,
-          data TEXT NOT NULL,
-          source_video_count INTEGER DEFAULT 0,
-          created_at INTEGER NOT NULL
-        );
-        INSERT INTO methodologies_new (id, collection_id, account_id, version, data, source_video_count, created_at)
-          SELECT id, 'col-account-' || account_id, account_id, version, data, source_video_count, created_at FROM methodologies;
-        DROP TABLE methodologies;
-        ALTER TABLE methodologies_new RENAME TO methodologies;
-        CREATE INDEX IF NOT EXISTS idx_methodologies_collection ON methodologies(collection_id);
-        CREATE INDEX IF NOT EXISTS idx_methodologies_account ON methodologies(account_id);
-      `);
-      log.info("db-migrate", "methodologies 表已迁移:account_id → collection_id(col-account 映射)");
-    }
-  } catch (err) { log.warn("db-migrate", "methodologies 迁移失败:", err?.message || err); }
+  // (methodologies 旧 schema 已在上方建表前弃掉重建,不再做数据迁移)
 
   // 插入内置管线
   const now = Date.now();
