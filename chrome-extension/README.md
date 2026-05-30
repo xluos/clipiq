@@ -12,16 +12,16 @@
 
 1. 在 Chrome 打开 `chrome://extensions`,右上角开「开发者模式」
 2. 点「加载已解压的扩展程序」,选这个 `chrome-extension/` 目录
-3. 打开 ClipIQ 桌面端 → 设置 → 浏览器插件桥 → 复制 token
-4. 点 Chrome 工具栏的 ClipIQ Bridge 图标,把 token 粘贴进去 → 保存
-5. 状态指示灯变绿 = 已连接
+3. 打开 ClipIQ 桌面端 —— 插件自动配对,工具栏图标 popup 指示灯变绿 = 已连接
+
+不用再手动复制 token。桌面端按 WS `Origin` 头识别出连进来的是浏览器扩展(网页伪造不了 Origin),首次连接自动 TOFU 配对并在 `welcome` 里下发 token,插件存下来供之后重连握手用。仅当自动配对失败时,在 popup 里展开「手动填 Token」,从桌面端「设置 → 浏览器插件桥」复制粘贴。
 
 ## 协议
 
 | 方向 | 类型 | 字段 |
 |---|---|---|
-| 插件 → 桌面 | `hello` | `{type, token, version}` 必须首条 |
-| 桌面 → 插件 | `welcome` | `{type, serverVersion}` |
+| 插件 → 桌面 | `hello` | `{type, token, version}` 必须首条;`token` 可空(触发自动配对) |
+| 桌面 → 插件 | `welcome` | `{type, serverVersion, token}`(首次配对时下发 token) |
 | 桌面 → 插件 | `request` | `{type, id, method, params}` |
 | 插件 → 桌面 | `response` | `{type, id, ok, data?, error?}` |
 
@@ -42,10 +42,11 @@
 ## 安全
 
 - WS server 只绑 `127.0.0.1`,外网访问不到
-- 每次连接首条必须是 `hello` 带正确 token,5s 内不发就断
-- token 32 字节随机 hex,存桌面端 userData/extension-bridge.json (mode 0600)
+- **Origin 闸门**:握手校验 WS `Origin` 头必须是 `chrome-extension://`。任何网页连过来 Origin 都是 `https://...`,直接拒。`Origin` 是 forbidden header,页面 JS 改不了 —— 这条挡住了 localhost CSRF(否则任意网页都能借桥发带你登录 cookie 的请求)
+- **TOFU 配对**:记住第一个连上的扩展 origin,之后只认它。防你装的另一个恶意扩展(它也是 `chrome-extension://` 但 id 不同)。持有正确 token 可换绑新 origin
+- token 32 字节随机 hex,存桌面端 userData/extension-bridge.json (mode 0600),作纵深防御(防本地非浏览器进程伪造 Origin);首次配对由桌面端在 `welcome` 下发,无需手动复制
 - 同一时刻只允许一个插件连接,后连的踢前一个
-- 重置 token 后所有现有连接立即断开
+- 「设置 → 重新配对」会换 token + 清配对,所有现有连接立即断开,下个扩展重新 TOFU
 
 ## 开发
 

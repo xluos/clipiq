@@ -3,10 +3,18 @@
 // 架构: Electron 在 127.0.0.1:58713 起 WS server, 插件 background service worker
 // 连过来用浏览器原生 cookie + fetch 调平台 API (B 站 / 抖音), 绕开 wbi 风控.
 //
-// 握手: 客户端首条 { type:"hello", token, version } → 验 token → 回 welcome 或 close(1008)
+// 握手: 客户端首条 { type:"hello", token, version } → 验 Origin + (token 或 TOFU 配对) → 回 welcome 或 close(1008)
 // 请求: server → client { type:"request", id, method, params }, 30s 超时
 // 响应: client → server { type:"response", id, ok, data | error }
 // 心跳: WS protocol-level ping/pong (ws 包内置, 30s)
+//
+// 认证模型 (为什么不是裸 localhost 放行):
+//   ws://127.0.0.1:58713 任何浏览器网页都连得上 (localhost 不受 mixed-content 限制), 裸放行 = 恶意网页
+//   能借这个桥发带你登录 cookie 的请求 (localhost CSRF). 防御分两层:
+//   ① Origin 闸门: WS 握手浏览器必带 Origin 头且 JS 无法伪造. 只认 chrome-extension:// → 网页一律连不上.
+//   ② TOFU 配对: 记住第一个连上来的扩展 origin, 之后只认它 → 防你装的另一个恶意扩展.
+//   token 仍保留作纵深防御 (防本地非浏览器进程伪造 Origin): 首连用 Origin+TOFU 引导, server 在 welcome
+//   里把 token 下发给扩展, 扩展存下来后续带 token 连 —— 全程零手动复制.
 
 const http = require("node:http");
 const crypto = require("node:crypto");
@@ -23,6 +31,7 @@ const SERVER_VERSION = 1;
 
 let tokenCachePath = null;
 let cachedToken = null;
+let pairedOrigin = null; // TOFU: 首个配对的扩展 origin, 之后只认它
 let wss = null;
 let httpServer = null;
 let activeClient = null; // 同一时刻只接受一个插件连接 (后连的踢前一个)
@@ -35,6 +44,19 @@ function getTokenPath(userDataDir) {
   return path.join(userDataDir, "extension-bridge.json");
 }
 
+function persistState() {
+  if (!tokenCachePath) return;
+  try {
+    fs.writeFileSync(
+      tokenCachePath,
+      JSON.stringify({ token: cachedToken, pairedOrigin, updatedAt: new Date().toISOString() }, null, 2),
+      { encoding: "utf8", mode: 0o600 },
+    );
+  } catch (e) {
+    log.warn("extension-bridge", "写 token 文件失败:", e?.message || String(e));
+  }
+}
+
 function loadOrCreateToken(userDataDir) {
   const file = getTokenPath(userDataDir);
   tokenCachePath = file;
@@ -43,38 +65,30 @@ function loadOrCreateToken(userDataDir) {
     const parsed = JSON.parse(raw);
     if (typeof parsed?.token === "string" && parsed.token.length >= 32) {
       cachedToken = parsed.token;
+      pairedOrigin = typeof parsed?.pairedOrigin === "string" ? parsed.pairedOrigin : null;
       return cachedToken;
     }
   } catch {
     /* fall through, regenerate */
   }
-  const token = crypto.randomBytes(32).toString("hex");
-  try {
-    fs.writeFileSync(file, JSON.stringify({ token, createdAt: new Date().toISOString() }, null, 2), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-  } catch (e) {
-    log.warn("extension-bridge", "写 token 文件失败:", e?.message || String(e));
-  }
-  cachedToken = token;
-  return token;
+  cachedToken = crypto.randomBytes(32).toString("hex");
+  pairedOrigin = null;
+  persistState();
+  return cachedToken;
 }
 
+// 重置: 换 token + 清除配对, 下一个连上来的扩展重新 TOFU 配对.
 function rotateToken() {
   if (!tokenCachePath) throw new Error("bridge 未初始化");
-  const token = crypto.randomBytes(32).toString("hex");
-  fs.writeFileSync(tokenCachePath, JSON.stringify({ token, createdAt: new Date().toISOString() }, null, 2), {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  cachedToken = token;
+  cachedToken = crypto.randomBytes(32).toString("hex");
+  pairedOrigin = null;
+  persistState();
   // 踢掉现有连接, 强制重新握手
   if (activeClient) {
     try { activeClient.close(1000, "token rotated"); } catch { /* noop */ }
   }
   notifyStatus();
-  return token;
+  return cachedToken;
 }
 
 function notifyStatus() {
@@ -94,6 +108,7 @@ function getStatus() {
     port: PORT,
     host: HOST,
     token: cachedToken,
+    pairedOrigin,
     connected: Boolean(activeClient),
     clientVersion: activeClientMeta?.version ?? null,
     clientUserAgent: activeClientMeta?.userAgent ?? null,
@@ -118,6 +133,7 @@ async function start(userDataDir) {
   wss = new WebSocketServer({ server: httpServer, path: "/agent" });
 
   wss.on("connection", (ws, req) => {
+    const origin = String(req.headers.origin || "");
     let helloTimer = setTimeout(() => {
       try { ws.close(1008, "hello timeout"); } catch { /* noop */ }
     }, 5_000);
@@ -135,10 +151,33 @@ async function start(userDataDir) {
           try { ws.close(1008, "expect hello first"); } catch { /* noop */ }
           return;
         }
-        if (typeof msg.token !== "string" || msg.token !== cachedToken) {
-          try { ws.close(1008, "invalid token"); } catch { /* noop */ }
-          return;
+
+        // 认证: 持有正确 token 一律放行 (手动兜底路径, 不受 Origin 影响);
+        // 无 token 则走自动配对, 必须过 Origin 闸门 + TOFU.
+        const tokenOk = typeof msg.token === "string" && msg.token === cachedToken;
+        const isExtOrigin = origin.startsWith("chrome-extension://");
+        if (!tokenOk) {
+          // ① Origin 闸门: 只认浏览器扩展, 把所有网页挡在外面 (Origin 头 JS 无法伪造)
+          if (!isExtOrigin) {
+            log.warn("extension-bridge", `拒绝无 token 的非扩展 origin: ${origin || "(空)"}`);
+            try { ws.close(1008, "origin not allowed"); } catch { /* noop */ }
+            return;
+          }
+          // ② TOFU 配对: 已配对则只认同一 origin
+          if (pairedOrigin && origin !== pairedOrigin) {
+            log.warn("extension-bridge", `拒绝未配对扩展: ${origin} (已配对 ${pairedOrigin})`);
+            try { ws.close(1008, "not paired, 在设置里点重新配对"); } catch { /* noop */ }
+            return;
+          }
         }
+
+        // 记住扩展 origin (首次配对, 或持 token 换绑到新扩展)
+        if (isExtOrigin && origin !== pairedOrigin) {
+          pairedOrigin = origin;
+          persistState();
+          log.info("extension-bridge", `已配对扩展 origin=${origin}`);
+        }
+
         clearTimeout(helloTimer);
         helloTimer = null;
 
@@ -153,7 +192,8 @@ async function start(userDataDir) {
           connectedAt: new Date().toISOString(),
         };
         try {
-          ws.send(JSON.stringify({ type: "welcome", serverVersion: SERVER_VERSION }));
+          // welcome 带 token: 首次配对的扩展据此自动存下 token, 之后无需手动复制
+          ws.send(JSON.stringify({ type: "welcome", serverVersion: SERVER_VERSION, token: cachedToken }));
         } catch { /* noop */ }
         notifyStatus();
         return;

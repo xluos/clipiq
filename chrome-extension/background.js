@@ -33,11 +33,8 @@ function setStatus(patch) {
 
 async function connect() {
   if (connecting || (ws && ws.readyState === WebSocket.OPEN)) return;
+  // 无 token 也照常连: 桌面端按 Origin + 首连 TOFU 自动配对, 在 welcome 里把 token 下发回来.
   const token = await getToken();
-  if (!token) {
-    setStatus({ connected: false, error: "未配置 token, 在 popup 里粘贴桌面端给的 token", since: Date.now() });
-    return;
-  }
   connecting = true;
   setStatus({ connected: false, error: null, since: Date.now() });
 
@@ -65,6 +62,10 @@ async function connect() {
     if (msg.type === "welcome") {
       connecting = false;
       reconnectDelay = RECONNECT_BASE_MS;
+      // 首次配对时桌面端在 welcome 里下发 token, 存下来供后续重连握手用
+      if (msg.token && msg.token !== token) {
+        try { await setToken(msg.token); } catch { /* noop */ }
+      }
       setStatus({ connected: true, error: null, since: Date.now() });
       return;
     }
@@ -80,18 +81,29 @@ async function connect() {
     }
   });
 
-  ws.addEventListener("close", (event) => {
+  ws.addEventListener("close", async (event) => {
     connecting = false;
-    const wasInvalidToken = event.code === 1008;
+    const reason = event.reason || "";
+    if (event.code === 1008) {
+      // 认证失败. 多半是桌面端重置过 (清了配对/换了 token), 我们手里的 token 过期了 ——
+      // 清掉它, 下次重连用空 token 重新走 TOFU 配对.
+      if (token) { try { await setToken(""); } catch { /* noop */ } }
+      const isNotPaired = reason.includes("paired");
+      setStatus({
+        connected: false,
+        error: isNotPaired
+          ? "已配对到别的扩展,在桌面端「设置 → 浏览器插件桥」点重新配对"
+          : "认证失败,正在重新自动配对…",
+      });
+      // not paired 重连也没用 (要用户去桌面端重置), 但 invalid token 重连能自愈
+      if (!isNotPaired) scheduleReconnect();
+      return;
+    }
     setStatus({
       connected: false,
-      error: wasInvalidToken
-        ? `token 校验失败 (${event.reason || "invalid token"}), 检查 popup 里 token 是否和桌面端一致`
-        : event.reason
-          ? `连接关闭: ${event.reason} (${event.code})`
-          : `连接关闭 (${event.code})`,
+      error: reason ? `连接关闭: ${reason} (${event.code})` : `连接关闭 (${event.code})`,
     });
-    if (!wasInvalidToken) scheduleReconnect();
+    scheduleReconnect();
   });
 
   ws.addEventListener("error", () => { /* close 兜底 */ });

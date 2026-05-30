@@ -2832,9 +2832,24 @@ function ExtensionBridgeSection() {
           )}
         </div>
 
-        <div>
-          <label className="block text-[10.5px] font-mono tracking-wider uppercase text-slate-500 mb-1.5">Token</label>
-          <div className="flex gap-2">
+        <p className="text-[12px] text-slate-500 dark:text-slate-400 leading-relaxed">
+          装好插件后会自动配对,无需手动复制 token。桌面端按浏览器 Origin 识别出连进来的是插件(网页伪造不了),首次连接自动认证。
+          {status?.pairedOrigin && (
+            <> 已配对:<code className="font-mono text-[11px] text-slate-600 dark:text-slate-300 break-all">{status.pairedOrigin}</code></>
+          )}
+        </p>
+
+        <div className="flex items-center justify-between gap-3 pt-1">
+          <Button variant="ghost" size="sm" onClick={handleRotate} disabled={rotating} className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-100">
+            <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${rotating ? "animate-spin" : ""}`} />
+            重新配对
+          </Button>
+          <span className="text-[11px] text-slate-400">换连别的浏览器 / 误配对到其他扩展时用</span>
+        </div>
+
+        <details className="text-[12px] text-slate-500 dark:text-slate-400">
+          <summary className="cursor-pointer select-none hover:text-slate-700 dark:hover:text-slate-200">手动 token(自动配对失败时兜底)</summary>
+          <div className="flex gap-2 mt-2">
             <input
               readOnly
               value={status?.token ?? "—"}
@@ -2844,15 +2859,11 @@ function ExtensionBridgeSection() {
               <Copy className="w-3.5 h-3.5 mr-1.5" />
               {copied ? "已复制" : "复制"}
             </Button>
-            <Button variant="ghost" size="sm" onClick={handleRotate} disabled={rotating} className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-100">
-              <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${rotating ? "animate-spin" : ""}`} />
-              重置
-            </Button>
           </div>
           <p className="text-[11.5px] text-slate-500 mt-1.5">
-            重置 token 会让现有插件连接断开,需要在 popup 里重新粘贴。
+            在插件 popup 展开「手动填 Token」粘贴。
           </p>
-        </div>
+        </details>
       </section>
 
       <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-3">
@@ -2863,8 +2874,7 @@ function ExtensionBridgeSection() {
           </li>
           <li>Chrome 打开 <code className="font-mono text-[11.5px] text-indigo-600 dark:text-indigo-400">chrome://extensions</code>,右上角开「开发者模式」</li>
           <li>点「加载已解压的扩展程序」,选解压后的目录</li>
-          <li>点 Chrome 工具栏的「ClipIQ Bridge」图标,把上方 token 粘贴进去并保存</li>
-          <li>状态指示灯变绿 → 回桌面端拉账号视频列表</li>
+          <li>回到这里,状态指示灯自动变绿(无需复制 token)→ 即可拉账号视频列表</li>
         </ol>
       </section>
     </>
