@@ -116,12 +116,12 @@ export function AccountGrid() {
   const { videos, analysesByVideo } = useApp();
   const [addOpen, setAddOpen] = useState(false);
 
-  // 每个视频是否已完成结构拆解(builtin-pipeline completed)→ 账号卡片"已拆解 / 总数"分数。
+  // 每个视频是否做过分析(任意管线 completed,结构拆解或内容分析都算)→ 账号卡片"已分析 / 总数"分数。
   const analyzedByAccount = useMemo(() => {
     const m: Record<string, number> = {};
     for (const v of videos) {
       if (!v.accountId) continue;
-      const done = (analysesByVideo[v.id] || []).some((a) => a.pipelineId === "builtin-pipeline" && a.status === "completed");
+      const done = (analysesByVideo[v.id] || []).some((a) => a.status === "completed");
       if (done) m[v.accountId] = (m[v.accountId] || 0) + 1;
     }
     return m;
