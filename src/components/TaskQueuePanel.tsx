@@ -5,6 +5,7 @@
 import { type FunctionComponent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useApp, type ModelDownloadProgress } from "../AppContext";
 import { useTaskQueueStore } from "../stores/tasks";
+import { setActiveCollectionId } from "../screens/ContentLibraryScreen";
 import type { QueueTask } from "../electron-api";
 import type { Video } from "../types";
 import { Cpu, X, ChevronRight, AlertTriangle, UserSquare2, Download, Sparkles, Clock } from "lucide-react";
@@ -106,7 +107,22 @@ export function useTaskQueueData() {
     return { analysisTasks, contentTasks, accountTasks, downloadTasks, failedAnalyses, totalRunning };
   }, [videos, analysesByVideo, progressByAnalysis, activeAnalysisForProject, accounts, accountFetchUi, modelDownloads]);
 
-  return { ...base, queued, totalQueued: queued.length };
+  // 创作手册(methodology)运行中任务 —— 纯 LLM 调用无 app-context 进度源,直接读任务 store。
+  const methodologyTasks = useMemo<TaskEntry[]>(
+    () =>
+      Object.values(tasksById)
+        .filter((t) => t.kind === "methodology" && t.status === "running")
+        .map((t) => ({
+          id: t.refId || t.id,
+          title: t.title || "创作手册",
+          progress: 50,
+          stage: "生成中",
+          icon: <Sparkles className="w-3.5 h-3.5 text-indigo-500 shrink-0" strokeWidth={1.5} />,
+        })),
+    [tasksById],
+  );
+
+  return { ...base, methodologyTasks, queued, totalQueued: queued.length, totalRunning: base.totalRunning + methodologyTasks.length };
 }
 
 function fmtSize(n: number): string | null {
@@ -205,7 +221,7 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
 
 const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: number }> = ({ onClose, sidebarWidth }) => {
   const { setLocation, setActiveProjectId, setCurrentScreen, refreshAnalyses, videos } = useApp();
-  const { analysisTasks, contentTasks, accountTasks, downloadTasks, failedAnalyses, totalRunning, queued } = useTaskQueueData();
+  const { analysisTasks, contentTasks, accountTasks, downloadTasks, methodologyTasks, failedAnalyses, totalRunning, queued } = useTaskQueueData();
 
   const openProject = (videoId: string) => {
     setActiveProjectId(videoId);
@@ -216,6 +232,14 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
   const openAccount = (accountId: string) => {
     try { window.sessionStorage.setItem("clipiq-active-account-id", accountId); } catch { /* noop */ }
     setLocation({ module: "account", screen: "detail" });
+    onClose();
+  };
+
+  // 创作手册任务 refId 是 collectionId:col-account-<id> 跳账号详情,普通收藏夹跳收藏夹详情。
+  const openMethodology = (collectionId: string) => {
+    if (collectionId.startsWith("col-account-")) { openAccount(collectionId.slice("col-account-".length)); return; }
+    setActiveCollectionId(collectionId);
+    setLocation({ module: "account", screen: "collection" });
     onClose();
   };
 
@@ -249,6 +273,9 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
 
         {/* 账号拉取 */}
         <TaskSection title="账号拉取" entries={accountTasks} onClickEntry={(t) => openAccount(t.id)} />
+
+        {/* 创作手册 */}
+        <TaskSection title="创作手册" entries={methodologyTasks} onClickEntry={(t) => openMethodology(t.id)} />
 
         {/* 排队中(后台任务调度器:等待空闲槽位)—— 放在运行中的下面 */}
         <QueuedSection tasks={queued} />
@@ -296,7 +323,7 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
 // ─── 通用任务 Section ──────────────────────────────────
 
 // 排队中的任务:还没拿到运行槽位,可直接取消(从队列里拿掉,不会启动)。
-const KIND_LABEL: Record<string, string> = { analysis: "结构拆解", summary: "内容分析", "account-fetch": "账号拉取" };
+const KIND_LABEL: Record<string, string> = { analysis: "结构拆解", summary: "内容分析", "account-fetch": "账号拉取", methodology: "创作手册" };
 
 const QueuedSection: FunctionComponent<{ tasks: QueueTask[] }> = ({ tasks }) => {
   if (tasks.length === 0) return null;

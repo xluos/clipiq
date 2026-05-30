@@ -14,6 +14,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useApp } from "../AppContext";
 import { useTaskQueueStore, selectTaskByRef } from "../stores/tasks";
 import { MethodologyPanel } from "../components/MethodologyPanel";
+import { ExportButton } from "../components/ExportButton";
 import { ImageGallery, ImageView, VideoThumbnail } from "../components/MediaViewer";
 import { ModelConfigDialog, type ModelConfigResult } from "../components/ModelConfigDialog";
 import type {
@@ -526,6 +527,10 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
   const [tab, setTab] = useState<"methodology" | "videos" | "hooks">(initialTab);
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState("");
+  // 方法论「生成中」改读后台任务调度器(账号方法论 = 它 col-account 收藏夹的 methodology 任务),
+  // 跟页面挂载无关:切走再回来仍显示生成中。
+  const methTask = useTaskQueueStore((s) => (id ? selectTaskByRef(s.tasksById, `col-account-${id}`, "methodology") : undefined));
+  const methGenerating = generating || !!methTask;
 
   // v3: 从 analysesByVideo 推导每个视频的内容分析状态，merge 到 video 对象上
   const accountVideos = useMemo(() => {
@@ -633,13 +638,14 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
         </button>
         <button
           onClick={generateMethodology}
-          disabled={generating}
+          disabled={methGenerating}
           title={methodologySourceCount === 0 ? "需要先分析至少 1 条视频" : "跨视频汇总方法论"}
           className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200/70 dark:border-indigo-800/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 disabled:opacity-50"
         >
           <Sparkles className="w-3 h-3" strokeWidth={1.5} />
-          {generating ? "汇总中…" : `汇总方法论 (${methodologySourceCount})`}
+          {methGenerating ? "汇总中…" : `汇总方法论 (${methodologySourceCount})`}
         </button>
+        <ExportButton scope="account" id={account.id} disabled={accountVideos.length === 0} />
         <button
           onClick={() => {
             const label = account.name || "该账号";
@@ -710,7 +716,7 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
               methodology={account.methodology}
               history={account.methodologyHistory}
               sourceCount={methodologySourceCount}
-              generating={generating}
+              generating={methGenerating}
               error={genError}
               onGenerate={generateMethodology}
               videos={accountVideos}

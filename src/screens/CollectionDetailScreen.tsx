@@ -13,6 +13,8 @@ import {
 import { useVideos, useUpsertVideo } from "../queries/videos";
 import { VideoRow, VideoRowList } from "../components/VideoRow";
 import { MethodologyPanel } from "../components/MethodologyPanel";
+import { ExportButton } from "../components/ExportButton";
+import { useTaskQueueStore, selectTaskByRef } from "../stores/tasks";
 import { useConfirm } from "../components/ConfirmDialog";
 import { activeCollectionId } from "./ContentLibraryScreen";
 import type { Collection, Video } from "../types";
@@ -38,6 +40,9 @@ export function CollectionDetailScreen() {
   const [nameDraft, setNameDraft] = useState("");
   const [genMeth, setGenMeth] = useState(false);
   const [genMethErr, setGenMethErr] = useState("");
+  // 「生成中」改读后台任务调度器:methodology 任务跟页面挂载无关,切走再回来仍显示。
+  const methTask = useTaskQueueStore((s) => (id ? selectTaskByRef(s.tasksById, id, "methodology") : undefined));
+  const methGenerating = genMeth || !!methTask;
 
   // 已做内容分析(builtin-content 完成)的视频数 —— 创作手册的数据源
   const contentDoneCount = useMemo(
@@ -137,6 +142,7 @@ export function CollectionDetailScreen() {
               >
                 <Plus className="w-3.5 h-3.5" strokeWidth={2} />新增视频
               </button>
+              <ExportButton scope="collection" id={collection.id} disabled={videos.length === 0} />
               <button onClick={handleDeleteCollection} title="删除收藏夹" className="h-8 w-8 rounded-md flex items-center justify-center text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:text-rose-400 dark:hover:bg-rose-900/30 border border-slate-200 dark:border-slate-700">
                 <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
               </button>
@@ -154,7 +160,7 @@ export function CollectionDetailScreen() {
               methodology={collection.methodology}
               history={collection.methodologyHistory}
               sourceCount={contentDoneCount}
-              generating={genMeth}
+              generating={methGenerating}
               error={genMethErr}
               onGenerate={generateMethodology}
               videos={videos}

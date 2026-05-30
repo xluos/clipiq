@@ -30,6 +30,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const { Readable } = require("node:stream");
+const archiver = require("archiver");
 const llamaRuntime = require("./llama-runtime.cjs");
 const llamaManager = require("./llama-manager.cjs");
 // whisper 运行时由 ai-model-daemon 管理,不再本地 require
@@ -508,7 +509,7 @@ let taskScheduler = null;
 // 每个 kind 的并发上限(可调)。analysis / summary 串行排队 —— 即用户要的"只能同时跑
 // 一个,其余排队";本地 llama 单例 + ai-model 服务自身也有并发队列,这里不必放开。
 // 以后想让云端分析并行,把对应值调大即可。
-const TASK_CONCURRENCY = { analysis: 1, summary: 1, "account-fetch": 2 };
+const TASK_CONCURRENCY = { analysis: 1, summary: 1, "account-fetch": 2, methodology: 1 };
 
 let learnedBaselines = { providers: {} };
 
@@ -8502,10 +8503,11 @@ app.whenReady().then(async () => {
     }
   });
 
-  // 收藏夹维度的「创作手册」生成 — 服务端按 collectionId 聚合该集合视频的内容分析产物
+  // 收藏夹维度的「创作手册」生成执行体 — 服务端按 collectionId 聚合该集合视频的内容分析产物
   // (summary/topic/target/tags),抽共性 + 给可复用创作方法,辅助创作。每条挂样本视频。
-  ipcMain.handle("collections:generateMethodology", async (_event, { collectionId } = {}) => {
-    if (!collectionId) throw new Error("collections:generateMethodology 需要 collectionId");
+  // 被任务调度器的 methodology kind 调用(见下方 registerKind / IPC 入队)。返回 { ok, methodology }。
+  async function runGenerateMethodology(collectionId) {
+    if (!collectionId) throw new Error("generateMethodology 需要 collectionId");
     const provider = await loadComplexTextProvider();
     if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) {
       throw new Error("未配置 complex_text 任务槽位的 LLM 供应商");
@@ -8587,6 +8589,24 @@ app.whenReady().then(async () => {
     } catch (err) {
       throw new Error(`创作手册生成失败: ${err?.message || String(err)}`);
     }
+  }
+
+  // IPC: 生成创作手册 → 入队 methodology 任务(并发 1、按 collectionId 去重)。
+  // await whenSettled 保留原本 { ok, methodology } 返回语义,但任务本体跑在后台调度器里:
+  // 面板可见、持久化、退出页面不丢、重启恢复。重复点击同一收藏夹被 dedupe 合并。
+  ipcMain.handle("collections:generateMethodology", async (_event, { collectionId } = {}) => {
+    if (!collectionId) throw new Error("collections:generateMethodology 需要 collectionId");
+    if (!taskScheduler) return runGenerateMethodology(collectionId); // 兜底:调度器未就绪
+    const db = getDb();
+    const coll = db.prepare("SELECT name, account_id FROM collections WHERE id = ?").get(collectionId);
+    // 任务标题:账号收藏夹露账号名,普通收藏夹露收藏夹名
+    let title = coll?.name || "创作手册";
+    if (coll?.account_id) {
+      const acc = db.prepare("SELECT name FROM accounts WHERE id = ?").get(coll.account_id);
+      if (acc?.name) title = acc.name;
+    }
+    const task = taskScheduler.enqueue("methodology", { collectionId, title }, { refId: collectionId });
+    return taskScheduler.whenSettled(task.id);
   });
 
   // v2: Studio steps LLM 生成
@@ -8859,6 +8879,14 @@ app.whenReady().then(async () => {
         return runAccountFetch({ accountId: task.payload.accountId, url: task.payload.url, range: task.payload.range });
       },
     });
+    // 创作手册生成:并发 1(走 complex_text 槽位,跟内容分析共用上游,串行更稳),按 collectionId 去重。
+    // 纯 LLM 调用、无中途取消检查点;abort 当前不打断已发出的请求(任务被标 cancelled,结果丢弃)。
+    taskScheduler.registerKind("methodology", {
+      concurrency: TASK_CONCURRENCY.methodology,
+      dedupeKey: (p) => `methodology:${p.collectionId}`,
+      title: (p) => p.title || "创作手册",
+      run: (task) => runGenerateMethodology(task.payload.collectionId),
+    });
     // 重启恢复:running → interrupted,queued 重新调度起跑。
     try { taskScheduler.hydrate(tasksRepo.list()); } catch (err) { log.warn("task-queue", "hydrate 失败:", err?.message || err); }
   }
@@ -8981,6 +9009,210 @@ app.whenReady().then(async () => {
           : exportMarkdown(video, nodes, report, provider);
     await fs.writeFile(result.filePath, content, "utf8");
     return { canceled: false, filePath: result.filePath };
+  });
+
+  // 批量导出:整个账号 / 整个收藏夹下所有视频的所有分析。
+  // 一个视频有多份分析(内容分析 / 结构拆解…)就各导一份(按 pipeline 区分)。
+  // format=json 出单个 JSON;format=zip 出压缩包(manifest + 每视频一目录,每份分析一文件)。
+  ipcMain.handle("export:bundle", async (_event, { scope, id, format, includeMedia } = {}) => {
+    const db = getDb();
+    if (scope !== "account" && scope !== "collection") throw new Error("export:bundle 需要 scope=account|collection");
+    if (!id) throw new Error("export:bundle 需要 id");
+
+    // 方法论(创作手册):账号挂在它 col-account 收藏夹;收藏夹按自身 id。version DESC。
+    const loadMethodology = (collectionId) => {
+      try {
+        const rows = db
+          .prepare("SELECT data FROM methodologies WHERE collection_id = ? ORDER BY version DESC")
+          .all(collectionId)
+          .map((r) => { try { return JSON.parse(r.data); } catch { return null; } })
+          .filter(Boolean);
+        return { methodology: rows[0] || null, methodologyHistory: rows.slice(1) };
+      } catch { return { methodology: null, methodologyHistory: [] }; }
+    };
+
+    // 1) 解析范围实体(账号信息 / 收藏夹信息)+ 方法论嵌入 + 视频列表
+    let scopeName = id;
+    let entity = null; // account / collection 实体
+    let videos = [];
+    if (scope === "account") {
+      const accRow = db.prepare("SELECT * FROM accounts WHERE id = ?").get(id);
+      if (!accRow) throw new Error("未找到账号");
+      scopeName = accRow.name || id;
+      const meth = loadMethodology(`col-account-${id}`);
+      entity = { ...rowToAccount(accRow), ...meth };
+      videos = db
+        .prepare("SELECT * FROM videos WHERE account_id = ? ORDER BY upload_date DESC, created_at DESC")
+        .all(id)
+        .map(rowToVideo);
+    } else {
+      const colRow = db.prepare("SELECT * FROM collections WHERE id = ?").get(id);
+      if (!colRow) throw new Error("未找到收藏夹");
+      scopeName = colRow.name || id;
+      const c = rowToCollection(colRow);
+      const meth = loadMethodology(id);
+      // 收藏夹只带名称 + 简介(+ 方法论),不含账号信息
+      entity = { id: c.id, name: c.name, description: c.description, ...meth };
+      videos = db
+        .prepare(
+          "SELECT v.* FROM videos v JOIN collection_videos cv ON cv.video_id = v.id WHERE cv.collection_id = ? ORDER BY cv.position",
+        )
+        .all(id)
+        .map(rowToVideo);
+    }
+
+    // 2) pipeline_id → 可读名(内容分析 / 结构拆解)
+    const pipeName = {};
+    for (const p of db.prepare("SELECT id, name FROM pipelines").all()) pipeName[p.id] = p.name;
+
+    // 3) 每个视频:每个 pipeline 只取「最新且成功」的一份(内容分析 + 结构分析各一)。
+    //    限定 status='completed' → 最新那次若失败/取消/中断,自动回退到上一个成功的。
+    const analysisCols =
+      "SELECT id, video_id, pipeline_id, status, options, provider_snapshot, result, token_usage, duration_ms, error_message, started_at, completed_at, created_at FROM analyses WHERE video_id = ? AND status = 'completed' AND result IS NOT NULL ORDER BY created_at DESC";
+    let analysisCount = 0;
+    const items = videos.map((v) => {
+      const seenPipe = new Set();
+      const analyses = db
+        .prepare(analysisCols)
+        .all(v.id)
+        .map(rowToAnalysis)
+        .filter((a) => { // ORDER BY created_at DESC → 每个 pipeline 第一条即最新,后续历史份丢弃
+          if (seenPipe.has(a.pipelineId)) return false;
+          seenPipe.add(a.pipelineId);
+          return true;
+        })
+        .map((a) => ({
+          analysisId: a.id,
+          pipelineId: a.pipelineId,
+          pipelineName: pipeName[a.pipelineId] || a.pipelineId,
+          status: a.status,
+          options: a.options,
+          providerSnapshot: a.providerSnapshot,
+          tokenUsage: a.tokenUsage,
+          durationMs: a.durationMs,
+          startedAt: a.startedAt,
+          completedAt: a.completedAt,
+          result: a.result,
+        }));
+      analysisCount += analyses.length;
+      return { video: v, analyses };
+    });
+
+    const bundle = {
+      app: "ClipIQ",
+      exportedAt: new Date().toISOString(),
+      scope: { type: scope, id, name: scopeName },
+      [scope]: entity, // account: {...} 或 collection: {...},方法论已嵌入
+      videoCount: videos.length,
+      analysisCount,
+      videos: items,
+    };
+
+    // 文件名清洗:去掉路径非法字符,空则回退
+    const safe = (s, fallback) => {
+      const t = String(s || "").replace(/[\/\\:*?"<>| -]/g, "").replace(/\s+/g, " ").trim().slice(0, 80);
+      return t || fallback;
+    };
+    const baseName = safe(scopeName, scope === "account" ? "account" : "collection");
+
+    if (format === "json") {
+      const defaultPath = path.join(app.getPath("documents"), `${baseName}-分析导出.json`);
+      const result = await dialog.showSaveDialog({
+        title: "导出分析结果",
+        defaultPath,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (result.canceled || !result.filePath) return { canceled: true };
+      await fs.writeFile(result.filePath, JSON.stringify(bundle, null, 2), "utf8");
+      return { canceled: false, filePath: result.filePath, videoCount: videos.length, analysisCount };
+    }
+
+    // zip — 用 archiver 流式写盘(边压边写,不把整包/原视频读进内存,带视频也不会 OOM)
+    const suffix = includeMedia ? "分析导出-含视频" : "分析导出";
+    const defaultPath = path.join(app.getPath("documents"), `${baseName}-${suffix}.zip`);
+    const result = await dialog.showSaveDialog({
+      title: "导出分析结果",
+      defaultPath,
+      filters: [{ name: "ZIP", extensions: ["zip"] }],
+    });
+    if (result.canceled || !result.filePath) return { canceled: true };
+
+    const output = fsSync.createWriteStream(result.filePath);
+    const archive = archiver("zip", { zlib: { level: 6 } });
+    const closed = new Promise((resolve, reject) => {
+      output.on("close", resolve);
+      output.on("error", reject);
+      archive.on("error", reject);
+      archive.on("warning", (err) => { if (err.code === "ENOENT") log.warn("export", "归档警告:", err?.message); else reject(err); });
+    });
+    archive.pipe(output);
+
+    // 账号 / 收藏夹信息(含已存信息 + 嵌入的方法论)
+    archive.append(JSON.stringify(entity, null, 2), { name: scope === "account" ? "账号信息.json" : "收藏夹信息.json" });
+
+    const usedFolders = new Set();
+    const manifestVideos = [];
+    let mediaIncludedCount = 0;
+    let mediaMissingCount = 0;
+    for (const it of items) {
+      // 目录名:标题清洗 + videoId 短哈希兜底去重
+      let folder = safe(it.video.title, it.video.id.slice(0, 8));
+      if (usedFolders.has(folder)) folder = `${folder}-${it.video.id.slice(0, 6)}`;
+      usedFolders.add(folder);
+      const dir = `videos/${folder}`;
+      archive.append(JSON.stringify(it.video, null, 2), { name: `${dir}/video.json` });
+      const usedFiles = {};
+      for (const a of it.analyses) {
+        const base = safe(a.pipelineName, "分析");
+        usedFiles[base] = (usedFiles[base] || 0) + 1;
+        const fname = usedFiles[base] > 1 ? `${base}-${a.analysisId.slice(0, 8)}` : base;
+        archive.append(JSON.stringify(a, null, 2), { name: `${dir}/${fname}.json` });
+      }
+      // 原视频:本地文件存在才打包(URL 未下载 / 文件被删的跳过,计入 missing)
+      let mediaIncluded = false;
+      if (includeMedia && it.video.localPath) {
+        try {
+          await fs.access(it.video.localPath);
+          const ext = path.extname(it.video.localPath) || ".mp4";
+          archive.file(it.video.localPath, { name: `${dir}/原视频${ext}` });
+          mediaIncluded = true;
+          mediaIncludedCount++;
+        } catch { mediaMissingCount++; }
+      }
+      manifestVideos.push({
+        videoId: it.video.id,
+        title: it.video.title,
+        platform: it.video.platform,
+        mediaIncluded,
+        analyses: it.analyses.map((a) => ({ analysisId: a.analysisId, pipelineName: a.pipelineName })),
+      });
+    }
+
+    // 顶层 manifest:概览 + 索引(放最后 append,好带上原视频统计;zip 内顺序不影响解压)
+    const manifest = {
+      app: "ClipIQ",
+      exportedAt: bundle.exportedAt,
+      scope: bundle.scope,
+      videoCount: videos.length,
+      analysisCount,
+      hasMethodology: !!entity?.methodology,
+      mediaIncluded: !!includeMedia,
+      mediaFileCount: mediaIncludedCount,
+      mediaMissingCount,
+      videos: manifestVideos,
+    };
+    archive.append(JSON.stringify(manifest, null, 2), { name: "manifest.json" });
+
+    await archive.finalize();
+    await closed;
+    return {
+      canceled: false,
+      filePath: result.filePath,
+      videoCount: videos.length,
+      analysisCount,
+      mediaFileCount: mediaIncludedCount,
+      mediaMissingCount,
+    };
   });
 
   ipcMain.handle("provider:testConnection", async (_event, provider) => {

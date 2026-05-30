@@ -111,6 +111,7 @@ export type ExtensionBridgeStatus = {
   port: number;
   host: string;
   token: string | null;
+  pairedOrigin: string | null;
   connected: boolean;
   clientVersion: number | null;
   clientUserAgent: string | null;
@@ -451,6 +452,21 @@ declare global {
         analysis: Analysis;
         format: ExportFormat;
       }) => Promise<{ canceled: boolean; filePath?: string }>;
+      // 批量导出整个账号 / 收藏夹下所有视频的所有分析(多份分析各导一份)
+      // includeMedia(仅 zip):额外把本地原视频文件打进压缩包
+      exportBundle: (payload: {
+        scope: "account" | "collection";
+        id: string;
+        format: "json" | "zip";
+        includeMedia?: boolean;
+      }) => Promise<{
+        canceled: boolean;
+        filePath?: string;
+        videoCount?: number;
+        analysisCount?: number;
+        mediaFileCount?: number;
+        mediaMissingCount?: number;
+      }>;
 
       // provider
       testProvider: (provider: ModelProvider) => Promise<ProviderTestResult>;

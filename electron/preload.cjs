@@ -26,6 +26,7 @@ const CHANNELS = [
   { method: "downloadVideoAsync", channel: "video:downloadUrlAsync", kind: "invoke" },
   { method: "onDownloadComplete", channel: "download:complete", kind: "event" },
   { method: "exportVideo", channel: "video:export", kind: "invoke" },
+  { method: "exportBundle", channel: "export:bundle", kind: "invoke" },
 
   // ── 配置 ──
   { method: "loadConfig", channel: "config:load", kind: "invoke" },
