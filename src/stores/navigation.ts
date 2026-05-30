@@ -3,6 +3,19 @@ import type { AppLocation, AppModule, ScreenState } from "../types";
 import { legacyScreenToLocation } from "../types";
 
 const SIDEBAR_COLLAPSED_KEY = "clipiq-sidebar-collapsed";
+// 当前页面位置持久化到 sessionStorage:HMR / 整页 reload 后恢复原页面,不被重置回首页。
+// sessionStorage 在 app 真正退出时清空 → 整机重启仍从首页开始(符合预期)。
+const LOCATION_KEY = "clipiq-nav-location";
+function readPersistedLocation(): AppLocation | null {
+  try {
+    const raw = window.sessionStorage.getItem(LOCATION_KEY);
+    if (raw) return JSON.parse(raw) as AppLocation;
+  } catch { /* noop */ }
+  return null;
+}
+function persistLocation(loc: AppLocation): void {
+  try { window.sessionStorage.setItem(LOCATION_KEY, JSON.stringify(loc)); } catch { /* noop */ }
+}
 
 const MODULE_DEFAULT_SCREEN: Record<Exclude<AppModule, "settings" | "diagnostics">, AppLocation> = {
   analysis: { module: "analysis", screen: "home" },
@@ -65,7 +78,7 @@ interface NavigationState {
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
-  currentLocation: HOME_LOCATION,
+  currentLocation: readPersistedLocation() ?? HOME_LOCATION,
   history: [],
   sidebarCollapsed: (() => {
     try { return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1"; } catch { return false; }
@@ -95,3 +108,6 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   currentScreen: "home" as ScreenState,
   setCurrentScreen: (s) => set((st) => navigate(st, legacyScreenToLocation(s))),
 }));
+
+// 每次位置变化写回 sessionStorage(任何导航路径都覆盖到,不用逐个 setter 改)。
+useNavigationStore.subscribe((s) => persistLocation(s.currentLocation));
