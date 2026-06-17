@@ -8505,11 +8505,17 @@ app.whenReady().then(async () => {
       });
       return { ok: true, accepted: true };
     }
+    let title = "内容分析";
+    try {
+      const row = getDb().prepare("SELECT title FROM videos WHERE id = ?").get(videoId);
+      if (row?.title) title = row.title;
+    } catch { /* noop */ }
     const task = taskScheduler.enqueue("summary", {
       videoId,
+      title,
       slotOverrides: slotOverrides || undefined,
       customPrompt: customPrompt || undefined,
-    }, { refId: videoId });
+    }, { refId: videoId, title });
     return { ok: true, accepted: true, taskId: task.id, status: task.status };
   });
 
@@ -8687,7 +8693,7 @@ app.whenReady().then(async () => {
       const acc = db.prepare("SELECT name FROM accounts WHERE id = ?").get(coll.account_id);
       if (acc?.name) title = acc.name;
     }
-    const task = taskScheduler.enqueue("methodology", { collectionId, title }, { refId: collectionId });
+    const task = taskScheduler.enqueue("methodology", { collectionId, title }, { refId: collectionId, title });
     return taskScheduler.whenSettled(task.id);
   });
 
@@ -8978,13 +8984,20 @@ app.whenReady().then(async () => {
   ipcMain.handle("analysis:start", (event, args) => {
     const videoId = args?.videoId || args?.project?.id;
     if (!videoId || !taskScheduler) return runAnalysisStart(event, args); // 兜底
+    let title = args?.project?.videoName || args?.project?.title || "结构拆解";
+    if (title === "结构拆解") {
+      try {
+        const row = getDb().prepare("SELECT title FROM videos WHERE id = ?").get(videoId);
+        if (row?.title) title = row.title;
+      } catch { /* noop */ }
+    }
     const task = taskScheduler.enqueue("analysis", {
       videoId,
       pipelineId: args?.pipelineId || "builtin-pipeline",
       options: args?.options,
       resumeAnalysisId: args?.resumeAnalysisId,
-      title: args?.project?.videoName || args?.project?.title,
-    }, { refId: videoId });
+      title,
+    }, { refId: videoId, title });
     return taskScheduler.whenSettled(task.id);
   });
 
@@ -9000,12 +9013,18 @@ app.whenReady().then(async () => {
     }
     const options = row.options ? JSON.parse(row.options) : undefined;
     if (taskScheduler) {
+      let title = "结构拆解";
+      try {
+        const videoRow = db.prepare("SELECT title FROM videos WHERE id = ?").get(row.video_id);
+        if (videoRow?.title) title = videoRow.title;
+      } catch { /* noop */ }
       const task = taskScheduler.enqueue("analysis", {
         videoId: row.video_id,
         pipelineId: row.pipeline_id || "builtin-pipeline",
         options,
         resumeAnalysisId: analysisId,
-      }, { refId: row.video_id });
+        title,
+      }, { refId: row.video_id, title });
       await taskScheduler.whenSettled(task.id);
     } else {
       await runAnalysisStart(event, {

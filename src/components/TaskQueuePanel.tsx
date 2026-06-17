@@ -7,7 +7,7 @@ import { useApp, type ModelDownloadProgress } from "../AppContext";
 import { useTaskQueueStore } from "../stores/tasks";
 import { setActiveCollectionId } from "../screens/ContentLibraryScreen";
 import type { QueueTask } from "../electron-api";
-import type { Video } from "../types";
+import type { Account, Collection, Video } from "../types";
 import { Cpu, X, ChevronRight, AlertTriangle, UserSquare2, Download, Sparkles, Clock } from "lucide-react";
 
 // ─── 通用任务条目类型 ─────────────────────────────────
@@ -22,6 +22,11 @@ type TaskEntry = {
   onClick?: () => void;
 };
 
+type QueuedTaskEntry = {
+  task: QueueTask;
+  title: string;
+};
+
 const ACCOUNT_PLATFORM_LABEL: Record<string, string> = {
   douyin: "抖音",
   bilibili: "B 站",
@@ -33,13 +38,17 @@ const ACCOUNT_PLATFORM_LABEL: Record<string, string> = {
 // ─── 数据汇聚 hook ────────────────────────────────────
 
 export function useTaskQueueData() {
-  const { videos, accounts, accountFetchUi, progressByAnalysis, activeAnalysisForProject, analysesByVideo, modelDownloads } = useApp();
+  const { videos, accounts, collections, accountFetchUi, progressByAnalysis, activeAnalysisForProject, analysesByVideo, modelDownloads } = useApp();
   const tasksById = useTaskQueueStore((s) => s.tasksById);
 
   // 后台任务队列里"排队中"的任务(运行中的仍由下面各 section 按 analysesByVideo 展示详细进度)。
-  const queued = useMemo(
-    () => Object.values(tasksById).filter((t) => t.status === "queued").sort((a, b) => a.createdAt - b.createdAt),
-    [tasksById],
+  const queued = useMemo<QueuedTaskEntry[]>(
+    () =>
+      Object.values(tasksById)
+        .filter((t) => t.status === "queued")
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .map((task) => ({ task, title: resolveQueuedTaskTitle(task, { videos, accounts, collections }) })),
+    [tasksById, videos, accounts, collections],
   );
 
   const base = useMemo(() => {
@@ -201,11 +210,20 @@ export const TaskQueueButton: FunctionComponent<{ collapsed: boolean }> = ({ col
           )}
         </span>
         {!collapsed && (
-          <span className="flex-1 flex items-center gap-2">
-            任务队列
+          <span className="min-w-0 flex-1 flex items-center gap-2">
+            <span className="truncate whitespace-nowrap leading-none">任务队列</span>
             {totalActive > 0 && (
-              <span className="text-[10.5px] font-mono text-slate-500 dark:text-slate-400">
-                · {totalRunning} 运行{totalQueued > 0 ? ` · ${totalQueued} 排队` : ""}
+              <span className="ml-auto shrink-0 flex items-center gap-1">
+                {totalRunning > 0 && (
+                  <span className="h-5 px-1.5 rounded-md bg-slate-100 dark:bg-slate-800 text-[10.5px] font-mono text-slate-600 dark:text-slate-300 flex items-center">
+                    运行 {totalRunning}
+                  </span>
+                )}
+                {totalQueued > 0 && (
+                  <span className="h-5 px-1.5 rounded-md bg-slate-100 dark:bg-slate-800 text-[10.5px] font-mono text-slate-600 dark:text-slate-300 flex items-center">
+                    排队 {totalQueued}
+                  </span>
+                )}
               </span>
             )}
           </span>
@@ -325,18 +343,60 @@ const TaskQueueDrawer: FunctionComponent<{ onClose: () => void; sidebarWidth: nu
 // 排队中的任务:还没拿到运行槽位,可直接取消(从队列里拿掉,不会启动)。
 const KIND_LABEL: Record<string, string> = { analysis: "结构拆解", summary: "内容分析", "account-fetch": "账号拉取", methodology: "创作手册" };
 
-const QueuedSection: FunctionComponent<{ tasks: QueueTask[] }> = ({ tasks }) => {
+function resolveQueuedTaskTitle(
+  task: QueueTask,
+  ctx: { videos: Video[]; accounts: Account[]; collections: Collection[] },
+): string {
+  const rawTitle = typeof task.title === "string" ? task.title.trim() : "";
+  const kindLabel = KIND_LABEL[task.kind] || task.kind;
+  if (rawTitle && rawTitle !== kindLabel) return rawTitle;
+
+  const payload = task.payload || {};
+  const payloadVideoId = typeof payload.videoId === "string" ? payload.videoId : "";
+  const payloadAccountId = typeof payload.accountId === "string" ? payload.accountId : "";
+  const payloadCollectionId = typeof payload.collectionId === "string" ? payload.collectionId : "";
+  const payloadTitle = typeof payload.title === "string" ? payload.title.trim() : "";
+
+  if (task.kind === "analysis" || task.kind === "summary") {
+    const videoId = payloadVideoId || task.refId || "";
+    const video = ctx.videos.find((v) => v.id === videoId);
+    const title = video?.title || video?.videoName || payloadTitle;
+    if (title) return title;
+  }
+
+  if (task.kind === "account-fetch") {
+    const accountId = payloadAccountId || task.refId || "";
+    const account = ctx.accounts.find((a) => a.id === accountId);
+    const name = account?.name?.trim() || payloadTitle;
+    if (name) return name;
+  }
+
+  if (task.kind === "methodology") {
+    const collectionId = payloadCollectionId || task.refId || "";
+    const collection = ctx.collections.find((c) => c.id === collectionId);
+    if (collection?.accountId) {
+      const account = ctx.accounts.find((a) => a.id === collection.accountId);
+      if (account?.name?.trim()) return `${account.name.trim()} · 创作手册`;
+    }
+    const title = collection?.name || payloadTitle;
+    if (title) return title;
+  }
+
+  return rawTitle || kindLabel;
+}
+
+const QueuedSection: FunctionComponent<{ tasks: QueuedTaskEntry[] }> = ({ tasks }) => {
   if (tasks.length === 0) return null;
   return (
     <Section title="排队中" count={tasks.length}>
-      {tasks.map((t) => (
+      {tasks.map(({ task: t, title }) => (
         <div
           key={t.id}
           className="px-4 py-2.5 border-b border-slate-100 dark:border-slate-800/60 last:border-b-0 flex items-center gap-2"
         >
           <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" strokeWidth={1.5} />
           <div className="flex-1 min-w-0">
-            <div className="text-[12.5px] text-slate-900 dark:text-slate-100 truncate">{t.title}</div>
+            <div className="text-[12.5px] text-slate-900 dark:text-slate-100 truncate">{title}</div>
             <div className="text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400">
               {KIND_LABEL[t.kind] || t.kind} · 等待运行
             </div>
