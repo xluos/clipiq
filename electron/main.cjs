@@ -6878,7 +6878,7 @@ app.whenReady().then(async () => {
   if (app.isPackaged) {
     const csp = [
       "default-src 'self'",
-      "img-src 'self' data: blob: media:",
+      "img-src 'self' data: blob: media: https:",
       "media-src 'self' blob: media:",
       "style-src 'self' 'unsafe-inline'",
       "script-src 'self'",

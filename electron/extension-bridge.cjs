@@ -243,17 +243,43 @@ async function start(userDataDir) {
   heartbeat.unref?.();
 
   await new Promise((resolve, reject) => {
+    const server = httpServer;
+    const wsServer = wss;
+    let settled = false;
     const onError = (e) => {
-      httpServer.off("listening", onListening);
+      if (settled) return;
+      settled = true;
+      server.off("listening", onListening);
+      server.off("error", onError);
+      wsServer.off("error", onError);
+      if (wsServer) {
+        try { wsServer.close(); } catch { /* noop */ }
+        wss = null;
+      }
+      if (server) {
+        try { server.close(); } catch { /* noop */ }
+        httpServer = null;
+      }
       reject(e);
     };
     const onListening = () => {
-      httpServer.off("error", onError);
+      if (settled) return;
+      settled = true;
+      server.off("error", onError);
+      wsServer.off("error", onError);
       resolve();
     };
-    httpServer.once("error", onError);
-    httpServer.once("listening", onListening);
-    httpServer.listen(PORT, HOST);
+    server.once("error", onError);
+    wsServer.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(PORT, HOST);
+  });
+
+  httpServer.on("error", (e) => {
+    log.warn("extension-bridge", "服务异常:", e?.message || String(e));
+  });
+  wss.on("error", (e) => {
+    log.warn("extension-bridge", "WS 服务异常:", e?.message || String(e));
   });
 
   return getStatus();
