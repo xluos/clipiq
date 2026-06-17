@@ -31,8 +31,11 @@
       "dist/**",
       "electron/**",
       "src/electron-api.d.ts",
-      "package.json"
+      "package.json",
+      "!node_modules/ffprobe-static/bin/linux/**",
+      "!node_modules/ffprobe-static/bin/win32/**"
     ],
+    "afterPack": "scripts/after-pack-prune.cjs",
     "extraResources": [
       {
         "from": "build/daemon/${os}-${arch}/",
@@ -40,6 +43,20 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "vendor/DouYin_Spider/",
+        "to": "vendor/DouYin_Spider",
+        "filter": [
+          "**/*",
+          "!**/.git/**",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
+      },
+      {
+        "from": "electron/douyin_spider_runner.py",
+        "to": "electron/douyin_spider_runner.py"
       }
     ],
     "asarUnpack": [
@@ -103,6 +120,7 @@
     "@tanstack/react-query": "^5.100.14",
     "@vitejs/plugin-react": "^5.0.4",
     "archiver": "^7.0.1",
+    "archiver-utils": "^5.0.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dotenv": "^17.2.3",

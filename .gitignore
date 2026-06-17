@@ -19,3 +19,11 @@ electron/**/*.js.map
 .screenshots/
 .mocks/
 .claude/
+
+# vendored crawler source: keep source in git, keep local dependency/build output out.
+vendor/DouYin_Spider/.venv/
+vendor/DouYin_Spider/node_modules/
+vendor/DouYin_Spider/**/__pycache__/
+vendor/DouYin_Spider/**/*.pyc
+vendor/DouYin_Spider/.env
+vendor/DouYin_Spider/outputs/

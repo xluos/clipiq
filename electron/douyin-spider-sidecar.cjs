@@ -16,11 +16,17 @@ function appRoot() {
   return app?.getAppPath?.() || path.resolve(__dirname, "..");
 }
 
+function resourcesRoot() {
+  return process.resourcesPath || appRoot();
+}
+
 function candidateSpiderPaths() {
   const env = process.env.DOUYIN_SPIDER_PATH ? [process.env.DOUYIN_SPIDER_PATH] : [];
   const root = appRoot();
+  const resources = resourcesRoot();
   return [
     ...env,
+    path.join(resources, "vendor", "DouYin_Spider"),
     path.join(root, "vendor", "DouYin_Spider"),
     path.join(root, "..", "douyin-tool-eval", "vendor", "DouYin_Spider"),
     path.join(root, "..", "douyin-crawler-service", "vendor", "DouYin_Spider"),
@@ -173,7 +179,10 @@ async function getCookie({ seedUrl } = {}) {
 function runRunner(payload, { timeoutMs = 90_000 } = {}) {
   const spiderPath = resolveSpiderPath();
   const python = resolvePythonCommand(spiderPath);
-  const runnerPath = path.join(__dirname, "douyin_spider_runner.py");
+  const bundledRunnerPath = path.join(resourcesRoot(), "electron", "douyin_spider_runner.py");
+  const runnerPath = fsSync.existsSync(bundledRunnerPath)
+    ? bundledRunnerPath
+    : path.join(__dirname, "douyin_spider_runner.py");
   return new Promise((resolve, reject) => {
     const child = spawn(python, [runnerPath], {
       cwd: spiderPath,
