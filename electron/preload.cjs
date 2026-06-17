@@ -70,6 +70,7 @@ const CHANNELS = [
   { method: "startAccountFetch", channel: "accounts:startFetch", kind: "invoke" },
   { method: "cancelAccountFetch", channel: "accounts:cancelFetch", kind: "invoke" },
   { method: "listAccountFetchInFlight", channel: "accounts:listFetchInFlight", kind: "invoke" },
+  { method: "refreshAccountProfile", channel: "accounts:refreshProfile", kind: "invoke" },
   { method: "generateAccountMethodology", channel: "accounts:generateMethodology", kind: "invoke" },
   { method: "onAccountFetchProgress", channel: "account:fetch:progress", kind: "event" },
   { method: "onAccountFetchDone", channel: "account:fetch:done", kind: "event" },

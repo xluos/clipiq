@@ -813,6 +813,7 @@ export type Account = {
   /** @deprecated v3: videos 表按 account_id 查 */
   videoIds?: string[];
   totalVideoCount?: number;
+  secUid?: string;
   /** accounts:list 回填(来自该账号 col-account 收藏夹的 methodology);新老结构兼容 */
   methodology?: AnyMethodology;
   /** accounts:list 回填 */

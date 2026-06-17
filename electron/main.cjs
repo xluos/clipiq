@@ -1154,6 +1154,8 @@ function rowToAccount(r) {
     fetchPhase: r.fetch_phase || "idle",
     fetchError: r.fetch_error || undefined,
     lastFetchedAt: r.last_fetched_at ? new Date(r.last_fetched_at).toISOString() : undefined,
+    totalVideoCount: r.total_video_count > 0 ? r.total_video_count : undefined,
+    secUid: r.sec_uid || undefined,
     analysisConfig: r.analysis_config ? JSON.parse(r.analysis_config) : undefined,
     createdAt: new Date(r.created_at).toISOString(),
     updatedAt: new Date(r.updated_at).toISOString(),
@@ -1400,6 +1402,8 @@ function getDb() {
   // 增量迁移: videos 加 play_url(抖音 play_addr 直链)。老库没这列会导致拉取时抓到的
   // 直链落库即丢,抖音视频下载只能走 yt-dlp(现需 cookie)而失败。
   try { db.exec("ALTER TABLE videos ADD COLUMN play_url TEXT"); } catch { /* 列已存在 */ }
+  try { db.exec("ALTER TABLE accounts ADD COLUMN total_video_count INTEGER DEFAULT 0"); } catch { /* 列已存在 */ }
+  try { db.exec("ALTER TABLE accounts ADD COLUMN sec_uid TEXT"); } catch { /* 列已存在 */ }
 
   // (methodologies 旧 schema 已在上方建表前弃掉重建,不再做数据迁移)
 
@@ -2295,6 +2299,22 @@ function parseDouyinSecUid(url) {
   // 兜底:有些分享链把 sec_uid 放在 query(sec_user_id / sec_uid)
   const q = s.match(/[?&]sec_(?:user_)?id=([A-Za-z0-9_-]+)/);
   return q ? q[1] : null;
+}
+
+// 从分享文本中提取 v.douyin.com 短链,跟随重定向拿到 sec_uid
+async function resolveDouyinShortLink(text) {
+  const urlMatch = String(text || "").match(/https?:\/\/v\.douyin\.com\/[A-Za-z0-9_-]+\/?/);
+  if (!urlMatch) return null;
+  try {
+    const resp = await fetch(urlMatch[0], {
+      redirect: "manual",
+      headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" },
+    });
+    const location = resp.headers.get("location") || "";
+    return parseDouyinSecUid(location);
+  } catch {
+    return null;
+  }
 }
 
 // 中文/英文格式化粉丝数
@@ -5458,6 +5478,9 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       inspected = await inspectVideo(inputPath, handle);
       handle.attachStageMeta({ fileSizeBytes: inputFileSize, durationSec: inspected.durationSec, width: inspected.width, height: inspected.height });
 
+      if (inspected.width === 0 && inspected.height === 0) {
+        throw new Error("该文件无视频流（纯音频），无法进行视频拉片分析。如需分析内容，请使用内容分析。");
+      }
       send(5, "检测镜头切换", "扫描视频中的镜头切换点。");
       ensureNotCancelled(handle);
       const sceneThreshold = sceneThresholdFor(options);
@@ -6722,11 +6745,20 @@ function exportCsv(nodes) {
 }
 
 function getAppIcon() {
+  const isDev = !app.isPackaged;
+  const prefix = isDev ? "icon-dev-" : "icon-";
   const candidates = [
-    path.join(__dirname, "assets", "icon-1024.png"),
-    path.join(__dirname, "assets", "icon-512.png"),
-    path.join(__dirname, "assets", "icon-256.png"),
+    path.join(__dirname, "assets", `${prefix}1024.png`),
+    path.join(__dirname, "assets", `${prefix}512.png`),
+    path.join(__dirname, "assets", `${prefix}256.png`),
   ];
+  if (isDev) {
+    candidates.push(
+      path.join(__dirname, "assets", "icon-1024.png"),
+      path.join(__dirname, "assets", "icon-512.png"),
+      path.join(__dirname, "assets", "icon-256.png"),
+    );
+  }
   for (const p of candidates) {
     if (fsSync.existsSync(p)) {
       const img = nativeImage.createFromPath(p);
@@ -6869,7 +6901,7 @@ async function createWindow() {
     height: 860,
     minWidth: 1080,
     minHeight: 720,
-    title: "ClipIQ · 看懂每一帧的逻辑",
+    title: app.isPackaged ? "ClipIQ · 看懂每一帧的逻辑" : "ClipIQ [DEV] · 看懂每一帧的逻辑",
     titleBarStyle: "hiddenInset",
     backgroundColor: "#0F172A",
     icon: icon || undefined,
@@ -7817,6 +7849,7 @@ app.whenReady().then(async () => {
     let nativeVideos = null;
     let nativeVideosError = null;
     let nativeMid = null;
+    let accountSecUid = null;
 
     report(8, "解析账号", `平台 · ${platform}`);
     checkCancelled();
@@ -7855,7 +7888,12 @@ app.whenReady().then(async () => {
     }
 
     if (platform === "douyin") {
-      const secUid = parseDouyinSecUid(url);
+      let secUid = parseDouyinSecUid(url);
+      if (!secUid) {
+        report(12, "解析短链", "跟随重定向获取 sec_uid");
+        secUid = await resolveDouyinShortLink(url);
+      }
+      if (secUid) accountSecUid = secUid;
       log.info("accounts:fetch", `抖音 secUid=${secUid ? secUid.slice(0, 20) + "..." : "(null)"} bridgeConnected=${extensionBridge.isConnected()}`);
       if (secUid) {
         // 并行: 拉取账号资料 + 视频列表。抖音优先走本地 DouYin_Spider sidecar:
@@ -7881,6 +7919,7 @@ app.whenReady().then(async () => {
                 mid: result.profile.uid || null,
                 archiveCount: result.profile.awemeCount || 0,
               };
+              if (result.profile.secUid) accountSecUid = result.profile.secUid;
             }
           }
           log.info("accounts:fetch", `DouYin_Spider 拉取${nativeVideos ? "成功" : "无结果"}`);
@@ -7933,6 +7972,7 @@ app.whenReady().then(async () => {
             archiveCount: profile.awemeCount || 0,
           };
           log.info("accounts:fetch", `抖音账号: ${profile.nickname} 粉丝=${profile.followerCount} 作品=${profile.awemeCount}`);
+          if (profile.secUid && !accountSecUid) accountSecUid = profile.secUid;
         }
       } else {
         nativeCardError = "无法从抖音 URL 解析出 sec_user_id (支持 douyin.com/user/MS4w... 或分享短链 iesdouyin.com/share/user/MS4w...)";
@@ -8080,6 +8120,7 @@ app.whenReady().then(async () => {
       accountFollowers,
       accountBio,
       accountExternalId,
+      accountSecUid,
       accountPlatform: platform,
       totalVideoCount,
       videos,
@@ -8115,12 +8156,16 @@ app.whenReady().then(async () => {
         onProgress: ({ progress, stage, message }) => sendProgress(progress, stage, message),
         cancelled: () => state.cancelled,
       });
-      sendProgress(95, "落库", `${result.videos.length} 条视频`);
-
-      // v3: 把视频写入 videos 表
+      // v3: 把视频写入 videos 表(增量:只对新视频下载封面,已有视频只更新计数)
       const db = getDb();
       const now = Date.now();
       const platform = result.accountPlatform;
+
+      // 查出该账号 DB 里已有的视频 ID,用于区分新增 vs 已有
+      const existingIds = new Set(
+        db.prepare("SELECT id FROM videos WHERE account_id = ?").all(accountId).map((r) => r.id),
+      );
+
       const upsertVideoStmt = db.prepare(`
         INSERT INTO videos (id, title, source_type, source_url, play_url, platform, external_id, local_path,
           duration_sec, width, height, orientation, thumbnail_url, account_id, status,
@@ -8128,26 +8173,36 @@ app.whenReady().then(async () => {
           tags, created_at, updated_at)
         VALUES (?, ?, 'url', ?, ?, ?, ?, NULL, ?, 0, 0, 'landscape', ?, ?, 'ready', ?, ?, ?, ?, ?, ?, NULL, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
-          title=excluded.title, source_url=excluded.source_url, play_url=excluded.play_url, thumbnail_url=excluded.thumbnail_url,
+          title=excluded.title, source_url=excluded.source_url, play_url=excluded.play_url,
           upload_date=excluded.upload_date, view_count=excluded.view_count, like_count=excluded.like_count,
           comment_count=excluded.comment_count, share_count=excluded.share_count, collect_count=excluded.collect_count,
           updated_at=excluded.updated_at
       `);
-      // 把远程封面下到本地(并行),避免签名 URL 过期后封面"破"。失败则回退原远程 URL。
+
+      // 增量封面下载:只对 DB 里还没有的新视频下载封面
+      const freshVideos = result.videos.filter((v) => !existingIds.has(`av-${accountId}-${v.id}`));
+      const updatedCount = result.videos.length - freshVideos.length;
+      sendProgress(95, "落库", `${freshVideos.length} 个新视频${updatedCount ? ` · ${updatedCount} 个已有更新` : ""}`);
+
       const coverByVideoId = {};
-      await Promise.all(result.videos.map(async (v) => {
-        if (!v.thumbnailUrl) return;
-        const videoId = `av-${accountId}-${v.id}`;
-        const local = await downloadCoverImage(v.thumbnailUrl, videoId);
-        coverByVideoId[videoId] = local || v.thumbnailUrl;
-      }));
+      if (freshVideos.length > 0) {
+        await Promise.all(freshVideos.map(async (v) => {
+          if (!v.thumbnailUrl) return;
+          const videoId = `av-${accountId}-${v.id}`;
+          const local = await downloadCoverImage(v.thumbnailUrl, videoId);
+          coverByVideoId[videoId] = local || v.thumbnailUrl;
+        }));
+      }
 
       const newVideos = [];
       for (const v of result.videos) {
         const videoId = `av-${accountId}-${v.id}`;
+        const isNew = !existingIds.has(videoId);
         upsertVideoStmt.run(
           videoId, v.title || "", v.externalUrl || null, v.playUrl || null, platform || null, v.id || null,
-          v.durationSec || 0, coverByVideoId[videoId] || v.thumbnailUrl || null, accountId,
+          v.durationSec || 0,
+          isNew ? (coverByVideoId[videoId] || v.thumbnailUrl || null) : null,
+          accountId,
           v.uploadDate || null, v.viewCount ?? null, v.likeCount ?? null,
           v.commentCount ?? null, v.shareCount ?? null, v.collectCount ?? null,
           now, now,
@@ -8175,6 +8230,8 @@ app.whenReady().then(async () => {
             name = COALESCE(?, name), avatar_url = COALESCE(?, avatar_url),
             followers = COALESCE(?, followers), bio = COALESCE(?, bio),
             external_id = COALESCE(?, external_id), platform = COALESCE(?, platform),
+            total_video_count = COALESCE(?, total_video_count),
+            sec_uid = COALESCE(?, sec_uid),
             fetch_phase = 'ready', fetch_error = NULL, last_fetched_at = ?,
             updated_at = ?
           WHERE id = ?
@@ -8185,6 +8242,8 @@ app.whenReady().then(async () => {
           result.accountBio || null,
           result.accountExternalId || null,
           result.accountPlatform || null,
+          result.totalVideoCount || null,
+          result.accountSecUid || null,
           accNow, accNow, accountId,
         );
         const accRow = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId);
@@ -8255,6 +8314,62 @@ app.whenReady().then(async () => {
       out.push({ accountId, stage: state.stage, progress: state.progress, message: state.message });
     }
     return out;
+  });
+
+  // ── 轻量账号信息刷新(不拉视频列表,只更新 profile + totalVideoCount) ──
+  ipcMain.handle("accounts:refreshProfile", async (_event, { accountId } = {}) => {
+    if (!accountId) throw new Error("accounts:refreshProfile requires accountId");
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId);
+    if (!row) return { ok: false, error: "account not found" };
+    const account = rowToAccount(row);
+    const { platform, externalUrl, externalId } = account;
+
+    let name = null, avatarUrl = null, followers = null, bio = null, totalVideoCount = null;
+    try {
+      if (platform === "bilibili") {
+        const mid = parseBilibiliMid(externalUrl) || externalId;
+        if (!mid) return { ok: false, error: "cannot parse bilibili mid", account };
+        const card = await fetchBilibiliCard(mid);
+        name = card.name;
+        avatarUrl = card.face;
+        followers = card.fansFormatted;
+        bio = card.sign;
+        totalVideoCount = card.archiveCount;
+      } else if (platform === "douyin") {
+        let secUid = account.secUid || parseDouyinSecUid(externalUrl);
+        if (!secUid) secUid = await resolveDouyinShortLink(externalUrl);
+        if (!secUid) return { ok: false, error: "cannot parse douyin sec_uid", account };
+        const profile = await fetchDouyinUserProfile(secUid);
+        name = profile.nickname;
+        avatarUrl = profile.avatarUrl;
+        followers = profile.followerCount > 0 ? formatFollowersCount(profile.followerCount) : null;
+        bio = profile.signature;
+        totalVideoCount = profile.awemeCount;
+        // 持久化 sec_uid 供后续轻量刷新复用
+        if (profile.secUid || secUid) {
+          try { db.prepare("UPDATE accounts SET sec_uid = COALESCE(sec_uid, ?) WHERE id = ?").run(profile.secUid || secUid, accountId); } catch {}
+        }
+      } else {
+        return { ok: true, account, refreshed: false };
+      }
+
+      const now = Date.now();
+      db.prepare(`
+        UPDATE accounts SET
+          name = COALESCE(?, name), avatar_url = COALESCE(?, avatar_url),
+          followers = COALESCE(?, followers), bio = COALESCE(?, bio),
+          total_video_count = COALESCE(?, total_video_count),
+          updated_at = ?
+        WHERE id = ?
+      `).run(name, avatarUrl, followers, bio, totalVideoCount, now, accountId);
+
+      const updated = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId);
+      return { ok: true, account: rowToAccount(updated), refreshed: true };
+    } catch (e) {
+      log.warn("accounts:refreshProfile", `lightweight refresh failed: ${e?.message || e}`);
+      return { ok: false, error: e?.message || String(e), account };
+    }
   });
 
   // ── 轻量视频摘要管线 ──
@@ -8372,29 +8487,39 @@ app.whenReady().then(async () => {
       log.info("summary", `视频元数据: ${inspected.durationSec}s ${inspected.width}x${inspected.height} hasAudio=${inspected.hasAudio} codec=${inspected.videoCodec || "?"}`);
       checkCancel();
 
-      // 3) 检测镜头切换
-      log.info("summary", `[3/6] 检测镜头切换, threshold=0.3`);
-      send(32, "内容分析", "检测镜头");
+      // 纯音频文件(无视频流)跳过镜头检测和抽帧,直接靠字幕做文本分析
+      const hasVideoStream = inspected.width > 0 && inspected.height > 0;
       let scenes = [];
-      if (ffmpegPath) {
-        scenes = await detectScenes(ffmpegPath, videoPath, 0.3, handle);
-        log.info("summary", `镜头切换检测完成: ${scenes.length} 个切点`);
-      } else {
-        log.warn("summary", "ffmpeg 不可用, 跳过镜头检测");
-      }
-      checkCancel();
+      let frames = [];
+      let framesDir = path.join(artifactDir, "frames");
 
-      // 4) 抽取关键画面 (8-12 帧)
-      const targetCount = Math.min(12, Math.max(6, scenes.length || 6));
-      log.info("summary", `[4/6] 抽取关键画面, 目标 ${targetCount} 帧 (scenes=${scenes.length})`);
-      send(38, "内容分析", "抽取关键画面");
-      const plan = planFramePlan(scenes, inspected.durationSec, targetCount);
-      const framesDir = path.join(artifactDir, "frames");
-      await fs.mkdir(framesDir, { recursive: true });
-      const { frames, skipped } = await buildFrames(ffmpegPath, videoPath, plan, framesDir, handle,
-        (i, total) => send(38 + Math.round((i / total) * 12), "抽帧", `抽帧 ${i + 1}/${total}`),
-      );
-      log.info("summary", `抽帧完成: ${frames.length} 帧 (跳过相似 ${skipped || 0}), framesDir=${framesDir}`);
+      if (!hasVideoStream) {
+        log.info("summary", "无视频流(纯音频), 跳过镜头检测和抽帧");
+        send(38, "内容分析", "纯音频文件, 跳过抽帧");
+      } else {
+        // 3) 检测镜头切换
+        log.info("summary", `[3/6] 检测镜头切换, threshold=0.3`);
+        send(32, "内容分析", "检测镜头");
+        if (ffmpegPath) {
+          scenes = await detectScenes(ffmpegPath, videoPath, 0.3, handle);
+          log.info("summary", `镜头切换检测完成: ${scenes.length} 个切点`);
+        } else {
+          log.warn("summary", "ffmpeg 不可用, 跳过镜头检测");
+        }
+        checkCancel();
+
+        // 4) 抽取关键画面 (8-12 帧)
+        const targetCount = Math.min(12, Math.max(6, scenes.length || 6));
+        log.info("summary", `[4/6] 抽取关键画面, 目标 ${targetCount} 帧 (scenes=${scenes.length})`);
+        send(38, "内容分析", "抽取关键画面");
+        const plan = planFramePlan(scenes, inspected.durationSec, targetCount);
+        await fs.mkdir(framesDir, { recursive: true });
+        const built = await buildFrames(ffmpegPath, videoPath, plan, framesDir, handle,
+          (i, total) => send(38 + Math.round((i / total) * 12), "抽帧", `抽帧 ${i + 1}/${total}`),
+        );
+        frames = built.frames;
+        log.info("summary", `抽帧完成: ${frames.length} 帧 (跳过相似 ${built.skipped || 0}), framesDir=${framesDir}`);
+      }
       checkCancel();
 
       // 5) 识别字幕

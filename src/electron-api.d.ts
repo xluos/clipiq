@@ -371,6 +371,12 @@ declare global {
       listAccounts: () => Promise<Account[]>;
       upsertAccount: (account: Account) => Promise<{ ok: true }>;
       deleteAccount: (accountId: string) => Promise<{ ok: true; message?: string }>;
+      refreshAccountProfile: (payload: { accountId: string }) => Promise<{
+        ok: boolean;
+        account?: Account;
+        refreshed?: boolean;
+        error?: string;
+      }>;
 
       // studio sessions
       listSessions: () => Promise<StudioSession[]>;

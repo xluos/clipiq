@@ -27,3 +27,13 @@ export function useDeleteAccount() {
     },
   });
 }
+
+export function useRefreshAccountProfile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (accountId: string) => ipc.refreshAccountProfile(accountId),
+    onSuccess: (data) => {
+      if (data.ok) qc.invalidateQueries({ queryKey: ["accounts"] });
+    },
+  });
+}

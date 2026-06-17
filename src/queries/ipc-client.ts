@@ -50,6 +50,8 @@ export const ipc = {
     api()?.upsertAccount(account) ?? Promise.resolve({ ok: true as const }),
   deleteAccount: (accountId: string) =>
     api()?.deleteAccount(accountId) ?? Promise.resolve({ ok: true as const }),
+  refreshAccountProfile: (accountId: string) =>
+    api()?.refreshAccountProfile({ accountId }) ?? Promise.resolve({ ok: false, error: "no api" }),
 
   // collections
   listCollections: (): Promise<Collection[]> =>

@@ -13,6 +13,7 @@ import { type FunctionComponent, type ReactNode, useCallback, useEffect, useMemo
 import { useQueryClient } from "@tanstack/react-query";
 import { useApp } from "../AppContext";
 import { useTaskQueueStore, selectTaskByRef } from "../stores/tasks";
+import { useRefreshAccountProfile } from "../queries/accounts";
 import { MethodologyPanel } from "../components/MethodologyPanel";
 import { ExportButton } from "../components/ExportButton";
 import { ImageGallery, ImageView, VideoThumbnail } from "../components/MediaViewer";
@@ -256,17 +257,15 @@ const AccountCard: FunctionComponent<{
         </span>
       </div>
 
-      <div className="flex gap-1 mt-3">
-        {(account.tags?.length ?? 0) > 0 ? (
-          account.tags!.map((t) => (
+      {(account.tags?.length ?? 0) > 0 && (
+        <div className="flex gap-1 mt-3">
+          {account.tags!.map((t) => (
             <span key={t} className="text-[10.5px] font-mono px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
               {t}
             </span>
-          ))
-        ) : (
-          <span aria-hidden className="text-[10.5px] font-mono px-1.5 py-0.5 rounded invisible">·</span>
-        )}
-      </div>
+          ))}
+        </div>
+      )}
 
       {fetching ? (
         <div className="mt-3.5 px-3 py-2.5 bg-indigo-50/50 dark:bg-indigo-950/30 rounded-md">
@@ -554,6 +553,13 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
   const fetchingUi = id ? accountFetchUi[id] : undefined;
   const fetching = !!fetchingUi || account?.fetchPhase === "fetching";
 
+  const refreshProfile = useRefreshAccountProfile();
+  useEffect(() => {
+    if (!id || fetching) return;
+    if (account?.platform !== "bilibili" && account?.platform !== "douyin") return;
+    refreshProfile.mutate(id);
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const summarizedVideos = useMemo(
     () => accountVideos.filter((v) => v.summaryStatus === "done" && v.videoSummary),
     [accountVideos],
@@ -678,10 +684,23 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
             <AccountAvatar account={account} size={64} fontSize={14} />
             <div className="flex-1 min-w-0">
               <h1 className="text-[22px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">{account.name || (account.fetchPhase === "fetching" ? "拉取中…" : "未知账号")}</h1>
-              <div className="text-[12.5px] font-mono tracking-wider text-slate-600 dark:text-slate-400 mt-1">
-                {PLATFORM_LABEL[account.platform]}
+              <div className="text-[12.5px] font-mono tracking-wider text-slate-600 dark:text-slate-400 mt-1 flex items-center gap-0 flex-wrap">
+                <span>{PLATFORM_LABEL[account.platform]}</span>
                 {account.followers && <span> · {account.followers} 粉丝</span>}
-                {accountVideos.length > 0 && <span> · {accountVideos.length} 条视频</span>}
+                {account.totalVideoCount != null ? (
+                  <>
+                    <span> · 平台 {account.totalVideoCount} 个作品</span>
+                    <span> · 已拉取 {accountVideos.length} 个</span>
+                    {account.totalVideoCount > accountVideos.length && (
+                      <span className="text-amber-600 dark:text-amber-400 ml-1">
+                        （还有 {account.totalVideoCount - accountVideos.length} 个未拉取）
+                      </span>
+                    )}
+                  </>
+                ) : accountVideos.length > 0 ? (
+                  <span> · {accountVideos.length} 条视频</span>
+                ) : null}
+                {refreshProfile.isPending && <Loader2 className="w-3 h-3 animate-spin ml-1.5 text-slate-400" strokeWidth={1.5} />}
               </div>
               {account.bio && (
                 <p className="text-[12.5px] text-slate-600 dark:text-slate-400 mt-2 leading-relaxed line-clamp-2 max-w-xl">
@@ -694,7 +713,7 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
           <div className="flex border-b border-slate-200 dark:border-slate-800 mb-6">
             {([
               ["methodology", "方法论"],
-              ["videos", `视频 ${accountVideos.length}`],
+              ["videos", account.totalVideoCount != null ? `视频 ${accountVideos.length}/${account.totalVideoCount}` : `视频 ${accountVideos.length}`],
               ["hooks", "开场样本"],
             ] as const).map(([k, l]) => (
               <button
@@ -1241,6 +1260,7 @@ function VideosTab({
                   {v.viewCount ? <span>· {formatViews(v.viewCount)}</span> : null}
                   {v.likeCount ? <span>· {formatCount(v.likeCount)}赞</span> : null}
                   {v.commentCount ? <span>· {formatCount(v.commentCount)}评</span> : null}
+                  {v.uploadDate && <span>· {formatUploadDate(v.uploadDate)}</span>}
                   {isSummarizing && (
                     <span className="px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300">
                       {live ? `分析中 ${live.progress}%` : "分析中"}
