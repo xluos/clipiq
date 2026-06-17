@@ -2822,7 +2822,7 @@ function ExtensionBridgeSection() {
               {status?.connected ? "插件已连接" : "插件未连接"}
             </div>
             <div className="text-[11.5px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
-              ws://{status?.host ?? "127.0.0.1"}:{status?.port ?? 58713}/agent
+              ws://{status?.host ?? "127.0.0.1"}:{status?.port ?? "58713-58723"}/agent
             </div>
           </div>
           {status?.connected && status.connectedAt && (

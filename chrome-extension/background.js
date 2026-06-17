@@ -1,12 +1,14 @@
 // ClipIQ Bridge background service worker
 //
-// 连接 Electron 桌面端 (ws://127.0.0.1:58713/agent), 用浏览器登录态 + 真实 buvid 指纹替桌面端代发 HTTPS 请求.
+// 连接 Electron 桌面端 (ws://127.0.0.1:58713-58723/agent), 用浏览器登录态 + 真实 buvid 指纹替桌面端代发 HTTPS 请求.
 // 设计是通用 fetch 代理 (method: "fetch"), 业务逻辑 (wbi 签名 / URL 拼接) 全留在 main.cjs,
 // 这样新增平台 (抖音 / 小红书) 不用改插件代码.
 //
 // 协议见 electron/extension-bridge.cjs.
 
-const ENDPOINT = "ws://127.0.0.1:58713/agent";
+const HOST = "127.0.0.1";
+const PORT_START = 58713;
+const PORT_END = 58723;
 const CLIENT_VERSION = 1;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
@@ -15,7 +17,8 @@ const KEEPALIVE_ALARM = "clipiq-bridge-keepalive";
 let ws = null;
 let connecting = false;
 let reconnectDelay = RECONNECT_BASE_MS;
-let lastStatus = { connected: false, error: null, since: null };
+let activeEndpoint = null;
+let lastStatus = { connected: false, error: null, since: null, endpoint: null };
 
 async function getToken() {
   const { token } = await chrome.storage.local.get("token");
@@ -36,10 +39,12 @@ async function connect() {
   // 无 token 也照常连: 桌面端按 Origin + 首连 TOFU 自动配对, 在 welcome 里把 token 下发回来.
   const token = await getToken();
   connecting = true;
-  setStatus({ connected: false, error: null, since: Date.now() });
+  setStatus({ connected: false, error: null, since: Date.now(), endpoint: activeEndpoint });
 
   try {
-    ws = new WebSocket(ENDPOINT);
+    activeEndpoint = await findBridgeEndpoint();
+    setStatus({ endpoint: activeEndpoint });
+    ws = new WebSocket(activeEndpoint);
   } catch (e) {
     connecting = false;
     setStatus({ connected: false, error: `创建 WS 失败: ${e?.message || String(e)}` });
@@ -66,7 +71,7 @@ async function connect() {
       if (msg.token && msg.token !== token) {
         try { await setToken(msg.token); } catch { /* noop */ }
       }
-      setStatus({ connected: true, error: null, since: Date.now() });
+      setStatus({ connected: true, error: null, since: Date.now(), endpoint: activeEndpoint });
       return;
     }
 
@@ -107,6 +112,39 @@ async function connect() {
   });
 
   ws.addEventListener("error", () => { /* close 兜底 */ });
+}
+
+async function findBridgeEndpoint() {
+  const ports = activeEndpoint ? [Number(new URL(activeEndpoint).port)] : [];
+  for (let port = PORT_START; port <= PORT_END; port += 1) {
+    if (!ports.includes(port)) ports.push(port);
+  }
+
+  for (const port of ports) {
+    if (!Number.isFinite(port)) continue;
+    const ok = await probeBridgePort(port);
+    if (ok) return `ws://${HOST}:${port}/agent`;
+  }
+  throw new Error(`未找到桌面端插件桥 (${HOST}:${PORT_START}-${PORT_END})`);
+}
+
+async function probeBridgePort(port) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 350);
+  try {
+    const res = await fetch(`http://${HOST}:${port}/health`, {
+      method: "GET",
+      cache: "no-store",
+      signal: ac.signal,
+    });
+    if (!res.ok) return false;
+    const body = await res.json().catch(() => null);
+    return body?.ok === true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function scheduleReconnect() {

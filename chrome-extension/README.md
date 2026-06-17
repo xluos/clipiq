@@ -4,7 +4,7 @@
 
 ## 工作机制
 
-桌面端在 `ws://127.0.0.1:58713/agent` 起一个 WS server,本插件 background service worker 连上去后做通用 fetch 代理 —— 桌面端把签好名的 URL + headers 发过来,插件用浏览器原生 `fetch` (带 cookie / buvid3 / SESSDATA) 代发,把响应回传。
+桌面端会在 `ws://127.0.0.1:58713-58723/agent` 范围内选择一个可用端口起 WS server,本插件 background service worker 会扫描同一范围并连上去后做通用 fetch 代理 —— 桌面端把签好名的 URL + headers 发过来,插件用浏览器原生 `fetch` (带 cookie / buvid3 / SESSDATA) 代发,把响应回传。
 
 业务逻辑 (wbi 签名 / view API 补全) 全留在桌面端,插件只是个借身份的 fetch 通道。
 

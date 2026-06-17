@@ -109,6 +109,7 @@ export type ExportFormat = "markdown" | "json" | "csv";
 
 export type ExtensionBridgeStatus = {
   port: number;
+  portRange?: { start: number; end: number };
   host: string;
   token: string | null;
   pairedOrigin: string | null;

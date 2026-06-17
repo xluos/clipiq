@@ -6919,14 +6919,14 @@ app.whenReady().then(async () => {
   );
 
   try {
-    await extensionBridge.start(app.getPath("userData"));
+    const bridgeStatus = await extensionBridge.start(app.getPath("userData"));
     extensionBridge.onStatusChange((s) => {
       // 广播给所有 renderer 窗口
       for (const win of BrowserWindow.getAllWindows()) {
         try { win.webContents.send("extensionBridge:status", s); } catch { /* noop */ }
       }
     });
-    log.info("extension-bridge", "已启动 ws://127.0.0.1:58713/agent");
+    log.info("extension-bridge", `已启动 ws://${bridgeStatus.host}:${bridgeStatus.port}/agent`);
   } catch (err) {
     log.warn("extension-bridge", "启动失败:", err?.message || err);
   }

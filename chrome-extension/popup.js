@@ -10,7 +10,7 @@ function applyStatus(status) {
   if (status?.connected) {
     indicator.classList.add("ok");
     primary.textContent = "已连接";
-    secondary.textContent = `桌面端 · ${new Date(status.since || Date.now()).toLocaleTimeString()}`;
+    secondary.textContent = `${status.endpoint || "桌面端"} · ${new Date(status.since || Date.now()).toLocaleTimeString()}`;
   } else if (status?.error) {
     indicator.classList.add("err");
     primary.textContent = "未连接";

@@ -1,16 +1,22 @@
 {
   "manifest_version": 3,
   "name": "ClipIQ Bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "用浏览器登录态帮 ClipIQ 桌面端拉取 B 站 / 抖音账号视频列表",
-  "permissions": ["storage", "alarms", "tabs", "scripting"],
+  "permissions": [
+    "storage",
+    "alarms",
+    "tabs",
+    "scripting"
+  ],
   "host_permissions": [
     "https://api.bilibili.com/*",
     "https://space.bilibili.com/*",
     "https://*.bilibili.com/*",
     "https://www.douyin.com/*",
     "https://www.iesdouyin.com/*",
-    "https://*.douyin.com/*"
+    "https://*.douyin.com/*",
+    "http://127.0.0.1:*/*"
   ],
   "background": {
     "service_worker": "background.js",
