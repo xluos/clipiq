@@ -1885,6 +1885,63 @@ function applySlotOverrides(config, overrides) {
   return patched;
 }
 
+async function isSlotAssignmentAvailable(config, assignment, scope) {
+  if (!assignment?.providerId || !assignment?.modelId) return false;
+  const provider = config.providers?.find((p) => p.id === assignment.providerId);
+  const model = provider?.models?.find((m) => m.id === assignment.modelId);
+  if (!provider || !model) return false;
+  if (provider.source === "remote") {
+    return !!provider.baseUrl && !!provider.apiKeyRef;
+  }
+  if (provider.source === "local_whisper") {
+    const modelId = normalizeWhisperModelId(model.localWhisperModel || model.id);
+    try {
+      const daemonClient = require("./daemon-client.cjs");
+      const status = await daemonClient.getModelStatus(modelId);
+      return !!status?.ready;
+    } catch (err) {
+      log.warn("slot-overrides", `${scope}: 检查本地音频模型失败 ${modelId}: ${err?.message || err}`);
+      return false;
+    }
+  }
+  if (provider.source === "local_llama") {
+    const modelId = model.localKey || model.id;
+    try {
+      const daemonClient = require("./daemon-client.cjs");
+      const status = await daemonClient.getModelStatus(modelId);
+      return !!status?.ready;
+    } catch (err) {
+      log.warn("slot-overrides", `${scope}: 检查本地视觉模型失败 ${modelId}: ${err?.message || err}`);
+      return false;
+    }
+  }
+  return true;
+}
+
+async function applyAvailableSlotOverrides(config, overrides, scope = "slot-overrides") {
+  if (!overrides) return config;
+  const usable = {};
+  const checks = [
+    ["simple_vision", overrides.simple_vision],
+    ["complex_vision", overrides.complex_vision],
+    ["medium_text", overrides.medium_text],
+    ["audio", overrides.audio],
+  ];
+  for (const [key, assignment] of checks) {
+    if (assignment === undefined) continue;
+    const ok = await isSlotAssignmentAvailable(config, assignment, `${scope}.${key}`);
+    if (ok) {
+      usable[key] = assignment;
+    } else {
+      const label = assignment?.providerId && assignment?.modelId
+        ? `${assignment.providerId}/${assignment.modelId}`
+        : "(空)";
+      log.warn("slot-overrides", `${scope}: 忽略不可用账号级配置 ${key}=${label}, 回退全局配置`);
+    }
+  }
+  return Object.keys(usable).length > 0 ? applySlotOverrides(config, usable) : config;
+}
+
 function shapeEffectiveProvider(provider, model, slot) {
   // local_llama 的 baseUrl / apiKeyRef 由 llama-manager 在请求时动态注入,
   // 这里只占位; openai-client 看到 provider.source === "local_llama" 会自动 acquire slot。
@@ -5035,7 +5092,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     cfgSnapshot = migrateConfigV1ToV2(readConfig());
     const pipelineCfg = resolvePipelineConfig(cfgSnapshot, "pipeline");
     cfgSnapshot = { ...cfgSnapshot, taskSlots: pipelineCfg.taskSlots, audioSlot: pipelineCfg.audioSlot };
-    if (slotOverrides) cfgSnapshot = applySlotOverrides(cfgSnapshot, slotOverrides);
+    if (slotOverrides) cfgSnapshot = await applyAvailableSlotOverrides(cfgSnapshot, slotOverrides, "pipeline");
     _activeCachePolicy = cfgSnapshot?.cachePolicy || null;
     complexVisionProvider = resolveSlotProvider(cfgSnapshot, "complex_vision");
     mediumTextProvider = resolveSlotProvider(cfgSnapshot, "medium_text");
@@ -8345,7 +8402,7 @@ app.whenReady().then(async () => {
       let cfg = migrateConfigV1ToV2(readConfig());
       const contentCfg = resolvePipelineConfig(cfg, "content");
       cfg = { ...cfg, taskSlots: contentCfg.taskSlots, audioSlot: contentCfg.audioSlot };
-      if (slotOverrides) cfg = applySlotOverrides(cfg, slotOverrides);
+      if (slotOverrides) cfg = await applyAvailableSlotOverrides(cfg, slotOverrides, "content");
 
       log.info("summary", `[5/6] 识别字幕, hasAudio=${inspected.hasAudio}`);
       send(52, "内容分析", "识别字幕");
