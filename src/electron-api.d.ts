@@ -378,6 +378,11 @@ declare global {
         error?: string;
       }>;
 
+      // 抖音登录态
+      douyinOpenLogin: () => Promise<{ ok: boolean; cancelled?: boolean; timeout?: boolean }>;
+      douyinGetLoginStatus: () => Promise<{ loggedIn: boolean }>;
+      douyinLogout: () => Promise<{ ok: boolean }>;
+
       // studio sessions
       listSessions: () => Promise<StudioSession[]>;
       upsertSession: (session: StudioSession) => Promise<{ ok: true }>;

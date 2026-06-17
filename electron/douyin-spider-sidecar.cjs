@@ -106,8 +106,31 @@ function withTimeout(promise, timeoutMs, label) {
   ]);
 }
 
+async function collectSessionCookies() {
+  const ses = session.fromPartition(SESSION_PARTITION);
+  const cookies = [
+    ...(await ses.cookies.get({ url: "https://www.douyin.com" })),
+    ...(await ses.cookies.get({ url: "https://douyin.com" })),
+  ];
+  const dict = new Map();
+  for (const c of cookies) {
+    if (c?.name && c.value != null) dict.set(c.name, c.value);
+  }
+  return dict;
+}
+
 async function generateCookieViaElectron({ seedUrl = DEFAULT_SEED_USER_URL, timeoutMs = 45_000 } = {}) {
   const ses = session.fromPartition(SESSION_PARTITION);
+
+  // 如果 session 已有登录态 cookie,直接收集返回,不用 hidden window 重新生成匿名 cookie
+  const existing = await collectSessionCookies();
+  if (existing.has("sessionid") && existing.has("s_v_web_id")) {
+    log.info("douyin-spider", "session 已有登录态 cookie,跳过匿名生成");
+    const cookie = [...existing.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
+    await writeCachedCookie(cookie);
+    return cookie;
+  }
+
   let webid = null;
   const filter = { urls: ["*://www.douyin.com/aweme/v1/web/user/profile/other/*"] };
   const onBeforeRequest = (details, callback) => {
@@ -149,14 +172,7 @@ async function generateCookieViaElectron({ seedUrl = DEFAULT_SEED_USER_URL, time
     while (!webid && Date.now() - started < Math.min(timeoutMs, 12_000)) {
       await delay(500);
     }
-    const cookies = [
-      ...(await ses.cookies.get({ url: "https://www.douyin.com" })),
-      ...(await ses.cookies.get({ url: "https://douyin.com" })),
-    ];
-    const dict = new Map();
-    for (const c of cookies) {
-      if (c?.name && c.value != null) dict.set(c.name, c.value);
-    }
+    const dict = await collectSessionCookies();
     if (webid && !dict.has("s_v_web_id")) dict.set("s_v_web_id", webid);
     if (!dict.has("s_v_web_id")) {
       throw new Error("Electron 生成抖音 cookie 失败: 缺少 s_v_web_id");
@@ -200,7 +216,7 @@ function runRunner(payload, { timeoutMs = 90_000 } = {}) {
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; log.info("douyin:spider:stderr", chunk.trimEnd()); });
     child.on("error", (err) => {
       clearTimeout(timer);
       reject(err);
@@ -313,12 +329,91 @@ function getStatus() {
   }
 }
 
+const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+
+async function openLoginWindow() {
+  const ses = session.fromPartition(SESSION_PARTITION);
+  const win = new BrowserWindow({
+    show: true,
+    width: 1100,
+    height: 750,
+    title: "抖音登录",
+    webPreferences: {
+      partition: SESSION_PARTITION,
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    const done = (result) => { if (!resolved) { resolved = true; resolve(result); } };
+
+    const timer = setTimeout(() => {
+      try { win.destroy(); } catch {}
+      done({ ok: false, timeout: true });
+    }, LOGIN_TIMEOUT_MS);
+
+    win.on("closed", () => {
+      clearTimeout(timer);
+      done({ ok: false, cancelled: true });
+    });
+
+    // 每 2s 检查是否已登录
+    const poll = setInterval(async () => {
+      if (resolved) { clearInterval(poll); return; }
+      try {
+        const dict = await collectSessionCookies();
+        if (dict.has("sessionid")) {
+          clearInterval(poll);
+          clearTimeout(timer);
+          const cookie = [...dict.entries()].map(([n, v]) => `${n}=${v}`).join("; ");
+          await writeCachedCookie(cookie);
+          log.info("douyin-spider", "扫码登录成功,cookie 已缓存");
+          try { win.destroy(); } catch {}
+          done({ ok: true });
+        }
+      } catch {}
+    }, 2000);
+
+    win.loadURL("https://www.douyin.com").catch((err) => {
+      log.warn("douyin-spider", "登录窗口加载失败:", err?.message || err);
+    });
+  });
+}
+
+async function getLoginStatus() {
+  try {
+    const dict = await collectSessionCookies();
+    return { loggedIn: dict.has("sessionid") };
+  } catch {
+    return { loggedIn: false };
+  }
+}
+
+async function logout() {
+  try {
+    const ses = session.fromPartition(SESSION_PARTITION);
+    await ses.clearStorageData({ storages: ["cookies"] });
+    const cachePath = cookieCachePath();
+    await fs.unlink(cachePath).catch(() => {});
+    log.info("douyin-spider", "已清除登录态");
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
 module.exports = {
   crawlUser,
   crawlAweme,
   generateCookieViaElectron,
   getCookie,
   getStatus,
+  openLoginWindow,
+  getLoginStatus,
+  logout,
   normalizeSpiderVideo,
   normalizeSpiderUser,
 };

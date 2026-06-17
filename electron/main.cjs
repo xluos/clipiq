@@ -7928,33 +7928,41 @@ app.whenReady().then(async () => {
           log.warn("accounts:fetch", `DouYin_Spider 失败: ${e?.message || e}`);
         }
 
-        report(20, "请求抖音接口", "拉取视频列表");
-        try {
-          if (!nativeVideos) {
+        // 判断已有结果是否足够(Spider 可能只返回一页)
+        const needMore = () => {
+          if (!nativeVideos) return true;
+          if (nativeVideos.videos.length >= safeLimit) return false;
+          if (nativeCard?.archiveCount && nativeVideos.videos.length >= nativeCard.archiveCount) return false;
+          return true;
+        };
+
+        if (needMore()) {
+          report(20, "请求抖音接口", nativeVideos ? `Spider 只拿到 ${nativeVideos.videos.length} 条, 尝试 API 补拉` : "拉取视频列表");
+          try {
             const result = await fetchDouyinUserPostsViaApi(secUid, safeLimit);
-            if (result && result.videos.length > 0) nativeVideos = result;
+            if (result && result.videos.length > (nativeVideos?.videos?.length || 0)) nativeVideos = result;
+          } catch (e) {
+            const prevErr = nativeVideosError ? nativeVideosError + "; " : "";
+            nativeVideosError = prevErr + `douyin API: ${e?.message || String(e)}`;
+            log.warn("accounts:fetch", `纯 API 失败: ${e?.message || e}`);
           }
-          log.info("accounts:fetch", `纯 API 拉取${nativeVideos ? "已有/成功" : "无结果"}`);
-        } catch (e) {
-          const prevErr = nativeVideosError ? nativeVideosError + "; " : "";
-          nativeVideosError = prevErr + `douyin API: ${e?.message || String(e)}`;
-          log.warn("accounts:fetch", `纯 API 失败: ${e?.message || e}`);
         }
-        if (!nativeVideos && extensionBridge.isConnected()) {
+        log.info("accounts:fetch", `nativeVideos=${nativeVideos?.videos?.length || 0}条 nativeVideosError=${nativeVideosError || "无"} skipYtDlp=${!!nativeVideos}`);
+        if (needMore() && extensionBridge.isConnected()) {
           report(25, "请求抖音接口", "经 Chrome 插件桥");
           try {
             const result = await fetchDouyinUserPosts(secUid, safeLimit);
-            if (result && result.videos.length > 0) nativeVideos = result;
+            if (result && result.videos.length > (nativeVideos?.videos?.length || 0)) nativeVideos = result;
           } catch (e) {
             const prevErr = nativeVideosError ? nativeVideosError + "; " : "";
             nativeVideosError = prevErr + `douyin bridge: ${e?.message || String(e)}`;
           }
         }
-        if (!nativeVideos) {
+        if (needMore()) {
           report(30, "请求抖音接口", "BrowserWindow 兜底");
           try {
             const result = await fetchDouyinUserPostsViaWindow(secUid, safeLimit);
-            if (result && result.videos.length > 0) nativeVideos = result;
+            if (result && result.videos.length > (nativeVideos?.videos?.length || 0)) nativeVideos = result;
           } catch (e) {
             const prevErr = nativeVideosError ? nativeVideosError + "; " : "";
             nativeVideosError = prevErr + `douyin BrowserWindow: ${e?.message || String(e)}`;
@@ -8108,6 +8116,12 @@ app.whenReady().then(async () => {
     }
     if (platform === "douyin" && noVideos && !extensionBridge.isConnected()) {
       warnings.push("抖音风控较严, 装上 Chrome 插件后大幅更稳 (设置 → 浏览器插件桥)");
+    }
+    if (platform === "douyin" && !noVideos && videos.length < safeLimit) {
+      const loginStatus = await douyinSpider.getLoginStatus().catch(() => ({ loggedIn: false }));
+      if (!loginStatus.loggedIn) {
+        warnings.push(`抖音未登录，仅拉取到 ${videos.length} 条。去设置 → 抖音账号扫码登录后可拉取全部`);
+      }
     }
 
     report(90, "整理元数据", `视频 ${videos.length} 条`);
@@ -8371,6 +8385,11 @@ app.whenReady().then(async () => {
       return { ok: false, error: e?.message || String(e), account };
     }
   });
+
+  // ── 抖音登录态 ──
+  ipcMain.handle("douyin:openLogin", async () => douyinSpider.openLoginWindow());
+  ipcMain.handle("douyin:getLoginStatus", async () => douyinSpider.getLoginStatus());
+  ipcMain.handle("douyin:logout", async () => douyinSpider.logout());
 
   // ── 轻量视频摘要管线 ──
 

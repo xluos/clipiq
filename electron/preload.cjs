@@ -76,6 +76,11 @@ const CHANNELS = [
   { method: "onAccountFetchDone", channel: "account:fetch:done", kind: "event" },
   { method: "onAccountFetchFailed", channel: "account:fetch:failed", kind: "event" },
 
+  // ── 抖音登录态 ──
+  { method: "douyinOpenLogin", channel: "douyin:openLogin", kind: "invoke" },
+  { method: "douyinGetLoginStatus", channel: "douyin:getLoginStatus", kind: "invoke" },
+  { method: "douyinLogout", channel: "douyin:logout", kind: "invoke" },
+
   // ── studio sessions ──
   { method: "listSessions", channel: "sessions:list", kind: "invoke" },
   { method: "upsertSession", channel: "sessions:upsert", kind: "invoke" },

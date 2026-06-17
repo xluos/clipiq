@@ -560,6 +560,12 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
     refreshProfile.mutate(id);
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const [douyinLoggedIn, setDouyinLoggedIn] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (account?.platform !== "douyin") return;
+    window.videoAnalyzer?.douyinGetLoginStatus?.().then((r) => setDouyinLoggedIn(r.loggedIn)).catch(() => {});
+  }, [account?.platform]);
+
   const summarizedVideos = useMemo(
     () => accountVideos.filter((v) => v.summaryStatus === "done" && v.videoSummary),
     [accountVideos],
@@ -694,6 +700,15 @@ export function AccountDetailScreen({ tab: initialTab = "methodology" }: { tab?:
                     {account.totalVideoCount > accountVideos.length && (
                       <span className="text-amber-600 dark:text-amber-400 ml-1">
                         （还有 {account.totalVideoCount - accountVideos.length} 个未拉取）
+                      </span>
+                    )}
+                    {account.platform === "douyin" && douyinLoggedIn === false && account.totalVideoCount != null && account.totalVideoCount > accountVideos.length && (
+                      <span
+                        role="button"
+                        onClick={() => setLocation({ module: "settings" })}
+                        className="text-indigo-600 dark:text-indigo-400 ml-1 cursor-pointer hover:underline"
+                      >
+                        → 去设置登录可拉全部
                       </span>
                     )}
                   </>

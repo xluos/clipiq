@@ -47,7 +47,7 @@ import {
 } from "../types";
 import type { CachePolicy, CacheScopeStats, CacheStats, ExtensionBridgeStatus, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
 
-type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "bridge" | "data";
+type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "douyin" | "bridge" | "data";
 
 
 const SECTIONS: { key: Section; label: string }[] = [
@@ -56,6 +56,7 @@ const SECTIONS: { key: Section; label: string }[] = [
   { key: "local", label: "本地推理" },
   { key: "deps", label: "本地依赖" },
   { key: "analysis", label: "默认分析" },
+  { key: "douyin", label: "抖音账号" },
   { key: "bridge", label: "浏览器插件桥" },
   { key: "data", label: "项目数据" },
 ];
@@ -144,6 +145,7 @@ export function SettingsScreen() {
             {section === "deps" && <DepsSection />}
             {section === "local" && <LocalInferenceSection />}
             {section === "analysis" && <AnalysisDefaultsSection />}
+            {section === "douyin" && <DouyinAccountSection />}
             {section === "bridge" && <ExtensionBridgeSection />}
             {section === "data" && <DataSection />}
           </div>
@@ -2759,6 +2761,74 @@ function CacheSection() {
       </div>
       {statusMessage && <p className="text-xs text-slate-500">{statusMessage}</p>}
     </section>
+  );
+}
+
+function DouyinAccountSection() {
+  const [status, setStatus] = useState<{ loggedIn: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(() => {
+    window.videoAnalyzer?.douyinGetLoginStatus?.().then(setStatus).catch(() => setStatus({ loggedIn: false }));
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const handleLogin = async () => {
+    setBusy(true);
+    try {
+      const r = await window.videoAnalyzer?.douyinOpenLogin?.();
+      if (r?.ok) refresh();
+    } finally { setBusy(false); }
+  };
+
+  const handleLogout = async () => {
+    if (!window.confirm("确认退出抖音登录？退出后拉取视频数量可能受限。")) return;
+    setBusy(true);
+    try {
+      await window.videoAnalyzer?.douyinLogout?.();
+      refresh();
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div>
+      <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-1">抖音账号</h2>
+      <p className="text-[12.5px] text-slate-500 dark:text-slate-400 mb-4">
+        登录抖音后可拉取全部视频。未登录时受匿名限制，每次仅能拉取约 10 条。
+      </p>
+      <div className="flex items-center gap-3">
+        {status?.loggedIn ? (
+          <>
+            <span className="inline-flex items-center gap-1.5 text-[12.5px] font-medium text-emerald-700 dark:text-emerald-400">
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              已登录
+            </span>
+            <button
+              onClick={handleLogout}
+              disabled={busy}
+              className="h-7 px-3 rounded-md text-[12px] text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 disabled:opacity-50"
+            >
+              退出登录
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="inline-flex items-center gap-1.5 text-[12.5px] text-slate-500 dark:text-slate-400">
+              <span className="w-2 h-2 rounded-full bg-slate-400" />
+              未登录
+            </span>
+            <button
+              onClick={handleLogin}
+              disabled={busy}
+              className="h-7 px-3 rounded-md text-[12px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50"
+            >
+              {busy ? "等待登录…" : "扫码登录"}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 

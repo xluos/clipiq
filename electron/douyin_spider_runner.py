@@ -300,8 +300,14 @@ def crawl_user(payload: dict[str, Any]) -> dict[str, Any]:
     for _page in range(max_pages):
         page_payload = DouyinAPI.get_user_work_info(auth, user_url, max_cursor)
         items = page_payload.get("aweme_list") or []
+        has_more = page_payload.get("has_more")
         videos.extend(summarize_aweme(item) for item in items)
-        if len(videos) >= limit or page_payload.get("has_more") != 1 or not items:
+        log_line = (
+            f"[spider-page] page={_page+1}/{max_pages} items={len(items)} "
+            f"total={len(videos)} has_more={has_more} cursor={max_cursor[:20]}"
+        )
+        sys.stderr.write(log_line + "\n")
+        if len(videos) >= limit or has_more != 1 or not items:
             break
         max_cursor = str(page_payload.get("max_cursor") or "0")
         time.sleep(sleep_seconds)
