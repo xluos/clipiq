@@ -45,6 +45,7 @@ const etaEstimator = require("./eta-estimator.cjs");
 const etaLearner = require("./eta-learner.cjs");
 const cacheStore = require("./cache-store.cjs");
 const extensionBridge = require("./extension-bridge.cjs");
+const douyinSpider = require("./douyin-spider-sidecar.cjs");
 const log = require("./logger.cjs");
 const { createTaskScheduler } = require("./task-queue");
 const ElectronStore = require("electron-store");
@@ -2699,6 +2700,21 @@ async function fetchDouyinUserPostsViaApi(secUid, limit = 18) {
   }
   log.info("douyin:api", `API 拉取完成, 共 ${videos.length} 条`);
   return { videos: videos.slice(0, limit), total: videos.length };
+}
+
+// 抖音用户投稿 — Electron 生成浏览器 cookie,本地 Python sidecar 复用 DouYin_Spider
+// 的 a_bogus 签名和接口封装。它不是外部 HTTP 服务,由主进程按需托管。
+async function fetchDouyinUserPostsViaSpider(userUrl, limit = 18) {
+  log.info("douyin:spider", `开始 DouYin_Spider 拉取, limit=${limit} url=${String(userUrl).slice(0, 80)}`);
+  const result = await douyinSpider.crawlUser({ userUrl, limit, maxCommentsPerVideo: 0, includeReplies: false });
+  const videos = Array.isArray(result?.videos) ? result.videos.filter((v) => v.id) : [];
+  if (videos.length === 0) throw new Error("DouYin_Spider 未返回视频");
+  log.info("douyin:spider", `DouYin_Spider 拉取完成, 共 ${videos.length} 条`);
+  return {
+    videos: videos.slice(0, limit),
+    total: Number(result?.raw?.summary?.video_count) || videos.length,
+    profile: result.profile || null,
+  };
 }
 
 // 抖音用户投稿 — 经 Chrome 插件桥 (在 douyin.com tab 里调 fetch, 借 webmssdk 自动签 a_bogus).
@@ -7745,21 +7761,47 @@ app.whenReady().then(async () => {
       const secUid = parseDouyinSecUid(url);
       log.info("accounts:fetch", `抖音 secUid=${secUid ? secUid.slice(0, 20) + "..." : "(null)"} bridgeConnected=${extensionBridge.isConnected()}`);
       if (secUid) {
-        // 并行: 拉取账号资料 + 视频列表 (都走纯 API, 不需要 BrowserWindow)
+        // 并行: 拉取账号资料 + 视频列表。抖音优先走本地 DouYin_Spider sidecar:
+        // Electron 负责浏览器 cookie,sidecar 保留 a_bogus 签名 / 图集 / 评论接口能力。
         const profilePromise = fetchDouyinUserProfile(secUid).catch((e) => {
           nativeCardError = `douyin profile: ${e?.message || String(e)}`;
           log.warn("accounts:fetch", `抖音资料 API 失败: ${e?.message || e}`);
           return null;
         });
 
-        // 优先级: 纯 API → bridge → BrowserWindow
+        // 优先级: DouYin_Spider sidecar → 纯 API → bridge → BrowserWindow
+        report(18, "请求抖音接口", "DouYin_Spider");
+        try {
+          const result = await fetchDouyinUserPostsViaSpider(url, safeLimit);
+          if (result && result.videos.length > 0) {
+            nativeVideos = result;
+            if (result.profile?.nickname) {
+              nativeCard = {
+                name: result.profile.nickname || null,
+                face: result.profile.avatarUrl || null,
+                sign: result.profile.signature || null,
+                fansFormatted: result.profile.followerCount > 0 ? formatFollowersCount(result.profile.followerCount) : null,
+                mid: result.profile.uid || null,
+                archiveCount: result.profile.awemeCount || 0,
+              };
+            }
+          }
+          log.info("accounts:fetch", `DouYin_Spider 拉取${nativeVideos ? "成功" : "无结果"}`);
+        } catch (e) {
+          nativeVideosError = `douyin spider: ${e?.message || String(e)}`;
+          log.warn("accounts:fetch", `DouYin_Spider 失败: ${e?.message || e}`);
+        }
+
         report(20, "请求抖音接口", "拉取视频列表");
         try {
-          const result = await fetchDouyinUserPostsViaApi(secUid, safeLimit);
-          if (result && result.videos.length > 0) nativeVideos = result;
-          log.info("accounts:fetch", `纯 API 拉取${nativeVideos ? "成功" : "无结果"}`);
+          if (!nativeVideos) {
+            const result = await fetchDouyinUserPostsViaApi(secUid, safeLimit);
+            if (result && result.videos.length > 0) nativeVideos = result;
+          }
+          log.info("accounts:fetch", `纯 API 拉取${nativeVideos ? "已有/成功" : "无结果"}`);
         } catch (e) {
-          nativeVideosError = `douyin API: ${e?.message || String(e)}`;
+          const prevErr = nativeVideosError ? nativeVideosError + "; " : "";
+          nativeVideosError = prevErr + `douyin API: ${e?.message || String(e)}`;
           log.warn("accounts:fetch", `纯 API 失败: ${e?.message || e}`);
         }
         if (!nativeVideos && extensionBridge.isConnected()) {
@@ -7784,7 +7826,7 @@ app.whenReady().then(async () => {
         }
 
         const profile = await profilePromise;
-        if (profile) {
+        if (profile && !nativeCard) {
           nativeCard = {
             name: profile.nickname || null,
             face: profile.avatarUrl || null,
