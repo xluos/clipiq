@@ -2,6 +2,8 @@ const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const zlib = require("node:zlib");
+const { pipeline } = require("node:stream/promises");
 const { Arch } = require("builder-util");
 const asar = require("@electron/asar");
 
@@ -18,6 +20,20 @@ async function removePath(filePath) {
   if (!(await pathExists(filePath))) return;
   await fs.rm(filePath, { recursive: true, force: true });
   console.log(`[after-pack-prune] removed ${filePath}`);
+}
+
+async function gzipAndRemove(filePath) {
+  if (!(await pathExists(filePath))) return;
+  const gzPath = `${filePath}.gz`;
+  await fs.rm(gzPath, { force: true });
+  await pipeline(
+    fsSync.createReadStream(filePath),
+    zlib.createGzip({ level: 9 }),
+    fsSync.createWriteStream(gzPath),
+  );
+  await fs.chmod(gzPath, 0o644);
+  await fs.rm(filePath, { force: true });
+  console.log(`[after-pack-prune] compressed ${filePath} -> ${gzPath}`);
 }
 
 async function findAppPath(appOutDir) {
@@ -57,9 +73,12 @@ async function pruneAsar(resourcesDir, arch) {
   const nextAsar = `${asarPath}.next`;
   try {
     await asar.extractAll(asarPath, tmpDir);
+    await patchBinaryWrappers(tmpDir, arch);
     for (const rel of ffprobeDirsToRemove(arch)) {
       await removePath(path.join(tmpDir, rel));
     }
+    await removePath(path.join(tmpDir, "node_modules", "ffprobe-static", "bin"));
+    await removePath(path.join(tmpDir, "node_modules", "@ffmpeg-installer", `darwin-${arch}`, "ffmpeg"));
     await fs.rm(nextAsar, { force: true });
     await asar.createPackage(tmpDir, nextAsar);
     await fs.rename(nextAsar, asarPath);
@@ -71,11 +90,64 @@ async function pruneAsar(resourcesDir, arch) {
   }
 }
 
+async function patchBinaryWrappers(rootDir, arch) {
+  const ffprobeIndex = path.join(rootDir, "node_modules", "ffprobe-static", "index.js");
+  if (await pathExists(ffprobeIndex)) {
+    await fs.writeFile(ffprobeIndex, `\
+//
+// Patched by ClipIQ packaging: binaries live in app.asar.unpacked.
+//
+const os = require("os");
+const path = require("path");
+
+const platform = os.platform();
+const arch = os.arch();
+const binary = platform === "win32" ? "ffprobe.exe" : "ffprobe";
+const baseDir = __dirname.includes("app.asar")
+  ? __dirname.replace("app.asar", "app.asar.unpacked")
+  : __dirname;
+
+exports.path = path.join(baseDir, "bin", platform, arch, binary);
+`, "utf8");
+    console.log(`[after-pack-prune] patched ${ffprobeIndex}`);
+  }
+
+  const ffmpegIndex = path.join(rootDir, "node_modules", "@ffmpeg-installer", "ffmpeg", "index.js");
+  const ffmpegPackage = path.join(rootDir, "node_modules", "@ffmpeg-installer", `darwin-${arch}`, "package.json");
+  if ((await pathExists(ffmpegIndex)) && (await pathExists(ffmpegPackage))) {
+    await fs.writeFile(ffmpegIndex, `\
+//
+// Patched by ClipIQ packaging: binaries live in app.asar.unpacked.
+//
+const os = require("os");
+const path = require("path");
+
+const platform = os.platform() + "-" + os.arch();
+const binary = os.platform() === "win32" ? "ffmpeg.exe" : "ffmpeg";
+const packageDir = path.resolve(__dirname, "..", platform);
+const unpackedPackageDir = packageDir.includes("app.asar")
+  ? packageDir.replace("app.asar", "app.asar.unpacked")
+  : packageDir;
+const ffmpegPath = path.join(unpackedPackageDir, binary);
+const packageJson = require(path.join(packageDir, "package.json"));
+
+module.exports = {
+  path: ffmpegPath,
+  version: packageJson.ffmpeg || packageJson.version,
+  url: packageJson.homepage,
+};
+`, "utf8");
+    console.log(`[after-pack-prune] patched ${ffmpegIndex}`);
+  }
+}
+
 async function pruneUnpacked(resourcesDir, arch) {
   const unpackedDir = path.join(resourcesDir, "app.asar.unpacked");
   for (const rel of ffprobeDirsToRemove(arch)) {
     await removePath(path.join(unpackedDir, rel));
   }
+  await gzipAndRemove(path.join(unpackedDir, "node_modules", "ffprobe-static", "bin", "darwin", arch, "ffprobe"));
+  await gzipAndRemove(path.join(unpackedDir, "node_modules", "@ffmpeg-installer", `darwin-${arch}`, "ffmpeg"));
 }
 
 async function removeMatching(dir, predicate) {
@@ -90,6 +162,24 @@ async function removeMatching(dir, predicate) {
 
 async function pruneSpider(resourcesDir) {
   const spiderDir = path.join(resourcesDir, "vendor", "DouYin_Spider");
+  await removePath(path.join(spiderDir, "author"));
+  await removePath(path.join(spiderDir, "dy_live"));
+  await removePath(path.join(spiderDir, "outputs"));
+  await removePath(path.join(spiderDir, ".env"));
+  await removePath(path.join(spiderDir, "Dockerfile"));
+  await removePath(path.join(spiderDir, "README.md"));
+  await removePath(path.join(spiderDir, "package-lock.json"));
+
+  const nodeModulesDir = path.join(spiderDir, "node_modules");
+  if (await pathExists(nodeModulesDir)) {
+    const entries = await fs.readdir(nodeModulesDir);
+    await Promise.all(
+      entries
+        .filter((entry) => entry !== "jsrsasign")
+        .map((entry) => removePath(path.join(nodeModulesDir, entry))),
+    );
+  }
+
   const venvDir = path.join(spiderDir, ".venv");
   const binDir = path.join(venvDir, "bin");
   await removePath(path.join(binDir, "playwright"));
@@ -107,6 +197,26 @@ async function pruneSpider(resourcesDir) {
   }
 }
 
+async function pruneElectronFramework(appPath) {
+  const frameworkDir = path.join(
+    appPath,
+    "Contents",
+    "Frameworks",
+    "Electron Framework.framework",
+    "Versions",
+    "A",
+  );
+  const resourcesDir = path.join(frameworkDir, "Resources");
+  await removeMatching(resourcesDir, (entry) => {
+    if (!entry.endsWith(".lproj")) return false;
+    return !/^(en|en_GB|zh_CN|zh_TW)(?:_|\.lproj)/.test(entry);
+  });
+
+  const librariesDir = path.join(frameworkDir, "Libraries");
+  await removePath(path.join(librariesDir, "libvk_swiftshader.dylib"));
+  await removePath(path.join(librariesDir, "vk_swiftshader_icd.json"));
+}
+
 module.exports = async function afterPack(context) {
   if (context.electronPlatformName !== "darwin") return;
   const appPath = await findAppPath(context.appOutDir);
@@ -116,4 +226,5 @@ module.exports = async function afterPack(context) {
   await pruneAsar(resourcesDir, arch);
   await pruneUnpacked(resourcesDir, arch);
   await pruneSpider(resourcesDir);
+  await pruneElectronFramework(appPath);
 };

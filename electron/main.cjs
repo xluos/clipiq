@@ -28,8 +28,10 @@ const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const zlib = require("node:zlib");
 const { DatabaseSync } = require("node:sqlite");
 const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 const archiver = require("archiver");
 const llamaRuntime = require("./llama-runtime.cjs");
 const llamaManager = require("./llama-manager.cjs");
@@ -477,6 +479,42 @@ function getBinDir() {
   return path.join(app.getPath("userData"), "bin");
 }
 
+async function ensureCompressedBundledTool(filePath, command) {
+  if (!filePath) return null;
+  if (fsSync.existsSync(filePath)) return filePath;
+
+  const gzPath = `${filePath}.gz`;
+  if (!fsSync.existsSync(gzPath)) return null;
+
+  const targetDir = path.join(getBinDir(), "bundled-tools", `${process.platform}-${process.arch}`);
+  const targetPath = path.join(targetDir, path.basename(filePath));
+  if (fsSync.existsSync(targetPath)) return targetPath;
+
+  await fs.mkdir(targetDir, { recursive: true });
+  const tempPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
+  await pipeline(
+    fsSync.createReadStream(gzPath),
+    zlib.createGunzip(),
+    fsSync.createWriteStream(tempPath, { mode: 0o755 }),
+  );
+  await fs.chmod(tempPath, 0o755);
+  await fs.rename(tempPath, targetPath);
+  log.info("clipiq", `已解压内置 ${command}: ${targetPath}`);
+  return targetPath;
+}
+
+function isBundledToolPath(actualPath, packagedPath) {
+  if (!actualPath || !packagedPath) return false;
+  if (actualPath === packagedPath) return true;
+  const extractedPath = path.join(
+    getBinDir(),
+    "bundled-tools",
+    `${process.platform}-${process.arch}`,
+    path.basename(packagedPath),
+  );
+  return actualPath === extractedPath;
+}
+
 function ytDlpAssetName() {
   if (process.platform === "win32") return "yt-dlp.exe";
   if (process.platform === "darwin") return "yt-dlp_macos";
@@ -806,11 +844,13 @@ function run(command, args, options = {}, handle = null) {
 async function commandPath(command) {
   if (command === "ffmpeg") {
     const bundled = bundledFfmpegPath();
-    if (bundled && fsSync.existsSync(bundled)) return bundled;
+    const ready = await ensureCompressedBundledTool(bundled, "ffmpeg");
+    if (ready) return ready;
   }
   if (command === "ffprobe") {
     const bundled = bundledFfprobePath();
-    if (bundled && fsSync.existsSync(bundled)) return bundled;
+    const ready = await ensureCompressedBundledTool(bundled, "ffprobe");
+    if (ready) return ready;
   }
   if (command === "yt-dlp") {
     const local = ytDlpLocalPath();
@@ -7104,8 +7144,8 @@ app.whenReady().then(async () => {
       ffmpeg,
       ffprobe,
       ytDlp,
-      ffmpegBundled: ffmpeg ? ffmpeg === bundledFfmpegPath() : false,
-      ffprobeBundled: ffprobe ? ffprobe === bundledFfprobePath() : false,
+      ffmpegBundled: isBundledToolPath(ffmpeg, bundledFfmpegPath()),
+      ffprobeBundled: isBundledToolPath(ffprobe, bundledFfprobePath()),
       ytDlpBundled: ytDlp ? ytDlp === ytDlpLocalPath() : false,
       ytDlpVersion: ytDlp ? await getYtDlpVersion(ytDlp).catch(() => null) : null,
     };
