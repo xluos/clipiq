@@ -105,7 +105,7 @@ export type DownloadCompleteEvent =
   | { videoId: string; success: true; video: DownloadedVideo }
   | { videoId: string; success: false; cancelled?: boolean; error: string };
 
-export type ExportFormat = "markdown" | "json" | "csv";
+export type ExportFormat = "markdown" | "json" | "csv" | "zip";
 
 export type ExtensionBridgeStatus = {
   port: number;
@@ -467,6 +467,7 @@ declare global {
         analysisCount?: number;
         mediaFileCount?: number;
         mediaMissingCount?: number;
+        frameFileCount?: number;
       }>;
 
       // provider

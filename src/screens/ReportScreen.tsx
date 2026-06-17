@@ -2,7 +2,7 @@ import { useApp } from "../AppContext";
 import { SummaryDetail } from "./AccountScreen";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ArrowLeft, CheckCircle2, Download, FileText, AlertTriangle, Search, RefreshCw } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Download, FileText, AlertTriangle, Search, RefreshCw, FileArchive } from "lucide-react";
 import { formatTime } from "@/lib/utils";
 import { Fragment, useEffect, useMemo, useRef, useState, type FC, type PointerEvent as ReactPointerEvent } from "react";
 import type { ExportFormat } from "../electron-api";
@@ -403,6 +403,10 @@ export function ReportScreen() {
             <div className="flex items-center gap-2 shrink-0">
               <Button variant="outline" size="sm" onClick={() => handleExport("json")} className="border-slate-200 dark:border-slate-800">JSON</Button>
               <Button variant="outline" size="sm" onClick={() => handleExport("csv")} className="border-slate-200 dark:border-slate-800">CSV</Button>
+              <Button variant="outline" size="sm" onClick={() => handleExport("zip")} className="border-slate-200 dark:border-slate-800">
+                <FileArchive className="w-3.5 h-3.5 mr-1" />
+                ZIP
+              </Button>
               <Button className="bg-indigo-600 hover:bg-indigo-700 text-white border-0" onClick={() => handleExport("markdown")}>
                 <Download className="w-4 h-4 mr-2" />
                 Markdown

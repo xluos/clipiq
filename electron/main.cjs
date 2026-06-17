@@ -9144,24 +9144,102 @@ app.whenReady().then(async () => {
     const title = video?.title || "video-analysis";
     const nodes = analysis?.result?.nodes || [];
     const report = analysis?.result?.report || analysis?.result || {};
+    const provider = analysis?.providerSnapshot || null;
+    const safeName = path.parse(title).name || "video-analysis";
+
+    // JSON 导出剥离本地资源路径(framePath / media:// / localPath)
+    const stripNodes = (ns) => ns.map((n) => {
+      const c = { ...n };
+      delete c.thumbnailUrl;
+      delete c.representativeFrames;
+      if (Array.isArray(c.framesInShot)) c.framesInShot = c.framesInShot.length;
+      return c;
+    });
+    const stripFrames = (fs) => fs.map((f) => {
+      const c = { ...f };
+      delete c.url;
+      return c;
+    });
+    const stripVideo = (v) => {
+      const c = { ...v };
+      delete c.localPath;
+      if (c.thumbnailUrl?.startsWith("media://")) delete c.thumbnailUrl;
+      return c;
+    };
+
+    // ZIP:分析 JSON(路径重写) + 帧截图 + 封面
+    if (format === "zip") {
+      const defaultPath = path.join(app.getPath("documents"), `${safeName}-分析导出.zip`);
+      const result = await dialog.showSaveDialog({
+        title: "导出拉片结果",
+        defaultPath,
+        filters: [{ name: "ZIP", extensions: ["zip"] }],
+      });
+      if (result.canceled || !result.filePath) return { canceled: true };
+
+      const output = fsSync.createWriteStream(result.filePath);
+      const archive = archiver("zip", { zlib: { level: 6 } });
+      const closed = new Promise((resolve, reject) => {
+        output.on("close", resolve);
+        output.on("error", reject);
+        archive.on("error", reject);
+        archive.on("warning", (err) => { if (err.code === "ENOENT") log.warn("export", "归档警告:", err?.message); else reject(err); });
+      });
+      archive.pipe(output);
+
+      // 分析结果:clone + 收集帧 + 重写路径(传完整 result 以覆盖 content/pipeline 两种管线)
+      const fullResult = analysis?.result || {};
+      const analysisClone = JSON.parse(JSON.stringify({ ...fullResult, provider, exportedAt: new Date().toISOString() }));
+      const frameFiles = collectFramesAndRewritePaths(analysisClone, "frames");
+      let frameCount = 0;
+      for (const [diskPath, zipPath] of frameFiles) {
+        try {
+          await fs.access(diskPath);
+          archive.file(diskPath, { name: zipPath });
+          frameCount++;
+        } catch { /* 帧文件已删,跳过 */ }
+      }
+
+      // 视频信息:重写资源路径
+      const videoClone = { ...video };
+      delete videoClone.localPath;
+      if (videoClone.thumbnailUrl?.startsWith("media://")) {
+        const coverDisk = resolveMediaUrl(videoClone.thumbnailUrl);
+        if (coverDisk) {
+          try {
+            await fs.access(coverDisk);
+            const coverName = path.basename(coverDisk);
+            archive.file(coverDisk, { name: coverName });
+            videoClone.thumbnailUrl = coverName;
+          } catch { delete videoClone.thumbnailUrl; }
+        } else {
+          delete videoClone.thumbnailUrl;
+        }
+      }
+
+      archive.append(JSON.stringify({ video: videoClone, ...analysisClone }, null, 2), { name: "analysis.json" });
+      await archive.finalize();
+      await closed;
+      return { canceled: false, filePath: result.filePath };
+    }
+
+    // 纯文本格式:JSON(剥离资源) / CSV / Markdown
     const extension = format === "json" ? "json" : format === "csv" ? "csv" : "md";
-    const defaultPath = path.join(
-      app.getPath("documents"),
-      `${path.parse(title).name || "video-analysis"}-analysis.${extension}`
-    );
+    const defaultPath = path.join(app.getPath("documents"), `${safeName}-analysis.${extension}`);
     const result = await dialog.showSaveDialog({
       title: "导出拉片结果",
       defaultPath,
-      filters: [
-        { name: format.toUpperCase(), extensions: [extension] },
-      ],
+      filters: [{ name: format.toUpperCase(), extensions: [extension] }],
     });
     if (result.canceled || !result.filePath) return { canceled: true };
 
-    const provider = analysis?.providerSnapshot || null;
+    const fullResult = analysis?.result || {};
+    const strippedResult = { ...fullResult };
+    if (Array.isArray(strippedResult.frames)) strippedResult.frames = stripFrames(strippedResult.frames);
+    if (strippedResult.nodes) strippedResult.nodes = stripNodes(strippedResult.nodes);
     const content =
       format === "json"
-        ? JSON.stringify({ video, nodes, report, provider, exportedAt: new Date().toISOString() }, null, 2)
+        ? JSON.stringify({ video: stripVideo(video), ...strippedResult, provider, exportedAt: new Date().toISOString() }, null, 2)
         : format === "csv"
           ? exportCsv(nodes)
           : exportMarkdown(video, nodes, report, provider);
@@ -9169,9 +9247,126 @@ app.whenReady().then(async () => {
     return { canceled: false, filePath: result.filePath };
   });
 
+  // --- 导出资源处理 helpers ---
+
+  // 纯 JSON 导出:剥离本地资源路径(framePath / media:// / localPath),只保留文本数据
+  function stripResourceFieldsForExport(bundle) {
+    const clone = JSON.parse(JSON.stringify(bundle));
+    for (const item of clone.videos || []) {
+      if (item.video) {
+        delete item.video.localPath;
+        if (item.video.thumbnailUrl?.startsWith("media://")) delete item.video.thumbnailUrl;
+      }
+      for (const a of item.analyses || []) {
+        if (!a.result) continue;
+        // builtin-content: result.frames[].url
+        if (Array.isArray(a.result.frames)) {
+          for (const f of a.result.frames) { delete f.url; }
+        }
+        // builtin-pipeline: nodes + shotContexts
+        if (a.result.nodes) {
+          for (const node of a.result.nodes) {
+            delete node.thumbnailUrl;
+            delete node.representativeFrames;
+            if (Array.isArray(node.framesInShot)) node.framesInShot = node.framesInShot.length;
+          }
+        }
+        const shotContexts = a.result.report?.shotContexts || a.result.shotContexts;
+        if (Array.isArray(shotContexts)) {
+          for (const shot of shotContexts) {
+            delete shot.frames;
+            delete shot.representativeFrames;
+          }
+        }
+      }
+    }
+    return clone;
+  }
+
+  // 解析 media:// URL 为磁盘绝对路径
+  function resolveMediaUrl(url) {
+    if (!url || !url.startsWith("media://")) return null;
+    // media://external/{encodedAbsPath}
+    const extMatch = url.match(/^media:\/\/external\/(.+)$/);
+    if (extMatch) return decodeURIComponent(extMatch[1]);
+    // media://project/{videoId}/{rel}
+    const projMatch = url.match(/^media:\/\/project\/([^/]+)\/(.+)$/);
+    if (projMatch) {
+      const videoId = decodeURIComponent(projMatch[1]);
+      const rel = projMatch[2].split("/").map(decodeURIComponent).join(path.sep);
+      return path.join(getVideoDir(videoId), rel);
+    }
+    return null;
+  }
+
+  // ZIP 导出:遍历分析结果中的帧引用,收集磁盘文件 + 重写为 ZIP 内相对路径。
+  // 支持两种管线:
+  //   builtin-content: result.frames[].url (media://external/...)
+  //   builtin-pipeline: nodes[].representativeFrames/framesInShot + report.shotContexts[].frames
+  function collectFramesAndRewritePaths(analysisResult, framesPrefix) {
+    const frameFiles = new Map();
+    if (!analysisResult) return frameFiles;
+
+    // 通用:从 framePath(绝对路径)收集 + 重写
+    const rewrite = (f) => {
+      if (!f?.framePath) return;
+      const basename = path.basename(f.framePath);
+      const zipRel = `${framesPrefix}/${basename}`;
+      if (!frameFiles.has(f.framePath)) frameFiles.set(f.framePath, zipRel);
+      f.framePath = zipRel;
+      if (f.thumbnailUrl) f.thumbnailUrl = zipRel;
+    };
+
+    // 通用:从 media:// URL 解析磁盘路径 + 收集 + 返回 zipRel
+    const resolveAndCollect = (mediaUrl) => {
+      const diskPath = resolveMediaUrl(mediaUrl);
+      if (!diskPath) return null;
+      const basename = path.basename(diskPath);
+      const zipRel = `${framesPrefix}/${basename}`;
+      if (!frameFiles.has(diskPath)) frameFiles.set(diskPath, zipRel);
+      return zipRel;
+    };
+
+    // builtin-content: result.frames[].url
+    if (Array.isArray(analysisResult.frames)) {
+      for (const f of analysisResult.frames) {
+        if (!f?.url?.startsWith("media://")) continue;
+        const zipRel = resolveAndCollect(f.url);
+        if (zipRel) f.url = zipRel;
+      }
+    }
+
+    // builtin-pipeline: nodes
+    if (analysisResult.nodes) {
+      for (const node of analysisResult.nodes) {
+        if (Array.isArray(node.representativeFrames)) node.representativeFrames.forEach(rewrite);
+        if (Array.isArray(node.framesInShot)) node.framesInShot.forEach(rewrite);
+        if (node.thumbnailUrl && node.representativeFrames?.[0]?.framePath) {
+          node.thumbnailUrl = node.representativeFrames[0].framePath;
+        } else if (node.thumbnailUrl?.startsWith("media://")) {
+          const zipRel = resolveAndCollect(node.thumbnailUrl);
+          node.thumbnailUrl = zipRel || undefined;
+          if (!zipRel) delete node.thumbnailUrl;
+        } else if (node.thumbnailUrl) {
+          delete node.thumbnailUrl;
+        }
+      }
+    }
+
+    // builtin-pipeline: report.shotContexts
+    const shotContexts = analysisResult.report?.shotContexts || analysisResult.shotContexts;
+    if (Array.isArray(shotContexts)) {
+      for (const shot of shotContexts) {
+        if (Array.isArray(shot.frames)) shot.frames.forEach(rewrite);
+        if (Array.isArray(shot.representativeFrames)) shot.representativeFrames.forEach(rewrite);
+      }
+    }
+    return frameFiles;
+  }
+
   // 批量导出:整个账号 / 整个收藏夹下所有视频的所有分析。
   // 一个视频有多份分析(内容分析 / 结构拆解…)就各导一份(按 pipeline 区分)。
-  // format=json 出单个 JSON;format=zip 出压缩包(manifest + 每视频一目录,每份分析一文件)。
+  // format=json 出单个 JSON(不含资源路径);format=zip 出压缩包(含帧截图,可选含原视频)。
   ipcMain.handle("export:bundle", async (_event, { scope, id, format, includeMedia } = {}) => {
     const db = getDb();
     if (scope !== "account" && scope !== "collection") throw new Error("export:bundle 需要 scope=account|collection");
@@ -9281,7 +9476,7 @@ app.whenReady().then(async () => {
         filters: [{ name: "JSON", extensions: ["json"] }],
       });
       if (result.canceled || !result.filePath) return { canceled: true };
-      await fs.writeFile(result.filePath, JSON.stringify(bundle, null, 2), "utf8");
+      await fs.writeFile(result.filePath, JSON.stringify(stripResourceFieldsForExport(bundle), null, 2), "utf8");
       return { canceled: false, filePath: result.filePath, videoCount: videos.length, analysisCount };
     }
 
@@ -9312,41 +9507,88 @@ app.whenReady().then(async () => {
     const manifestVideos = [];
     let mediaIncludedCount = 0;
     let mediaMissingCount = 0;
+    let totalFrameFiles = 0;
     for (const it of items) {
-      // 目录名:标题清洗 + videoId 短哈希兜底去重
       let folder = safe(it.video.title, it.video.id.slice(0, 8));
       if (usedFolders.has(folder)) folder = `${folder}-${it.video.id.slice(0, 6)}`;
       usedFolders.add(folder);
       const dir = `videos/${folder}`;
-      archive.append(JSON.stringify(it.video, null, 2), { name: `${dir}/video.json` });
+
+      // 每份分析:clone → 收集帧文件 → 重写路径
       const usedFiles = {};
+      const allFrameFiles = new Map();
+      const analysisEntries = [];
       for (const a of it.analyses) {
         const base = safe(a.pipelineName, "分析");
         usedFiles[base] = (usedFiles[base] || 0) + 1;
         const fname = usedFiles[base] > 1 ? `${base}-${a.analysisId.slice(0, 8)}` : base;
-        archive.append(JSON.stringify(a, null, 2), { name: `${dir}/${fname}.json` });
+        const clone = JSON.parse(JSON.stringify(a));
+        const frameFiles = collectFramesAndRewritePaths(clone.result, `${fname}-frames`);
+        for (const [disk, zip] of frameFiles) {
+          if (!allFrameFiles.has(disk)) allFrameFiles.set(disk, `${dir}/${zip}`);
+        }
+        analysisEntries.push({ clone, fname });
       }
-      // 原视频:本地文件存在才打包(URL 未下载 / 文件被删的跳过,计入 missing)
+
+      // 帧截图打包(去重,文件缺失跳过)
+      for (const [diskPath, zipPath] of allFrameFiles) {
+        try {
+          await fs.access(diskPath);
+          archive.file(diskPath, { name: zipPath });
+          totalFrameFiles++;
+        } catch { /* 帧文件已删,跳过 */ }
+      }
+
+      // video.json:重写资源路径
+      const videoClone = JSON.parse(JSON.stringify(it.video));
+      if (videoClone.thumbnailUrl?.startsWith("media://")) {
+        const coverDisk = resolveMediaUrl(videoClone.thumbnailUrl);
+        if (coverDisk) {
+          try {
+            await fs.access(coverDisk);
+            const coverName = path.basename(coverDisk);
+            archive.file(coverDisk, { name: `${dir}/${coverName}` });
+            videoClone.thumbnailUrl = coverName;
+          } catch { delete videoClone.thumbnailUrl; }
+        } else {
+          delete videoClone.thumbnailUrl;
+        }
+      }
+
+      // 原视频
       let mediaIncluded = false;
       if (includeMedia && it.video.localPath) {
         try {
           await fs.access(it.video.localPath);
           const ext = path.extname(it.video.localPath) || ".mp4";
-          archive.file(it.video.localPath, { name: `${dir}/原视频${ext}` });
+          const mediaName = `原视频${ext}`;
+          archive.file(it.video.localPath, { name: `${dir}/${mediaName}` });
+          videoClone.localPath = mediaName;
           mediaIncluded = true;
           mediaIncludedCount++;
-        } catch { mediaMissingCount++; }
+        } catch {
+          delete videoClone.localPath;
+          mediaMissingCount++;
+        }
+      } else {
+        delete videoClone.localPath;
       }
+
+      archive.append(JSON.stringify(videoClone, null, 2), { name: `${dir}/video.json` });
+      for (const { clone, fname } of analysisEntries) {
+        archive.append(JSON.stringify(clone, null, 2), { name: `${dir}/${fname}.json` });
+      }
+
       manifestVideos.push({
         videoId: it.video.id,
         title: it.video.title,
         platform: it.video.platform,
         mediaIncluded,
+        frameCount: allFrameFiles.size,
         analyses: it.analyses.map((a) => ({ analysisId: a.analysisId, pipelineName: a.pipelineName })),
       });
     }
 
-    // 顶层 manifest:概览 + 索引(放最后 append,好带上原视频统计;zip 内顺序不影响解压)
     const manifest = {
       app: "ClipIQ",
       exportedAt: bundle.exportedAt,
@@ -9357,6 +9599,7 @@ app.whenReady().then(async () => {
       mediaIncluded: !!includeMedia,
       mediaFileCount: mediaIncludedCount,
       mediaMissingCount,
+      frameFileCount: totalFrameFiles,
       videos: manifestVideos,
     };
     archive.append(JSON.stringify(manifest, null, 2), { name: "manifest.json" });
@@ -9370,6 +9613,7 @@ app.whenReady().then(async () => {
       analysisCount,
       mediaFileCount: mediaIncludedCount,
       mediaMissingCount,
+      frameFileCount: totalFrameFiles,
     };
   });
 

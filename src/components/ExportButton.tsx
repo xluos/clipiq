@@ -41,9 +41,12 @@ export const ExportButton: FunctionComponent<Props> = ({ scope, id, disabled }) 
       const r = await window.videoAnalyzer?.exportBundle?.({ scope, id, format, includeMedia });
       if (r && !r.canceled) {
         let text = `已导出 ${r.videoCount ?? 0} 条视频 · ${r.analysisCount ?? 0} 份分析`;
-        if (includeMedia) {
-          text += ` · ${r.mediaFileCount ?? 0} 个原视频`;
-          if (r.mediaMissingCount) text += `(${r.mediaMissingCount} 个无本地文件)`;
+        if (format === "zip") {
+          if (r.frameFileCount) text += ` · ${r.frameFileCount} 张帧截图`;
+          if (includeMedia) {
+            text += ` · ${r.mediaFileCount ?? 0} 个原视频`;
+            if (r.mediaMissingCount) text += `(${r.mediaMissingCount} 个无本地文件)`;
+          }
         }
         setToast({ kind: "ok", text });
         setTimeout(() => setToast(null), 5000);
