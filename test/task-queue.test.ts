@@ -205,6 +205,52 @@ describe("TaskScheduler: 进度", () => {
   });
 });
 
+describe("TaskScheduler: 终态展示", () => {
+  it("成功时 stage 收口为完成,不保留运行中", async () => {
+    const { sched } = makeScheduler();
+    const d = deferred();
+    sched.registerKind("serial", {
+      concurrency: 1,
+      run: (_t, ctx) => {
+        ctx.onProgress({ progress: 80, stage: "运行中", message: "处理中" });
+        return d.promise;
+      },
+    });
+    const a = sched.enqueue("serial", {});
+    d.resolve("ok");
+    await d.promise;
+    await Promise.resolve();
+    expect(sched.get(a.id)?.status).toBe("succeeded");
+    expect(sched.get(a.id)?.progress).toBe(100);
+    expect(sched.get(a.id)?.stage).toBe("完成");
+    expect(sched.get(a.id)?.message).toBe("");
+  });
+
+  it("失败时 stage/message/error 收口为失败信息", async () => {
+    const { sched } = makeScheduler();
+    const d = deferred();
+    sched.registerKind("serial", { concurrency: 1, run: () => d.promise });
+    const a = sched.enqueue("serial", {});
+    d.reject(new Error("模型挂了"));
+    await expect(d.promise).rejects.toThrow("模型挂了");
+    await Promise.resolve();
+    expect(sched.get(a.id)?.status).toBe("failed");
+    expect(sched.get(a.id)?.stage).toBe("失败");
+    expect(sched.get(a.id)?.message).toBe("模型挂了");
+    expect(sched.get(a.id)?.error).toBe("模型挂了");
+  });
+
+  it("排队取消时 stage 收口为已取消", () => {
+    const { sched } = makeScheduler();
+    sched.registerKind("serial", { concurrency: 1, run: () => deferred().promise });
+    sched.enqueue("serial", {});
+    const q = sched.enqueue("serial", {});
+    sched.cancel(q.id);
+    expect(sched.get(q.id)?.status).toBe("cancelled");
+    expect(sched.get(q.id)?.stage).toBe("已取消");
+  });
+});
+
 describe("TaskScheduler: whenSettled(接回 await 完成的 IPC 语义)", () => {
   it("成功 → resolve runner 返回值", async () => {
     const { sched } = makeScheduler();
@@ -265,6 +311,7 @@ describe("TaskScheduler: 重启恢复(hydrate)", () => {
     sched.registerKind("serial", { concurrency: 1, run: () => deferred().promise });
     sched.hydrate(rows);
     expect(sched.get("r1")?.status).toBe("interrupted");
+    expect(sched.get("r1")?.stage).toBe("已中断");
     expect(sched.get("r2")?.status).toBe("running"); // 被重新调度起跑
     expect(sched.get("r3")?.status).toBe("succeeded");
   });

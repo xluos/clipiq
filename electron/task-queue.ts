@@ -93,6 +93,33 @@ export interface EnqueueOptions {
 
 const ACTIVE: ReadonlySet<TaskStatus> = new Set<TaskStatus>(["queued", "running"]);
 
+function applyTerminalPresentation(task: Task, status: TaskStatus, error?: string): void {
+  if (status === "succeeded") {
+    task.progress = 100;
+    task.stage = "完成";
+    task.message = "";
+    task.error = null;
+    return;
+  }
+  if (status === "cancelled") {
+    task.stage = "已取消";
+    task.message = "";
+    task.error = error || null;
+    return;
+  }
+  if (status === "interrupted") {
+    task.stage = "已中断";
+    task.message = "";
+    task.error = error || null;
+    return;
+  }
+  if (status === "failed") {
+    task.stage = "失败";
+    task.message = error || "";
+    task.error = error || "任务失败";
+  }
+}
+
 interface Settler {
   promise: Promise<unknown>;
   resolve: (v: unknown) => void;
@@ -151,6 +178,7 @@ export class TaskScheduler {
       if (task.status === "running") {
         task.status = "interrupted";
         task.finishedAt = this.deps.now();
+        applyTerminalPresentation(task, "interrupted");
         this.deps.persist(task);
       }
       this.tasks.set(task.id, task);
@@ -198,6 +226,7 @@ export class TaskScheduler {
     if (task.status === "queued") {
       task.status = "cancelled";
       task.finishedAt = this.deps.now();
+      applyTerminalPresentation(task, "cancelled");
       this.deps.persist(task);
       this.deps.emit({ type: "task", task });
       this.rejectSettler(id, "任务已取消");
@@ -329,8 +358,7 @@ export class TaskScheduler {
     }
     task.status = status;
     task.finishedAt = this.deps.now();
-    if (status === "succeeded") task.progress = 100;
-    if (error) task.error = error;
+    applyTerminalPresentation(task, status, error);
     this.controllers.delete(task.id);
     this.children.delete(task.id);
     this.deps.persist(task);
