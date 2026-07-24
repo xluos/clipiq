@@ -14,6 +14,7 @@ import {
   type EditPlanValidationOptions,
   type ShotValidationSource,
 } from "./edit-plan-validator";
+import { hasUsableWordTimings } from "./transcript-evidence";
 
 export type PlannerShotSelection = {
   shotId: string;
@@ -107,16 +108,21 @@ function buildEvidence(
       endUs: secondsToUs(segment.endSec),
       text: segment.text,
       speakerId: segment.speakerId,
+      wordTimingUsable: hasUsableWordTimings(segment),
       words: (segment.words || [])
         .map((word) => ({
           text: String(word.text || "").trim(),
           startUs: secondsToUs(word.startSec),
           endUs: secondsToUs(word.endSec),
+          ...(Number.isFinite(word.confidence)
+            ? { confidence: Number(word.confidence) }
+            : {}),
         }))
         .filter((word): word is {
           text: string;
           startUs: number;
           endUs: number;
+          confidence?: number;
         } =>
           word.startUs != null
           && word.endUs != null
@@ -130,7 +136,13 @@ function buildEvidence(
       endUs: number;
       text: string;
       speakerId: string | undefined;
-      words: Array<{ text: string; startUs: number; endUs: number }>;
+      wordTimingUsable: boolean;
+      words: Array<{
+        text: string;
+        startUs: number;
+        endUs: number;
+        confidence?: number;
+      }>;
     } =>
       segment.startUs != null
       && segment.endUs != null
@@ -141,8 +153,10 @@ function buildEvidence(
     .map((segment) => {
       const clippedStartUs = Math.max(segment.startUs, sourceInUs);
       const clippedEndUs = Math.min(segment.endUs, sourceOutUs);
-      const words = segment.words.filter((word) =>
-        word.startUs >= clippedStartUs && word.endUs <= clippedEndUs);
+      const words = segment.wordTimingUsable
+        ? segment.words.filter((word) =>
+          word.startUs >= clippedStartUs && word.endUs <= clippedEndUs)
+        : [];
       return {
         startUs: clippedStartUs,
         endUs: clippedEndUs,
@@ -150,7 +164,18 @@ function buildEvidence(
           ? words.map((word) => word.text).join("").trim()
           : segment.text,
         ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
-        ...(words.length ? { words } : {}),
+        ...(words.length
+          ? {
+            words: words.map((word) => ({
+              text: word.text,
+              startUs: word.startUs,
+              endUs: word.endUs,
+              ...(Number.isFinite(word.confidence)
+                ? { confidence: Number(word.confidence) }
+                : {}),
+            })),
+          }
+          : {}),
       };
     });
 
@@ -367,6 +392,9 @@ export function compileEditPlan(
               + Math.round((word.startUs - clip.sourceInUs) / clip.speed),
             endUs: clip.timelineInUs
               + Math.round((word.endUs - clip.sourceInUs) / clip.speed),
+            ...(Number.isFinite(word.confidence)
+              ? { confidence: Number(word.confidence) }
+              : {}),
           })),
         }
         : {}),

@@ -146,6 +146,7 @@ export function buildShotsFromAnalysis(
             end?: number;
             startSec?: number;
             endSec?: number;
+            confidence?: number;
           }>;
         };
         const segmentStart = finiteTime(segment.start ?? legacySegment.startSec);
@@ -161,7 +162,14 @@ export function buildShotsFromAnalysis(
             const wordEnd = finiteTime(word.end ?? legacyWord.endSec);
             const wordText = String(word.text || "").trim();
             return wordStart != null && wordEnd != null && wordEnd > wordStart && wordText
-              ? { text: wordText, startSec: wordStart, endSec: wordEnd }
+              ? {
+                text: wordText,
+                startSec: wordStart,
+                endSec: wordEnd,
+                ...(Number.isFinite(word.confidence)
+                  ? { confidence: Number(word.confidence) }
+                  : {}),
+              }
               : null;
           })
           .filter((word): word is NonNullable<typeof word> => Boolean(word));

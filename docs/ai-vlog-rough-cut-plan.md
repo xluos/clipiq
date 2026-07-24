@@ -271,7 +271,8 @@ export type EditTransition = {
 当前能力基线：
 
 - Whisper 已返回分段级 `start / end / text`，可以回答某个时间范围内有哪些字幕。
-- 当前没有词级时间戳，也没有说话人分离；分段边界是 ASR 估计值，不应宣称逐字帧精确。
+- 本地 whisper.cpp 的 `verbose_json` 已能返回词级候选；ClipIQ 保留有效词时间和置信度，并以文本覆盖率校验。中文词元损坏或覆盖不足时仍降级为分段级，不宣称逐字帧精确。
+- 当前没有说话人分离；`speakerId` 仍需独立 diarization 后端。
 - `ShotContext` 已有镜头起止时间、字幕分段、内容描述和代表帧。
 - 已有结构化人物实体、出镜区间、说话人轨迹和跨素材身份聚类的数据契约、持久化与保守匹配策略。
 - 当前仍没有真实的人脸检测/连续跟踪、特征提取和说话人分离后端，因此没有上游证据时不能可靠判断多个素材中是否为同一个人。
@@ -435,6 +436,7 @@ type PersonAppearance = {
 
 - [x] 验证当前 Whisper 后端的词级时间戳能力；不支持时保留 segment 级精度并显式标记。
 - [x] 评估现有 Whisper 的说话人分离能力，确认当前不能产出通用多人 `speakerId`。
+- [x] 保留 whisper.cpp 词级候选时间和置信度；文本覆盖不足的分段自动降级。
 - [ ] 接入独立本地说话人分离后端，产出 `speakerId`，不与人物 ID 强绑定。
 - [x] 建立 `people / person_appearances / speaker_tracks / person_identity_events / person_identity_constraints` 本地数据层。
 - [x] 建立保守的跨素材人物原型匹配策略；阈值由具体模型和固定测试集标定。

@@ -8,6 +8,7 @@ import type {
   VideoClipPersonEvidence,
   VideoClipSpeakerEvidence,
 } from "../../src/types";
+import { hasUsableWordTimings } from "./transcript-evidence";
 
 export type VlogCandidate = {
   shotId: string;
@@ -77,11 +78,15 @@ function transcriptSegments(
       endUs: secondsToUs(segment.endSec),
       text: String(segment.text || "").trim(),
       speakerId: segment.speakerId,
+      wordTimingUsable: hasUsableWordTimings(segment),
       words: (segment.words || [])
         .map((word) => ({
           text: String(word.text || "").trim(),
           startUs: secondsToUs(word.startSec),
           endUs: secondsToUs(word.endSec),
+          ...(Number.isFinite(word.confidence)
+            ? { confidence: Number(word.confidence) }
+            : {}),
         }))
         .filter((word): word is TimedWordEvidence =>
           word.startUs != null
@@ -95,6 +100,7 @@ function transcriptSegments(
       text: string;
       speakerId: string | undefined;
       words: TimedWordEvidence[];
+      wordTimingUsable: boolean;
     } =>
       segment.startUs != null
       && segment.endUs != null
@@ -103,17 +109,30 @@ function transcriptSegments(
       && segment.endUs > shotStartUs
       && Boolean(segment.text))
     .map((segment) => {
-      const words = segment.words.filter((word) =>
-        word.startUs >= segment.startUs
-        && word.endUs <= segment.endUs
-        && word.startUs >= shotStartUs
-        && word.endUs <= shotEndUs);
+      const words = segment.wordTimingUsable
+        ? segment.words.filter((word) =>
+          word.startUs >= segment.startUs
+          && word.endUs <= segment.endUs
+          && word.startUs >= shotStartUs
+          && word.endUs <= shotEndUs)
+        : [];
       return {
         startUs: segment.startUs,
         endUs: segment.endUs,
         text: segment.text,
         ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
-        ...(words.length ? { words } : {}),
+        ...(words.length
+          ? {
+            words: words.map((word) => ({
+              text: word.text,
+              startUs: word.startUs,
+              endUs: word.endUs,
+              ...(Number.isFinite(word.confidence)
+                ? { confidence: Number(word.confidence) }
+                : {}),
+            })),
+          }
+          : {}),
       };
     });
 }

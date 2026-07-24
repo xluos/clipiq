@@ -136,6 +136,7 @@ describe("分析证据质量报告", () => {
         capability: "word",
         segmentCount: 2,
         wordTimedSegmentCount: 2,
+        wordTimingCoverageRatio: 1,
         invalidSegmentCount: 0,
         videosWithTranscript: 2,
         shotCoverageRatio: 1,

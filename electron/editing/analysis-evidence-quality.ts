@@ -7,6 +7,10 @@ import type {
   Video,
 } from "../../src/types";
 import type { VlogCandidateBuildResult } from "./candidate-builder";
+import {
+  hasUsableWordTimings,
+  wordTimingTextCoverage,
+} from "./transcript-evidence";
 
 export type BuildAnalysisEvidenceQualityOptions = {
   generatedAt?: number;
@@ -67,6 +71,7 @@ export function buildAnalysisEvidenceQualityReport(
 
   let transcriptSegmentCount = 0;
   let wordTimedSegmentCount = 0;
+  let wordTimingCoverageSum = 0;
   let invalidSegmentCount = 0;
   let shotsWithTranscript = 0;
   const videosWithTranscript = new Set<string>();
@@ -86,15 +91,9 @@ export function buildAnalysisEvidenceQualityReport(
       }
       transcriptSegmentCount += 1;
       validSegmentsInShot += 1;
-      const words = segment.words || [];
-      if (
-        words.length > 0
-        && words.every((word) =>
-          validRange(word.startSec, word.endSec, videoDuration)
-          && word.startSec >= segment.startSec
-          && word.endSec <= segment.endSec
-          && Boolean(String(word.text || "").trim()))
-      ) {
+      const wordTimingCoverage = wordTimingTextCoverage(segment);
+      wordTimingCoverageSum += wordTimingCoverage;
+      if (hasUsableWordTimings(segment)) {
         wordTimedSegmentCount += 1;
       }
     }
@@ -265,6 +264,9 @@ export function buildAnalysisEvidenceQualityReport(
       capability: transcriptCapability,
       segmentCount: transcriptSegmentCount,
       wordTimedSegmentCount,
+      wordTimingCoverageRatio: transcriptSegmentCount > 0
+        ? Math.round((wordTimingCoverageSum / transcriptSegmentCount) * 10_000) / 10_000
+        : 0,
       invalidSegmentCount,
       videosWithTranscript: videosWithTranscript.size,
       shotCoverageRatio: ratio(shotsWithTranscript, scopedShots.length),

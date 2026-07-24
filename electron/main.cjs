@@ -89,6 +89,9 @@ const { exportEditPlanPackage } = require("./editing/exporters/package-exporter"
 const {
   buildAnalysisEvidenceQualityReport,
 } = require("./editing/analysis-evidence-quality");
+const {
+  normalizeTranscriptSegments,
+} = require("./transcribe/transcript-normalizer.cjs");
 const ElectronStore = require("electron-store");
 
 let _cfgStore = null;
@@ -109,7 +112,7 @@ let contextResolver = null;
 const DEFAULT_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
 // 每个阶段一份 prompt/输入格式 VERSION 常量, 改 prompt 时手动 bump → 旧 cache 自动失效。
 const CACHE_VERSIONS = {
-  transcript: "v1",
+  transcript: "v2",
   prefilter: "v1",
   shotMerger: "v1",
   summarizer: "v1",
@@ -3368,6 +3371,34 @@ async function extractFirstFrameCover(videoPath, videoId) {
 
 // PR2 金字塔管线: 把 shots 里的 representativeFrameIndex / frames / subtitleSegments
 // 按时间区间 overlap 匹配, 挂到大模型出的 nodes 上, 让 UI 能渲染镜头级 evidence。
+function transcriptSegmentForReport(segment) {
+  const words = Array.isArray(segment?.words)
+    ? segment.words
+      .map((word) => {
+        const start = Number(word?.start);
+        const end = Number(word?.end);
+        const text = String(word?.text || word?.word || "").trim();
+        if (!(Number.isFinite(start) && Number.isFinite(end) && end > start && text)) return null;
+        return {
+          text,
+          start,
+          end,
+          ...(Number.isFinite(Number(word?.confidence))
+            ? { confidence: Number(word.confidence) }
+            : {}),
+        };
+      })
+      .filter(Boolean)
+    : [];
+  return {
+    start: Number(segment?.start) || 0,
+    end: Number(segment?.end) || 0,
+    text: String(segment?.text || "").trim(),
+    ...(segment?.speakerId ? { speakerId: String(segment.speakerId) } : {}),
+    ...(words.length ? { words } : {}),
+  };
+}
+
 function attachShotEvidenceToNodes(nodes, shots, projectId) {
   if (!Array.isArray(nodes) || !Array.isArray(shots)) return;
   for (const node of nodes) {
@@ -3404,11 +3435,7 @@ function attachShotEvidenceToNodes(nodes, shots, projectId) {
       node.framesInShot = best.frames.map(toFrameCtx);
     }
     if (Array.isArray(best.subtitleSegments) && best.subtitleSegments.length > 0) {
-      node.subtitleSegments = best.subtitleSegments.map((s) => ({
-        start: Number(s.start) || 0,
-        end: Number(s.end) || 0,
-        text: String(s.text || ""),
-      }));
+      node.subtitleSegments = best.subtitleSegments.map(transcriptSegmentForReport);
     }
     // 用 shot 内代表帧 / 第一帧的 prefilterTag 覆盖按 fallbackNodes[index] 兜底挂错位的 tag
     // (主分析切的节点数跟 frames 不是 1:1, 旧逻辑 fallbackNodes[index] 会把 frame[0] 的 caption
@@ -5010,11 +5037,10 @@ async function transcribeAudio(audioProvider, wavPath, handle, onProgress) {
     const t = String(s || "").trim();
     return shouldSimplify && t ? t2sConverterMain(t) : t;
   };
-  const segments = Array.isArray(data?.segments)
-    ? data.segments.map((s) => ({ start: Number(s.start) || 0, end: Number(s.end) || 0, text: normalize(s.text) }))
-    : [];
+  const segments = normalizeTranscriptSegments(data?.segments, normalize);
   const fullText = typeof data?.text === "string" ? normalize(data.text) : segments.map((s) => s.text).join(" ").trim();
   return {
+    schemaVersion: "v2",
     language: detectedLang,
     text: fullText,
     segments,
@@ -5078,11 +5104,10 @@ async function transcribeLocalWhisperCpp(audioProvider, wavPath, handle, onProgr
     const t = String(s || "").trim();
     return shouldSimplify && t ? t2sConverterMain(t) : t;
   };
-  const segments = Array.isArray(data?.segments)
-    ? data.segments.map((s) => ({ start: Number(s.start) || 0, end: Number(s.end) || 0, text: normalize(s.text) }))
-    : [];
+  const segments = normalizeTranscriptSegments(data?.segments, normalize);
   const fullText = typeof data?.text === "string" ? normalize(data.text) : segments.map((s) => s.text).join(" ").trim();
   return {
+    schemaVersion: "v2",
     language: detectedLang,
     text: fullText,
     segments,
@@ -5824,7 +5849,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     let transcriptError = null;
     const transcriptPath = path.join(artifactDir, "transcript.json");
     const savedTranscript = await readJson(transcriptPath, null).catch(() => null);
-    if (savedTranscript?.segments?.length > 0) {
+    if (savedTranscript?.schemaVersion === "v2" && savedTranscript?.segments?.length > 0) {
       transcript = savedTranscript;
       send(pct("字幕识别", 1), "字幕识别", `命中缓存，复用 ${transcript.segments.length} 段已有字幕。`, { fromCache: true });
     }
@@ -6064,11 +6089,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             frames: framesCtx,
             representativeFrames: repFrames.length > 0 ? repFrames : framesCtx.slice(0, 1),
             subtitleSegments: Array.isArray(s.subtitleSegments)
-              ? s.subtitleSegments.map((seg) => ({
-                  start: Number(seg.start) || 0,
-                  end: Number(seg.end) || 0,
-                  text: String(seg.text || "").trim(),
-                }))
+              ? s.subtitleSegments.map(transcriptSegmentForReport)
               : [],
             subtitleText: s.subtitleText || undefined,
             framesInShot: framesCtx.length,

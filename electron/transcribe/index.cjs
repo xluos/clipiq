@@ -10,9 +10,15 @@
 //   transcribe({ wavPath, modelId, language, onProgress, handle }): Promise<Transcript>
 //
 // Transcript = {
+//   schemaVersion: "v2",
 //   language: string | null,
 //   text: string,
-//   segments: Array<{ start: number; end: number; text: string }>,
+//   segments: Array<{
+//     start: number,
+//     end: number,
+//     text: string,
+//     words?: Array<{ text: string, start: number, end: number, confidence?: number }>
+//   }>,
 //   duration: number,
 // }
 

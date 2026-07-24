@@ -4,6 +4,7 @@
 const fs = require("node:fs/promises");
 const OpenCC = require("opencc-js");
 const daemonClient = require("../daemon-client.cjs");
+const { normalizeTranscriptSegments } = require("./transcript-normalizer.cjs");
 
 const SIMPLIFIED_PROMPT = "以下是普通话的句子，请使用简体中文输出。";
 const t2sConverter = OpenCC.Converter({ from: "t", to: "cn" });
@@ -57,18 +58,14 @@ async function transcribe({ wavPath, modelId, language, onProgress, handle }) {
     return shouldSimplify && t ? t2sConverter(t) : t;
   };
 
-  const rawSegments = Array.isArray(data?.segments) ? data.segments : [];
-  const segments = rawSegments.map((s) => ({
-    start: Number(s.start) || 0,
-    end: Number(s.end) || 0,
-    text: normalize(s.text),
-  }));
+  const segments = normalizeTranscriptSegments(data?.segments, normalize);
   const fullText =
     typeof data?.text === "string" && data.text.trim()
       ? normalize(data.text)
       : segments.map((s) => s.text).join(" ").trim();
 
   return {
+    schemaVersion: "v2",
     language: detectedLang,
     text: fullText,
     segments,
