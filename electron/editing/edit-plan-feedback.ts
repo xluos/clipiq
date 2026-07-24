@@ -9,6 +9,7 @@ import {
   beatAlignedClipSpeed,
   refreshBeatSyncSuggestions,
 } from "./audio-beat-analysis";
+import { clipVideoEvidenceToRange } from "./aligned-evidence";
 import {
   validateEditPlan,
   type EditPlanValidationOptions,
@@ -268,11 +269,9 @@ export function applyEditPlanFeedback(
       }
       clip.sourceInUs = action.sourceInUs;
       clip.sourceOutUs = action.sourceOutUs;
-      clip.evidence = clip.evidence ? {
-        ...clip.evidence,
-        subtitleSegments: clip.evidence.subtitleSegments?.filter((segment) =>
-          segment.startUs >= clip.sourceInUs && segment.endUs <= clip.sourceOutUs),
-      } : undefined;
+      clip.evidence = clip.evidence
+        ? clipVideoEvidenceToRange(clip.evidence, clip.sourceInUs, clip.sourceOutUs)
+        : undefined;
       break;
     }
     case "replace_clip": {

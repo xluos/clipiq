@@ -139,6 +139,11 @@ describe("EditPlan 结构化反馈", () => {
       sourceExists: () => true,
     });
     expect(trimmed.actualDurationUs).toBe(8_000_000);
+    const trimmedVideo = trimmed.tracks.find((track) => track.kind === "video");
+    if (trimmedVideo?.kind !== "video") throw new Error("fixture");
+    expect(trimmedVideo.items[0].evidence?.alignedSegments?.at(0)?.startUs).toBe(0);
+    expect(trimmedVideo.items[0].evidence?.alignedSegments?.at(-1)?.endUs)
+      .toBe(2_000_000);
 
     const editedCaption = applyEditPlanFeedback(trimmed, {
       type: "update_caption",

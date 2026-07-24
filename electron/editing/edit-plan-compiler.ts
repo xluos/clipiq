@@ -10,6 +10,7 @@ import type {
   VideoClip,
 } from "../../src/types";
 import type { PlannerVoiceover } from "./vlog-planner";
+import { buildAlignedEvidenceSegments } from "./aligned-evidence";
 import {
   validateEditPlan,
   type EditPlanValidationOptions,
@@ -72,6 +73,7 @@ function stablePlannerDigest(
     targetDurationUs: options.targetDurationUs,
     canvas: options.canvas,
     methodologyIds: [...new Set(options.methodologyIds || [])].sort(),
+    minimumIdentityConfidence: options.minimumIdentityConfidence,
     evidenceQuality,
     selections,
     voiceovers: options.voiceovers || [],
@@ -82,16 +84,55 @@ function stablePlannerDigest(
         sourcePath: source.sourcePath,
         startSec: source.shot.startSec,
         endSec: source.shot.endSec,
+        description: source.shot.description,
+        usageTags: [...new Set(source.shot.usageTags || [])].sort(),
+        subtitleSegments: (source.shot.subtitleSegments || [])
+          .map((segment) => ({
+            startSec: segment.startSec,
+            endSec: segment.endSec,
+            text: segment.text,
+            speakerId: segment.speakerId,
+            words: (segment.words || []).map((word) => ({
+              text: word.text,
+              startSec: word.startSec,
+              endSec: word.endSec,
+              confidence: word.confidence,
+              speakerId: word.speakerId,
+            })),
+          }))
+          .sort((left, right) =>
+            left.startSec - right.startSec
+            || left.endSec - right.endSec
+            || left.text.localeCompare(right.text)),
         sourceWidth: source.sourceWidth,
         sourceHeight: source.sourceHeight,
-        focusEvidence: (source.appearances || [])
-          .filter((appearance) => appearance.focusBounds)
+        appearances: (source.appearances || [])
+          .filter((appearance) => appearance.videoId === source.videoId)
           .map((appearance) => ({
             id: appearance.id,
             videoId: appearance.videoId,
+            trackId: appearance.trackId,
+            personId: appearance.personId,
             startSec: appearance.startSec,
             endSec: appearance.endSec,
+            confidence: appearance.confidence,
+            identityConfidence: appearance.identityConfidence,
+            manualLocked: appearance.manualLocked,
             focusBounds: appearance.focusBounds,
+          }))
+          .sort((a, b) => a.id.localeCompare(b.id)),
+        speakerTracks: (source.speakerTracks || [])
+          .filter((track) => track.videoId === source.videoId)
+          .map((track) => ({
+            id: track.id,
+            videoId: track.videoId,
+            speakerId: track.speakerId,
+            personId: track.personId,
+            startSec: track.startSec,
+            endSec: track.endSec,
+            confidence: track.confidence,
+            linkConfidence: track.linkConfidence,
+            manualLocked: track.manualLocked,
           }))
           .sort((a, b) => a.id.localeCompare(b.id)),
       }))
@@ -268,21 +309,30 @@ function buildEvidence(
   const speakerIds = [...new Set(timedSpeakerTracks
     .map((track) => track.speakerId)
     .filter(Boolean))].sort();
+  const transcriptGranularity = subtitleSegments.length
+    ? subtitleSegments.every((segment) => segment.words?.length)
+      ? "word" as const
+      : "segment" as const
+    : undefined;
+  const alignedSegments = buildAlignedEvidenceSegments({
+    startUs: sourceInUs,
+    endUs: sourceOutUs,
+    eventSummary: source.shot.description,
+    transcriptGranularity,
+    subtitleSegments,
+    personAppearances,
+    speakerTracks: timedSpeakerTracks,
+  });
 
   const evidence: NonNullable<VideoClip["evidence"]> = {
     ...(source.shot.description ? { eventSummary: source.shot.description } : {}),
-    ...(subtitleSegments.length
-      ? {
-        transcriptGranularity: subtitleSegments.every((segment) => segment.words?.length)
-          ? "word"
-          : "segment",
-      }
-      : {}),
+    ...(transcriptGranularity ? { transcriptGranularity } : {}),
     ...(subtitleSegments.length ? { subtitleSegments } : {}),
     ...(personAppearances.length ? { personAppearances } : {}),
     ...(timedSpeakerTracks.length ? { speakerTracks: timedSpeakerTracks } : {}),
     ...(personIds.length ? { personIds } : {}),
     ...(speakerIds.length ? { speakerIds } : {}),
+    alignedSegments,
   };
   return Object.keys(evidence).length ? evidence : undefined;
 }

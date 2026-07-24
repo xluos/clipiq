@@ -893,6 +893,14 @@ export type TimedWordEvidence = {
   speakerId?: string;
 };
 
+export type VideoClipSubtitleEvidence = {
+  startUs: number;
+  endUs: number;
+  text: string;
+  speakerId?: string;
+  words?: TimedWordEvidence[];
+};
+
 export type VideoClipPersonEvidence = {
   appearanceId: string;
   trackId: string;
@@ -921,20 +929,34 @@ export type VideoClipSpeakerEvidence = {
   manualConfirmed?: boolean;
 };
 
+export type VideoClipEvidenceSegment = {
+  startUs: number;
+  endUs: number;
+  eventSummary?: string;
+  eventGranularity?: "shot";
+  subtitleText?: string;
+  transcriptGranularity?: "segment" | "word";
+  visiblePeople: Array<{
+    appearanceId: string;
+    trackId: string;
+    personId?: string;
+  }>;
+  activeSpeakers: Array<{
+    trackId: string;
+    speakerId: string;
+    personId?: string;
+  }>;
+};
+
 export type VideoClipEvidence = {
   eventSummary?: string;
   transcriptGranularity?: "segment" | "word";
-  subtitleSegments?: Array<{
-    startUs: number;
-    endUs: number;
-    text: string;
-    speakerId?: string;
-    words?: TimedWordEvidence[];
-  }>;
+  subtitleSegments?: VideoClipSubtitleEvidence[];
   personAppearances?: VideoClipPersonEvidence[];
   speakerTracks?: VideoClipSpeakerEvidence[];
   personIds?: string[];
   speakerIds?: string[];
+  alignedSegments?: VideoClipEvidenceSegment[];
 };
 
 export type VideoClip = {

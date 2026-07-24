@@ -284,6 +284,7 @@ export type EditTransition = {
 - `ShotContext` 已有镜头起止时间、字幕分段、内容描述和代表帧。
 - 已有结构化人物实体、出镜区间、说话人轨迹和跨素材身份聚类的数据契约、持久化与保守匹配策略。
 - 已接入 YuNet 检测/关键点、SFace 128 维特征、单素材连续跟踪和保守跨素材聚类；清晰正脸在最小固定正负样本中可复用同一 `personId`，不同人物未发生自动误合并。
+- Candidate Builder 已将 Shot 事件、字幕分段、人物出镜和说话人轨迹按全部起止边界合成为连续 `alignedSegments`；Planner 和 `EditPlan` 使用同一份时间片证据，验证见 [`aligned-material-evidence-validation.md`](./aligned-material-evidence-validation.md)。
 - 每个人物出镜区间同时保存归一化人脸焦点范围；`EditPlan` 在焦点可完整容纳时生成横竖屏裁切，多人跨度过大或焦点缺失时保持等比缩放留边。
 - 未知人数聚类采用避免误合并的保守参数，可能把同一人拆成多个匿名 speaker；当前不做跨素材声纹复用，也不自动把 speaker 等同于同屏人物。
 - 侧脸、遮挡、相似人物和跨设备样本还需扩大固定集，低质量人脸继续保持匿名。
@@ -326,6 +327,25 @@ type PersonAppearance = {
     height: number;
   };
   speakingConfidence?: number;
+};
+
+type VideoClipEvidenceSegment = {
+  startUs: number;
+  endUs: number;
+  eventSummary?: string;
+  eventGranularity?: "shot"; // 明确事件语义没有伪装成逐秒视觉分析
+  subtitleText?: string;
+  transcriptGranularity?: "segment" | "word";
+  visiblePeople: Array<{
+    appearanceId: string;
+    trackId: string;
+    personId?: string;       // 只保留可信或人工确认的跨素材身份
+  }>;
+  activeSpeakers: Array<{
+    trackId: string;
+    speakerId: string;
+    personId?: string;       // 只保留已有可靠关联，不由同时出镜猜测
+  }>;
 };
 ```
 
@@ -465,6 +485,7 @@ type PersonAppearance = {
 - [x] 新增 SFace 本地人脸特征与跨素材聚类，生成稳定 `personId`；最小正负样本验证和阈值记录见 `docs/person-identity-sface-validation.md`。
 - [x] 在素材库人物管理 UI 支持命名、合并、按出镜区间拆分，以及人工关联/取消关联说话人。
 - [x] Candidate Builder 可按人物、说话人、事件、对白和素材内时间范围检索真实 Shot。
+- [x] 将事件、字幕、出镜人物和说话人按微秒边界对齐为连续素材时间片，写入 Planner 输入和 `EditPlan`；镜头裁切后同步重建并校验完整覆盖。
 
 验收：
 
@@ -634,7 +655,7 @@ export-package/
 - [ ] 贴纸和花字模板。
 - [ ] 多版本粗剪对比。
 - [ ] FCPXML 或 DaVinci 导出。
-- [x] 将词级字幕（存在时）、人物出镜区间和说话人区间完整传入候选并写入 `EditPlan`。
+- [x] 将词级字幕（存在时）、人物出镜区间和说话人区间完整传入候选，并以连续对齐时间片写入 `EditPlan`。
 - [x] 为每次 Planner 输入生成并持久化分析证据质量报告，缺失能力不伪装为可用。
 - [x] Studio 显示语义覆盖、字幕粒度、人物一致性和说话人分离状态。
 

@@ -246,6 +246,61 @@ describe("Vlog Candidate Builder", () => {
       sourceTimeRanges: [{ videoId: "video-1", startUs: 2, endUs: 1 }],
     })).toThrow("候选素材时间范围无效");
   });
+
+  it("跨素材同一可信人物在时间片中复用稳定 personId", () => {
+    const result = buildVlogCandidates([
+      shot({}),
+      shot({
+        id: "shot-video-2",
+        videoId: "video-2",
+        assetProjectId: "video-2",
+        startSec: 5,
+        endSec: 9,
+      }),
+    ], [
+      video({}),
+      video({ id: "video-2", localPath: "/videos/camping-2.mp4" }),
+    ], [
+      {
+        id: "appearance-video-1",
+        personId: "person-a",
+        videoId: "video-1",
+        trackId: "track-video-1",
+        startSec: 0,
+        endSec: 4,
+        confidence: 0.95,
+        identityConfidence: 0.92,
+        source: "face_track",
+      },
+      {
+        id: "appearance-video-2",
+        personId: "person-a",
+        videoId: "video-2",
+        trackId: "track-video-2",
+        startSec: 5,
+        endSec: 9,
+        confidence: 0.94,
+        identityConfidence: 0.9,
+        source: "face_track",
+      },
+    ], [], {
+      minimumIdentityConfidence: 0.8,
+    });
+
+    expect(result.candidates).toHaveLength(2);
+    expect(result.candidates.map((candidate) => candidate.personIds)).toEqual([
+      ["person-a"],
+      ["person-a"],
+    ]);
+    expect(result.candidates.map((candidate) => [...new Set(
+      candidate.alignedSegments.flatMap((segment) =>
+        segment.visiblePeople.map((person) => person.personId)),
+    )]))
+      .toEqual([["person-a"], ["person-a"]]);
+    expect(result.candidates.map((candidate) =>
+      candidate.alignedSegments[0].visiblePeople[0].trackId))
+      .toEqual(["track-video-1", "track-video-2"]);
+  });
 });
 
 describe("Vlog Planner 契约", () => {
@@ -279,6 +334,45 @@ describe("Vlog Planner 契约", () => {
       endUs: 1_800_000,
       confidence: 0.9,
     }],
+    alignedSegments: [{
+      startUs: 0,
+      endUs: 300_000,
+      eventSummary: "小林整理装备",
+      eventGranularity: "shot" as const,
+      visiblePeople: [{
+        appearanceId: "appearance-1",
+        trackId: "track-a",
+        personId: "person-a",
+      }],
+      activeSpeakers: [],
+    }, {
+      startUs: 300_000,
+      endUs: 1_800_000,
+      eventSummary: "小林整理装备",
+      eventGranularity: "shot" as const,
+      subtitleText: "先把装备整理好",
+      transcriptGranularity: "segment" as const,
+      visiblePeople: [{
+        appearanceId: "appearance-1",
+        trackId: "track-a",
+        personId: "person-a",
+      }],
+      activeSpeakers: [{
+        trackId: "speaker-track-1",
+        speakerId: "speaker-1",
+      }],
+    }, {
+      startUs: 1_800_000,
+      endUs: 4_000_000,
+      eventSummary: "小林整理装备",
+      eventGranularity: "shot" as const,
+      visiblePeople: [{
+        appearanceId: "appearance-1",
+        trackId: "track-a",
+        personId: "person-a",
+      }],
+      activeSpeakers: [],
+    }],
     personIds: ["person-a"],
     speakerIds: ["speaker-1"],
     usageTags: ["hook"],
@@ -305,6 +399,9 @@ describe("Vlog Planner 契约", () => {
     expect(prompt.userText).toContain("shotId=shot-1");
     expect(prompt.userText).toContain("people=person-a");
     expect(prompt.userText).toContain("[0.30-1.80] 先把装备整理好");
+    expect(prompt.userText).toContain(
+      "[0.30-1.80] event=小林整理装备@shot subtitle=先把装备整理好 visible=person-a speaking=speaker-1",
+    );
     expect(prompt.userText).not.toContain("/private/path.mp4");
     expect(prompt.systemText).toContain("严禁生成 startSec/endSec");
   });

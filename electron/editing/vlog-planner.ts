@@ -70,6 +70,31 @@ export type PlannerVoiceover = {
   text: string;
 };
 
+function alignedSegmentText(
+  candidate: VlogCandidate,
+): string {
+  return candidate.alignedSegments
+    .map((segment) => {
+      const visiblePeople = segment.visiblePeople
+        .map((person) => person.personId || `track:${person.trackId}`)
+        .join(",");
+      const activeSpeakers = segment.activeSpeakers
+        .map((speaker) =>
+          speaker.personId
+            ? `${speaker.speakerId}->${speaker.personId}`
+            : speaker.speakerId)
+        .join(",");
+      return [
+        `[${(segment.startUs / 1_000_000).toFixed(2)}-${(segment.endUs / 1_000_000).toFixed(2)}]`,
+        `event=${segment.eventSummary || "(无描述)"}${segment.eventGranularity === "shot" ? "@shot" : ""}`,
+        `subtitle=${segment.subtitleText || "(无字幕)"}`,
+        `visible=${visiblePeople || "unknown"}`,
+        `speaking=${activeSpeakers || "unknown"}`,
+      ].join(" ");
+    })
+    .join(" / ");
+}
+
 function candidateText(candidate: VlogCandidate): string {
   const subtitles = candidate.subtitleSegments
     .map((segment) =>
@@ -89,6 +114,7 @@ function candidateText(candidate: VlogCandidate): string {
       return `${track.speakerId}${linkedPerson}@${(track.startUs / 1_000_000).toFixed(2)}-${(track.endUs / 1_000_000).toFixed(2)}`;
     })
     .join(",");
+  const alignedTimeline = alignedSegmentText(candidate);
   return [
     `shotId=${candidate.shotId}`,
     `videoId=${candidate.videoId}`,
@@ -101,6 +127,7 @@ function candidateText(candidate: VlogCandidate): string {
     `speakers=${speakers || "unknown"}`,
     `event=${candidate.description || "(无描述)"}`,
     `subtitles=${subtitles || "(无字幕)"}`,
+    `alignedTimeline=${alignedTimeline}`,
   ].join(" | ");
 }
 
@@ -137,6 +164,7 @@ export function buildVlogPlannerPrompt(input: {
       "程序会把 shotId 编译为真实素材时间；你只负责叙事选择与排序。",
       "personId 只代表达到可信阈值或人工确认的跨素材身份；track: 前缀只在单素材内保持连续，不能当成同一人。",
       "speakerId 与 personId 是不同证据；没有显式关联时不得推断说话人就是出镜人物。",
+      "alignedTimeline 是程序按时间边界对齐后的证据；event@shot 表示事件只精确到 Shot，不得伪装为更细粒度语义。",
       "旁白只补充画面和对白没有表达的信息，不复述现有字幕；最多 3 段，每段不超过 80 个字符。",
       "旁白 afterShotId 必须引用已选择且不是最后一个的 shotId，旁白会从它的下一个镜头开始播放。",
       "只返回合法 JSON，不要 Markdown，不要解释。",

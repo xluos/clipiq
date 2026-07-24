@@ -178,6 +178,28 @@ describe("EditPlan 确定性编译", () => {
               ],
             }],
             transcriptGranularity: "word",
+            alignedSegments: expect.arrayContaining([
+              expect.objectContaining({
+                startUs: 200_000,
+                endUs: 1_400_000,
+                eventSummary: "人物整理露营装备",
+                eventGranularity: "shot",
+                subtitleText: "先把装备整理好",
+                visiblePeople: expect.arrayContaining([
+                  expect.objectContaining({
+                    trackId: "track-a",
+                    personId: "person-a",
+                  }),
+                  expect.objectContaining({
+                    trackId: "track-b",
+                  }),
+                ]),
+                activeSpeakers: [{
+                  trackId: "speaker-track-1",
+                  speakerId: "speaker-1",
+                }],
+              }),
+            ]),
           },
         },
         {
@@ -238,6 +260,50 @@ describe("EditPlan 确定性编译", () => {
       "UNKNOWN_SELECTION_SHOT",
       "DUPLICATE_SELECTION_SHOT",
     ]);
+  });
+
+  it("字幕、事件和人物证据变化会改变 Planner 输入摘要", () => {
+    const compile = (description: string, personId: string) => compileEditPlan([
+      { shotId: "shot-1", intent: "测试", confidence: 1 },
+    ], [{
+      shot: shot({
+        description,
+        subtitleSegments: [{
+          startSec: 0.2,
+          endSec: 1.2,
+          text: "准备出发",
+        }],
+      }),
+      videoId: "video-1",
+      sourcePath: "/videos/video-1.mp4",
+      appearances: [{
+        id: "appearance-1",
+        personId,
+        videoId: "video-1",
+        trackId: "track-1",
+        startSec: 0,
+        endSec: 4,
+        confidence: 1,
+        identityConfidence: 1,
+        source: "face_track" as const,
+      }],
+    }], {
+      planId: `plan-${personId}`,
+      sessionId: "session-1",
+      targetDurationUs: 4_000_000,
+      canvas: { width: 1920, height: 1080, fps: 30 },
+      goal: "测试",
+      generatedAt: 1000,
+      minimumIdentityConfidence: 0.8,
+    });
+
+    const first = compile("人物整理露营装备", "person-a");
+    const changedEvent = compile("人物背起装备出发", "person-a");
+    const changedPerson = compile("人物整理露营装备", "person-b");
+    expect(first.provenance.plannerInputDigest)
+      .not.toBe(changedEvent.provenance.plannerInputDigest);
+    expect(first.provenance.plannerInputDigest)
+      .not.toBe(changedPerson.provenance.plannerInputDigest);
   });
 
   it("把 Planner 旁白锚定到后续真实镜头，并保留待合成降级状态", () => {
@@ -348,6 +414,7 @@ describe("EditPlan 硬校验", () => {
     expect(result.valid).toBe(false);
     expect(result.errors.map((issue) => issue.code)).toEqual(expect.arrayContaining([
       "SOURCE_OUTSIDE_SHOT",
+      "ALIGNED_EVIDENCE_INCOMPLETE",
       "VIDEO_TRACK_OVERLAP",
       "ACTUAL_DURATION_MISMATCH",
     ]));

@@ -5,9 +5,12 @@ import type {
   SpeakerTrack,
   TimedWordEvidence,
   Video,
+  VideoClipEvidenceSegment,
   VideoClipPersonEvidence,
   VideoClipSpeakerEvidence,
+  VideoClipSubtitleEvidence,
 } from "../../src/types";
+import { buildAlignedEvidenceSegments } from "./aligned-evidence";
 import { hasUsableWordTimings } from "./transcript-evidence";
 
 export type VlogCandidate = {
@@ -18,16 +21,11 @@ export type VlogCandidate = {
   endUs: number;
   durationUs: number;
   description: string;
-  subtitleSegments: Array<{
-    startUs: number;
-    endUs: number;
-    text: string;
-    speakerId?: string;
-    words?: TimedWordEvidence[];
-  }>;
+  subtitleSegments: VideoClipSubtitleEvidence[];
   transcriptGranularity?: "segment" | "word";
   personAppearances: VideoClipPersonEvidence[];
   speakerTracks: VideoClipSpeakerEvidence[];
+  alignedSegments: VideoClipEvidenceSegment[];
   personIds: string[];
   speakerIds: string[];
   usageTags: string[];
@@ -410,6 +408,20 @@ export function buildVlogCandidates(
       .filter((personId): personId is string => Boolean(personId));
     const speakers = timedSpeakerTracks.map((track) => track.speakerId);
     const { score, signals } = scoreShot(shot, durationUs, subtitles.length);
+    const transcriptGranularity = subtitles.length
+      ? subtitles.every((segment) => segment.words?.length)
+        ? "word" as const
+        : "segment" as const
+      : undefined;
+    const alignedSegments = buildAlignedEvidenceSegments({
+      startUs,
+      endUs,
+      eventSummary: String(shot.description || "").trim(),
+      transcriptGranularity,
+      subtitleSegments: subtitles,
+      personAppearances,
+      speakerTracks: timedSpeakerTracks,
+    });
     const candidate: VlogCandidate = {
       shotId: shot.id,
       videoId,
@@ -419,15 +431,10 @@ export function buildVlogCandidates(
       durationUs,
       description: String(shot.description || "").trim(),
       subtitleSegments: subtitles,
-      ...(subtitles.length
-        ? {
-          transcriptGranularity: subtitles.every((segment) => segment.words?.length)
-            ? "word" as const
-            : "segment" as const,
-        }
-        : {}),
+      ...(transcriptGranularity ? { transcriptGranularity } : {}),
       personAppearances,
       speakerTracks: timedSpeakerTracks,
+      alignedSegments,
       personIds: [...new Set(trustedPeople)].sort(),
       speakerIds: [...new Set(speakers)].sort(),
       usageTags: [...new Set(shot.usageTags || [])].sort(),

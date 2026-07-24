@@ -130,6 +130,96 @@ function validateClip(
       add(target, "error", "SUBTITLE_OUTSIDE_CLIP", "字幕证据超出了片段来源范围。", segmentPath);
     }
   }
+  const alignedSegments = clip.evidence?.alignedSegments;
+  if (alignedSegments) {
+    const appearanceById = new Map(
+      (clip.evidence?.personAppearances || []).map((appearance) => [
+        appearance.appearanceId,
+        appearance,
+      ]),
+    );
+    const speakerTrackById = new Map(
+      (clip.evidence?.speakerTracks || []).map((track) => [track.trackId, track]),
+    );
+    let expectedStartUs = clip.sourceInUs;
+    for (const [index, segment] of alignedSegments.entries()) {
+      const segmentPath = `${path}.evidence.alignedSegments[${index}]`;
+      if (!validateTimeRange(target, segment.startUs, segment.endUs, segmentPath)) continue;
+      if (
+        rangeValid
+        && (segment.startUs < clip.sourceInUs || segment.endUs > clip.sourceOutUs)
+      ) {
+        add(target, "error", "ALIGNED_EVIDENCE_OUTSIDE_CLIP", "对齐证据超出了片段来源范围。", segmentPath);
+      }
+      if (segment.startUs !== expectedStartUs) {
+        add(
+          target,
+          "error",
+          segment.startUs < expectedStartUs
+            ? "ALIGNED_EVIDENCE_OVERLAP"
+            : "ALIGNED_EVIDENCE_GAP",
+          segment.startUs < expectedStartUs
+            ? "相邻对齐证据存在重叠。"
+            : "相邻对齐证据存在空白。",
+          segmentPath,
+          { expectedStartUs, actualStartUs: segment.startUs },
+        );
+      }
+      expectedStartUs = segment.endUs;
+      for (const [personIndex, person] of segment.visiblePeople.entries()) {
+        const personPath = `${segmentPath}.visiblePeople[${personIndex}]`;
+        const appearance = appearanceById.get(person.appearanceId);
+        if (!appearance || appearance.trackId !== person.trackId) {
+          add(
+            target,
+            "error",
+            "ALIGNED_PERSON_REFERENCE_INVALID",
+            "对齐证据引用了不存在或不匹配的人物出镜记录。",
+            personPath,
+          );
+        } else if (person.personId && appearance.personId !== person.personId) {
+          add(
+            target,
+            "error",
+            "ALIGNED_PERSON_ID_MISMATCH",
+            "对齐证据中的人物身份与出镜记录不一致。",
+            personPath,
+          );
+        }
+      }
+      for (const [speakerIndex, speaker] of segment.activeSpeakers.entries()) {
+        const speakerPath = `${segmentPath}.activeSpeakers[${speakerIndex}]`;
+        const track = speakerTrackById.get(speaker.trackId);
+        if (!track || track.speakerId !== speaker.speakerId) {
+          add(
+            target,
+            "error",
+            "ALIGNED_SPEAKER_REFERENCE_INVALID",
+            "对齐证据引用了不存在或不匹配的说话人轨迹。",
+            speakerPath,
+          );
+        } else if (speaker.personId && track.personId !== speaker.personId) {
+          add(
+            target,
+            "error",
+            "ALIGNED_SPEAKER_PERSON_MISMATCH",
+            "对齐证据中的说话人物身份与说话人轨迹不一致。",
+            speakerPath,
+          );
+        }
+      }
+    }
+    if (alignedSegments.length === 0 || expectedStartUs !== clip.sourceOutUs) {
+      add(
+        target,
+        "error",
+        "ALIGNED_EVIDENCE_INCOMPLETE",
+        "对齐证据必须连续覆盖整个片段来源范围。",
+        `${path}.evidence.alignedSegments`,
+        { expectedEndUs: clip.sourceOutUs, actualEndUs: expectedStartUs },
+      );
+    }
+  }
 
   if (!rangeValid || !(Number.isFinite(clip.speed) && clip.speed > 0)) return 0;
   return Math.round((clip.sourceOutUs - clip.sourceInUs) / clip.speed);
