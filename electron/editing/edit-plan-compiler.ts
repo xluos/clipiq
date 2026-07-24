@@ -114,6 +114,7 @@ function buildEvidence(
           text: String(word.text || "").trim(),
           startUs: secondsToUs(word.startSec),
           endUs: secondsToUs(word.endSec),
+          ...(word.speakerId ? { speakerId: word.speakerId } : {}),
           ...(Number.isFinite(word.confidence)
             ? { confidence: Number(word.confidence) }
             : {}),
@@ -123,6 +124,7 @@ function buildEvidence(
           startUs: number;
           endUs: number;
           confidence?: number;
+          speakerId?: string;
         } =>
           word.startUs != null
           && word.endUs != null
@@ -142,6 +144,7 @@ function buildEvidence(
         startUs: number;
         endUs: number;
         confidence?: number;
+        speakerId?: string;
       }>;
     } =>
       segment.startUs != null
@@ -170,6 +173,7 @@ function buildEvidence(
               text: word.text,
               startUs: word.startUs,
               endUs: word.endUs,
+              ...(word.speakerId ? { speakerId: word.speakerId } : {}),
               ...(Number.isFinite(word.confidence)
                 ? { confidence: Number(word.confidence) }
                 : {}),
@@ -392,6 +396,7 @@ export function compileEditPlan(
               + Math.round((word.startUs - clip.sourceInUs) / clip.speed),
             endUs: clip.timelineInUs
               + Math.round((word.endUs - clip.sourceInUs) / clip.speed),
+            ...(word.speakerId ? { speakerId: word.speakerId } : {}),
             ...(Number.isFinite(word.confidence)
               ? { confidence: Number(word.confidence) }
               : {}),

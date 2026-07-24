@@ -99,6 +99,12 @@ const {
   YuNetFaceAnalysisProvider,
 } = require("./identity/yunet-provider");
 const {
+  createSherpaDiarizationProvider,
+} = require("./identity/sherpa-diarization-provider");
+const {
+  runSpeakerDiarization,
+} = require("./identity/speaker-diarization-pipeline");
+const {
   normalizeTranscriptSegments,
 } = require("./transcribe/transcript-normalizer.cjs");
 const ElectronStore = require("electron-store");
@@ -122,6 +128,7 @@ const DEFAULT_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
 // 每个阶段一份 prompt/输入格式 VERSION 常量, 改 prompt 时手动 bump → 旧 cache 自动失效。
 const CACHE_VERSIONS = {
   transcript: "v2",
+  speakerDiarization: "v1",
   prefilter: "v1",
   shotMerger: "v1",
   summarizer: "v1",
@@ -3346,7 +3353,7 @@ async function extractFrame(ffmpeg, inputPath, outputPath, second, width = 420, 
   ], {}, handle);
 }
 
-async function resolveDaemonVisionModelPath(modelId, displayName, onProgress) {
+async function resolveDaemonModelPaths(modelId, displayName, onProgress) {
   const daemonClient = require("./daemon-client.cjs");
   const status = await daemonClient.getModelStatus(modelId);
   if (!status) throw new Error(`ai-model-daemon 未提供 ${displayName} 模型`);
@@ -3357,11 +3364,20 @@ async function resolveDaemonVisionModelPath(modelId, displayName, onProgress) {
     });
   }
   const paths = await daemonClient.getModelPaths(modelId);
-  const modelPath = paths?.default || Object.values(paths || {})[0];
-  if (!modelPath || !fsSync.existsSync(modelPath)) {
+  const modelPaths = Object.fromEntries(
+    Object.entries(paths || {}).filter(([, modelPath]) => (
+      typeof modelPath === "string" && fsSync.existsSync(modelPath)
+    )),
+  );
+  if (Object.keys(modelPaths).length === 0) {
     throw new Error(`${displayName} 模型下载完成后仍未找到模型文件`);
   }
-  return modelPath;
+  return modelPaths;
+}
+
+async function resolveDaemonVisionModelPath(modelId, displayName, onProgress) {
+  const paths = await resolveDaemonModelPaths(modelId, displayName, onProgress);
+  return paths.default || Object.values(paths)[0];
 }
 
 async function runLocalPersonAppearanceAnalysis({
@@ -3565,6 +3581,7 @@ function transcriptSegmentForReport(segment) {
           text,
           start,
           end,
+          ...(word?.speakerId ? { speakerId: String(word.speakerId) } : {}),
           ...(Number.isFinite(Number(word?.confidence))
             ? { confidence: Number(word.confidence) }
             : {}),
@@ -5494,6 +5511,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     "挑选关键画面": 3, "抽取关键画面": 3, "画面去重": 3,
     "本地推理预检": 3, "本地初筛": 3, "本地初筛失败": 3, "精挑画面": 3,
     "提取音轨": 4, "字幕识别": 4, "字幕识别完成": 4, "字幕识别失败": 4, "字幕识别跳过": 4,
+    "说话人识别": 4, "说话人识别完成": 4, "说话人识别不可用": 4,
     "镜头合并": 5, "镜头缩略图": 5, "镜头缩略图就绪": 5, "镜头合并完成": 5, "镜头合并失败": 5,
     "全局聚合": 6, "全局聚合完成": 6, "全局聚合跳过": 6, "全局聚合失败": 6,
     "准备分析素材": 6, "识别视频类型": 6, "识别视频类型完成": 6, "类型识别跳过": 6, "类型识别完成": 6,
@@ -5848,6 +5866,9 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       "分析失败": "模型分析画面",
       "镜头缩略图": "镜头合并",
       "镜头缩略图就绪": "镜头合并",
+      "说话人识别": "字幕识别",
+      "说话人识别完成": "字幕识别",
+      "说话人识别不可用": "字幕识别",
       "类型识别跳过": "识别视频类型",
       "类型识别完成": "识别视频类型",
       "弹幕分析完成": "弹幕情绪聚合",
@@ -6030,6 +6051,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     let transcript = null;
     let transcriptError = null;
     const transcriptPath = path.join(artifactDir, "transcript.json");
+    const wavPath = path.join(artifactDir, "audio.wav");
     const savedTranscript = await readJson(transcriptPath, null).catch(() => null);
     if (savedTranscript?.schemaVersion === "v2" && savedTranscript?.segments?.length > 0) {
       transcript = savedTranscript;
@@ -6059,7 +6081,6 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     if (audioReady) {
       try {
         send(pct("提取音轨", 0), "提取音轨", "从视频里分离出音频,准备识别字幕。");
-        const wavPath = path.join(artifactDir, "audio.wav");
         await extractAudioWav(ffmpeg, inputPath, wavPath, handle);
         send(pct("字幕识别", 0), "字幕识别", `${audioProvider.name} 准备就绪`);
         handle.attachStageMeta({
@@ -6106,6 +6127,125 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       }
     }
 
+    let speakerAnalysis = null;
+    if (inspected.hasAudio) {
+      try {
+        ensureNotCancelled(handle);
+        if (!fsSync.existsSync(wavPath)) {
+          send(pct("说话人识别", 0), "提取音轨", "正在准备说话人识别音频。");
+          await extractAudioWav(ffmpeg, inputPath, wavPath, handle);
+        }
+        send(pct("说话人识别", 0.1), "说话人识别", "正在准备离线说话人模型。");
+        const modelPaths = await resolveDaemonModelPaths(
+          "speaker-diarization",
+          "Sherpa 说话人识别",
+          (progress) => {
+            const percent = Number(progress?.percent);
+            const progressText = Number.isFinite(percent)
+              ? ` · ${Math.round(percent)}%`
+              : "";
+            send(
+              pct("说话人识别", 0.1),
+              "说话人识别",
+              `正在下载离线说话人模型${progressText}`,
+            );
+          },
+        );
+        const segmentationModelPath = modelPaths.segmentation;
+        const embeddingModelPath = modelPaths.embedding;
+        if (!segmentationModelPath || !embeddingModelPath) {
+          throw new Error("说话人模型文件角色不完整");
+        }
+        const provider = createSherpaDiarizationProvider({
+          segmentationModelPath,
+          embeddingModelPath,
+          // 未知人数时优先避免把不同人误合并；可能保守拆成更多匿名 speaker。
+          threshold: 0.8,
+          numClusters: -1,
+          minDurationOn: 0.3,
+          minDurationOff: 0.5,
+        });
+        let diarizationCacheKey = null;
+        try {
+          const audioSha = await cacheStore.sha256File(wavPath);
+          diarizationCacheKey = cacheStore.makeKey({
+            sha: audioSha,
+            provider: provider.descriptor.id,
+            providerVersion: provider.descriptor.version,
+            threshold: 0.8,
+            minDurationOn: 0.3,
+            minDurationOff: 0.5,
+            version: CACHE_VERSIONS.speakerDiarization,
+          });
+        } catch {
+          // 音频摘要失败时仍可直接识别。
+        }
+        const cachedProvider = {
+          descriptor: provider.descriptor,
+          getReadiness: () => provider.getReadiness(),
+          diarize: (audioPath, runOptions) => runWithCache(
+            "speaker-diarization",
+            diarizationCacheKey,
+            () => provider.diarize(audioPath, runOptions),
+            { model: "pyannote-3.0-int8+3dspeaker-eres2net", threshold: 0.8 },
+          ),
+        };
+        send(pct("说话人识别", 0.3), "说话人识别", "正在区分音频中的不同说话人。");
+        speakerAnalysis = await runSpeakerDiarization({
+          videoId: project.id,
+          wavPath,
+          transcript,
+          provider: cachedProvider,
+          repository: getIdentityRepository(),
+          usePolicy: {
+            environment: app.isPackaged ? "production" : "development",
+          },
+          signal: handle.abortController?.signal,
+        });
+        if (speakerAnalysis.status === "completed") {
+          transcript = speakerAnalysis.transcript || transcript;
+          if (transcript) await writeJson(transcriptPath, transcript);
+          const tracks = getIdentityRepository().listSpeakerTracks(project.id);
+          await writeJson(path.join(artifactDir, "speaker-diarization.json"), {
+            schemaVersion: "v1",
+            provider: provider.descriptor,
+            speakerCount: speakerAnalysis.speakerCount,
+            tracks,
+          });
+          send(
+            pct("说话人识别完成", 1),
+            "说话人识别完成",
+            `${speakerAnalysis.speakerCount} 个匿名说话人 · ${speakerAnalysis.trackCount} 段说话区间`,
+          );
+        } else {
+          send(
+            pct("说话人识别不可用", 1),
+            "说话人识别不可用",
+            speakerAnalysis.reason || "本次未生成说话人证据",
+          );
+        }
+      } catch (error) {
+        if (error instanceof AnalysisCancelledError || error?.name === "AbortError") {
+          throw new AnalysisCancelledError();
+        }
+        const reason = error?.message || String(error);
+        speakerAnalysis = {
+          status: "unavailable",
+          videoId: project.id,
+          speakerCount: 0,
+          trackCount: 0,
+          transcript,
+          reason,
+        };
+        send(
+          pct("说话人识别不可用", 1),
+          "说话人识别不可用",
+          `${reason}（不影响字幕与画面分析）`,
+        );
+        log.warn("identity:speaker", `[analysis:${analysisId}] 说话人识别降级: ${reason}`);
+      }
+    }
+
     const fallbackNodes = frames.map((frame) =>
       localNodeForSegment(
         frame,
@@ -6121,7 +6261,20 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           textPreview: transcript.text.slice(0, 240),
         }
       : null;
-    const fallbackReport = buildLocalReport(projectMeta, fallbackNodes, provider, audioProvider, transcriptSummary, options);
+    const fallbackReport = {
+      ...buildLocalReport(projectMeta, fallbackNodes, provider, audioProvider, transcriptSummary, options),
+      ...(speakerAnalysis
+        ? {
+          speakerAnalysis: {
+            status: speakerAnalysis.status,
+            videoId: speakerAnalysis.videoId,
+            speakerCount: speakerAnalysis.speakerCount,
+            trackCount: speakerAnalysis.trackCount,
+            reason: speakerAnalysis.reason,
+          },
+        }
+        : {}),
+    };
 
     // 金字塔管线 (PR2): 镜头合并 + 全局聚合, 输出 shotContexts/globalSummary 给主分析。
     // medium_text 不可用时整段跳过, 走 detectGenreLightweight 兜底; 失败一律降级不阻断。

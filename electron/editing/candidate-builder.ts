@@ -84,6 +84,7 @@ function transcriptSegments(
           text: String(word.text || "").trim(),
           startUs: secondsToUs(word.startSec),
           endUs: secondsToUs(word.endSec),
+          ...(word.speakerId ? { speakerId: word.speakerId } : {}),
           ...(Number.isFinite(word.confidence)
             ? { confidence: Number(word.confidence) }
             : {}),
@@ -127,6 +128,7 @@ function transcriptSegments(
               text: word.text,
               startUs: word.startUs,
               endUs: word.endUs,
+              ...(word.speakerId ? { speakerId: word.speakerId } : {}),
               ...(Number.isFinite(word.confidence)
                 ? { confidence: Number(word.confidence) }
                 : {}),

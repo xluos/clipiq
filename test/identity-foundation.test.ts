@@ -203,6 +203,36 @@ describe("人物身份 repository", () => {
     ]);
   });
 
+  it("只重跑说话人分析时不删除独立的人物出镜证据", () => {
+    const repository = createIdentityRepository(createDatabase());
+    repository.replaceEvidenceForVideo("video-1", {
+      appearances: [{
+        id: "appearance-1",
+        videoId: "video-1",
+        trackId: "track-1",
+        startSec: 0,
+        endSec: 2,
+        confidence: 0.9,
+        source: "face_track",
+      }],
+    });
+
+    repository.replaceEvidenceForVideo("video-1", {
+      speakerTracks: [{
+        id: "speaker-track-1",
+        videoId: "video-1",
+        speakerId: "speaker-1",
+        startSec: 0,
+        endSec: 2,
+        confidence: 0.5,
+      }],
+    });
+
+    expect(repository.listAppearances("video-1")).toEqual([
+      expect.objectContaining({ id: "appearance-1" }),
+    ]);
+  });
+
   it("自动人物与 embedding 质量在同一事务中落库", () => {
     const repository = createIdentityRepository(createDatabase());
     repository.replaceEvidenceForVideo("video-1", {

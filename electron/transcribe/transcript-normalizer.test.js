@@ -34,4 +34,32 @@ describe("transcript normalizer", () => {
       { start: 1, end: 2, text: "有效" },
     ])).toEqual([{ start: 1, end: 2, text: "有效" }]);
   });
+
+  it("保留说话人到字幕段和词级证据", () => {
+    expect(normalizeTranscriptSegments([{
+      start: 0,
+      end: 1,
+      text: "你好",
+      speakerId: "speaker-1",
+      words: [{
+        text: "你好",
+        start: 0,
+        end: 0.8,
+        confidence: 0.95,
+        speakerId: "speaker-1",
+      }],
+    }])).toEqual([{
+      start: 0,
+      end: 1,
+      text: "你好",
+      speakerId: "speaker-1",
+      words: [{
+        text: "你好",
+        start: 0,
+        end: 0.8,
+        confidence: 0.95,
+        speakerId: "speaker-1",
+      }],
+    }]);
+  });
 });

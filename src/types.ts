@@ -410,7 +410,7 @@ export type AnalysisNode = {
     end: number;
     text: string;
     speakerId?: string;
-    words?: Array<{ text: string; start: number; end: number; confidence?: number }>;
+    words?: Array<{ text: string; start: number; end: number; confidence?: number; speakerId?: string }>;
   }>; // 落在该镜头区间内的字幕段
   audienceReaction?: AudienceReaction;     // B 站弹幕情绪聚合(可选; 仅 platform=bilibili 项目产出)
 };
@@ -428,7 +428,7 @@ export type ShotContext = {
     end: number;
     text: string;
     speakerId?: string;
-    words?: Array<{ text: string; start: number; end: number; confidence?: number }>;
+    words?: Array<{ text: string; start: number; end: number; confidence?: number; speakerId?: string }>;
   }>; // 落在该镜头区间的字幕段, 保留分段
   subtitleText?: string;            // 该镜头时间段内的拼接字幕 (向后兼容老 report)
   framesInShot?: number;            // 兼容字段: 旧 report 只存了帧数; 新 report 用 frames.length
@@ -493,6 +493,13 @@ export type AnalysisReport = {
     sampledFrameCount: number;
     sampleIntervalSec: number;
     downsampled: boolean;
+    reason?: string;
+  };
+  speakerAnalysis?: {
+    status: "completed" | "unavailable";
+    videoId: string;
+    speakerCount: number;
+    trackCount: number;
     reason?: string;
   };
   pipelineVersion?: string;
@@ -729,6 +736,7 @@ export type ShotTranscriptSegment = {
     startSec: number;
     endSec: number;
     confidence?: number;
+    speakerId?: string;
   }>;
 };
 
@@ -876,6 +884,7 @@ export type TimedWordEvidence = {
   startUs: number;
   endUs: number;
   confidence?: number;
+  speakerId?: string;
 };
 
 export type VideoClipPersonEvidence = {
@@ -947,6 +956,7 @@ export type CaptionCue = {
     startUs: number;
     endUs: number;
     confidence?: number;
+    speakerId?: string;
   }>;
 };
 

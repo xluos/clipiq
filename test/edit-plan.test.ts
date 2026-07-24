@@ -46,9 +46,10 @@ describe("EditPlan 确定性编译", () => {
             startSec: 0.2,
             endSec: 1.4,
             text: "先把装备整理好",
+            speakerId: "speaker-1",
             words: [
-              { text: "先把", startSec: 0.2, endSec: 0.6 },
-              { text: "装备整理好", startSec: 0.6, endSec: 1.4 },
+              { text: "先把", startSec: 0.2, endSec: 0.6, speakerId: "speaker-1" },
+              { text: "装备整理好", startSec: 0.6, endSec: 1.4, speakerId: "speaker-1" },
             ],
           }],
           transcriptGranularity: "word",
@@ -155,9 +156,10 @@ describe("EditPlan 确定性编译", () => {
               startUs: 200_000,
               endUs: 1_400_000,
               text: "先把装备整理好",
+              speakerId: "speaker-1",
               words: [
-                { text: "先把", startUs: 200_000, endUs: 600_000 },
-                { text: "装备整理好", startUs: 600_000, endUs: 1_400_000 },
+                { text: "先把", startUs: 200_000, endUs: 600_000, speakerId: "speaker-1" },
+                { text: "装备整理好", startUs: 600_000, endUs: 1_400_000, speakerId: "speaker-1" },
               ],
             }],
             transcriptGranularity: "word",
@@ -189,8 +191,8 @@ describe("EditPlan 确定性编译", () => {
       kind: "caption",
       items: [{
         wordTimings: [
-          { text: "先把", startUs: 200_000, endUs: 600_000 },
-          { text: "装备整理好", startUs: 600_000, endUs: 1_400_000 },
+          { text: "先把", startUs: 200_000, endUs: 600_000, speakerId: "speaker-1" },
+          { text: "装备整理好", startUs: 600_000, endUs: 1_400_000, speakerId: "speaker-1" },
         ],
       }],
     });

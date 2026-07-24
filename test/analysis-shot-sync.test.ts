@@ -78,8 +78,8 @@ describe("完整分析结果 → Shot", () => {
           text: "我们先把帐篷铺开",
           speakerId: "speaker-1",
           words: [
-            { text: "我们先", start: 0.25, end: 0.9, confidence: 0.97 },
-            { text: "把帐篷铺开", start: 0.9, end: 2.2 },
+            { text: "我们先", start: 0.25, end: 0.9, confidence: 0.97, speakerId: "speaker-1" },
+            { text: "把帐篷铺开", start: 0.9, end: 2.2, speakerId: "speaker-1" },
           ],
         }],
         subtitleText: "我们先把帐篷铺开",
@@ -141,8 +141,8 @@ describe("完整分析结果 → Shot", () => {
         text: "我们先把帐篷铺开",
         speakerId: "speaker-1",
         words: [
-          { text: "我们先", startSec: 0.25, endSec: 0.9, confidence: 0.97 },
-          { text: "把帐篷铺开", startSec: 0.9, endSec: 2.2 },
+          { text: "我们先", startSec: 0.25, endSec: 0.9, confidence: 0.97, speakerId: "speaker-1" },
+          { text: "把帐篷铺开", startSec: 0.9, endSec: 2.2, speakerId: "speaker-1" },
         ],
       }],
       transcriptGranularity: "word",

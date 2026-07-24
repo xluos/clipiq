@@ -1,6 +1,6 @@
 # ClipIQ AI Vlog 粗剪迭代计划
 
-> 状态：实施中（M0-1、M0-2、M1、M2、M3、M5 已完成；M0-3 已接入本地检测与跨素材身份，说话人分离待完成；M4 待安装剪映实测）
+> 状态：实施中（M0-1、M0-2、M1、M2、M3、M5 已完成；M0-3 已接入人物身份与独立说话人时间轴，人物管理 UI 待完成；M4 待安装剪映实测）
 > 适用分支基线：`feature/v2`  
 > 建议实施分支：`feature/ai-vlog-rough-cut`  
 > 更新日期：2026-07-24
@@ -272,11 +272,12 @@ export type EditTransition = {
 
 - Whisper 已返回分段级 `start / end / text`，可以回答某个时间范围内有哪些字幕。
 - 本地 whisper.cpp 的 `verbose_json` 已能返回词级候选；ClipIQ 保留有效词时间和置信度，并以文本覆盖率校验。中文词元损坏或覆盖不足时仍降级为分段级，不宣称逐字帧精确。
-- 当前没有说话人分离；`speakerId` 仍需独立 diarization 后端。
+- Sherpa-ONNX 已接入独立离线说话人分离，产出视频内匿名 `speakerId` 和精确说话区间；字幕段与词级证据在主导说话人足够明确时写入 `speakerId`。
 - `ShotContext` 已有镜头起止时间、字幕分段、内容描述和代表帧。
 - 已有结构化人物实体、出镜区间、说话人轨迹和跨素材身份聚类的数据契约、持久化与保守匹配策略。
 - 已接入 YuNet 检测/关键点、SFace 128 维特征、单素材连续跟踪和保守跨素材聚类；清晰正脸在最小固定正负样本中可复用同一 `personId`，不同人物未发生自动误合并。
-- 当前仍没有通用多人说话人分离；侧脸、遮挡、相似人物和跨设备样本还需扩大固定集，低质量人脸继续保持匿名。
+- 未知人数聚类采用避免误合并的保守参数，可能把同一人拆成多个匿名 speaker；当前不做跨素材声纹复用，也不自动把 speaker 等同于同屏人物。
+- 侧脸、遮挡、相似人物和跨设备样本还需扩大固定集，低质量人脸继续保持匿名。
 
 写入 `shots` 的剪辑证据至少包含：
 
@@ -290,6 +291,7 @@ type ShotTranscriptSegment = {
     text: string;
     startSec: number;
     endSec: number;
+    speakerId?: string;
   }>;
 };
 
@@ -438,7 +440,7 @@ type PersonAppearance = {
 - [x] 验证当前 Whisper 后端的词级时间戳能力；不支持时保留 segment 级精度并显式标记。
 - [x] 评估现有 Whisper 的说话人分离能力，确认当前不能产出通用多人 `speakerId`。
 - [x] 保留 whisper.cpp 词级候选时间和置信度；文本覆盖不足的分段自动降级。
-- [ ] 接入独立本地说话人分离后端，产出 `speakerId`，不与人物 ID 强绑定。
+- [x] 接入 Sherpa-ONNX 独立本地说话人分离后端，产出视频内 `speakerId` 与字幕段/词级归属，不与人物 ID 强绑定；验证见 `docs/speaker-diarization-validation.md`。
 - [x] 建立 `people / person_appearances / speaker_tracks / person_identity_events / person_identity_constraints` 本地数据层。
 - [x] 建立保守的跨素材人物原型匹配策略；阈值由具体模型和固定测试集标定。
 - [x] 建立可插拔人脸分析 Provider 契约和生产模型许可门禁。
@@ -454,6 +456,7 @@ type PersonAppearance = {
 - 同一素材中，同一人物跨多个相邻镜头保持一致 `trackId`。
 - 固定测试素材中，同一人物跨视频可归到同一 `personId`；不同人物不发生错误自动合并。
 - 多人同框、背影、遮挡和画外音可以保持未知，不因缺证据被强行关联。
+- 任一说话人轨迹都能回到 `videoId / speakerId / startSec / endSec`；混合说话或主导证据不足的字幕段不强填 `speakerId`。
 - 任一人物出现记录都能回到 `videoId / shotId / startSec / endSec` 和代表图。
 - Planner 输入只使用达到置信度阈值或经人工确认的人物身份。
 

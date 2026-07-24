@@ -30,8 +30,11 @@ function normalizeTranscriptSegments(rawSegments, normalizeText = (value) =>
             text: wordText,
             start: wordStart,
             end: wordEnd,
+            ...(word?.speakerId ? { speakerId: String(word.speakerId) } : {}),
             ...(Number.isFinite(Number(word?.probability))
               ? { confidence: Number(word.probability) }
+              : Number.isFinite(Number(word?.confidence))
+                ? { confidence: Number(word.confidence) }
               : {}),
           };
         })
@@ -40,6 +43,7 @@ function normalizeTranscriptSegments(rawSegments, normalizeText = (value) =>
         start,
         end,
         text,
+        ...(segment?.speakerId ? { speakerId: String(segment.speakerId) } : {}),
         ...(words.length ? { words } : {}),
       };
     })

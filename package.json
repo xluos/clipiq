@@ -66,7 +66,8 @@
     "asarUnpack": [
       "node_modules/@ffmpeg-installer/**",
       "node_modules/ffprobe-static/**",
-      "node_modules/onnxruntime-node/bin/**"
+      "node_modules/onnxruntime-node/bin/**",
+      "node_modules/sherpa-onnx/**"
     ],
     "mac": {
       "category": "public.app-category.video",
@@ -124,6 +125,7 @@
     "jpeg-js": "^0.4.4",
     "onnxruntime-node": "^1.21.1",
     "opencc-js": "^1.3.1",
+    "sherpa-onnx": "1.13.4",
     "ws": "^8.20.1"
   },
   "devDependencies": {

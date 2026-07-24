@@ -166,6 +166,7 @@ export function buildShotsFromAnalysis(
                 text: wordText,
                 startSec: wordStart,
                 endSec: wordEnd,
+                ...(word.speakerId ? { speakerId: word.speakerId } : {}),
                 ...(Number.isFinite(word.confidence)
                   ? { confidence: Number(word.confidence) }
                   : {}),
