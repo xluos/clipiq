@@ -6,6 +6,7 @@ import type {
   OverlayItem,
   VideoClip,
 } from "../../src/types";
+import { getOverlayTemplate } from "./overlay-templates";
 
 const EMOTION_TONES = new Set([
   "neutral",
@@ -590,7 +591,124 @@ export function validateEditPlan(
         }
       } else if (track.kind === "overlay") {
         const overlay = item as OverlayItem;
-        validateTimeRange(target, overlay.startUs, overlay.endUs, itemPath);
+        const rangeValid = validateTimeRange(
+          target,
+          overlay.startUs,
+          overlay.endUs,
+          itemPath,
+        );
+        if (!["text", "image", "sticker"].includes(overlay.kind)) {
+          add(target, "error", "INVALID_OVERLAY_KIND", "视觉层类型无效。", `${itemPath}.kind`);
+        }
+        const transform = overlay.transform;
+        if (
+          !transform
+          || !Number.isFinite(transform.x)
+          || !Number.isFinite(transform.y)
+          || transform.x < 0
+          || transform.x > 1
+          || transform.y < 0
+          || transform.y > 1
+          || !Number.isFinite(transform.scaleX)
+          || !Number.isFinite(transform.scaleY)
+          || transform.scaleX <= 0
+          || transform.scaleY <= 0
+          || !Number.isFinite(transform.rotationDeg)
+          || !Number.isFinite(transform.opacity)
+          || transform.opacity < 0
+          || transform.opacity > 1
+        ) {
+          add(
+            target,
+            "error",
+            "INVALID_OVERLAY_TRANSFORM",
+            "视觉层位置、缩放、旋转或透明度无效。",
+            `${itemPath}.transform`,
+          );
+        }
+        const template = getOverlayTemplate(overlay.resourceKey);
+        if (overlay.resourceKey && !template && !overlay.assetPath) {
+          add(
+            target,
+            "warning",
+            "OVERLAY_TEMPLATE_UNAVAILABLE",
+            "当前版本没有该视觉模板，预览会跳过并在导出中保留引用。",
+            `${itemPath}.resourceKey`,
+          );
+        }
+        if (template) {
+          if (overlay.kind !== template.kind) {
+            add(
+              target,
+              "error",
+              "OVERLAY_TEMPLATE_KIND_MISMATCH",
+              "视觉层类型与模板不一致。",
+              `${itemPath}.kind`,
+            );
+          }
+          const text = String(overlay.text || "").trim();
+          if (template.textRequired && !text) {
+            add(
+              target,
+              "error",
+              "OVERLAY_TEXT_MISSING",
+              "花字模板缺少文本。",
+              `${itemPath}.text`,
+            );
+          }
+          if (
+            template.maxTextLength != null
+            && text.length > template.maxTextLength
+          ) {
+            add(
+              target,
+              "error",
+              "OVERLAY_TEXT_TOO_LONG",
+              `花字模板最多 ${template.maxTextLength} 个字符。`,
+              `${itemPath}.text`,
+            );
+          }
+        } else if (overlay.kind === "text" && !String(overlay.text || "").trim()) {
+          add(target, "error", "OVERLAY_TEXT_MISSING", "文字视觉层缺少文本。", `${itemPath}.text`);
+        } else if (
+          (overlay.kind === "image" || overlay.kind === "sticker")
+          && !overlay.resourceKey
+          && !overlay.assetPath
+        ) {
+          add(target, "error", "OVERLAY_ASSET_MISSING", "贴图缺少本地资源。", `${itemPath}.assetPath`);
+        }
+        if (
+          overlay.assetPath
+          && options.sourceExists
+          && !options.sourceExists(overlay.assetPath)
+        ) {
+          add(target, "error", "OVERLAY_ASSET_NOT_FOUND", "贴图资源不存在。", `${itemPath}.assetPath`);
+        }
+        if (
+          overlay.anchorOffsetUs != null
+          && !validIntegerTime(overlay.anchorOffsetUs)
+        ) {
+          add(target, "error", "INVALID_OVERLAY_ANCHOR_OFFSET", "视觉层锚点偏移必须是非负整数微秒。", `${itemPath}.anchorOffsetUs`);
+        }
+        if (rangeValid && overlay.endUs > plan.actualDurationUs) {
+          add(target, "error", "OVERLAY_OUTSIDE_TIMELINE", "视觉层超出成片时间线。", itemPath);
+        }
+        for (const [animationPhase, animation] of Object.entries(
+          overlay.animation || {},
+        )) {
+          if (
+            !["in", "out"].includes(animationPhase)
+            || !["pop", "fade"].includes(String(animation))
+          ) {
+            add(
+              target,
+              "warning",
+              "UNSUPPORTED_OVERLAY_ANIMATION",
+              "视觉层动画不受支持，预览将使用静态效果。",
+              `${itemPath}.animation.${animationPhase}`,
+            );
+          }
+        }
       }
     }
   }
@@ -607,6 +725,35 @@ export function validateEditPlan(
 
   const clipIndex = new Map(videoClips.map((clip, index) => [clip.id, index]));
   const videoClipById = new Map(videoClips.map((clip) => [clip.id, clip]));
+  for (const overlay of plan.tracks
+    .filter((track) => track.kind === "overlay")
+    .flatMap((track) => track.kind === "overlay" ? track.items : [])) {
+    if (!overlay.anchorClipId) continue;
+    const anchor = videoClipById.get(overlay.anchorClipId);
+    if (!anchor) {
+      add(
+        target,
+        "error",
+        "OVERLAY_ANCHOR_MISSING",
+        "视觉层锚定的视频片段不存在。",
+        `overlay.${overlay.id}.anchorClipId`,
+      );
+      continue;
+    }
+    const expectedStartUs = anchor.timelineInUs + (overlay.anchorOffsetUs || 0);
+    const anchorEndUs = anchor.timelineInUs + Math.round(
+      (anchor.sourceOutUs - anchor.sourceInUs) / anchor.speed,
+    );
+    if (overlay.startUs !== expectedStartUs || overlay.endUs > anchorEndUs) {
+      add(
+        target,
+        "error",
+        "OVERLAY_ANCHOR_TIMELINE_MISMATCH",
+        "视觉层时间与锚定镜头不一致。",
+        `overlay.${overlay.id}`,
+      );
+    }
+  }
   const emotionSegmentById = new Map(
     (plan.emotionSegments || []).map((segment) => [segment.id, segment]),
   );

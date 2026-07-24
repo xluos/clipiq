@@ -10,11 +10,17 @@ import type {
   EditReplacementCandidate,
 } from "../electron-api";
 import { useTaskQueueStore } from "../stores/tasks";
+import {
+  formatStudioDuration,
+  parseStudioDuration,
+} from "./studio-duration";
 import type {
   AppLocation,
   EditFeedbackAction,
   EditPlan,
   EmotionTone,
+  OverlayItem,
+  OverlayTemplateDefinition,
   StudioSession,
   StudioStep,
 } from "../types";
@@ -37,6 +43,7 @@ import {
   Trash2,
   Music2,
   Mic2,
+  Sparkles,
 } from "lucide-react";
 
 export function StudioScreen() {
@@ -244,7 +251,15 @@ const SessionCard: FunctionComponent<{ session: StudioSession; onClick: () => vo
 // 编辑器 — 三栏
 
 const PLATFORM_OPTIONS = ["B 站知识区", "B 站测评区", "抖音科技", "小红书种草", "YouTube"];
-const DURATION_OPTIONS = ["3 min ± 0.5", "5 min ± 1", "10 min ± 1", "15 min ± 2"];
+const DURATION_OPTIONS = [
+  "30 sec",
+  "60 sec",
+  "90 sec",
+  "3 min ± 0.5",
+  "5 min ± 1",
+  "10 min ± 1",
+  "15 min ± 2",
+];
 
 function StudioEditorScreen() {
   const { sessions, accounts, projects, upsertSession, setLocation } = useApp();
@@ -253,7 +268,10 @@ function StudioEditorScreen() {
 
   const [goalDraft, setGoalDraft] = useState(session?.goal || "");
   const [platform, setPlatform] = useState(session?.targetPlatform || PLATFORM_OPTIONS[0]);
-  const [duration, setDuration] = useState(formatDuration(session?.targetDurationSec) || DURATION_OPTIONS[1]);
+  const [duration, setDuration] = useState(
+    formatStudioDuration(session?.targetDurationSec)
+    || DURATION_OPTIONS[1],
+  );
   const [appliedMethodologies, setAppliedMethodologies] = useState<string[]>(session?.appliedMethodologies || []);
   const [usedAssetIds, setUsedAssetIds] = useState<string[]>(session?.usedAssetIds || []);
   const [generating, setGenerating] = useState(false);
@@ -261,6 +279,9 @@ function StudioEditorScreen() {
   const [preview, setPreview] = useState<EditPlanPreview | null>(null);
   const [currentPlan, setCurrentPlan] = useState<EditPlan | null>(null);
   const [variantPlans, setVariantPlans] = useState<EditPlan[]>([]);
+  const [overlayTemplates, setOverlayTemplates] = useState<
+    OverlayTemplateDefinition[]
+  >([]);
   const [previewError, setPreviewError] = useState("");
   const [editError, setEditError] = useState("");
   const [editingAction, setEditingAction] = useState("");
@@ -289,6 +310,18 @@ function StudioEditorScreen() {
   const backToList: AppLocation = { module: "studio", screen: "list" };
 
   useEffect(() => {
+    if (!session) return;
+    setGoalDraft(session.goal || "");
+    setPlatform(session.targetPlatform || PLATFORM_OPTIONS[0]);
+    setDuration(
+      formatStudioDuration(session.targetDurationSec)
+      || DURATION_OPTIONS[1],
+    );
+    setAppliedMethodologies(session.appliedMethodologies || []);
+    setUsedAssetIds(session.usedAssetIds || []);
+  }, [session?.id]);
+
+  useEffect(() => {
     let disposed = false;
     setPreview(null);
     setCurrentPlan(null);
@@ -300,12 +333,14 @@ function StudioEditorScreen() {
       api.getEditPlan?.(planId) || Promise.resolve(null),
       api.getEditPlanPreview?.(planId) || Promise.resolve(null),
       api.listEditPlans?.(session.id) || Promise.resolve([]),
+      api.listOverlayTemplates?.() || Promise.resolve([]),
     ])
-      .then(([plan, previewValue, plans]) => {
+      .then(([plan, previewValue, plans, templates]) => {
         if (disposed) return;
         setCurrentPlan(plan);
         setPreview(previewValue);
         setVariantPlans(variantPlansForActivePlan(plans, plan));
+        setOverlayTemplates(templates);
       })
       .catch(() => {});
     return () => { disposed = true; };
@@ -317,7 +352,7 @@ function StudioEditorScreen() {
       ...session,
       goal: goalDraft,
       targetPlatform: platform,
-      targetDurationSec: parseDuration(duration),
+      targetDurationSec: parseStudioDuration(duration),
       appliedMethodologies,
       usedAssetIds,
       ...patch,
@@ -333,7 +368,7 @@ function StudioEditorScreen() {
     }
     setGenError("");
     setGenerating(true);
-    const totalSec = parseDuration(duration);
+    const totalSec = parseStudioDuration(duration);
     try {
       if (!window.videoAnalyzer?.generateEditPlan) {
         throw new Error("浏览器预览环境不能生成真实粗剪");
@@ -608,6 +643,7 @@ function StudioEditorScreen() {
   const currentVideoTrack = currentPlan?.tracks.find((track) => track.kind === "video");
   const currentCaptionTrack = currentPlan?.tracks.find((track) => track.kind === "caption");
   const currentAudioTrack = currentPlan?.tracks.find((track) => track.kind === "audio");
+  const currentOverlayTrack = currentPlan?.tracks.find((track) => track.kind === "overlay");
   const currentMusics = currentAudioTrack?.kind === "audio"
     ? currentAudioTrack.items
       .filter((clip) => clip.kind === "music")
@@ -701,7 +737,17 @@ function StudioEditorScreen() {
           </div>
 
           <KVRow label="目标平台" value={platform} options={PLATFORM_OPTIONS} onChange={(v) => { setPlatform(v); save({ targetPlatform: v }); }} />
-          <KVRow label="目标时长" value={duration} options={DURATION_OPTIONS} onChange={(v) => { setDuration(v); save({ targetDurationSec: parseDuration(v) }); }} />
+          <KVRow
+            label="目标时长"
+            value={duration}
+            options={DURATION_OPTIONS.includes(duration)
+              ? DURATION_OPTIONS
+              : [duration, ...DURATION_OPTIONS]}
+            onChange={(v) => {
+              setDuration(v);
+              save({ targetDurationSec: parseStudioDuration(v) });
+            }}
+          />
 
           <div className="text-[10.5px] font-mono tracking-[0.14em] uppercase text-slate-500 mt-5 mb-2">应用的方法论</div>
           {accounts.length === 0 && (
@@ -1235,6 +1281,28 @@ function StudioEditorScreen() {
                             />
                           );
                         })()}
+                        {overlayTemplates.length > 0 && (
+                          <OverlayTemplateEditor
+                            key={`${currentPlan?.id}-overlay-${currentVideoTrack.items[i].id}`}
+                            anchorClipId={currentVideoTrack.items[i].id}
+                            templates={overlayTemplates}
+                            overlays={currentOverlayTrack?.kind === "overlay"
+                              ? currentOverlayTrack.items.filter((overlay) =>
+                                overlay.anchorClipId === currentVideoTrack.items[i].id)
+                              : []}
+                            disabled={Boolean(editingAction)}
+                            onApply={(templateKey, text) => applyFeedback({
+                              type: "set_overlay_template",
+                              anchorClipId: currentVideoTrack.items[i].id,
+                              templateKey,
+                              ...(text.trim() ? { text: text.trim() } : {}),
+                            })}
+                            onRemove={(overlayId) => applyFeedback({
+                              type: "remove_overlay",
+                              overlayId,
+                            })}
+                          />
+                        )}
                         {replacingClipId === currentVideoTrack.items[i].id && (
                           <div className="basis-full mt-1 flex items-center gap-1.5">
                             <select
@@ -1597,6 +1665,132 @@ const VoiceoverEditor: FunctionComponent<{
   );
 };
 
+const OverlayTemplateEditor: FunctionComponent<{
+  anchorClipId: string;
+  templates: OverlayTemplateDefinition[];
+  overlays: OverlayItem[];
+  disabled: boolean;
+  onApply: (templateKey: string, text: string) => Promise<boolean>;
+  onRemove: (overlayId: string) => Promise<boolean>;
+}> = ({
+  anchorClipId,
+  templates,
+  overlays,
+  disabled,
+  onApply,
+  onRemove,
+}) => {
+  const [editing, setEditing] = useState(false);
+  const [templateKey, setTemplateKey] = useState(templates[0]?.key || "");
+  const [text, setText] = useState("");
+  const selected = templates.find((template) => template.key === templateKey);
+  const templateByKey = new Map<string, OverlayTemplateDefinition>(
+    templates.map((template) => [template.key, template]),
+  );
+
+  if (!editing) {
+    return (
+      <button
+        onClick={() => setEditing(true)}
+        disabled={disabled || templates.length === 0}
+        className="h-7 px-2 inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-600 dark:text-slate-300 disabled:opacity-50"
+      >
+        <Sparkles className="w-3 h-3" strokeWidth={1.5} />
+        {overlays.length > 0 ? `视觉模板 · ${overlays.length}` : "加视觉模板"}
+      </button>
+    );
+  }
+
+  return (
+    <div
+      data-overlay-editor={anchorClipId}
+      className="basis-full mt-1 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 p-2"
+    >
+      {overlays.length > 0 && (
+        <div className="mb-2 space-y-1">
+          {overlays.map((overlay) => (
+            <div
+              key={overlay.id}
+              className="flex items-center gap-2 rounded-md border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 px-2 py-1.5"
+            >
+              <span className="min-w-0 flex-1 truncate text-[11.5px] text-slate-700 dark:text-slate-300">
+                {templateByKey.get(overlay.resourceKey || "")?.label || "视觉模板"}
+                {overlay.text ? ` · ${overlay.text}` : ""}
+              </span>
+              <span className="font-mono text-[10px] text-slate-500">
+                {formatTimeShort((overlay.endUs - overlay.startUs) / 1_000_000)}
+              </span>
+              <button
+                onClick={() => onRemove(overlay.id)}
+                disabled={disabled}
+                className="h-6 px-1.5 rounded-sm text-[10.5px] text-red-600 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/30 disabled:opacity-50"
+              >
+                移除
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex items-center gap-1.5">
+        <select
+          value={templateKey}
+          onChange={(event) => {
+            setTemplateKey(event.target.value);
+            setText("");
+          }}
+          disabled={disabled}
+          className="h-8 min-w-32 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 text-[11.5px] text-slate-700 dark:text-slate-200"
+        >
+          {templates.map((template) => (
+            <option key={template.key} value={template.key}>
+              {template.label}
+            </option>
+          ))}
+        </select>
+        {selected?.textRequired && (
+          <input
+            value={text}
+            maxLength={selected.maxTextLength}
+            onChange={(event) => setText(event.target.value)}
+            placeholder="输入花字"
+            className="h-8 min-w-0 flex-1 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 text-[11.5px] text-slate-800 dark:text-slate-200"
+          />
+        )}
+        <button
+          onClick={async () => {
+            if (selected && await onApply(selected.key, text)) {
+              setEditing(false);
+              setText("");
+            }
+          }}
+          disabled={
+            disabled
+            || !selected
+            || Boolean(selected.textRequired && !text.trim())
+          }
+          className="h-8 px-2 rounded-md bg-indigo-600 text-white text-[11.5px] disabled:opacity-50"
+        >
+          应用
+        </button>
+        <button
+          onClick={() => {
+            setText("");
+            setEditing(false);
+          }}
+          className="h-8 px-2 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-600 dark:text-slate-300"
+        >
+          取消
+        </button>
+      </div>
+      {selected && (
+        <p className="mt-1.5 text-[10.5px] text-slate-500 dark:text-slate-400">
+          {selected.description}
+        </p>
+      )}
+    </div>
+  );
+};
+
 const KVRow: FunctionComponent<{
   label: string;
   value: string;
@@ -1618,18 +1812,6 @@ const KVRow: FunctionComponent<{
     </div>
   );
 };
-
-function formatDuration(sec?: number): string | null {
-  if (!sec) return null;
-  if (sec < 60) return `${sec} sec`;
-  const min = Math.round(sec / 60);
-  return `${min} min ± 1`;
-}
-
-function parseDuration(s: string): number {
-  const m = s.match(/(\d+)\s*min/);
-  return m ? Number(m[1]) * 60 : 600;
-}
 
 function collectMissingShots(steps: StudioStep[]): string[] {
   return steps

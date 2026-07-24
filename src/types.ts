@@ -1099,11 +1099,25 @@ export type BeatSyncSuggestion = {
   confidence: number;
 };
 
+export type OverlayTemplateDefinition = {
+  key: string;
+  version: 1;
+  label: string;
+  description: string;
+  kind: "text" | "sticker";
+  textRequired: boolean;
+  maxTextLength?: number;
+  defaultDurationUs: number;
+};
+
 export type OverlayItem = {
   id: string;
   kind: "text" | "image" | "sticker";
   assetPath?: string;
   resourceKey?: string;
+  text?: string;
+  anchorClipId?: string;
+  anchorOffsetUs?: number;
   startUs: number;
   endUs: number;
   transform: TransformSpec;
@@ -1213,7 +1227,14 @@ export type EditFeedbackAction =
     toClipId: string;
     transitionType: EditTransition["type"];
     durationUs: number;
-  };
+  }
+  | {
+    type: "set_overlay_template";
+    anchorClipId: string;
+    templateKey: string;
+    text?: string;
+  }
+  | { type: "remove_overlay"; overlayId: string };
 
 export type EditFeedbackEvent = {
   id: string;

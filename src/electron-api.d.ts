@@ -16,6 +16,7 @@ import type {
   EditPlan,
   EditFeedbackAction,
   EditFeedbackEvent,
+  OverlayTemplateDefinition,
   LocalFitLevel,
   MachineSpecs,
   Methodology,
@@ -523,6 +524,7 @@ declare global {
       // 剪辑方案
       listEditPlans: (sessionId?: string) => Promise<EditPlan[]>;
       getEditPlan: (planId: string) => Promise<EditPlan | null>;
+      listOverlayTemplates: () => Promise<OverlayTemplateDefinition[]>;
       activateEditPlan: (payload: {
         sessionId: string;
         planId: string;

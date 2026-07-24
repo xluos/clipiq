@@ -7,6 +7,7 @@ import type {
   CaptionCue,
   EditPlan,
   EditTransition,
+  OverlayItem,
   VideoClip,
 } from "../../src/types";
 import {
@@ -14,9 +15,10 @@ import {
   captionEventSummaries,
   deriveCaptionHighlights,
 } from "./caption-highlights";
+import { getOverlayTemplate } from "./overlay-templates";
 
 const US_PER_SECOND = 1_000_000;
-const PROXY_RENDERER_VERSION = 2;
+const PROXY_RENDERER_VERSION = 3;
 
 export type ProxySubtitleMode = "external" | "burn" | "none";
 
@@ -147,12 +149,34 @@ function explicitCaptions(plan: EditPlan): CaptionCue[] {
     .flatMap((item) => item.kind === "caption" ? item.items : []);
 }
 
+function overlayTrack(plan: EditPlan): OverlayItem[] {
+  return plan.tracks
+    .filter((item) => item.kind === "overlay")
+    .flatMap((item) => item.kind === "overlay" ? item.items : []);
+}
+
 export function collectProxyWarnings(plan: EditPlan): string[] {
+  const warnings: string[] = [];
   const unsupportedTts = audioTrack(plan)
     .filter((clip) => clip.kind === "voiceover" && clip.ttsText && !clip.sourcePath);
-  return unsupportedTts.length > 0
-    ? [`有 ${unsupportedTts.length} 段旁白尚未合成，代理预览已跳过。`]
-    : [];
+  if (unsupportedTts.length > 0) {
+    warnings.push(`有 ${unsupportedTts.length} 段旁白尚未合成，代理预览已跳过。`);
+  }
+  const unsupportedOverlays = overlayTrack(plan)
+    .filter((item) => !getOverlayTemplate(item.resourceKey));
+  if (unsupportedOverlays.length > 0) {
+    warnings.push(`有 ${unsupportedOverlays.length} 个自定义贴图或未知模板无法烧录，代理预览已跳过。`);
+  }
+  return warnings;
+}
+
+export function collectProxyOverlays(plan: EditPlan): OverlayItem[] {
+  return overlayTrack(plan)
+    .filter((item) =>
+      Boolean(getOverlayTemplate(item.resourceKey))
+      && item.endUs > item.startUs)
+    .sort((left, right) =>
+      left.startUs - right.startUs || left.id.localeCompare(right.id));
 }
 
 export function collectProxyCaptions(plan: EditPlan): CaptionCue[] {
@@ -243,12 +267,61 @@ function highlightedAssText(cue: CaptionCue): string {
   return parts.join("");
 }
 
+function assOverlayStyleName(resourceKey: string): string {
+  return `Overlay_${resourceKey.replace(/[^A-Za-z0-9]+/g, "_")}`;
+}
+
+function assAlpha(opacity: number): string {
+  return Math.round((1 - Math.max(0, Math.min(1, opacity))) * 255)
+    .toString(16)
+    .padStart(2, "0")
+    .toUpperCase();
+}
+
+function overlayAssOverride(
+  item: OverlayItem,
+  spec: Pick<ProxyVideoSpec, "width" | "height">,
+): string {
+  const x = Math.round(item.transform.x * spec.width);
+  const y = Math.round(item.transform.y * spec.height);
+  const targetScaleX = Math.max(1, Math.round(item.transform.scaleX * 100));
+  const targetScaleY = Math.max(1, Math.round(item.transform.scaleY * 100));
+  const durationMs = Math.max(1, Math.round((item.endUs - item.startUs) / 1_000));
+  const fadeInMs = item.animation?.in === "fade" ? Math.min(180, durationMs / 3) : 0;
+  const fadeOutMs = item.animation?.out === "fade" ? Math.min(160, durationMs / 3) : 0;
+  const overrides = [
+    `\\pos(${x},${y})`,
+    `\\frz${Number(item.transform.rotationDeg.toFixed(2))}`,
+    `\\alpha&H${assAlpha(item.transform.opacity)}&`,
+  ];
+  if (item.animation?.in === "pop") {
+    overrides.push(
+      `\\fscx${Math.max(1, Math.round(targetScaleX * 0.72))}`,
+      `\\fscy${Math.max(1, Math.round(targetScaleY * 0.72))}`,
+      `\\t(0,180,\\fscx${targetScaleX}\\fscy${targetScaleY})`,
+    );
+  } else {
+    overrides.push(`\\fscx${targetScaleX}`, `\\fscy${targetScaleY}`);
+  }
+  if (fadeInMs > 0 || fadeOutMs > 0) {
+    overrides.push(`\\fad(${Math.round(fadeInMs)},${Math.round(fadeOutMs)})`);
+  }
+  return overrides.join("");
+}
+
 export function serializeAss(
   cues: CaptionCue[],
   spec: Pick<ProxyVideoSpec, "width" | "height">,
+  overlays: OverlayItem[] = [],
 ): string {
   const fontSize = Math.max(28, Math.round(spec.height * 0.034));
   const marginV = Math.max(32, Math.round(spec.height * 0.045));
+  const templates = [...new Map(
+    overlays.flatMap((overlay) => {
+      const template = getOverlayTemplate(overlay.resourceKey);
+      return template ? [[template.key, template] as const] : [];
+    }),
+  ).values()];
   return [
     "[Script Info]",
     "ScriptType: v4.00+",
@@ -260,11 +333,55 @@ export function serializeAss(
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
     `Style: Default,PingFang SC,${fontSize},&H00FFFFFF,&H00FFFFFF,&H80000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,36,36,${marginV},1`,
+    ...templates.map((template) => {
+      const templateFontSize = Math.max(
+        20,
+        Math.round(spec.height * (template.ass.fontSizeRatio || 0.04)),
+      );
+      const outline = Math.max(1, Math.round(
+        spec.height * template.ass.outlineRatio,
+      ));
+      return [
+        `Style: ${assOverlayStyleName(template.key)}`,
+        "PingFang SC",
+        templateFontSize,
+        template.ass.primaryColor,
+        template.ass.primaryColor,
+        template.ass.outlineColor,
+        template.ass.backColor,
+        template.ass.bold ? -1 : 0,
+        0,
+        0,
+        0,
+        100,
+        100,
+        0,
+        0,
+        template.ass.borderStyle,
+        outline,
+        0,
+        template.ass.alignment,
+        0,
+        0,
+        0,
+        1,
+      ].join(",");
+    }),
     "",
     "[Events]",
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ...cues.map((cue) =>
       `Dialogue: 0,${assTimestamp(cue.startUs)},${assTimestamp(cue.endUs)},Default,,0,0,0,,${highlightedAssText(cue)}`),
+    ...overlays.flatMap((overlay) => {
+      const template = getOverlayTemplate(overlay.resourceKey);
+      if (!template) return [];
+      const content = template.ass.drawing
+        ? `{${overlayAssOverride(overlay, spec)}\\p1}${template.ass.drawing}{\\p0}`
+        : `{${overlayAssOverride(overlay, spec)}}${escapeAssText(overlay.text || "")}`;
+      return [
+        `Dialogue: 1,${assTimestamp(overlay.startUs)},${assTimestamp(overlay.endUs)},${assOverlayStyleName(template.key)},,0,0,0,,${content}`,
+      ];
+    }),
     "",
   ].join("\n");
 }
@@ -786,11 +903,18 @@ export async function renderEditPlanProxy(
   }
 
   const cues = collectProxyCaptions(plan);
+  const overlays = collectProxyOverlays(plan);
   if (subtitleMode !== "none" && cues.length > 0) {
     await fs.writeFile(captionsPath, serializeSrt(cues), "utf8");
   }
-  if (subtitleMode === "burn" && cues.length > 0) {
-    await fs.writeFile(burnCaptionsPath, serializeAss(cues, spec), "utf8");
+  const needsAssBurn = (subtitleMode === "burn" && cues.length > 0)
+    || overlays.length > 0;
+  if (needsAssBurn) {
+    await fs.writeFile(
+      burnCaptionsPath,
+      serializeAss(subtitleMode === "burn" ? cues : [], spec, overlays),
+      "utf8",
+    );
   }
 
   const workPrefix = path.join(outputDir, `.preview-${renderDigest.slice(0, 16)}`);
@@ -881,7 +1005,7 @@ export async function renderEditPlanProxy(
       options.onProgress?.({ progress: 92, stage: "处理音轨" });
     }
 
-    if (subtitleMode === "burn" && cues.length > 0) {
+    if (needsAssBurn) {
       try {
         await runProcess(
           options.ffmpegPath,
@@ -892,7 +1016,7 @@ export async function renderEditPlanProxy(
             registerChild: options.registerChild,
             onProgress: (ratio) => options.onProgress?.({
               progress: 92 + Math.round(ratio * 7),
-              stage: "烧录字幕",
+              stage: overlays.length > 0 ? "烧录字幕和视觉模板" : "烧录字幕",
             }),
           },
         );
@@ -902,12 +1026,17 @@ export async function renderEditPlanProxy(
         await fs.rm(burnedPath, { force: true });
         const message = error instanceof Error ? error.message : String(error);
         if (/No such filter:\s*'subtitles'|Filter not found/i.test(message)) {
-          effectiveSubtitleMode = "external";
-          warnings.push("当前 FFmpeg 不支持字幕烧录，已输出外挂 SRT。");
+          if (subtitleMode === "burn" && cues.length > 0) {
+            effectiveSubtitleMode = "external";
+            warnings.push("当前 FFmpeg 不支持字幕烧录，已输出外挂 SRT。");
+          }
+          if (overlays.length > 0) {
+            warnings.push("当前 FFmpeg 不支持视觉模板烧录，代理预览已跳过。");
+          }
           options.onProgress?.({
             progress: 99,
-            stage: "字幕已降级",
-            message: "当前 FFmpeg 不支持烧录，保留外挂 SRT",
+            stage: "视觉效果已降级",
+            message: "当前 FFmpeg 不支持烧录",
           });
         } else {
           throw error;

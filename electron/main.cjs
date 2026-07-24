@@ -87,6 +87,7 @@ const {
   generateDistinctVlogVariants,
   vlogVariantSpecs,
 } = require("./editing/vlog-variants");
+const { listOverlayTemplates } = require("./editing/overlay-templates");
 const { applyEditPlanFeedback } = require("./editing/edit-plan-feedback");
 const { renderEditPlanProxy } = require("./editing/proxy-renderer");
 const { exportEditPlanPackage } = require("./editing/exporters/package-exporter");
@@ -8450,6 +8451,10 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("editPlans:get", async (_event, planId) => {
     return getEditPlanRepository().get(planId);
+  });
+
+  ipcMain.handle("editPlans:listOverlayTemplates", async () => {
+    return listOverlayTemplates();
   });
 
   ipcMain.handle("editPlans:activate", async (_event, payload = {}) => {

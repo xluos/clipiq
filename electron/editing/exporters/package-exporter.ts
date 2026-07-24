@@ -19,9 +19,21 @@ import type {
   EditPlan,
 } from "../../../src/types";
 import { renderEditPlanFcpxml } from "./fcpxml-exporter";
+import {
+  getOverlayTemplate,
+  overlayTemplateManifest,
+} from "../overlay-templates";
 
 export type EditPackageFile = {
-  kind: "video" | "audio" | "overlay" | "preview" | "caption" | "plan" | "fcpxml";
+  kind:
+    | "video"
+    | "audio"
+    | "overlay"
+    | "overlay_template"
+    | "preview"
+    | "caption"
+    | "plan"
+    | "fcpxml";
   relativePath: string;
   originalName: string;
   bytes: number;
@@ -203,7 +215,11 @@ function collectSources(
       }
     } else if (track.kind === "overlay") {
       for (const item of track.items) {
-        if (!item.assetPath && item.resourceKey) {
+        if (
+          !item.assetPath
+          && item.resourceKey
+          && !getOverlayTemplate(item.resourceKey)
+        ) {
           warnings.push({
             code: "OVERLAY_RESOURCE_NOT_PORTABLE",
             message: "贴图只引用模板资源，素材包无法携带该资源。",
@@ -327,6 +343,36 @@ export async function exportEditPlanPackage(
         bytes: info.size,
         sha256: await sha256File(targetPath),
         refs: captionTrack.items.map((cue) => cue.id),
+      });
+    }
+
+    const overlayTrack = plan.tracks.find((track) => track.kind === "overlay");
+    const templateKeys = overlayTrack?.kind === "overlay"
+      ? overlayTrack.items.flatMap((item) => item.resourceKey ? [item.resourceKey] : [])
+      : [];
+    const templateDefinitions = overlayTemplateManifest(templateKeys);
+    if (templateDefinitions.length > 0 && overlayTrack?.kind === "overlay") {
+      const templatesPath = "overlays/templates.json";
+      const targetPath = path.join(tempPath, ...templatesPath.split("/"));
+      await writeFile(targetPath, `${JSON.stringify({
+        schemaVersion: 1,
+        kind: "clipiq-overlay-templates",
+        templates: templateDefinitions,
+      }, null, 2)}\n`, "utf8");
+      const info = await stat(targetPath);
+      const templateKeySet = new Set(
+        templateDefinitions.map((template) => template.key),
+      );
+      files.push({
+        kind: "overlay_template",
+        relativePath: templatesPath,
+        originalName: "templates.json",
+        bytes: info.size,
+        sha256: await sha256File(targetPath),
+        refs: overlayTrack.items
+          .filter((item) =>
+            Boolean(item.resourceKey && templateKeySet.has(item.resourceKey)))
+          .map((item) => item.id),
       });
     }
 

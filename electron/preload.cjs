@@ -104,6 +104,7 @@ const CHANNELS = [
   // ── 剪辑方案 ──
   { method: "listEditPlans", channel: "editPlans:list", kind: "invoke" },
   { method: "getEditPlan", channel: "editPlans:get", kind: "invoke" },
+  { method: "listOverlayTemplates", channel: "editPlans:listOverlayTemplates", kind: "invoke" },
   { method: "activateEditPlan", channel: "editPlans:activate", kind: "invoke" },
   { method: "saveEditPlan", channel: "editPlans:save", kind: "invoke" },
   { method: "deleteEditPlan", channel: "editPlans:delete", kind: "invoke" },

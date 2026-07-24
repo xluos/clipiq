@@ -143,6 +143,25 @@ async function fixture(): Promise<{
               opacity: 1,
             },
           },
+          {
+            id: "overlay-builtin-template",
+            kind: "text",
+            resourceKey: "clipiq.flower.punch.v1",
+            text: "出发",
+            anchorClipId: "clip-1",
+            anchorOffsetUs: 0,
+            startUs: 0,
+            endUs: 1_800_000,
+            transform: {
+              x: 0.5,
+              y: 0.16,
+              scaleX: 1,
+              scaleY: 1,
+              rotationDeg: -2,
+              opacity: 1,
+            },
+            animation: { in: "pop", out: "fade" },
+          },
         ],
       },
     ],
@@ -200,6 +219,7 @@ describe("EditPlan 素材包导出", () => {
       "video",
       "audio",
       "overlay",
+      "overlay_template",
       "preview",
       "caption",
       "plan",
@@ -212,6 +232,10 @@ describe("EditPlan 素材包导出", () => {
       "FCPXML_OVERLAY_NOT_INCLUDED",
       "FCPXML_CAPTIONS_AS_SRT",
     ]));
+    expect(await readFile(
+      path.join(result.packagePath, "overlays", "templates.json"),
+      "utf8",
+    )).toContain("clipiq.flower.punch.v1");
   });
 
   it("重复导出只创建新目录，不覆盖已有素材包", async () => {

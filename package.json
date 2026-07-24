@@ -20,6 +20,7 @@
     "vlog:evaluate-identity-dataset": "tsx scripts/evaluate-vlog-identity-dataset.ts",
     "vlog:probe-editing-app": "tsx scripts/probe-editing-app-environment.ts",
     "vlog:validate-jianying-spike": "tsx scripts/validate-editing-app-spike-report.ts",
+    "vlog:validate-overlay-templates": "tsx scripts/validate-overlay-template-runtime.ts",
     "dist": "npm run build && node scripts/build-daemon.cjs && electron-builder",
     "dist:mac": "npm run build && node scripts/build-daemon.cjs --mac && electron-builder --mac",
     "dist:win": "npm run build && node scripts/build-daemon.cjs --win && electron-builder --win",

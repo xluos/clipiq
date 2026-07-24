@@ -16,6 +16,7 @@ import {
   validateEditPlan,
   type EditPlanValidationOptions,
 } from "./edit-plan-validator";
+import { createTemplateOverlay } from "./overlay-templates";
 
 type ResolvedFeedbackOptions = {
   newPlanId: string;
@@ -90,6 +91,18 @@ function getOrCreateAudioTrack(plan: EditPlan) {
   return track;
 }
 
+function getOrCreateOverlayTrack(plan: EditPlan) {
+  const existing = plan.tracks.find((item) => item.kind === "overlay");
+  if (existing?.kind === "overlay") return existing;
+  const track = {
+    id: `${plan.id}-overlay-track-1`,
+    kind: "overlay" as const,
+    items: [],
+  };
+  plan.tracks.push(track);
+  return track;
+}
+
 function transitionFor(
   transitions: EditTransition[],
   leftId: string,
@@ -145,6 +158,31 @@ function reflowPlan(plan: EditPlan): void {
   }
 
   const clipById = new Map(video.items.map((clip) => [clip.id, clip]));
+  for (const track of plan.tracks) {
+    if (track.kind !== "overlay") continue;
+    track.items = track.items.flatMap((overlay) => {
+      if (!overlay.anchorClipId) return [overlay];
+      const anchor = clipById.get(overlay.anchorClipId);
+      if (!anchor) return [];
+      const anchorDurationUs = clipDurationUs(anchor);
+      const offsetUs = Math.min(
+        Math.max(0, overlay.anchorOffsetUs || 0),
+        Math.max(0, anchorDurationUs - 200_000),
+      );
+      const durationUs = Math.min(
+        overlay.endUs - overlay.startUs,
+        anchorDurationUs - offsetUs,
+      );
+      if (durationUs < 200_000) return [];
+      overlay.anchorOffsetUs = offsetUs;
+      overlay.startUs = anchor.timelineInUs + offsetUs;
+      overlay.endUs = overlay.startUs + durationUs;
+      return [overlay];
+    });
+    if (track.items.length === 0) {
+      plan.tracks = plan.tracks.filter((item) => item !== track);
+    }
+  }
   for (const track of plan.tracks) {
     if (track.kind !== "audio") continue;
     const mappedMusic = track.items
@@ -261,6 +299,21 @@ function replaceVoiceoverAnchorClipId(
   }
 }
 
+function replaceOverlayAnchorClipId(
+  plan: EditPlan,
+  oldClipId: string,
+  newClipId: string,
+): void {
+  for (const track of plan.tracks) {
+    if (track.kind !== "overlay") continue;
+    for (const overlay of track.items) {
+      if (overlay.anchorClipId === oldClipId) {
+        overlay.anchorClipId = newClipId;
+      }
+    }
+  }
+}
+
 export function applyEditPlanFeedback(
   sourcePlan: EditPlan,
   action: EditFeedbackAction,
@@ -340,6 +393,7 @@ export function applyEditPlanFeedback(
       ];
       replaceTransitionClipId(plan.transitions, oldClip.id, replacementClip.id);
       replaceVoiceoverAnchorClipId(plan, oldClip.id, replacementClip.id);
+      replaceOverlayAnchorClipId(plan, oldClip.id, replacementClip.id);
       break;
     }
     case "update_caption": {
@@ -507,6 +561,35 @@ export function applyEditPlanFeedback(
         !(transition.fromClipId === action.fromClipId
           && transition.toClipId === action.toClipId));
       plan.transitions.push(next);
+      break;
+    }
+    case "set_overlay_template": {
+      const anchor = video.items.find((clip) => clip.id === action.anchorClipId);
+      if (!anchor) throw new Error(`视觉模板锚定镜头不存在: ${action.anchorClipId}`);
+      const overlay = createTemplateOverlay({
+        id: `${options.newPlanId}-overlay-${video.items.indexOf(anchor) + 1}-${action.templateKey.replace(/[^A-Za-z0-9]+/g, "-")}`,
+        templateKey: action.templateKey,
+        anchorClip: anchor,
+        text: action.text,
+      });
+      const track = getOrCreateOverlayTrack(plan);
+      track.items = [
+        ...track.items.filter((item) =>
+          item.anchorClipId !== anchor.id
+          || item.resourceKey !== action.templateKey),
+        overlay,
+      ];
+      break;
+    }
+    case "remove_overlay": {
+      const track = plan.tracks.find((item) => item.kind === "overlay");
+      if (track?.kind !== "overlay") throw new Error("EditPlan 没有视觉模板");
+      const before = track.items.length;
+      track.items = track.items.filter((item) => item.id !== action.overlayId);
+      if (track.items.length === before) throw new Error("视觉模板不存在");
+      if (track.items.length === 0) {
+        plan.tracks = plan.tracks.filter((item) => item !== track);
+      }
       break;
     }
     default:

@@ -468,7 +468,7 @@ type VideoClipEvidenceSegment = {
 - [x] 明确 v3 素材归属：优先使用素材收藏夹或显式 `video_role`，不再通过 `account_id` 推导。
 - [x] 修复 Library 和 Studio 重启后素材消失问题。
 - [x] 内容分析与完整分析结束时将 FFprobe 的时长、宽高和方向通过 video repo 完整回写，避免账号竖屏素材重启后回落成默认横屏。
-- [x] 扩展 `studio_sessions` 持久化契约，保存素材、方法论、缺失镜头等完整上下文。
+- [x] 扩展 `studio_sessions` 持久化契约，保存素材、方法论、缺失镜头等完整上下文；Studio 异步载入已保存会话时按会话 ID 回填目标、平台、时长、方法论和素材，不覆盖同一会话内正在编辑的草稿。
 - [x] 将完整分析产生的真实镜头语义写入或同步到 `shots`。
 - [x] 在 `shots` 保留原始字幕分段时间、音频摘要和镜头事件描述，不再只存拼接文本。
 - [x] 为数据库 migration、row mapper 和 upsert 补测试。
@@ -673,7 +673,7 @@ export-package/
 - [x] 基于人物焦点的横竖屏智能重构图；多人无法完整容纳或无可靠焦点时降级为留边。
 - [x] 情绪段落驱动的 BGM 切换：Planner 基于候选窗口的真实事件、字幕和剪辑作用输出镜头级剪辑情绪，确定性编译为连续且最多 4 段的 `emotionSegments`；Studio 可选择 1 首全片 BGM，或按段落顺序选择等量音频，代理预览逐段裁切、淡入淡出、延迟和混音。当前不伪装自动识别歌曲情绪，验证见 [`emotion-bgm-validation.md`](./emotion-bgm-validation.md)。
 - [x] 字幕关键词高亮：词级时间与镜头事件语义共同生成可追溯 `CaptionCue.highlights`，ASS 代理烧录显示强调色；句级字幕、人工改文和无 libass 环境均有明确降级，验证见 [`caption-keyword-highlight-validation.md`](./caption-keyword-highlight-validation.md)。
-- [ ] 贴纸和花字模板。
+- [x] 贴纸和花字模板：建立三个版本化中立模板（重点花字、注释花字、闪光贴纸），以镜头 ID 和微秒偏移锚定，支持结构化添加、移除及 revision；FFmpeg/ASS 真实烧录，素材包携带模板清单，未知模板明确降级，且不写入未经验证的剪映资源 ID。验证见 [`overlay-template-validation.md`](./overlay-template-validation.md)。
 - [x] 多版本粗剪对比：复用同一批真实候选和证据，分别生成“叙事均衡 / 节奏优先 / 人物优先”三个方向；candidateId 顺序签名阻止重复方案伪装成对比，整组计划原子持久化，Studio 可切换后分别预览和调整。验证见 [`vlog-variant-comparison-validation.md`](./vlog-variant-comparison-validation.md)。
 - [x] FCPXML 1.10 粗剪时间线导出：素材包内生成 `timeline.fcpxml`，保留视频裁切、排序、恒定变速和有文件的音轨；字幕、贴图、人物裁切及未验证转场均显式降级，验证见 [`fcpxml-export-validation.md`](./fcpxml-export-validation.md)。
 - [x] 将词级字幕（存在时）、人物出镜区间和说话人区间完整传入候选，并以连续对齐时间片写入 `EditPlan`。
