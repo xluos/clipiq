@@ -86,6 +86,7 @@ const { compileEditPlan } = require("./editing/edit-plan-compiler");
 const { applyEditPlanFeedback } = require("./editing/edit-plan-feedback");
 const { renderEditPlanProxy } = require("./editing/proxy-renderer");
 const { exportEditPlanPackage } = require("./editing/exporters/package-exporter");
+const { analyzeAudioBeatSource } = require("./editing/audio-beat-runtime");
 const {
   buildAnalysisEvidenceQualityReport,
 } = require("./editing/analysis-evidence-quality");
@@ -414,6 +415,7 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 const VIDEO_EXTENSIONS = ["mp4", "mov", "mkv", "webm", "avi", "m4v"];
+const AUDIO_EXTENSIONS = ["mp3", "wav", "m4a", "aac", "ogg", "flac"];
 const MEDIA_MIME_TYPES = {
   ".mp4": "video/mp4",
   ".m4v": "video/mp4",
@@ -431,6 +433,7 @@ const MEDIA_MIME_TYPES = {
   ".m4a": "audio/mp4",
   ".aac": "audio/aac",
   ".ogg": "audio/ogg",
+  ".flac": "audio/flac",
 };
 const PIPELINE_VERSION = "mvp-local-2026-05-13";
 const SCHEMA_VERSION = "analysis-v2-methodology";
@@ -612,6 +615,7 @@ const TASK_CONCURRENCY = {
   "account-fetch": 2,
   methodology: 1,
   "edit-preview": 1,
+  "audio-beat": 1,
 };
 
 let learnedBaselines = { providers: {} };
@@ -8275,6 +8279,32 @@ app.whenReady().then(async () => {
     getEditPlanRepository().save({ ...plan, status: "rendered" });
     return previewManifestForRenderer(manifest);
   };
+  const runAudioBeatAnalysis = async (task, ctx) => {
+    const planId = String(task.payload.planId || "").trim();
+    const sourcePath = String(task.payload.sourcePath || "").trim();
+    if (!planId || !sourcePath) throw new Error("BGM 节拍分析需要 planId 和音频路径");
+    const plan = getEditPlanRepository().get(planId);
+    if (!plan) throw new Error(`EditPlan 不存在: ${planId}`);
+    if (!fsSync.existsSync(sourcePath)) throw new Error("BGM 文件不存在或无法访问");
+    const extension = path.extname(sourcePath).slice(1).toLowerCase();
+    if (!AUDIO_EXTENSIONS.includes(extension)) {
+      throw new Error(`不支持的音频格式: .${extension}`);
+    }
+    const ffmpegPath = await commandPath("ffmpeg");
+    if (!ffmpegPath) throw new Error("未检测到 ffmpeg，无法分析 BGM 节拍");
+    const maximumDurationUs = Math.min(
+      Math.max(3_000_000, plan.actualDurationUs),
+      30 * 60 * 1_000_000,
+    );
+    return analyzeAudioBeatSource({
+      ffmpegPath,
+      sourcePath,
+      maximumDurationUs,
+      signal: ctx.signal,
+      registerChild: ctx.registerChild,
+      onProgress: ctx.onProgress,
+    });
+  };
 
   ipcMain.handle("editPlans:list", async (_event, sessionId) => {
     return getEditPlanRepository().list(sessionId);
@@ -8611,9 +8641,7 @@ app.whenReady().then(async () => {
       }));
   });
 
-  ipcMain.handle("editPlans:applyFeedback", async (_event, payload = {}) => {
-    const planId = String(payload.planId || "").trim();
-    const action = payload.action;
+  const applyEditPlanAction = async (planId, action) => {
     if (!planId || !action?.type) throw new Error("粗剪反馈需要 planId 和 action");
     const sourcePlan = getEditPlanRepository().get(planId);
     if (!sourcePlan) throw new Error(`EditPlan 不存在: ${planId}`);
@@ -8687,10 +8715,15 @@ app.whenReady().then(async () => {
         throw new Error("待恢复的 EditPlan 版本未通过校验");
       }
       const missingSource = targetPlan.tracks
-        .filter((track) => track.kind === "video")
-        .flatMap((track) => track.items)
-        .find((clip) => !fsSync.existsSync(clip.sourcePath));
-      if (missingSource) throw new Error(`待恢复版本的素材不存在: ${missingSource.sourcePath}`);
+        .flatMap((track) => {
+          if (track.kind === "video") return track.items.map((clip) => clip.sourcePath);
+          if (track.kind === "audio") {
+            return track.items.map((clip) => clip.sourcePath).filter(Boolean);
+          }
+          return [];
+        })
+        .find((sourcePath) => !fsSync.existsSync(sourcePath));
+      if (missingSource) throw new Error(`待恢复版本的素材不存在: ${missingSource}`);
       nextPlan = {
         ...structuredClone(targetPlan),
         id: newPlanId,
@@ -8734,6 +8767,88 @@ app.whenReady().then(async () => {
       throw error;
     }
     return { ok: true, plan: nextPlan, event };
+  };
+
+  ipcMain.handle("editPlans:applyFeedback", async (_event, payload = {}) => {
+    const planId = String(payload.planId || "").trim();
+    return applyEditPlanAction(planId, payload.action);
+  });
+
+  ipcMain.handle("editPlans:selectMusic", async (_event, payload = {}) => {
+    const planId = String(payload.planId || "").trim();
+    const sourcePlan = getEditPlanRepository().get(planId);
+    if (!sourcePlan) throw new Error(`EditPlan 不存在: ${planId}`);
+    const sourceSession = getStudioSessionRepository().get(sourcePlan.sessionId);
+    if (
+      sourceSession?.currentEditPlanId
+      && sourceSession.currentEditPlanId !== sourcePlan.id
+    ) {
+      throw new Error("当前粗剪版本已更新，请刷新后再添加 BGM");
+    }
+    const result = await dialog.showOpenDialog({
+      title: "选择 BGM",
+      properties: ["openFile"],
+      filters: [{ name: "Audio", extensions: AUDIO_EXTENSIONS }],
+    });
+    if (result.canceled || !result.filePaths?.[0]) return { cancelled: true };
+    const sourcePath = path.resolve(result.filePaths[0]);
+    let analysis;
+    let taskId;
+    if (taskScheduler) {
+      const task = taskScheduler.enqueue("audio-beat", {
+        planId,
+        sourcePath,
+        title: path.basename(sourcePath),
+      }, {
+        refId: planId,
+        title: "BGM 节拍分析",
+        dedupeKey: `audio-beat:${planId}:${sourcePath}`,
+      });
+      taskId = task.id;
+      analysis = await taskScheduler.whenSettled(task.id);
+    } else {
+      analysis = await runAudioBeatAnalysis(
+        { payload: { planId, sourcePath } },
+        {
+          signal: new AbortController().signal,
+          onProgress: () => {},
+          registerChild: () => {},
+        },
+      );
+    }
+    const sourceOutUs = Math.min(
+      sourcePlan.actualDurationUs,
+      Number(analysis?.analyzedEndUs) || 0,
+    );
+    if (!Number.isSafeInteger(sourceOutUs) || sourceOutUs <= 0) {
+      throw new Error("BGM 没有可用音频");
+    }
+    const fadeUs = Math.min(500_000, Math.floor(sourceOutUs / 2));
+    const applied = await applyEditPlanAction(planId, {
+      type: "set_music",
+      music: {
+        id: `music-${require("node:crypto").randomUUID()}`,
+        kind: "music",
+        sourcePath,
+        timelineInUs: 0,
+        sourceInUs: 0,
+        sourceOutUs,
+        volume: 0.18,
+        fadeInUs: fadeUs,
+        fadeOutUs: fadeUs,
+        ducking: {
+          enabled: true,
+          targetVolume: 0.08,
+        },
+        beatAnalysis: analysis,
+      },
+    });
+    return {
+      cancelled: false,
+      ...applied,
+      analysis,
+      ...(taskId ? { taskId } : {}),
+    };
   });
 
   // v2: 多策略拉取 UP 主账号信息 + 视频列表
@@ -10017,6 +10132,12 @@ app.whenReady().then(async () => {
       dedupeKey: (p) => `edit-preview:${p.planId}:${p.subtitleMode || "external"}`,
       title: (p) => p.title || "粗剪代理预览",
       run: runEditPreview,
+    });
+    taskScheduler.registerKind("audio-beat", {
+      concurrency: TASK_CONCURRENCY["audio-beat"],
+      dedupeKey: (p) => `audio-beat:${p.planId}:${p.sourcePath}`,
+      title: (p) => p.title || "BGM 节拍分析",
+      run: runAudioBeatAnalysis,
     });
     // 重启恢复:running → interrupted,queued 重新调度起跑。
     try { taskScheduler.hydrate(tasksRepo.list()); } catch (err) { log.warn("task-queue", "hydrate 失败:", err?.message || err); }

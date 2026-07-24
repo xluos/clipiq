@@ -6,6 +6,9 @@ import type {
   VideoClip,
 } from "../../src/types";
 import {
+  refreshBeatSyncSuggestions,
+} from "./audio-beat-analysis";
+import {
   validateEditPlan,
   type EditPlanValidationOptions,
 } from "./edit-plan-validator";
@@ -83,6 +86,18 @@ function getOrCreateCaptionTrack(plan: EditPlan, clips: VideoClip[]) {
     id: `${plan.id}-caption-track-1`,
     kind: "caption" as const,
     items: clips.flatMap(captionCuesFromClip),
+  };
+  plan.tracks.push(track);
+  return track;
+}
+
+function getOrCreateAudioTrack(plan: EditPlan) {
+  const existing = plan.tracks.find((item) => item.kind === "audio");
+  if (existing?.kind === "audio") return existing;
+  const track = {
+    id: `${plan.id}-audio-track-1`,
+    kind: "audio" as const,
+    items: [],
   };
   plan.tracks.push(track);
   return track;
@@ -260,6 +275,40 @@ export function applyEditPlanFeedback(
       cue.text = text;
       break;
     }
+    case "set_music": {
+      const music = structuredClone(action.music);
+      if (
+        music.kind !== "music"
+        || !music.id
+        || !music.sourcePath
+        || !Number.isSafeInteger(music.timelineInUs)
+        || !Number.isSafeInteger(music.sourceInUs)
+        || !Number.isSafeInteger(music.sourceOutUs)
+        || music.timelineInUs < 0
+        || music.sourceInUs < 0
+        || music.sourceOutUs <= music.sourceInUs
+      ) {
+        throw new Error("BGM 音轨无效");
+      }
+      const audio = getOrCreateAudioTrack(plan);
+      audio.items = [
+        ...audio.items.filter((item) => item.kind !== "music"),
+        music,
+      ];
+      break;
+    }
+    case "remove_music": {
+      const audio = plan.tracks.find((item) => item.kind === "audio");
+      if (audio?.kind !== "audio") throw new Error("EditPlan 没有 BGM 音轨");
+      const before = audio.items.length;
+      audio.items = audio.items.filter((item) =>
+        !(item.kind === "music" && item.id === action.audioClipId));
+      if (audio.items.length === before) throw new Error("BGM 音轨不存在");
+      if (audio.items.length === 0) {
+        plan.tracks = plan.tracks.filter((item) => item !== audio);
+      }
+      break;
+    }
     case "set_transition": {
       const leftIndex = video.items.findIndex((clip) => clip.id === action.fromClipId);
       if (
@@ -298,6 +347,7 @@ export function applyEditPlanFeedback(
   plan.revision = (sourcePlan.revision || 1) + 1;
   plan.status = "draft";
   reflowPlan(plan);
+  refreshBeatSyncSuggestions(plan);
   const validation = validateEditPlan(plan, {
     sourceExists: options.sourceExists,
   });

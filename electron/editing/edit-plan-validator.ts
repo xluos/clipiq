@@ -247,6 +247,7 @@ export function validateEditPlan(
   const seenTrackIds = new Set<string>();
   const seenItemIds = new Set<string>();
   const videoClips: VideoClip[] = [];
+  const audioClips: AudioClip[] = [];
   const videoClipDurationUs = new Map<string, number>();
   const captionCues: CaptionCue[] = [];
   let computedDurationUs = 0;
@@ -316,10 +317,44 @@ export function validateEditPlan(
         captionCues.push(cue);
       } else if (track.kind === "audio") {
         const audio = item as AudioClip;
+        audioClips.push(audio);
         if (!validIntegerTime(audio.timelineInUs)) {
           add(target, "error", "AUDIO_TIMELINE_NOT_INTEGER_US", "音频位置必须是非负整数微秒。", `${itemPath}.timelineInUs`);
         }
-        validateTimeRange(target, audio.sourceInUs, audio.sourceOutUs, `${itemPath}.source`);
+        const audioRangeValid = validateTimeRange(
+          target,
+          audio.sourceInUs,
+          audio.sourceOutUs,
+          `${itemPath}.source`,
+        );
+        if (
+          !(Number.isFinite(audio.volume) && audio.volume >= 0 && audio.volume <= 4)
+        ) {
+          add(target, "error", "INVALID_AUDIO_VOLUME", "音轨音量必须在 0 到 4 之间。", `${itemPath}.volume`);
+        }
+        if (audio.kind !== "voiceover" && !audio.sourcePath) {
+          add(target, "error", "MISSING_AUDIO_SOURCE", "音轨缺少本地音频路径。", `${itemPath}.sourcePath`);
+        } else if (
+          audio.sourcePath
+          && options.sourceExists
+          && !options.sourceExists(audio.sourcePath)
+        ) {
+          add(target, "error", "AUDIO_SOURCE_NOT_FOUND", "音频文件不存在。", `${itemPath}.sourcePath`);
+        }
+        if (
+          audio.fadeInUs != null
+          && (!validIntegerTime(audio.fadeInUs)
+            || (audioRangeValid && audio.fadeInUs > audio.sourceOutUs - audio.sourceInUs))
+        ) {
+          add(target, "error", "INVALID_AUDIO_FADE_IN", "音轨淡入时长无效。", `${itemPath}.fadeInUs`);
+        }
+        if (
+          audio.fadeOutUs != null
+          && (!validIntegerTime(audio.fadeOutUs)
+            || (audioRangeValid && audio.fadeOutUs > audio.sourceOutUs - audio.sourceInUs))
+        ) {
+          add(target, "error", "INVALID_AUDIO_FADE_OUT", "音轨淡出时长无效。", `${itemPath}.fadeOutUs`);
+        }
         if (audio.beatAnalysis) {
           validateBeatAnalysis(target, audio.beatAnalysis, `${itemPath}.beatAnalysis`);
         }
@@ -342,6 +377,48 @@ export function validateEditPlan(
 
   const clipIndex = new Map(videoClips.map((clip, index) => [clip.id, index]));
   const videoClipById = new Map(videoClips.map((clip) => [clip.id, clip]));
+  for (const audio of audioClips) {
+    for (const [index, suggestion] of (audio.beatSyncSuggestions || []).entries()) {
+      const suggestionPath = `audio.${audio.id}.beatSyncSuggestions[${index}]`;
+      const fromIndex = clipIndex.get(suggestion.fromClipId);
+      const toIndex = clipIndex.get(suggestion.toClipId);
+      if (
+        fromIndex == null
+        || toIndex == null
+        || toIndex !== fromIndex + 1
+      ) {
+        add(target, "error", "BEAT_SUGGESTION_CLIPS_INVALID", "卡点建议必须引用相邻镜头。", suggestionPath);
+        continue;
+      }
+      const toClip = videoClips[toIndex];
+      const transition = (plan.transitions || []).find((item) =>
+        item.fromClipId === suggestion.fromClipId
+        && item.toClipId === suggestion.toClipId);
+      if (transition && transition.type !== "cut") {
+        add(target, "error", "BEAT_SUGGESTION_TRANSITION_INVALID", "卡点建议只能引用硬切边界。", suggestionPath);
+      }
+      if (
+        !validIntegerTime(suggestion.boundaryTimeUs)
+        || suggestion.boundaryTimeUs !== toClip.timelineInUs
+      ) {
+        add(target, "error", "BEAT_SUGGESTION_BOUNDARY_STALE", "卡点建议与当前镜头边界不一致。", suggestionPath);
+      }
+      if (
+        !validIntegerTime(suggestion.beatTimeUs)
+        || !Number.isSafeInteger(suggestion.offsetUs)
+        || suggestion.beatTimeUs - suggestion.boundaryTimeUs !== suggestion.offsetUs
+      ) {
+        add(target, "error", "BEAT_SUGGESTION_OFFSET_INVALID", "卡点建议偏移量无效。", suggestionPath);
+      }
+      if (
+        !Number.isFinite(suggestion.confidence)
+        || suggestion.confidence < 0
+        || suggestion.confidence > 1
+      ) {
+        add(target, "error", "BEAT_SUGGESTION_CONFIDENCE_INVALID", "卡点建议置信度无效。", `${suggestionPath}.confidence`);
+      }
+    }
+  }
   for (const [index, cue] of captionCues.entries()) {
     if (!cue.sourceClipId) continue;
     const cuePath = `captionCues[${index}]`;

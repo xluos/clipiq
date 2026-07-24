@@ -34,6 +34,7 @@ import {
   ArrowUp,
   Captions,
   Trash2,
+  Music2,
 } from "lucide-react";
 
 export function StudioScreen() {
@@ -208,6 +209,8 @@ function StudioEditorScreen() {
   const [exportError, setExportError] = useState("");
   const [renderingPreview, setRenderingPreview] = useState(false);
   const [subtitleMode, setSubtitleMode] = useState<"burn" | "external">("burn");
+  const [musicBusy, setMusicBusy] = useState(false);
+  const [musicError, setMusicError] = useState("");
   const tasksById = useTaskQueueStore((state) => state.tasksById);
 
   const assetProjects = useMemo(() => projects.filter((p) => p.videoRole === "asset"), [projects]);
@@ -408,6 +411,35 @@ function StudioEditorScreen() {
     }
   };
 
+  const selectMusic = async () => {
+    const planId = currentPlan?.id || session?.currentEditPlanId;
+    if (!planId || !window.videoAnalyzer?.selectEditPlanMusic || !session) {
+      setMusicError("当前环境不能添加 BGM");
+      return;
+    }
+    setMusicError("");
+    setMusicBusy(true);
+    try {
+      const result = await window.videoAnalyzer.selectEditPlanMusic({ planId });
+      if (!("plan" in result)) return;
+      const steps = editPlanToStudioSteps(result.plan, assetProjects);
+      setCurrentPlan(result.plan);
+      setPreview(null);
+      upsertSession({
+        ...session,
+        steps,
+        missingShots: collectMissingShots(steps),
+        currentEditPlanId: result.plan.id,
+        output: { kind: "draft" },
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      setMusicError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMusicBusy(false);
+    }
+  };
+
   if (!session) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center bg-slate-50 dark:bg-[#0A0A0B] gap-4">
@@ -425,6 +457,10 @@ function StudioEditorScreen() {
   const steps = session.steps || [];
   const currentVideoTrack = currentPlan?.tracks.find((track) => track.kind === "video");
   const currentCaptionTrack = currentPlan?.tracks.find((track) => track.kind === "caption");
+  const currentAudioTrack = currentPlan?.tracks.find((track) => track.kind === "audio");
+  const currentMusic = currentAudioTrack?.kind === "audio"
+    ? currentAudioTrack.items.find((clip) => clip.kind === "music")
+    : undefined;
   const evidenceQuality = currentPlan?.provenance.evidenceQuality;
 
   return (
@@ -1011,6 +1047,61 @@ function StudioEditorScreen() {
                 {assetProjects.find((p) => p.id === usedAssetIds[0])?.videoName || "—"}
               </div>
               <div className="text-[10.5px] font-mono text-slate-500 dark:text-slate-400 mt-1">已选 {usedAssetIds.length} 条素材</div>
+            </div>
+          )}
+
+          {currentPlan && (
+            <div className="rounded-md border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 p-3 mb-3">
+              <div className="flex items-center gap-1.5 text-[10.5px] font-mono tracking-wider uppercase text-slate-500 dark:text-slate-400">
+                <Music2 className="w-3 h-3" strokeWidth={1.5} />
+                BGM
+              </div>
+              {currentMusic ? (
+                <>
+                  <div className="mt-2 text-[12.5px] text-slate-900 dark:text-slate-100 truncate">
+                    {currentMusic.sourcePath?.split(/[\\/]/).pop() || "本地音频"}
+                  </div>
+                  <div className="mt-1 text-[10.5px] font-mono text-slate-500 dark:text-slate-400">
+                    {currentMusic.beatAnalysis?.status === "usable"
+                      ? `${currentMusic.beatAnalysis.bpm?.toFixed(1)} BPM · ${currentMusic.beatSyncSuggestions?.length || 0} 个卡点`
+                      : currentMusic.beatAnalysis?.status === "low_confidence"
+                        ? `节拍置信度 ${Math.round(currentMusic.beatAnalysis.confidence * 100)}%`
+                        : "未识别稳定节拍"}
+                  </div>
+                  <div className="mt-2 flex items-center gap-1.5">
+                    <button
+                      onClick={selectMusic}
+                      disabled={musicBusy || Boolean(editingAction)}
+                      className="h-7 px-2 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-600 dark:text-slate-300 disabled:opacity-50"
+                    >
+                      {musicBusy ? "分析中…" : "替换"}
+                    </button>
+                    <button
+                      onClick={() => applyFeedback({
+                        type: "remove_music",
+                        audioClipId: currentMusic.id,
+                      })}
+                      disabled={musicBusy || Boolean(editingAction)}
+                      className="h-7 px-2 rounded-md text-[11.5px] text-red-600 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/30 disabled:opacity-50"
+                    >
+                      移除
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <button
+                  onClick={selectMusic}
+                  disabled={musicBusy}
+                  className="mt-2 h-8 w-full rounded-md border border-slate-300 dark:border-slate-700 text-[12px] text-slate-700 dark:text-slate-300 disabled:opacity-50"
+                >
+                  {musicBusy ? "分析中…" : "添加 BGM"}
+                </button>
+              )}
+              {musicError && (
+                <div className="mt-2 text-[11px] text-amber-700 dark:text-amber-300">
+                  {musicError}
+                </div>
+              )}
             </div>
           )}
 

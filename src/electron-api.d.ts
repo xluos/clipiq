@@ -7,6 +7,7 @@ import type {
   AnalysisOptions,
   AnalysisProgressEvent,
   AnalysisBudgetEvent,
+  AudioBeatAnalysis,
   AnalysisEvidenceQualityReport,
   AnalysisReport,
   AppConfig,
@@ -516,6 +517,19 @@ declare global {
         planId: string;
         destinationDirectory?: string;
       }) => Promise<EditPackageExportResult | { cancelled: true }>;
+      selectEditPlanMusic: (payload: {
+        planId: string;
+      }) => Promise<
+        | { cancelled: true }
+        | {
+          cancelled: false;
+          ok: true;
+          taskId?: string;
+          analysis: AudioBeatAnalysis;
+          plan: EditPlan;
+          event: EditFeedbackEvent;
+        }
+      >;
       listEditFeedbackEvents: (filter: {
         sessionId?: string;
         planId?: string;

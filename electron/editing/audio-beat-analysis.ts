@@ -202,9 +202,11 @@ export function detectAudioBeats(
   const periodSec = refinedTempoLag(peaks, tempo.lag) / envelopeRate;
   const bpm = 60 / periodSec;
   const beatTimesUs: number[] = [];
+  let firstBeatSec = (phase * hopSize + frameSize) / sampleRate;
+  while (firstBeatSec - periodSec >= 0) firstBeatSec -= periodSec;
   for (
     // RMS 起音峰值落在包含瞬态的窗口起点附近，用窗口末端近似实际起音时间。
-    let timeSec = (phase * hopSize + frameSize) / sampleRate;
+    let timeSec = firstBeatSec;
     timeSec <= pcm.length / sampleRate;
     timeSec += periodSec
   ) {
@@ -275,4 +277,14 @@ export function suggestBeatAlignedCuts(
       confidence: analysis.confidence,
     }];
   });
+}
+
+export function refreshBeatSyncSuggestions(plan: EditPlan): void {
+  for (const track of plan.tracks) {
+    if (track.kind !== "audio") continue;
+    for (const clip of track.items) {
+      if (clip.kind !== "music") continue;
+      clip.beatSyncSuggestions = suggestBeatAlignedCuts(plan, clip);
+    }
+  }
 }

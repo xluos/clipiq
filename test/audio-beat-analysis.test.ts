@@ -173,6 +173,7 @@ describe("音频节拍分析", () => {
       items: [{
         id: "music-1",
         kind: "music",
+        sourcePath: "/music/test.wav",
         timelineInUs: 0,
         sourceInUs: 0,
         sourceOutUs: 6_000_000,
@@ -194,6 +195,77 @@ describe("音频节拍分析", () => {
     expect(result.errors.map((issue) => issue.code)).toEqual(expect.arrayContaining([
       "UNSORTED_BEAT_TIMES",
       "BEAT_OUTSIDE_ANALYSIS",
+    ]));
+  });
+
+  it("EditPlan 校验拒绝过期、跨镜头和非硬切的卡点建议", () => {
+    const currentPlan = plan();
+    const video = currentPlan.tracks[0];
+    if (video.kind !== "video") throw new Error("fixture");
+    video.items[1].timelineInUs = 2_000_000;
+    video.items[2].timelineInUs = 4_000_000;
+    currentPlan.transitions = [{
+      id: "dissolve",
+      fromClipId: "2",
+      toClipId: "3",
+      type: "dissolve",
+      durationUs: 200_000,
+    }];
+    currentPlan.tracks.push({
+      id: "audio-track",
+      kind: "audio",
+      items: [{
+        id: "music-1",
+        kind: "music",
+        sourcePath: "/music/test.wav",
+        timelineInUs: 0,
+        sourceInUs: 0,
+        sourceOutUs: 6_000_000,
+        volume: 0.2,
+        beatAnalysis: {
+          algorithmVersion: "energy-onset-v1",
+          status: "usable",
+          sampleRate: 16_000,
+          analyzedStartUs: 0,
+          analyzedEndUs: 6_000_000,
+          bpm: 120,
+          confidence: 0.9,
+          beatTimesUs: [0, 2_000_000, 4_000_000, 6_000_000],
+        },
+        beatSyncSuggestions: [
+          {
+            fromClipId: "1",
+            toClipId: "2",
+            boundaryTimeUs: 1_900_000,
+            beatTimeUs: 2_000_000,
+            offsetUs: 100_000,
+            confidence: 0.9,
+          },
+          {
+            fromClipId: "1",
+            toClipId: "3",
+            boundaryTimeUs: 4_000_000,
+            beatTimeUs: 4_000_000,
+            offsetUs: 0,
+            confidence: 0.9,
+          },
+          {
+            fromClipId: "2",
+            toClipId: "3",
+            boundaryTimeUs: 4_000_000,
+            beatTimeUs: 4_000_000,
+            offsetUs: 0,
+            confidence: 0.9,
+          },
+        ],
+      }],
+    });
+
+    const result = validateEditPlan(currentPlan);
+    expect(result.errors.map((issue) => issue.code)).toEqual(expect.arrayContaining([
+      "BEAT_SUGGESTION_BOUNDARY_STALE",
+      "BEAT_SUGGESTION_CLIPS_INVALID",
+      "BEAT_SUGGESTION_TRANSITION_INVALID",
     ]));
   });
 });

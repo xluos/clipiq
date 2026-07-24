@@ -988,6 +988,7 @@ export type AudioClip = {
     targetVolume: number;
   };
   beatAnalysis?: AudioBeatAnalysis;
+  beatSyncSuggestions?: BeatSyncSuggestion[];
 };
 
 export type AudioBeatAnalysis = {
@@ -1081,6 +1082,8 @@ export type EditFeedbackAction =
   | { type: "trim_clip"; clipId: string; sourceInUs: number; sourceOutUs: number }
   | { type: "replace_clip"; clipId: string; replacementShotId: string; intent?: string }
   | { type: "update_caption"; cueId: string; text: string }
+  | { type: "set_music"; music: AudioClip }
+  | { type: "remove_music"; audioClipId: string }
   | {
     type: "set_transition";
     fromClipId: string;

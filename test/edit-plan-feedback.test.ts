@@ -213,6 +213,79 @@ describe("EditPlan 结构化反馈", () => {
     expect(replacedCaptions?.items.map((cue) => cue.text)).toContain("替换字幕");
     expect(replacedCaptions?.items.map((cue) => cue.text)).not.toContain("第二句");
   });
+
+  it("添加 BGM 形成新版本，并在镜头调整后刷新卡点建议", () => {
+    const original = sourcePlan();
+    const withMusic = applyEditPlanFeedback(original, {
+      type: "set_music",
+      music: {
+        id: "music-1",
+        kind: "music",
+        sourcePath: "/music/周末.wav",
+        timelineInUs: 0,
+        sourceInUs: 0,
+        sourceOutUs: 9_000_000,
+        volume: 0.18,
+        fadeInUs: 500_000,
+        fadeOutUs: 500_000,
+        ducking: { enabled: true, targetVolume: 0.08 },
+        beatAnalysis: {
+          algorithmVersion: "energy-onset-v1",
+          status: "usable",
+          sampleRate: 16_000,
+          analyzedStartUs: 0,
+          analyzedEndUs: 9_000_000,
+          bpm: 120,
+          confidence: 0.9,
+          beatTimesUs: Array.from({ length: 18 }, (_, index) => index * 500_000),
+        },
+      },
+    }, {
+      newPlanId: "plan-music",
+      now: 2,
+      sourceExists: () => true,
+    });
+    const musicTrack = withMusic.tracks.find((track) => track.kind === "audio");
+    if (musicTrack?.kind !== "audio") throw new Error("fixture");
+    expect(musicTrack.items[0]).toMatchObject({
+      id: "music-1",
+      kind: "music",
+      beatSyncSuggestions: [
+        expect.objectContaining({ boundaryTimeUs: 3_000_000, offsetUs: 0 }),
+        expect.objectContaining({ boundaryTimeUs: 6_000_000, offsetUs: 0 }),
+      ],
+    });
+
+    const videoTrack = withMusic.tracks.find((track) => track.kind === "video");
+    if (videoTrack?.kind !== "video") throw new Error("fixture");
+    const shortened = applyEditPlanFeedback(withMusic, {
+      type: "trim_clip",
+      clipId: videoTrack.items[0].id,
+      sourceInUs: videoTrack.items[0].sourceInUs,
+      sourceOutUs: videoTrack.items[0].sourceOutUs - 100_000,
+    }, {
+      newPlanId: "plan-music-trimmed",
+      now: 3,
+      sourceExists: () => true,
+    });
+    const refreshed = shortened.tracks.find((track) => track.kind === "audio");
+    if (refreshed?.kind !== "audio") throw new Error("fixture");
+    expect(refreshed.items[0].beatSyncSuggestions?.[0]).toMatchObject({
+      boundaryTimeUs: 2_900_000,
+      beatTimeUs: 3_000_000,
+      offsetUs: 100_000,
+    });
+
+    const removed = applyEditPlanFeedback(shortened, {
+      type: "remove_music",
+      audioClipId: "music-1",
+    }, {
+      newPlanId: "plan-music-removed",
+      now: 4,
+      sourceExists: () => true,
+    });
+    expect(removed.tracks.some((track) => track.kind === "audio")).toBe(false);
+  });
 });
 
 describe("Edit feedback repository", () => {
