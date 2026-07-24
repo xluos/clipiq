@@ -445,6 +445,30 @@ export function validateEditPlan(
   if (!validIntegerTime(plan.actualDurationUs)) {
     add(target, "error", "INVALID_ACTUAL_DURATION", "实际时长必须是非负整数微秒。", "actualDurationUs");
   }
+  const variant = plan.provenance?.variant;
+  if (variant) {
+    if (
+      !variant.groupId.trim()
+      || !["balanced", "pace", "character"].includes(variant.key)
+      || !variant.label.trim()
+      || !variant.description.trim()
+      || !Number.isSafeInteger(variant.index)
+      || !Number.isSafeInteger(variant.count)
+      || variant.count < 2
+      || variant.count > 3
+      || variant.index < 0
+      || variant.index >= variant.count
+      || !/^[a-f0-9]{64}$/.test(variant.selectionSignature)
+    ) {
+      add(
+        target,
+        "error",
+        "INVALID_PLAN_VARIANT",
+        "粗剪对比版本元数据无效。",
+        "provenance.variant",
+      );
+    }
+  }
 
   const seenTrackIds = new Set<string>();
   const seenItemIds = new Set<string>();

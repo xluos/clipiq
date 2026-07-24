@@ -674,7 +674,7 @@ export-package/
 - [x] 情绪段落驱动的 BGM 切换：Planner 基于候选窗口的真实事件、字幕和剪辑作用输出镜头级剪辑情绪，确定性编译为连续且最多 4 段的 `emotionSegments`；Studio 可选择 1 首全片 BGM，或按段落顺序选择等量音频，代理预览逐段裁切、淡入淡出、延迟和混音。当前不伪装自动识别歌曲情绪，验证见 [`emotion-bgm-validation.md`](./emotion-bgm-validation.md)。
 - [x] 字幕关键词高亮：词级时间与镜头事件语义共同生成可追溯 `CaptionCue.highlights`，ASS 代理烧录显示强调色；句级字幕、人工改文和无 libass 环境均有明确降级，验证见 [`caption-keyword-highlight-validation.md`](./caption-keyword-highlight-validation.md)。
 - [ ] 贴纸和花字模板。
-- [ ] 多版本粗剪对比。
+- [x] 多版本粗剪对比：复用同一批真实候选和证据，分别生成“叙事均衡 / 节奏优先 / 人物优先”三个方向；candidateId 顺序签名阻止重复方案伪装成对比，整组计划原子持久化，Studio 可切换后分别预览和调整。验证见 [`vlog-variant-comparison-validation.md`](./vlog-variant-comparison-validation.md)。
 - [x] FCPXML 1.10 粗剪时间线导出：素材包内生成 `timeline.fcpxml`，保留视频裁切、排序、恒定变速和有文件的音轨；字幕、贴图、人物裁切及未验证转场均显式降级，验证见 [`fcpxml-export-validation.md`](./fcpxml-export-validation.md)。
 - [x] 将词级字幕（存在时）、人物出镜区间和说话人区间完整传入候选，并以连续对齐时间片写入 `EditPlan`。
 - [x] 为每次 Planner 输入生成并持久化分析证据质量报告，缺失能力不伪装为可用。

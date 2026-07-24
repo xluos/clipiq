@@ -71,6 +71,49 @@ afterEach(() => {
 });
 
 describe("EditPlan 确定性编译", () => {
+  it("持久化并校验多版本分组元数据", () => {
+    const source = candidateSource({
+      shot: shot({}),
+      videoId: "video-1",
+      sourcePath: "/videos/video-1.mp4",
+    });
+    const selection = candidateSelection(source, "叙事均衡", 0.9);
+    const selectionSignature = "a".repeat(64);
+    const plan = compileEditPlan([selection], [source], {
+      planId: "plan-variant",
+      sessionId: "session-1",
+      targetDurationUs: 4_000_000,
+      canvas: { width: 1080, height: 1920, fps: 30 },
+      goal: "测试多版本",
+      generatedAt: 1,
+      variant: {
+        groupId: "variant-group-1",
+        key: "balanced",
+        label: "叙事均衡",
+        description: "兼顾事件与节奏",
+        index: 0,
+        count: 3,
+        selectionSignature,
+      },
+      sourceExists: () => true,
+    });
+
+    expect(plan.provenance.variant).toEqual({
+      groupId: "variant-group-1",
+      key: "balanced",
+      label: "叙事均衡",
+      description: "兼顾事件与节奏",
+      index: 0,
+      count: 3,
+      selectionSignature,
+    });
+    expect(plan.validation.valid).toBe(true);
+    const invalid = structuredClone(plan);
+    invalid.provenance.variant!.index = 3;
+    expect(validateEditPlan(invalid).errors.map((issue) => issue.code))
+      .toContain("INVALID_PLAN_VARIANT");
+  });
+
   it("只接受 candidateId 和剪辑意图，并由程序编译真实微秒范围", () => {
     const sources = [
       {

@@ -165,6 +165,12 @@ export function buildVlogPlannerPrompt(input: {
   candidates: VlogCandidate[];
   methodologySummaries?: string[];
   evidenceQuality?: AnalysisEvidenceQualityReport;
+  variant?: {
+    label: string;
+    description: string;
+    instruction: string;
+    avoidCandidateSequences?: string[][];
+  };
 }): { systemText: string; userText: string } {
   const constraints = VLOG_PLANNER_CONSTRAINTS
     .map((rule) => `- ${rule.ruleId} [${rule.priority}]: ${rule.instruction}`)
@@ -197,12 +203,28 @@ export function buildVlogPlannerPrompt(input: {
       "旁白 afterCandidateId 必须引用已选择且不是最后一个的 candidateId，旁白会从它的下一个镜头开始播放。",
       "每个选择必须根据该候选真实事件、字幕和剪辑作用标注 emotion：tone 只能是 neutral/calm/warm/upbeat/tense/reflective，intensity 与 confidence 均为 0-1，reason 不超过 40 个字符。",
       "emotion 表示成片这一镜头需要承载的情绪，不得把素材中没有证据的具体情感或人物心理当成事实。",
+      ...(input.variant ? [
+        `本次只生成「${input.variant.label}」版本，必须遵守该版本方向，同时继续满足全部事实证据和 Vlog 约束。`,
+      ] : []),
       "只返回合法 JSON，不要 Markdown，不要解释。",
     ].join("\n"),
     userText: [
       "# 剪辑目标",
       input.goal,
       `目标时长：${(input.targetDurationUs / 1_000_000).toFixed(1)} 秒`,
+      ...(input.variant ? [
+        "",
+        "# 本版本方向",
+        `${input.variant.label}：${input.variant.description}`,
+        input.variant.instruction,
+        ...((input.variant.avoidCandidateSequences || []).length > 0
+          ? [
+            "以下 candidateId 顺序已被其他版本使用，本版本必须给出不同的选择或排序：",
+            ...(input.variant.avoidCandidateSequences || [])
+              .map((sequence) => `- ${sequence.join(" -> ")}`),
+          ]
+          : []),
+      ] : []),
       "",
       "# Vlog 约束",
       constraints,

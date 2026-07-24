@@ -83,6 +83,10 @@ const {
   VLOG_PLANNER_OUTPUT_SCHEMA,
 } = require("./editing/vlog-planner");
 const { compileEditPlan } = require("./editing/edit-plan-compiler");
+const {
+  generateDistinctVlogVariants,
+  vlogVariantSpecs,
+} = require("./editing/vlog-variants");
 const { applyEditPlanFeedback } = require("./editing/edit-plan-feedback");
 const { renderEditPlanProxy } = require("./editing/proxy-renderer");
 const { exportEditPlanPackage } = require("./editing/exporters/package-exporter");
@@ -8448,6 +8452,43 @@ app.whenReady().then(async () => {
     return getEditPlanRepository().get(planId);
   });
 
+  ipcMain.handle("editPlans:activate", async (_event, payload = {}) => {
+    const planId = String(payload.planId || "").trim();
+    const sessionId = String(payload.sessionId || "").trim();
+    const plan = getEditPlanRepository().get(planId);
+    if (!plan || !sessionId || plan.sessionId !== sessionId) {
+      throw new Error("待切换的粗剪版本不存在或不属于当前会话");
+    }
+    if (!plan.validation?.valid) {
+      throw new Error("待切换的粗剪版本未通过校验");
+    }
+    const missingSource = plan.tracks
+      .flatMap((track) => {
+        if (track.kind === "video") {
+          return track.items.map((clip) => clip.sourcePath);
+        }
+        if (track.kind === "audio") {
+          return track.items.map((clip) => clip.sourcePath).filter(Boolean);
+        }
+        if (track.kind === "overlay") {
+          return track.items.map((item) => item.assetPath).filter(Boolean);
+        }
+        return [];
+      })
+      .find((sourcePath) => !fsSync.existsSync(sourcePath));
+    if (missingSource) {
+      throw new Error(`待切换版本的素材不存在: ${missingSource}`);
+    }
+    const session = getStudioSessionRepository().get(sessionId);
+    if (!session) throw new Error(`Studio 会话不存在: ${sessionId}`);
+    getStudioSessionRepository().upsert({
+      ...session,
+      currentEditPlanId: plan.id,
+      updatedAt: new Date().toISOString(),
+    });
+    return { ok: true, plan };
+  });
+
   ipcMain.handle("editPlans:save", async (_event, plan) => {
     getEditPlanRepository().save(plan);
     return { ok: true };
@@ -8630,44 +8671,8 @@ app.whenReady().then(async () => {
       }
     }
 
-    const provider = await loadComplexTextProvider();
-    const isLocalProvider = provider?.source === "local_llama";
-    if (
-      !provider?.model
-      || (!isLocalProvider && (!provider.apiKeyRef || !provider.baseUrl))
-    ) {
-      throw new Error("未配置 complex_text 任务槽位的 LLM 供应商");
-    }
-    const prompt = buildVlogPlannerPrompt({
-      goal,
-      targetDurationUs,
-      candidates: candidateResult.candidates,
-      methodologySummaries,
-      evidenceQuality,
-    });
-    const result = await openaiClient.callJsonCompletion(provider, {
-      ...prompt,
-      temperature: 0.2,
-      responseFormat: {
-        type: "json_schema",
-        json_schema: {
-          name: "vlog_edit_plan",
-          strict: false,
-          schema: VLOG_PLANNER_OUTPUT_SCHEMA,
-        },
-      },
-    });
-    const plannerResult = parseVlogPlannerOutput(
-      result.parsed,
-      candidateResult.candidates,
-    );
-    if (plannerResult.errors.length > 0) {
-      throw new Error(`Vlog Planner 输出无效: ${plannerResult.errors.join("；")}`);
-    }
-
     const shotById = new Map(shots.map((shot) => [shot.id, shot]));
     const videoById = new Map(videos.map((video) => [video.id, video]));
-    const planId = `edit-${require("node:crypto").randomUUID()}`;
     const sources = candidateResult.candidates
       .map((candidate) => {
         const shot = shotById.get(candidate.shotId);
@@ -8686,33 +8691,124 @@ app.whenReady().then(async () => {
         } : null;
       })
       .filter(Boolean);
-    const plan = compileEditPlan(plannerResult.selections, sources, {
-      planId,
-      sessionId,
-      targetDurationUs,
-      canvas: payload.canvas || { width: 1080, height: 1920, fps: 30 },
-      goal,
-      methodologyIds,
-      generatedAt: evidenceGeneratedAt,
-      plannerProvider: provider.id,
-      plannerModel: result.model || provider.model,
-      evidenceQuality,
-      maxClipDurationUs: Math.round(
-        Math.max(1, Number(payload.maxClipDurationSec) || 12) * 1_000_000,
-      ),
-      minimumIdentityConfidence: identityConfidence,
-      voiceovers: plannerResult.voiceovers,
-      sourceExists: (sourcePath) => fsSync.existsSync(sourcePath),
+
+    const provider = await loadComplexTextProvider();
+    const isLocalProvider = provider?.source === "local_llama";
+    if (
+      !provider?.model
+      || (!isLocalProvider && (!provider.apiKeyRef || !provider.baseUrl))
+    ) {
+      throw new Error("未配置 complex_text 任务槽位的 LLM 供应商");
+    }
+    const variantCount = Number(payload.variantCount ?? 1);
+    const variantSpecs = variantCount === 1
+      ? [null]
+      : vlogVariantSpecs(variantCount);
+    if (!Number.isInteger(variantCount) || variantCount < 1) {
+      throw new Error("粗剪对比版本数必须是正整数");
+    }
+    const variantGroupId = variantCount > 1
+      ? `variant-${require("node:crypto").randomUUID()}`
+      : null;
+    const plans = [];
+    const plannedVariants = await generateDistinctVlogVariants({
+      specs: variantSpecs,
+      maximumAttempts: 2,
+      generate: async (
+        variantSpec,
+        avoidCandidateSequences,
+      ) => {
+        const prompt = buildVlogPlannerPrompt({
+          goal,
+          targetDurationUs,
+          candidates: candidateResult.candidates,
+          methodologySummaries,
+          evidenceQuality,
+          ...(variantSpec ? {
+            variant: {
+              ...variantSpec,
+              avoidCandidateSequences,
+            },
+          } : {}),
+        });
+        const completionResult = await openaiClient.callJsonCompletion(provider, {
+          ...prompt,
+          temperature: variantSpec ? 0.3 : 0.2,
+          responseFormat: {
+            type: "json_schema",
+            json_schema: {
+              name: "vlog_edit_plan",
+              strict: false,
+              schema: VLOG_PLANNER_OUTPUT_SCHEMA,
+            },
+          },
+        });
+        const plannerResult = parseVlogPlannerOutput(
+          completionResult.parsed,
+          candidateResult.candidates,
+        );
+        return {
+          selections: plannerResult.selections,
+          errors: plannerResult.errors,
+          value: { plannerResult, completionResult },
+        };
+      },
     });
-    getEditPlanRepository().save(plan);
-    if (!plan.validation.valid) {
-      throw new Error(
-        `EditPlan 校验失败 (${plan.id}): ${plan.validation.errors.map((issue) => issue.message).join("；")}`,
-      );
+
+    for (const [variantIndex, planned] of plannedVariants.entries()) {
+      const { spec: variantSpec, signature } = planned;
+      const { plannerResult, completionResult } = planned.value;
+      const planId = `edit-${require("node:crypto").randomUUID()}`;
+      const variant = variantSpec && variantGroupId ? {
+        groupId: variantGroupId,
+        key: variantSpec.key,
+        label: variantSpec.label,
+        description: variantSpec.description,
+        index: variantIndex,
+        count: variantSpecs.length,
+        selectionSignature: signature,
+      } : undefined;
+      const plan = compileEditPlan(plannerResult.selections, sources, {
+        planId,
+        sessionId,
+        targetDurationUs,
+        canvas: payload.canvas || { width: 1080, height: 1920, fps: 30 },
+        goal,
+        methodologyIds,
+        generatedAt: evidenceGeneratedAt,
+        plannerProvider: provider.id,
+        plannerModel: completionResult.model || provider.model,
+        ...(variant ? { variant } : {}),
+        evidenceQuality,
+        maxClipDurationUs: Math.round(
+          Math.max(1, Number(payload.maxClipDurationSec) || 12) * 1_000_000,
+        ),
+        minimumIdentityConfidence: identityConfidence,
+        voiceovers: plannerResult.voiceovers,
+        sourceExists: (sourcePath) => fsSync.existsSync(sourcePath),
+      });
+      if (!plan.validation.valid) {
+        throw new Error(
+          `EditPlan 校验失败 (${plan.id}): ${plan.validation.errors.map((issue) => issue.message).join("；")}`,
+        );
+      }
+      plans.push(plan);
+    }
+
+    const db = getDb();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const plan of plans) getEditPlanRepository().save(plan);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
     }
     return {
       ok: true,
-      plan,
+      plan: plans[0],
+      plans,
+      ...(variantGroupId ? { variantGroupId } : {}),
       candidateCount: candidateResult.candidates.length,
       rejectedCount: candidateResult.rejected.length,
       evidenceQuality,

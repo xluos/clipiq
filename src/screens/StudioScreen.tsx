@@ -68,6 +68,58 @@ const EMOTION_TONE_LABELS: Record<EmotionTone, string> = {
   reflective: "回味",
 };
 
+function variantPlansForActivePlan(
+  plans: EditPlan[],
+  activePlan: EditPlan | null,
+): EditPlan[] {
+  const groupId = activePlan?.provenance.variant?.groupId;
+  if (!groupId) return [];
+  const latestByKey = new Map<string, EditPlan>();
+  for (const plan of plans) {
+    const variant = plan.provenance.variant;
+    if (variant?.groupId !== groupId || latestByKey.has(variant.key)) continue;
+    latestByKey.set(variant.key, plan);
+  }
+  if (activePlan?.provenance.variant) {
+    latestByKey.set(activePlan.provenance.variant.key, activePlan);
+  }
+  return [...latestByKey.values()].sort((left, right) =>
+    (left.provenance.variant?.index || 0)
+    - (right.provenance.variant?.index || 0));
+}
+
+function editPlanComparisonFacts(plan: EditPlan): {
+  clipCount: number;
+  videoCount: number;
+  emotionLabels: string;
+} {
+  const video = plan.tracks.find((track) => track.kind === "video");
+  const clips = video?.kind === "video" ? video.items : [];
+  return {
+    clipCount: clips.length,
+    videoCount: new Set(clips.map((clip) => clip.videoId)).size,
+    emotionLabels: [...new Set(
+      (plan.emotionSegments || []).map((segment) =>
+        EMOTION_TONE_LABELS[segment.tone]),
+    )].join(" / "),
+  };
+}
+
+function replaceVariantBranch(
+  plans: EditPlan[],
+  nextPlan: EditPlan,
+): EditPlan[] {
+  const variant = nextPlan.provenance.variant;
+  if (!variant) return [];
+  const next = plans.filter((plan) =>
+    plan.provenance.variant?.groupId === variant.groupId
+    && plan.provenance.variant.key !== variant.key);
+  next.push(nextPlan);
+  return next.sort((left, right) =>
+    (left.provenance.variant?.index || 0)
+    - (right.provenance.variant?.index || 0));
+}
+
 function StudioListScreen() {
   const { sessions, setLocation, upsertSession } = useApp();
   const editorLoc: AppLocation = { module: "studio", screen: "editor" };
@@ -208,6 +260,7 @@ function StudioEditorScreen() {
   const [genError, setGenError] = useState("");
   const [preview, setPreview] = useState<EditPlanPreview | null>(null);
   const [currentPlan, setCurrentPlan] = useState<EditPlan | null>(null);
+  const [variantPlans, setVariantPlans] = useState<EditPlan[]>([]);
   const [previewError, setPreviewError] = useState("");
   const [editError, setEditError] = useState("");
   const [editingAction, setEditingAction] = useState("");
@@ -246,15 +299,17 @@ function StudioEditorScreen() {
     Promise.all([
       api.getEditPlan?.(planId) || Promise.resolve(null),
       api.getEditPlanPreview?.(planId) || Promise.resolve(null),
+      api.listEditPlans?.(session.id) || Promise.resolve([]),
     ])
-      .then(([plan, previewValue]) => {
+      .then(([plan, previewValue, plans]) => {
         if (disposed) return;
         setCurrentPlan(plan);
         setPreview(previewValue);
+        setVariantPlans(variantPlansForActivePlan(plans, plan));
       })
       .catch(() => {});
     return () => { disposed = true; };
-  }, [session?.currentEditPlanId]);
+  }, [session?.currentEditPlanId, session?.id]);
 
   const save = (patch: Partial<StudioSession> = {}) => {
     if (!session) return;
@@ -270,7 +325,7 @@ function StudioEditorScreen() {
     });
   };
 
-  const regenerateSteps = async () => {
+  const regenerateSteps = async (variantCount: 1 | 3 = 1) => {
     if (!session) return;
     if (!goalDraft.trim()) {
       setGenError("先填剪辑目标");
@@ -289,9 +344,11 @@ function StudioEditorScreen() {
         targetDurationSec: totalSec,
         videoIds: usedAssetIds,
         methodologyIds: appliedMethodologies,
+        variantCount,
       });
       const steps = editPlanToStudioSteps(result.plan, assetProjects);
       setCurrentPlan(result.plan);
+      setVariantPlans(variantPlansForActivePlan(result.plans, result.plan));
       setPreview(null);
       setPreviewError("");
       upsertSession({
@@ -311,6 +368,44 @@ function StudioEditorScreen() {
       setGenError(e instanceof Error ? e.message : String(e));
     } finally {
       setGenerating(false);
+    }
+  };
+
+  const activateVariant = async (plan: EditPlan) => {
+    if (
+      !session
+      || plan.id === currentPlan?.id
+      || !window.videoAnalyzer?.activateEditPlan
+    ) {
+      return;
+    }
+    setEditError("");
+    setEditingAction("activate_variant");
+    try {
+      const result = await window.videoAnalyzer.activateEditPlan({
+        sessionId: session.id,
+        planId: plan.id,
+      });
+      const [previewValue] = await Promise.all([
+        window.videoAnalyzer.getEditPlanPreview?.(plan.id) || Promise.resolve(null),
+      ]);
+      const steps = editPlanToStudioSteps(result.plan, assetProjects);
+      setCurrentPlan(result.plan);
+      setPreview(previewValue);
+      setReplacingClipId("");
+      setReplacementCandidates({});
+      upsertSession({
+        ...session,
+        steps,
+        missingShots: collectMissingShots(steps),
+        currentEditPlanId: result.plan.id,
+        output: { kind: "draft" },
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      setEditError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setEditingAction("");
     }
   };
 
@@ -359,6 +454,7 @@ function StudioEditorScreen() {
       });
       const steps = editPlanToStudioSteps(result.plan, assetProjects);
       setCurrentPlan(result.plan);
+      setVariantPlans((current) => replaceVariantBranch(current, result.plan));
       setPreview(null);
       setReplacingClipId("");
       setReplacementCandidates({});
@@ -437,6 +533,7 @@ function StudioEditorScreen() {
       if (!("plan" in result)) return;
       const steps = editPlanToStudioSteps(result.plan, assetProjects);
       setCurrentPlan(result.plan);
+      setVariantPlans((current) => replaceVariantBranch(current, result.plan));
       setPreview(null);
       upsertSession({
         ...session,
@@ -474,6 +571,7 @@ function StudioEditorScreen() {
       });
       const steps = editPlanToStudioSteps(result.plan, assetProjects);
       setCurrentPlan(result.plan);
+      setVariantPlans((current) => replaceVariantBranch(current, result.plan));
       setPreview(null);
       upsertSession({
         ...session,
@@ -561,12 +659,20 @@ function StudioEditorScreen() {
           </button>
         )}
         <button
-          onClick={regenerateSteps}
+          onClick={() => regenerateSteps(1)}
           disabled={generating}
           className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
         >
           <RefreshCw className={`w-3 h-3 ${generating ? "animate-spin" : ""}`} strokeWidth={1.5} />
           {generating ? "LLM 生成中…" : "重新生成"}
+        </button>
+        <button
+          onClick={() => regenerateSteps(3)}
+          disabled={generating}
+          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-slate-300 dark:border-slate-700 text-[12.5px] text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
+        >
+          <Scissors className="w-3 h-3" strokeWidth={1.5} />
+          生成对比
         </button>
         <button
           onClick={exportPackage}
@@ -676,6 +782,66 @@ function StudioEditorScreen() {
             <div className="mb-3 rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-[12px] text-amber-700 dark:text-amber-300">
               {genError}
             </div>
+          )}
+          {variantPlans.length > 1 && (
+            <section className="mb-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-[10.5px] font-mono tracking-[0.14em] uppercase text-slate-500">
+                    方案对比
+                  </div>
+                  <div className="mt-1 text-[12px] text-slate-600 dark:text-slate-400">
+                    独立预览与调整
+                  </div>
+                </div>
+                <span className="text-[10.5px] font-mono text-slate-500">
+                  {variantPlans.length} 个版本
+                </span>
+              </div>
+              <div className="mt-2 grid grid-cols-3 gap-2">
+                {variantPlans.map((plan) => {
+                  const variant = plan.provenance.variant;
+                  const facts = editPlanComparisonFacts(plan);
+                  const active = currentPlan?.id === plan.id;
+                  return (
+                    <button
+                      key={plan.id}
+                      onClick={() => activateVariant(plan)}
+                      disabled={active || Boolean(editingAction)}
+                      className={`min-w-0 rounded-md border p-2 text-left disabled:opacity-100 ${
+                        active
+                          ? "border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/40"
+                          : "border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/50 hover:border-slate-300 dark:hover:border-slate-600"
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span className={`min-w-0 flex-1 truncate text-[12px] font-medium ${
+                          active
+                            ? "text-indigo-700 dark:text-indigo-300"
+                            : "text-slate-900 dark:text-slate-100"
+                        }`}>
+                          {variant?.label || "粗剪版本"}
+                        </span>
+                        {active && (
+                          <Check className="w-3 h-3 text-indigo-600 dark:text-indigo-400" strokeWidth={2} />
+                        )}
+                      </div>
+                      <div className="mt-1 line-clamp-2 text-[10.5px] leading-relaxed text-slate-500 dark:text-slate-400">
+                        {variant?.description}
+                      </div>
+                      <div className="mt-1.5 text-[10px] font-mono text-slate-500 dark:text-slate-400">
+                        {facts.clipCount} 镜头 · {facts.videoCount} 素材 · {formatTimeShort(plan.actualDurationUs / 1_000_000)}
+                      </div>
+                      {facts.emotionLabels && (
+                        <div className="mt-0.5 truncate text-[10px] text-slate-500 dark:text-slate-400">
+                          {facts.emotionLabels}
+                        </div>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
           )}
           {session.currentEditPlanId && (
             <section className="mb-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 overflow-hidden">
@@ -853,7 +1019,7 @@ function StudioEditorScreen() {
                 然后点右上角「重新生成」让系统基于素材库 × 方法论给出叙事骨架
               </p>
               <button
-                onClick={regenerateSteps}
+                onClick={() => regenerateSteps(1)}
                 disabled={!goalDraft.trim()}
                 className="mt-5 inline-flex items-center gap-1.5 h-9 px-4 rounded-md bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 text-white text-[13px] font-medium"
               >
@@ -1121,7 +1287,7 @@ function StudioEditorScreen() {
 
               <div className="flex gap-2.5 mt-5">
                 <button
-                  onClick={regenerateSteps}
+                  onClick={() => regenerateSteps(1)}
                   className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-[12.5px] text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
                 >
                   <RefreshCw className="w-3.5 h-3.5" strokeWidth={1.5} />

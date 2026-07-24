@@ -523,6 +523,10 @@ declare global {
       // 剪辑方案
       listEditPlans: (sessionId?: string) => Promise<EditPlan[]>;
       getEditPlan: (planId: string) => Promise<EditPlan | null>;
+      activateEditPlan: (payload: {
+        sessionId: string;
+        planId: string;
+      }) => Promise<{ ok: true; plan: EditPlan }>;
       saveEditPlan: (plan: EditPlan) => Promise<{ ok: true }>;
       deleteEditPlan: (
         planId: string,
@@ -546,9 +550,12 @@ declare global {
         }>;
         maxClipDurationSec?: number;
         canvas?: EditPlan["canvas"];
+        variantCount?: 1 | 2 | 3;
       }) => Promise<{
         ok: true;
         plan: EditPlan;
+        plans: EditPlan[];
+        variantGroupId?: string;
         candidateCount: number;
         rejectedCount: number;
         evidenceQuality: AnalysisEvidenceQualityReport;

@@ -521,6 +521,29 @@ describe("Vlog Planner 契约", () => {
     expect(prompt.systemText).toContain("emotion 表示成片这一镜头需要承载的情绪");
   });
 
+  it("多版本 prompt 固定当前方向，并明确避开已有镜头顺序", () => {
+    const prompt = buildVlogPlannerPrompt({
+      goal: "一分钟露营 Vlog",
+      targetDurationUs: 60_000_000,
+      candidates: [candidate],
+      variant: {
+        label: "节奏优先",
+        description: "更快推进",
+        instruction: "优先动作变化。",
+        avoidCandidateSequences: [
+          ["shot-1::0-4000000", "shot-2::4000000-8000000"],
+        ],
+      },
+    });
+
+    expect(prompt.systemText).toContain("本次只生成「节奏优先」版本");
+    expect(prompt.userText).toContain("# 本版本方向");
+    expect(prompt.userText).toContain("优先动作变化。");
+    expect(prompt.userText).toContain(
+      "shot-1::0-4000000 -> shot-2::4000000-8000000",
+    );
+  });
+
   it("解析时保留剪辑情绪，并拒绝候选集外引用、重复引用和非法置信度", () => {
     const result = parseVlogPlannerOutput({
       selections: [

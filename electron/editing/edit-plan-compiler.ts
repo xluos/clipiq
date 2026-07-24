@@ -52,6 +52,7 @@ export type CompileEditPlanOptions = {
   generatedAt: number;
   plannerProvider?: string;
   plannerModel?: string;
+  variant?: EditPlan["provenance"]["variant"];
   evidenceQuality?: AnalysisEvidenceQualityReport;
   maxClipDurationUs?: number;
   minimumIdentityConfidence?: number;
@@ -81,6 +82,7 @@ function stablePlannerDigest(
     canvas: options.canvas,
     methodologyIds: [...new Set(options.methodologyIds || [])].sort(),
     minimumIdentityConfidence: options.minimumIdentityConfidence,
+    variant: options.variant,
     evidenceQuality,
     selections,
     voiceovers: options.voiceovers || [],
@@ -619,6 +621,7 @@ export function compileEditPlan(
         selections,
         voiceover: options.voiceovers || [],
       },
+      ...(options.variant ? { variant: structuredClone(options.variant) } : {}),
       ...(options.evidenceQuality ? { evidenceQuality: options.evidenceQuality } : {}),
     },
     validation: {

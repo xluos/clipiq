@@ -1127,6 +1127,16 @@ export type EditTransition = {
   durationUs: number;
 };
 
+export type EditPlanVariant = {
+  groupId: string;
+  key: "balanced" | "pace" | "character";
+  label: string;
+  description: string;
+  index: number;
+  count: number;
+  selectionSignature: string;
+};
+
 export type EditPlan = {
   id: string;
   version: 1;
@@ -1163,6 +1173,7 @@ export type EditPlan = {
     plannerInputDigest?: string;
     plannerOutput?: unknown;
     evidenceQuality?: AnalysisEvidenceQualityReport;
+    variant?: EditPlanVariant;
   };
   validation: {
     valid: boolean;
