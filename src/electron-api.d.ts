@@ -10,6 +10,7 @@ import type {
   AnalysisReport,
   AppConfig,
   Collection,
+  EditPlan,
   LocalFitLevel,
   MachineSpecs,
   Methodology,
@@ -413,6 +414,14 @@ declare global {
         speakerTrackId: string,
         personId?: string,
       ) => Promise<SpeakerTrack>;
+
+      // 剪辑方案
+      listEditPlans: (sessionId?: string) => Promise<EditPlan[]>;
+      getEditPlan: (planId: string) => Promise<EditPlan | null>;
+      saveEditPlan: (plan: EditPlan) => Promise<{ ok: true }>;
+      deleteEditPlan: (
+        planId: string,
+      ) => Promise<{ ok: true; deleted: boolean }>;
 
       // 后台拉取
       startAccountFetch: (payload: { accountId: string; url: string; range: AccountFetchRange; name?: string }) => Promise<{ ok: true; accepted: boolean; reason?: string; taskId?: string; status?: QueueTaskStatus }>;

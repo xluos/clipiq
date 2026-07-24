@@ -101,6 +101,12 @@ const CHANNELS = [
   { method: "splitPersonAppearance", channel: "people:splitAppearance", kind: "invoke" },
   { method: "linkSpeakerTrackPerson", channel: "people:linkSpeakerTrack", kind: "invoke" },
 
+  // ── 剪辑方案 ──
+  { method: "listEditPlans", channel: "editPlans:list", kind: "invoke" },
+  { method: "getEditPlan", channel: "editPlans:get", kind: "invoke" },
+  { method: "saveEditPlan", channel: "editPlans:save", kind: "invoke" },
+  { method: "deleteEditPlan", channel: "editPlans:delete", kind: "invoke" },
+
   // ── 分析 ──
   { method: "analyzeVideo", channel: "analysis:start", kind: "invoke" },
   { method: "resumeAnalysis", channel: "analysis:resume", kind: "invoke" },

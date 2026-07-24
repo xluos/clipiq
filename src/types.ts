@@ -774,6 +774,147 @@ export type SpeakerTrack = {
   updatedAt?: string;
 };
 
+export type CropSpec = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type TransformSpec = {
+  x: number;
+  y: number;
+  scaleX: number;
+  scaleY: number;
+  rotationDeg: number;
+  opacity: number;
+};
+
+export type EditPlanIssue = {
+  code: string;
+  message: string;
+  path?: string;
+  meta?: Record<string, unknown>;
+};
+
+export type VideoClipEvidence = {
+  eventSummary?: string;
+  subtitleSegments?: Array<{
+    startUs: number;
+    endUs: number;
+    text: string;
+    speakerId?: string;
+  }>;
+  personIds?: string[];
+  speakerIds?: string[];
+};
+
+export type VideoClip = {
+  id: string;
+  shotId: string;
+  videoId: string;
+  sourcePath: string;
+  sourceInUs: number;
+  sourceOutUs: number;
+  timelineInUs: number;
+  speed: number;
+  volume: number;
+  crop?: CropSpec;
+  transform?: TransformSpec;
+  selectionReason: string;
+  confidence: number;
+  evidence?: VideoClipEvidence;
+};
+
+export type CaptionCue = {
+  id: string;
+  startUs: number;
+  endUs: number;
+  text: string;
+  styleId: string;
+  wordTimings?: Array<{
+    text: string;
+    startUs: number;
+    endUs: number;
+  }>;
+};
+
+export type AudioClip = {
+  id: string;
+  kind: "original" | "voiceover" | "music";
+  sourcePath?: string;
+  ttsText?: string;
+  timelineInUs: number;
+  sourceInUs: number;
+  sourceOutUs: number;
+  volume: number;
+  fadeInUs?: number;
+  fadeOutUs?: number;
+  ducking?: {
+    enabled: boolean;
+    targetVolume: number;
+  };
+};
+
+export type OverlayItem = {
+  id: string;
+  kind: "text" | "image" | "sticker";
+  assetPath?: string;
+  resourceKey?: string;
+  startUs: number;
+  endUs: number;
+  transform: TransformSpec;
+  animation?: {
+    in?: string;
+    out?: string;
+  };
+};
+
+export type EditTrack =
+  | { id: string; kind: "video"; items: VideoClip[] }
+  | { id: string; kind: "audio"; items: AudioClip[] }
+  | { id: string; kind: "caption"; items: CaptionCue[] }
+  | { id: string; kind: "overlay"; items: OverlayItem[] };
+
+export type EditTransition = {
+  id: string;
+  fromClipId: string;
+  toClipId: string;
+  type: "cut" | "dissolve" | "fade" | "slide";
+  durationUs: number;
+};
+
+export type EditPlan = {
+  id: string;
+  version: 1;
+  sessionId: string;
+  status: "draft" | "validated" | "rendered" | "exported";
+  canvas: {
+    width: number;
+    height: number;
+    fps: number;
+  };
+  targetDurationUs: number;
+  actualDurationUs: number;
+  tracks: EditTrack[];
+  transitions: EditTransition[];
+  provenance: {
+    goal: string;
+    genre: "vlog";
+    methodologyIds: string[];
+    generatedAt: number;
+    plannerProvider?: string;
+    plannerModel?: string;
+    plannerInputDigest?: string;
+    plannerOutput?: unknown;
+  };
+  validation: {
+    valid: boolean;
+    warnings: EditPlanIssue[];
+    errors: EditPlanIssue[];
+  };
+};
+
 // 对标账号 (UP 主)
 export type AccountPlatform = "bilibili" | "douyin" | "xiaohongshu" | "youtube" | "tiktok" | "unknown";
 

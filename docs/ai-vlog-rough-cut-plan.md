@@ -1,6 +1,6 @@
 # ClipIQ AI Vlog 粗剪迭代计划
 
-> 状态：实施中（M0-1、M0-2 已完成，M0-3 地基进行中）
+> 状态：实施中（M0-1、M0-2、M1-1 已完成，M0-3 地基进行中）
 > 适用分支基线：`feature/v2`  
 > 建议实施分支：`feature/ai-vlog-rough-cut`  
 > 更新日期：2026-07-24
@@ -458,8 +458,9 @@ type PersonAppearance = {
 - [ ] 增加基础质量评分和重复镜头过滤。
 - [ ] 将 `prompts/methodology/genre/vlog.md` 的规则转成 planner 可消费的约束。
 - [ ] 重写 Studio 生成契约：输入真实 Shot，输出 `shotId` 和剪辑意图。
-- [ ] 新增确定性编译器，禁止模型直接生成时间段。
-- [ ] 新增 `EditPlan` schema、版本号和校验器。
+- [x] 新增确定性编译器，禁止模型直接生成时间段。
+- [x] 新增 `EditPlan` schema、版本号和校验器。
+- [x] 新增 `edit_plans` repository 和 IPC，整份保存可执行方案。
 - [ ] 保存 planner 输入摘要、输出和模型信息，便于复现问题。
 
 验收：

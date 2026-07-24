@@ -67,6 +67,10 @@ const {
   createIdentityRepository,
   migrateIdentitySchema,
 } = require("./repositories/identity-repository");
+const {
+  createEditPlanRepository,
+  migrateEditPlanSchema,
+} = require("./repositories/edit-plan-repository");
 const { buildShotsFromAnalysis } = require("./editing/analysis-shot-sync");
 const ElectronStore = require("electron-store");
 
@@ -1363,6 +1367,7 @@ function getDb() {
   migrateStudioSessionSchema(db);
   migrateShotSchema(db);
   migrateIdentitySchema(db);
+  migrateEditPlanSchema(db);
 
   // (methodologies 旧 schema 已在上方建表前弃掉重建,不再做数据迁移)
 
@@ -1439,6 +1444,12 @@ let _identityRepository = null;
 function getIdentityRepository() {
   if (!_identityRepository) _identityRepository = createIdentityRepository(getDb());
   return _identityRepository;
+}
+
+let _editPlanRepository = null;
+function getEditPlanRepository() {
+  if (!_editPlanRepository) _editPlanRepository = createEditPlanRepository(getDb());
+  return _editPlanRepository;
 }
 
 // ── tasks 表读写(task-queue 调度器的持久层)──
@@ -7763,6 +7774,24 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("people:linkSpeakerTrack", async (_event, speakerTrackId, personId) => {
     return getIdentityRepository().linkSpeakerTrack(speakerTrackId, personId);
+  });
+
+  // --- edit plans ---
+  ipcMain.handle("editPlans:list", async (_event, sessionId) => {
+    return getEditPlanRepository().list(sessionId);
+  });
+
+  ipcMain.handle("editPlans:get", async (_event, planId) => {
+    return getEditPlanRepository().get(planId);
+  });
+
+  ipcMain.handle("editPlans:save", async (_event, plan) => {
+    getEditPlanRepository().save(plan);
+    return { ok: true };
+  });
+
+  ipcMain.handle("editPlans:delete", async (_event, planId) => {
+    return { ok: true, deleted: getEditPlanRepository().delete(planId) };
   });
 
   // v2: 多策略拉取 UP 主账号信息 + 视频列表
