@@ -6,6 +6,10 @@ import type {
   FaceDetection,
   FaceFrameAnalysis,
 } from "./face-analysis-provider";
+import {
+  SFACE_EMBEDDING_MODEL_ID,
+  SFaceEmbedder,
+} from "./sface-embedder";
 
 type OrtModule = typeof import("onnxruntime-node");
 type OrtSession = import("onnxruntime-node").InferenceSession;
@@ -15,6 +19,8 @@ type YuNetRawOutputs = Record<string, ArrayLike<number>>;
 
 export type YuNetProviderOptions = {
   modelPath: string;
+  embeddingModelPath?: string;
+  minimumEmbeddingQuality?: number;
   scoreThreshold?: number;
   nmsThreshold?: number;
   topK?: number;
@@ -71,6 +77,15 @@ export const YUNET_PROVIDER_DESCRIPTOR: FaceAnalysisProviderDescriptor = {
     licenseName: "MIT",
     productionUse: "allowed",
   }],
+};
+
+export const SFACE_MODEL_DESCRIPTOR = {
+  id: SFACE_EMBEDDING_MODEL_ID,
+  role: "embedding" as const,
+  version: "2021dec",
+  sourceUrl: "https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface",
+  licenseName: "Apache-2.0",
+  productionUse: "allowed" as const,
 };
 
 function clamp(value: number, minimum: number, maximum: number): number {
@@ -296,9 +311,15 @@ function toDetection(
 }
 
 export class YuNetFaceAnalysisProvider implements FaceAnalysisProvider {
-  readonly descriptor = YUNET_PROVIDER_DESCRIPTOR;
-  private readonly options: Required<YuNetProviderOptions>;
+  readonly descriptor: FaceAnalysisProviderDescriptor;
+  private readonly options: Required<Omit<
+    YuNetProviderOptions,
+    "embeddingModelPath" | "minimumEmbeddingQuality"
+  >> & {
+    minimumEmbeddingQuality: number;
+  };
   private sessionPromise?: Promise<OrtSession>;
+  private readonly embedder?: SFaceEmbedder;
 
   constructor(options: YuNetProviderOptions) {
     this.options = {
@@ -308,7 +329,23 @@ export class YuNetFaceAnalysisProvider implements FaceAnalysisProvider {
       topK: options.topK ?? 5000,
       inputWidth: options.inputWidth ?? 640,
       inputHeight: options.inputHeight ?? 640,
+      minimumEmbeddingQuality: options.minimumEmbeddingQuality ?? 0.5,
     };
+    this.embedder = options.embeddingModelPath
+      ? new SFaceEmbedder(options.embeddingModelPath)
+      : undefined;
+    this.descriptor = this.embedder
+      ? {
+        ...YUNET_PROVIDER_DESCRIPTOR,
+        id: "yunet-sface-onnxruntime",
+        version: "2023mar+2021dec",
+        capabilities: {
+          ...YUNET_PROVIDER_DESCRIPTOR.capabilities,
+          embedding: true,
+        },
+        models: [...YUNET_PROVIDER_DESCRIPTOR.models, SFACE_MODEL_DESCRIPTOR],
+      }
+      : YUNET_PROVIDER_DESCRIPTOR;
   }
 
   private getSession(): Promise<OrtSession> {
@@ -333,6 +370,10 @@ export class YuNetFaceAnalysisProvider implements FaceAnalysisProvider {
       );
       if (!session.inputNames.includes("input") || missingOutputs.length > 0) {
         return { ready: false, reason: "YuNet 模型输入输出契约不兼容" };
+      }
+      if (this.embedder) {
+        const embeddingReadiness = await this.embedder.getReadiness();
+        if (embeddingReadiness.ready === false) return embeddingReadiness;
       }
       return { ready: true };
     } catch (error) {
@@ -388,10 +429,25 @@ export class YuNetFaceAnalysisProvider implements FaceAnalysisProvider {
         outputs[name] = tensor.data;
       }
       const faces = decodeYuNetOutputs(outputs, prepared, this.options);
+      const detections: FaceDetection[] = [];
+      for (const [index, face] of faces.entries()) {
+        const detection = toDetection(face, index, frame, image.width, image.height);
+        if (this.embedder && detection.quality >= this.options.minimumEmbeddingQuality) {
+          detection.embedding = {
+            modelId: SFACE_EMBEDDING_MODEL_ID,
+            vector: await this.embedder.embed(
+              image.data,
+              image.width,
+              image.height,
+              face.landmarks,
+            ),
+          };
+        }
+        detections.push(detection);
+      }
       analyses.push({
         frame,
-        detections: faces.map((face, index) =>
-          toDetection(face, index, frame, image.width, image.height)),
+        detections,
       });
     }
     return analyses;

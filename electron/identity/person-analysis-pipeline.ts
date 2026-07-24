@@ -13,9 +13,15 @@ import {
   buildFaceTracks,
   type FaceTrackPolicy,
 } from "./face-tracker";
+import {
+  assignPersonIdentities,
+} from "./person-identity-assignment";
 
 export type PersonAnalysisRepository = {
   replaceEvidenceForVideo(videoId: string, batch: IdentityEvidenceBatch): void;
+  listAppearanceEvidence?(videoId?: string): PersonAppearanceEvidence[];
+  listPeople?(): import("../../src/types").Person[];
+  listDifferentPersonPairs?(): Array<{ leftPersonId: string; rightPersonId: string }>;
 };
 
 export type PersonAnalysisResult = {
@@ -25,6 +31,8 @@ export type PersonAnalysisResult = {
   trackCount: number;
   appearanceCount: number;
   embeddingTrackCount: number;
+  assignedTrackCount: number;
+  matchedExistingPersonCount: number;
   reason?: string;
 };
 
@@ -86,6 +94,8 @@ export async function runPersonAppearanceAnalysis(
       trackCount: 0,
       appearanceCount: 0,
       embeddingTrackCount: 0,
+      assignedTrackCount: 0,
+      matchedExistingPersonCount: 0,
       reason: readiness.reason,
     };
   }
@@ -107,14 +117,29 @@ export async function runPersonAppearanceAnalysis(
   }
 
   const tracks = buildFaceTracks(analyses, trackPolicy);
-  const appearances: PersonAppearanceEvidence[] = buildFaceTrackAppearances(tracks);
-  repository.replaceEvidenceForVideo(videoId, { appearances });
+  const rawAppearances: PersonAppearanceEvidence[] = buildFaceTrackAppearances(tracks);
+  const identity = assignPersonIdentities({
+    videoId,
+    appearances: rawAppearances,
+    existingEvidence: repository.listAppearanceEvidence?.() || [],
+    people: repository.listPeople?.() || [],
+    differentPersonPairs: repository.listDifferentPersonPairs?.() || [],
+  });
+  const batch: IdentityEvidenceBatch = {
+    appearances: identity.appearances,
+    ...(identity.people.length ? { people: identity.people } : {}),
+  };
+  repository.replaceEvidenceForVideo(videoId, batch);
   return {
     status: "completed",
     videoId,
     analyzedFrameCount: analyses.length,
     trackCount: tracks.length,
-    appearanceCount: appearances.length,
+    appearanceCount: identity.appearances.length,
     embeddingTrackCount: tracks.filter((track) => track.prototypeEmbedding).length,
+    assignedTrackCount: identity.decisions.filter((decision) => decision.personId).length,
+    matchedExistingPersonCount: identity.decisions.filter(
+      (decision) => decision.reason === "matched",
+    ).length,
   };
 }

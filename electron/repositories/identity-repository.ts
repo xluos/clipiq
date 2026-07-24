@@ -10,11 +10,13 @@ type Row = Record<string, any>;
 export type PersonAppearanceEvidence = PersonAppearance & {
   embedding?: number[];
   embeddingModel?: string;
+  embeddingQuality?: number;
 };
 
 export type IdentityEvidenceBatch = {
   appearances: PersonAppearanceEvidence[];
   speakerTracks?: SpeakerTrack[];
+  people?: Person[];
 };
 
 function toIso(value: unknown): string {
@@ -123,6 +125,7 @@ export function migrateIdentitySchema(db: DatabaseSync): void {
       manual_locked INTEGER NOT NULL DEFAULT 0,
       speaking_confidence REAL,
       embedding_model TEXT,
+      embedding_quality REAL,
       face_embedding BLOB,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
@@ -176,6 +179,11 @@ export function migrateIdentitySchema(db: DatabaseSync): void {
       UNIQUE(kind, left_person_id, right_person_id)
     );
   `);
+  try {
+    db.exec("ALTER TABLE person_appearances ADD COLUMN embedding_quality REAL");
+  } catch {
+    // 已迁移。
+  }
 }
 
 export function createIdentityRepository(db: DatabaseSync) {
@@ -206,8 +214,9 @@ export function createIdentityRepository(db: DatabaseSync) {
     INSERT INTO person_appearances (
       id, person_id, video_id, shot_id, track_id, start_sec, end_sec,
       confidence, identity_confidence, thumbnail_url, source, manual_locked,
-      speaking_confidence, embedding_model, face_embedding, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      speaking_confidence, embedding_model, embedding_quality,
+      face_embedding, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertSpeakerStatement = db.prepare(`
     INSERT INTO speaker_tracks (
@@ -215,6 +224,43 @@ export function createIdentityRepository(db: DatabaseSync) {
       confidence, link_confidence, transcript_text, manual_locked, created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
+  const upsertPersonStatement = db.prepare(`
+    INSERT INTO people (
+      id, display_name, representative_thumbnail_url, status,
+      merged_into_person_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      display_name = CASE
+        WHEN people.status = 'confirmed' THEN people.display_name
+        ELSE COALESCE(excluded.display_name, people.display_name)
+      END,
+      representative_thumbnail_url = COALESCE(
+        excluded.representative_thumbnail_url,
+        people.representative_thumbnail_url
+      ),
+      status = CASE
+        WHEN people.status IN ('confirmed', 'merged') THEN people.status
+        ELSE excluded.status
+      END,
+      merged_into_person_id = CASE
+        WHEN people.status = 'merged' THEN people.merged_into_person_id
+        ELSE excluded.merged_into_person_id
+      END,
+      updated_at = excluded.updated_at
+  `);
+
+  const writePerson = (person: Person, now: number): void => {
+    if (!person.id) throw new Error("人物缺少 id");
+    upsertPersonStatement.run(
+      person.id,
+      person.displayName || null,
+      person.representativeThumbnailUrl || null,
+      person.status || "auto",
+      person.mergedIntoPersonId || null,
+      Date.parse(person.createdAt || "") || now,
+      now,
+    );
+  };
 
   const recordEvent = (
     action: string,
@@ -278,6 +324,9 @@ export function createIdentityRepository(db: DatabaseSync) {
           ...rowToAppearance(row),
           embedding: decodeEmbedding(row.face_embedding),
           embeddingModel: row.embedding_model || undefined,
+          embeddingQuality: row.embedding_quality == null
+            ? undefined
+            : Number(row.embedding_quality),
         };
       });
     },
@@ -296,43 +345,10 @@ export function createIdentityRepository(db: DatabaseSync) {
 
     upsertPeople(people: Person[]): Person[] {
       const now = Date.now();
-      const statement = db.prepare(`
-        INSERT INTO people (
-          id, display_name, representative_thumbnail_url, status,
-          merged_into_person_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          display_name = CASE
-            WHEN people.status = 'confirmed' THEN people.display_name
-            ELSE COALESCE(excluded.display_name, people.display_name)
-          END,
-          representative_thumbnail_url = COALESCE(
-            excluded.representative_thumbnail_url,
-            people.representative_thumbnail_url
-          ),
-          status = CASE
-            WHEN people.status IN ('confirmed', 'merged') THEN people.status
-            ELSE excluded.status
-          END,
-          merged_into_person_id = CASE
-            WHEN people.status = 'merged' THEN people.merged_into_person_id
-            ELSE excluded.merged_into_person_id
-          END,
-          updated_at = excluded.updated_at
-      `);
       db.exec("BEGIN IMMEDIATE");
       try {
         for (const person of people) {
-          if (!person.id) throw new Error("人物缺少 id");
-          statement.run(
-            person.id,
-            person.displayName || null,
-            person.representativeThumbnailUrl || null,
-            person.status || "auto",
-            person.mergedIntoPersonId || null,
-            Date.parse(person.createdAt || "") || now,
-            now,
-          );
+          writePerson(person, now);
         }
         db.exec("COMMIT");
       } catch (error) {
@@ -358,6 +374,9 @@ export function createIdentityRepository(db: DatabaseSync) {
 
       db.exec("BEGIN IMMEDIATE");
       try {
+        for (const person of batch.people || []) {
+          writePerson(person, now);
+        }
         db.prepare(`
           DELETE FROM person_appearances WHERE video_id = ? AND manual_locked = 0
         `).run(videoId);
@@ -392,6 +411,7 @@ export function createIdentityRepository(db: DatabaseSync) {
             appearance.manualLocked ? 1 : 0,
             appearance.speakingConfidence ?? null,
             appearance.embeddingModel || null,
+            appearance.embeddingQuality ?? null,
             encodeEmbedding(appearance.embedding),
             Date.parse(appearance.createdAt || "") || now,
             now,
@@ -424,6 +444,24 @@ export function createIdentityRepository(db: DatabaseSync) {
             now,
           );
         }
+        db.exec(`
+          DELETE FROM people
+          WHERE status = 'auto'
+            AND NOT EXISTS (
+              SELECT 1 FROM person_appearances a WHERE a.person_id = people.id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM speaker_tracks s WHERE s.person_id = people.id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM person_identity_constraints c
+              WHERE c.left_person_id = people.id OR c.right_person_id = people.id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM person_identity_events e
+              WHERE e.person_id = people.id OR e.related_person_id = people.id
+            )
+        `);
         db.exec("COMMIT");
       } catch (error) {
         try { db.exec("ROLLBACK"); } catch { /* 保留原始错误。 */ }

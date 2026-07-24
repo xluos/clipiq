@@ -47,6 +47,7 @@ describe("人物身份 repository", () => {
         identityConfidence: 0.78,
         source: "face_track",
         embeddingModel: "test-face-v1",
+        embeddingQuality: 0.88,
         embedding: [0.1, 0.2, 0.3],
       }],
       speakerTracks: [{
@@ -108,6 +109,7 @@ describe("人物身份 repository", () => {
     ]);
     expect(repository.listAppearanceEvidence("video-1")[0]).toMatchObject({
       embeddingModel: "test-face-v1",
+      embeddingQuality: 0.88,
       embedding: expect.any(Array),
     });
     expect(repository.listAppearances("video-1")[0]).not.toHaveProperty("embedding");
@@ -198,6 +200,45 @@ describe("人物身份 repository", () => {
 
     expect(repository.listSpeakerTracks("video-1")).toEqual([
       expect.objectContaining({ id: "speaker-track-1" }),
+    ]);
+  });
+
+  it("自动人物与 embedding 质量在同一事务中落库", () => {
+    const repository = createIdentityRepository(createDatabase());
+    repository.replaceEvidenceForVideo("video-1", {
+      people: [{
+        id: "person-auto-a",
+        representativeThumbnailUrl: "media://frame/a",
+        status: "auto",
+      }],
+      appearances: [{
+        id: "appearance-1",
+        videoId: "video-1",
+        trackId: "track-1",
+        personId: "person-auto-a",
+        startSec: 0,
+        endSec: 1,
+        confidence: 0.93,
+        identityConfidence: 1,
+        source: "face_track",
+        embeddingModel: "opencv-zoo-sface-2021dec",
+        embeddingQuality: 0.81,
+        embedding: [1, 0, 0],
+      }],
+    });
+
+    expect(repository.listPeople()).toEqual([
+      expect.objectContaining({
+        id: "person-auto-a",
+        appearanceCount: 1,
+      }),
+    ]);
+    expect(repository.listAppearanceEvidence("video-1")).toEqual([
+      expect.objectContaining({
+        personId: "person-auto-a",
+        embeddingModel: "opencv-zoo-sface-2021dec",
+        embeddingQuality: 0.81,
+      }),
     ]);
   });
 });

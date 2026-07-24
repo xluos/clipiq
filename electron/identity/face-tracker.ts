@@ -44,6 +44,7 @@ export type FaceTrack = {
 export type FaceTrackAppearance = PersonAppearance & {
   embedding?: number[];
   embeddingModel?: string;
+  embeddingQuality?: number;
 };
 
 type MutableTrack = Omit<
@@ -317,6 +318,7 @@ export function buildFaceTrackAppearances(tracks: FaceTrack[]): FaceTrackAppeara
         source: "face_track",
         embedding: track.prototypeEmbedding,
         embeddingModel: track.embeddingModel,
+        embeddingQuality: track.prototypeEmbedding ? track.quality : undefined,
       };
     }),
   );

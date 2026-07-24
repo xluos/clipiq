@@ -1,6 +1,6 @@
 # ClipIQ AI Vlog 粗剪迭代计划
 
-> 状态：实施中（M0-1、M0-2、M1、M2 已完成，M0-3 本地检测已接入，跨素材身份与说话人分离待完成）
+> 状态：实施中（M0-1、M0-2、M1、M2、M3、M5 已完成；M0-3 已接入本地检测与跨素材身份，说话人分离待完成；M4 待安装剪映实测）
 > 适用分支基线：`feature/v2`  
 > 建议实施分支：`feature/ai-vlog-rough-cut`  
 > 更新日期：2026-07-24
@@ -275,7 +275,8 @@ export type EditTransition = {
 - 当前没有说话人分离；`speakerId` 仍需独立 diarization 后端。
 - `ShotContext` 已有镜头起止时间、字幕分段、内容描述和代表帧。
 - 已有结构化人物实体、出镜区间、说话人轨迹和跨素材身份聚类的数据契约、持久化与保守匹配策略。
-- 当前仍没有真实的人脸检测/连续跟踪、特征提取和说话人分离后端，因此没有上游证据时不能可靠判断多个素材中是否为同一个人。
+- 已接入 YuNet 检测/关键点、SFace 128 维特征、单素材连续跟踪和保守跨素材聚类；清晰正脸在最小固定正负样本中可复用同一 `personId`，不同人物未发生自动误合并。
+- 当前仍没有通用多人说话人分离；侧脸、遮挡、相似人物和跨设备样本还需扩大固定集，低质量人脸继续保持匿名。
 
 写入 `shots` 的剪辑证据至少包含：
 
@@ -299,7 +300,7 @@ type TranscriptEvidence = {
 
 type PersonAppearance = {
   id: string;
-  personId?: string;       // 未达到跨素材合并阈值时保持为空
+  personId?: string;       // 无可靠身份向量时保持为空；不确定匹配时新建自动人物而非误并
   videoId: string;
   shotId: string;
   trackId: string;         // 单素材内连续跟踪 ID
@@ -444,7 +445,7 @@ type PersonAppearance = {
 - [x] 建立确定性单素材轨迹构建器；无向量时不跨 Shot 猜测同一人物。
 - [x] 建立人物分析编排器；Provider 未就绪或异常时不覆盖旧人物证据。
 - [x] 新增 YuNet 单素材人脸检测与连续跟踪，按 1 秒证据窗口保存 `person_appearances`；长素材最多 900 帧并显式降采样。
-- [ ] 新增本地人脸特征与跨素材聚类，生成稳定 `personId`。
+- [x] 新增 SFace 本地人脸特征与跨素材聚类，生成稳定 `personId`；最小正负样本验证和阈值记录见 `docs/person-identity-sface-validation.md`。
 - [ ] 在人物管理 UI 支持命名、合并、拆分；后端人工锁定与重分析保留已完成。
 - [ ] Candidate Builder 可按人物、事件、对白和时间范围检索真实 Shot。
 
@@ -750,6 +751,8 @@ electron/
 │   ├── person-frame-sampler.ts
 │   ├── person-analysis-pipeline.ts
 │   ├── person-clusterer.ts
+│   ├── person-identity-assignment.ts
+│   ├── sface-embedder.ts
 │   ├── yunet-provider.ts
 │   └── speaker-linker.ts
 └── migrations/

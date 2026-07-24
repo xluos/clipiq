@@ -107,4 +107,25 @@ describe("YuNet Provider", () => {
       reason: expect.stringContaining("YuNet"),
     });
   });
+
+  it("只在配置 SFace 时声明跨素材 embedding 能力和许可", () => {
+    const detectorOnly = new YuNetFaceAnalysisProvider({
+      modelPath: "/tmp/yunet.onnx",
+    });
+    const withEmbedding = new YuNetFaceAnalysisProvider({
+      modelPath: "/tmp/yunet.onnx",
+      embeddingModelPath: "/tmp/sface.onnx",
+    });
+
+    expect(detectorOnly.descriptor.capabilities.embedding).toBe(false);
+    expect(withEmbedding.descriptor.capabilities.embedding).toBe(true);
+    expect(withEmbedding.descriptor.models).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "opencv-zoo-sface-2021dec",
+        role: "embedding",
+        licenseName: "Apache-2.0",
+        productionUse: "allowed",
+      }),
+    ]));
+  });
 });

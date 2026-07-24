@@ -3346,11 +3346,10 @@ async function extractFrame(ffmpeg, inputPath, outputPath, second, width = 420, 
   ], {}, handle);
 }
 
-async function resolveYuNetModelPath(onProgress) {
+async function resolveDaemonVisionModelPath(modelId, displayName, onProgress) {
   const daemonClient = require("./daemon-client.cjs");
-  const modelId = "yunet";
   const status = await daemonClient.getModelStatus(modelId);
-  if (!status) throw new Error("ai-model-daemon 未提供 YuNet 模型");
+  if (!status) throw new Error(`ai-model-daemon 未提供 ${displayName} 模型`);
 
   if (!status.ready) {
     await daemonClient.downloadModel(modelId, (progress) => {
@@ -3360,7 +3359,7 @@ async function resolveYuNetModelPath(onProgress) {
   const paths = await daemonClient.getModelPaths(modelId);
   const modelPath = paths?.default || Object.values(paths || {})[0];
   if (!modelPath || !fsSync.existsSync(modelPath)) {
-    throw new Error("YuNet 模型下载完成后仍未找到模型文件");
+    throw new Error(`${displayName} 模型下载完成后仍未找到模型文件`);
   }
   return modelPath;
 }
@@ -3384,6 +3383,8 @@ async function runLocalPersonAppearanceAnalysis({
       trackCount: 0,
       appearanceCount: 0,
       embeddingTrackCount: 0,
+      assignedTrackCount: 0,
+      matchedExistingPersonCount: 0,
       sampledFrameCount: 0,
       sampleIntervalSec: samplePlan.intervalSec,
       downsampled: false,
@@ -3392,14 +3393,59 @@ async function runLocalPersonAppearanceAnalysis({
   }
 
   send(97, "人物分析", "正在准备本地人脸检测模型。");
-  const modelPath = await resolveYuNetModelPath((progress) => {
+  const modelPath = await resolveDaemonVisionModelPath("yunet", "YuNet", (progress) => {
     const percent = Number(progress?.percent);
     const progressText = Number.isFinite(percent)
       ? ` · ${Math.round(percent)}%`
       : "";
     send(97, "人物分析", `正在下载 YuNet 人脸检测模型${progressText}`);
   });
-  const provider = new YuNetFaceAnalysisProvider({ modelPath });
+  let embeddingModelPath;
+  let embeddingUnavailableReason;
+  try {
+    embeddingModelPath = await resolveDaemonVisionModelPath("sface", "SFace", (progress) => {
+      const percent = Number(progress?.percent);
+      const progressText = Number.isFinite(percent)
+        ? ` · ${Math.round(percent)}%`
+        : "";
+      send(97, "人物分析", `正在下载 SFace 人物身份模型${progressText}`);
+    });
+  } catch (error) {
+    embeddingUnavailableReason = error?.message || String(error);
+    send(
+      97,
+      "人物分析",
+      `SFace 暂不可用，本次只生成单素材匿名轨迹：${embeddingUnavailableReason}`,
+    );
+  }
+  const identityRepository = getIdentityRepository();
+  const existingIdentityEvidence = embeddingUnavailableReason
+    ? identityRepository.listAppearanceEvidence(videoId)
+    : [];
+  if (
+    embeddingUnavailableReason
+    && existingIdentityEvidence.some((appearance) =>
+      appearance.personId || appearance.embedding?.length)
+  ) {
+    return {
+      status: "unavailable",
+      videoId,
+      analyzedFrameCount: 0,
+      trackCount: 0,
+      appearanceCount: 0,
+      embeddingTrackCount: 0,
+      assignedTrackCount: 0,
+      matchedExistingPersonCount: 0,
+      sampledFrameCount: 0,
+      sampleIntervalSec: samplePlan.intervalSec,
+      downsampled: samplePlan.downsampled,
+      reason: `SFace 暂不可用，为避免覆盖已有跨素材人物证据，本次保留旧结果：${embeddingUnavailableReason}`,
+    };
+  }
+  const provider = new YuNetFaceAnalysisProvider({
+    modelPath,
+    embeddingModelPath,
+  });
   const readiness = await provider.getReadiness();
   if (readiness.ready === false) {
     return {
@@ -3409,6 +3455,8 @@ async function runLocalPersonAppearanceAnalysis({
       trackCount: 0,
       appearanceCount: 0,
       embeddingTrackCount: 0,
+      assignedTrackCount: 0,
+      matchedExistingPersonCount: 0,
       sampledFrameCount: 0,
       sampleIntervalSec: samplePlan.intervalSec,
       downsampled: samplePlan.downsampled,
@@ -3455,7 +3503,7 @@ async function runLocalPersonAppearanceAnalysis({
     videoId,
     frames: analysisFrames,
     provider,
-    repository: getIdentityRepository(),
+    repository: identityRepository,
     usePolicy: { environment: "production" },
     trackPolicy: {
       maxGapSec: Math.max(1.5, samplePlan.intervalSec * 1.6),
@@ -3463,7 +3511,8 @@ async function runLocalPersonAppearanceAnalysis({
   });
   return {
     ...result,
-    modelId: provider.descriptor.models[0].id,
+    modelIds: provider.descriptor.models.map((model) => model.id),
+    ...(embeddingUnavailableReason ? { embeddingUnavailableReason } : {}),
     sampledFrameCount: analysisFrames.length,
     sampleIntervalSec: samplePlan.intervalSec,
     downsampled: samplePlan.downsampled,
@@ -6694,10 +6743,16 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         });
         report = { ...report, personAnalysis };
         if (personAnalysis.status === "completed") {
+          const identityText = personAnalysis.embeddingTrackCount > 0
+            ? ` · ${personAnalysis.assignedTrackCount} 条已分配人物`
+              + (personAnalysis.matchedExistingPersonCount > 0
+                ? ` · ${personAnalysis.matchedExistingPersonCount} 条命中跨素材身份`
+                : "")
+            : " · 仅匿名人物轨迹";
           send(
             98,
             "人物分析完成",
-            `${personAnalysis.trackCount} 条匿名人物轨迹 · ${personAnalysis.appearanceCount} 个出镜区间`,
+            `${personAnalysis.trackCount} 条人物轨迹 · ${personAnalysis.appearanceCount} 个出镜区间${identityText}`,
           );
         } else {
           send(98, "人物分析不可用", personAnalysis.reason || "本次未生成人物证据");
@@ -6716,6 +6771,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             trackCount: 0,
             appearanceCount: 0,
             embeddingTrackCount: 0,
+            assignedTrackCount: 0,
+            matchedExistingPersonCount: 0,
             sampledFrameCount: 0,
             sampleIntervalSec: 0,
             downsampled: false,

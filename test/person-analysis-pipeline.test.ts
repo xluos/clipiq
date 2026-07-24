@@ -87,6 +87,8 @@ describe("人物分析编排", () => {
       trackCount: 1,
       appearanceCount: 1,
       embeddingTrackCount: 0,
+      assignedTrackCount: 0,
+      matchedExistingPersonCount: 0,
     });
     expect(repository.replaceEvidenceForVideo).toHaveBeenCalledWith(
       "video-a",
