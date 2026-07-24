@@ -4,6 +4,7 @@ import type { DatabaseSync as Database } from "node:sqlite";
 import type { EditPlan, Shot } from "../src/types";
 import { compileEditPlan } from "../electron/editing/edit-plan-compiler";
 import { validateEditPlan } from "../electron/editing/edit-plan-validator";
+import { candidateIdForShotWindow } from "../electron/editing/candidate-windows";
 import {
   createEditPlanRepository,
   migrateEditPlanSchema,
@@ -33,12 +34,44 @@ function shot(patch: Partial<Shot>): Shot {
   };
 }
 
+function candidateSource<T extends {
+  shot: Shot;
+  videoId: string;
+  sourcePath: string;
+}>(source: T): T & {
+  candidateId: string;
+  sourceInUs: number;
+  sourceOutUs: number;
+} {
+  const sourceInUs = Math.round(source.shot.startSec * 1_000_000);
+  const sourceOutUs = Math.round(source.shot.endSec * 1_000_000);
+  return {
+    ...source,
+    candidateId: candidateIdForShotWindow(source.shot.id, sourceInUs, sourceOutUs),
+    sourceInUs,
+    sourceOutUs,
+  };
+}
+
+function candidateSelection(
+  source: ReturnType<typeof candidateSource>,
+  intent: string,
+  confidence: number,
+) {
+  return {
+    candidateId: source.candidateId,
+    shotId: source.shot.id,
+    intent,
+    confidence,
+  };
+}
+
 afterEach(() => {
   for (const db of databases.splice(0)) db.close();
 });
 
 describe("EditPlan 确定性编译", () => {
-  it("只接受 shotId 和剪辑意图，并由程序编译真实微秒范围", () => {
+  it("只接受 candidateId 和剪辑意图，并由程序编译真实微秒范围", () => {
     const sources = [
       {
         shot: shot({
@@ -124,10 +157,10 @@ describe("EditPlan 确定性编译", () => {
         videoId: "video-1",
         sourcePath: "/videos/video-1.mp4",
       },
-    ];
+    ].map(candidateSource);
     const plan = compileEditPlan([
-      { shotId: "shot-1", intent: "交代准备过程", confidence: 0.95 },
-      { shotId: "shot-2", intent: "推进到出发", confidence: 0.9 },
+      candidateSelection(sources[0], "交代准备过程", 0.95),
+      candidateSelection(sources[1], "推进到出发", 0.9),
     ], sources, {
       planId: "plan-1",
       sessionId: "session-1",
@@ -146,6 +179,7 @@ describe("EditPlan 确定性编译", () => {
       kind: "video",
       items: [
         {
+          candidateId: "shot-1::0-4000000",
           shotId: "shot-1",
           sourceInUs: 0,
           sourceOutUs: 4_000_000,
@@ -203,6 +237,7 @@ describe("EditPlan 确定性编译", () => {
           },
         },
         {
+          candidateId: "shot-2::10000000-15000000",
           shotId: "shot-2",
           sourceInUs: 10_000_000,
           sourceOutUs: 12_000_000,
@@ -236,15 +271,21 @@ describe("EditPlan 确定性编译", () => {
   });
 
   it("候选集外引用和重复引用会产生可解释错误，不猜测时间", () => {
-    const source = {
+    const source = candidateSource({
       shot: shot({}),
       videoId: "video-1",
       sourcePath: "/videos/video-1.mp4",
-    };
+    });
+    const validSelection = candidateSelection(source, "有效", 0.9);
     const plan = compileEditPlan([
-      { shotId: "missing", intent: "不存在", confidence: 0.8 },
-      { shotId: "shot-1", intent: "有效", confidence: 0.9 },
-      { shotId: "shot-1", intent: "重复", confidence: 0.9 },
+      {
+        candidateId: "missing::0-1000000",
+        shotId: "missing",
+        intent: "不存在",
+        confidence: 0.8,
+      },
+      validSelection,
+      { ...validSelection, intent: "重复" },
     ], [source], {
       planId: "plan-errors",
       sessionId: "session-1",
@@ -257,45 +298,127 @@ describe("EditPlan 确定性编译", () => {
     expect(plan.status).toBe("draft");
     expect(plan.tracks[0].items).toHaveLength(1);
     expect(plan.validation.errors.map((issue) => issue.code)).toEqual([
-      "UNKNOWN_SELECTION_SHOT",
-      "DUPLICATE_SELECTION_SHOT",
+      "UNKNOWN_SELECTION_CANDIDATE",
+      "DUPLICATE_SELECTION_CANDIDATE",
+    ]);
+  });
+
+  it("同一长 Shot 的多个 candidateId 可解析为不重叠的精确来源范围", () => {
+    const longShot = shot({
+      id: "shot-long",
+      startSec: 0,
+      endSec: 10,
+      subtitleSegments: [
+        { startSec: 0.2, endSec: 1, text: "第一段" },
+        { startSec: 7, endSec: 8, text: "第二段" },
+      ],
+    });
+    const sources = [
+      {
+        candidateId: candidateIdForShotWindow(longShot.id, 0, 5_000_000),
+        shot: longShot,
+        videoId: "video-1",
+        sourcePath: "/videos/video-1.mp4",
+        sourceInUs: 0,
+        sourceOutUs: 5_000_000,
+      },
+      {
+        candidateId: candidateIdForShotWindow(
+          longShot.id,
+          5_000_000,
+          10_000_000,
+        ),
+        shot: longShot,
+        videoId: "video-1",
+        sourcePath: "/videos/video-1.mp4",
+        sourceInUs: 5_000_000,
+        sourceOutUs: 10_000_000,
+      },
+    ];
+    const plan = compileEditPlan([
+      candidateSelection(sources[0], "动作开端", 0.9),
+      candidateSelection(sources[1], "动作结果", 0.9),
+    ], sources, {
+      planId: "plan-long",
+      sessionId: "session-1",
+      targetDurationUs: 10_000_000,
+      canvas: { width: 1920, height: 1080, fps: 30 },
+      goal: "保留完整过程",
+      generatedAt: 1000,
+    });
+
+    const video = plan.tracks.find((track) => track.kind === "video");
+    const captions = plan.tracks.find((track) => track.kind === "caption");
+    if (video?.kind !== "video" || captions?.kind !== "caption") {
+      throw new Error("测试期望视频和字幕轨道");
+    }
+    expect(plan.validation.valid).toBe(true);
+    expect(video.items.map((clip) => ({
+      candidateId: clip.candidateId,
+      shotId: clip.shotId,
+      sourceInUs: clip.sourceInUs,
+      sourceOutUs: clip.sourceOutUs,
+    }))).toEqual([
+      {
+        candidateId: "shot-long::0-5000000",
+        shotId: "shot-long",
+        sourceInUs: 0,
+        sourceOutUs: 5_000_000,
+      },
+      {
+        candidateId: "shot-long::5000000-10000000",
+        shotId: "shot-long",
+        sourceInUs: 5_000_000,
+        sourceOutUs: 10_000_000,
+      },
+    ]);
+    expect(captions.items.map((cue) => ({
+      text: cue.text,
+      startUs: cue.startUs,
+      endUs: cue.endUs,
+    }))).toEqual([
+      { text: "第一段", startUs: 200_000, endUs: 1_000_000 },
+      { text: "第二段", startUs: 7_000_000, endUs: 8_000_000 },
     ]);
   });
 
   it("字幕、事件和人物证据变化会改变 Planner 输入摘要", () => {
-    const compile = (description: string, personId: string) => compileEditPlan([
-      { shotId: "shot-1", intent: "测试", confidence: 1 },
-    ], [{
-      shot: shot({
-        description,
-        subtitleSegments: [{
-          startSec: 0.2,
-          endSec: 1.2,
-          text: "准备出发",
-        }],
-      }),
-      videoId: "video-1",
-      sourcePath: "/videos/video-1.mp4",
-      appearances: [{
-        id: "appearance-1",
-        personId,
+    const compile = (description: string, personId: string) => {
+      const source = candidateSource({
+        shot: shot({
+          description,
+          subtitleSegments: [{
+            startSec: 0.2,
+            endSec: 1.2,
+            text: "准备出发",
+          }],
+        }),
         videoId: "video-1",
-        trackId: "track-1",
-        startSec: 0,
-        endSec: 4,
-        confidence: 1,
-        identityConfidence: 1,
-        source: "face_track" as const,
-      }],
-    }], {
-      planId: `plan-${personId}`,
-      sessionId: "session-1",
-      targetDurationUs: 4_000_000,
-      canvas: { width: 1920, height: 1080, fps: 30 },
-      goal: "测试",
-      generatedAt: 1000,
-      minimumIdentityConfidence: 0.8,
-    });
+        sourcePath: "/videos/video-1.mp4",
+        appearances: [{
+          id: "appearance-1",
+          personId,
+          videoId: "video-1",
+          trackId: "track-1",
+          startSec: 0,
+          endSec: 4,
+          confidence: 1,
+          identityConfidence: 1,
+          source: "face_track" as const,
+        }],
+      });
+      return compileEditPlan([
+        candidateSelection(source, "测试", 1),
+      ], [source], {
+        planId: `plan-${personId}`,
+        sessionId: "session-1",
+        targetDurationUs: 4_000_000,
+        canvas: { width: 1920, height: 1080, fps: 30 },
+        goal: "测试",
+        generatedAt: 1000,
+        minimumIdentityConfidence: 0.8,
+      });
+    };
 
     const first = compile("人物整理露营装备", "person-a");
     const changedEvent = compile("人物背起装备出发", "person-a");
@@ -307,21 +430,22 @@ describe("EditPlan 确定性编译", () => {
   });
 
   it("把 Planner 旁白锚定到后续真实镜头，并保留待合成降级状态", () => {
-    const plan = compileEditPlan([
-      { shotId: "shot-1", intent: "准备", confidence: 0.9 },
-      { shotId: "shot-2", intent: "出发", confidence: 0.9 },
-    ], [
-      {
+    const sources = [
+      candidateSource({
         shot: shot({ id: "shot-1", startSec: 0, endSec: 4 }),
         videoId: "video-1",
         sourcePath: "/videos/video-1.mp4",
-      },
-      {
+      }),
+      candidateSource({
         shot: shot({ id: "shot-2", shotIndex: 2, startSec: 5, endSec: 9 }),
         videoId: "video-1",
         sourcePath: "/videos/video-1.mp4",
-      },
-    ], {
+      }),
+    ];
+    const plan = compileEditPlan([
+      candidateSelection(sources[0], "准备", 0.9),
+      candidateSelection(sources[1], "出发", 0.9),
+    ], sources, {
       planId: "plan-voiceover",
       sessionId: "session-1",
       targetDurationUs: 8_000_000,
@@ -329,7 +453,7 @@ describe("EditPlan 确定性编译", () => {
       goal: "测试旁白",
       generatedAt: 1000,
       voiceovers: [{
-        afterShotId: "shot-1",
+        afterCandidateId: sources[0].candidateId,
         text: "山谷天气比预想得更冷。",
       }],
     });
@@ -350,11 +474,11 @@ describe("EditPlan 确定性编译", () => {
     ]);
     expect(plan.provenance.plannerOutput).toEqual({
       selections: [
-        { shotId: "shot-1", intent: "准备", confidence: 0.9 },
-        { shotId: "shot-2", intent: "出发", confidence: 0.9 },
+        candidateSelection(sources[0], "准备", 0.9),
+        candidateSelection(sources[1], "出发", 0.9),
       ],
       voiceover: [{
-        afterShotId: "shot-1",
+        afterCandidateId: sources[0].candidateId,
         text: "山谷天气比预想得更冷。",
       }],
     });
@@ -363,21 +487,22 @@ describe("EditPlan 确定性编译", () => {
 
 describe("EditPlan 硬校验", () => {
   it("拒绝超出 Shot、轨道重叠和不一致的实际时长", () => {
-    const plan = compileEditPlan([
-      { shotId: "shot-1", intent: "片段 1", confidence: 0.9 },
-      { shotId: "shot-2", intent: "片段 2", confidence: 0.9 },
-    ], [
-      {
+    const sources = [
+      candidateSource({
         shot: shot({}),
         videoId: "video-1",
         sourcePath: "/videos/video-1.mp4",
-      },
-      {
+      }),
+      candidateSource({
         shot: shot({ id: "shot-2", shotIndex: 2, startSec: 5, endSec: 8 }),
         videoId: "video-1",
         sourcePath: "/videos/video-1.mp4",
-      },
-    ], {
+      }),
+    ];
+    const plan = compileEditPlan([
+      candidateSelection(sources[0], "片段 1", 0.9),
+      candidateSelection(sources[1], "片段 2", 0.9),
+    ], sources, {
       planId: "plan-invalid",
       sessionId: "session-1",
       targetDurationUs: 7_000_000,
@@ -427,13 +552,14 @@ describe("EditPlan repository", () => {
     migrateEditPlanSchema(db);
     migrateEditPlanSchema(db);
     const repository = createEditPlanRepository(db);
-    const plan = compileEditPlan([
-      { shotId: "shot-1", intent: "保留动作", confidence: 0.9 },
-    ], [{
+    const source = candidateSource({
       shot: shot({}),
       videoId: "video-1",
       sourcePath: "/videos/video-1.mp4",
-    }], {
+    });
+    const plan = compileEditPlan([
+      candidateSelection(source, "保留动作", 0.9),
+    ], [source], {
       planId: "plan-1",
       sessionId: "session-1",
       targetDurationUs: 4_000_000,

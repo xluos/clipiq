@@ -8633,9 +8633,12 @@ app.whenReady().then(async () => {
         const shot = shotById.get(candidate.shotId);
         const video = videoById.get(candidate.videoId);
         return shot ? {
+          candidateId: candidate.candidateId,
           shot,
           videoId: candidate.videoId,
           sourcePath: candidate.sourcePath,
+          sourceInUs: candidate.startUs,
+          sourceOutUs: candidate.endUs,
           sourceWidth: video?.width,
           sourceHeight: video?.height,
           appearances,
@@ -8721,10 +8724,13 @@ app.whenReady().then(async () => {
         minimumIdentityConfidence: 0.8,
       },
     ).candidates;
-    const usedShotIds = new Set(videoTrack.items.map((clip) => clip.shotId));
+    const usedCandidateIds = new Set(
+      videoTrack.items.map((clip) => clip.candidateId),
+    );
     return candidates
-      .filter((candidate) => !usedShotIds.has(candidate.shotId))
+      .filter((candidate) => !usedCandidateIds.has(candidate.candidateId))
       .map((candidate) => ({
+        candidateId: candidate.candidateId,
         shotId: candidate.shotId,
         videoId: candidate.videoId,
         startUs: candidate.startUs,
@@ -8756,38 +8762,69 @@ app.whenReady().then(async () => {
         ? oldVideoTrack.items.find((clip) => clip.id === action.clipId)
         : null;
       if (!oldClip) throw new Error(`待替换镜头不存在: ${action.clipId}`);
-      const shot = getShotRepository().list()
-        .find((item) => item.id === action.replacementShotId);
-      if (!shot) throw new Error(`替换 Shot 不存在: ${action.replacementShotId}`);
+      const videoIds = [...new Set([
+        ...(sourceSession?.usedAssetIds || []),
+        ...oldVideoTrack.items.map((clip) => clip.videoId),
+      ])];
+      const videos = getVideoRepository().list({})
+        .filter((video) => videoIds.includes(video.id));
+      const shots = getShotRepository().list()
+        .filter((shot) => videoIds.includes(shot.videoId || shot.assetProjectId));
+      const appearances = getIdentityRepository().listAppearances()
+        .filter((appearance) => videoIds.includes(appearance.videoId));
+      const speakerTracks = getIdentityRepository().listSpeakerTracks()
+        .filter((track) => videoIds.includes(track.videoId));
+      const replacementCandidate = buildVlogCandidates(
+        shots,
+        videos,
+        appearances,
+        speakerTracks,
+        {
+          videoIds,
+          maximumCandidates: 200,
+          minimumIdentityConfidence: 0.8,
+        },
+      ).candidates.find((candidate) =>
+        candidate.candidateId === action.replacementCandidateId);
+      if (!replacementCandidate) {
+        throw new Error(`替换候选窗口不存在: ${action.replacementCandidateId}`);
+      }
+      const shot = shots.find((item) => item.id === replacementCandidate.shotId);
+      if (!shot) throw new Error(`替换 Shot 不存在: ${replacementCandidate.shotId}`);
       const videoId = shot.videoId || shot.assetProjectId;
-      const video = getVideoRepository().list({}).find((item) => item.id === videoId);
+      const video = videos.find((item) => item.id === videoId);
       const sourcePath = video?.localPath || video?.localFilePath;
       if (!video || !sourcePath || !fsSync.existsSync(sourcePath)) {
         throw new Error("替换 Shot 没有可用的本地素材");
       }
       const compiled = compileEditPlan([{
+        candidateId: replacementCandidate.candidateId,
         shotId: shot.id,
         intent: String(action.intent || "用户替换镜头"),
         confidence: 1,
       }], [{
+        candidateId: replacementCandidate.candidateId,
         shot,
         videoId,
         sourcePath,
+        sourceInUs: replacementCandidate.startUs,
+        sourceOutUs: replacementCandidate.endUs,
         sourceWidth: video.width,
         sourceHeight: video.height,
-        appearances: getIdentityRepository().listAppearances(videoId),
-        speakerTracks: getIdentityRepository().listSpeakerTracks(videoId),
+        appearances,
+        speakerTracks,
       }], {
         planId: `${newPlanId}-replacement`,
         sessionId: sourcePlan.sessionId,
         targetDurationUs: Math.min(
-          Math.round((shot.endSec - shot.startSec) * 1_000_000),
+          replacementCandidate.durationUs,
           Math.round((oldClip.sourceOutUs - oldClip.sourceInUs) / oldClip.speed),
         ),
         canvas: sourcePlan.canvas,
         goal: sourcePlan.provenance.goal,
         methodologyIds: sourcePlan.provenance.methodologyIds,
         generatedAt: Date.now(),
+        minimumIdentityConfidence: 0.8,
         sourceExists: (candidatePath) => fsSync.existsSync(candidatePath),
       });
       const replacementTrack = compiled.tracks.find((track) => track.kind === "video");

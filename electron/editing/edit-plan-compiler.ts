@@ -19,16 +19,20 @@ import {
 import { hasUsableWordTimings } from "./transcript-evidence";
 import { personAwareCrop } from "./smart-reframe";
 
-export type PlannerShotSelection = {
+export type PlannerCandidateSelection = {
+  candidateId: string;
   shotId: string;
   intent: string;
   confidence: number;
 };
 
 export type EditPlanShotSource = {
+  candidateId: string;
   shot: Shot;
   videoId: string;
   sourcePath: string;
+  sourceInUs: number;
+  sourceOutUs: number;
   sourceWidth?: number;
   sourceHeight?: number;
   appearances?: PersonAppearance[];
@@ -61,7 +65,7 @@ function secondsToUs(value: number): number | null {
 }
 
 function stablePlannerDigest(
-  selections: PlannerShotSelection[],
+  selections: PlannerCandidateSelection[],
   sources: EditPlanShotSource[],
   options: CompileEditPlanOptions,
 ): string {
@@ -79,11 +83,14 @@ function stablePlannerDigest(
     voiceovers: options.voiceovers || [],
     sources: sources
       .map((source) => ({
+        candidateId: source.candidateId,
         shotId: source.shot.id,
         videoId: source.videoId,
         sourcePath: source.sourcePath,
         startSec: source.shot.startSec,
         endSec: source.shot.endSec,
+        sourceInUs: source.sourceInUs,
+        sourceOutUs: source.sourceOutUs,
         description: source.shot.description,
         usageTags: [...new Set(source.shot.usageTags || [])].sort(),
         subtitleSegments: (source.shot.subtitleSegments || [])
@@ -136,7 +143,7 @@ function stablePlannerDigest(
           }))
           .sort((a, b) => a.id.localeCompare(b.id)),
       }))
-      .sort((a, b) => a.shotId.localeCompare(b.shotId)),
+      .sort((a, b) => a.candidateId.localeCompare(b.candidateId)),
   };
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
@@ -338,76 +345,100 @@ function buildEvidence(
 }
 
 export function compileEditPlan(
-  selections: PlannerShotSelection[],
+  selections: PlannerCandidateSelection[],
   sources: EditPlanShotSource[],
   options: CompileEditPlanOptions,
 ): EditPlan {
   const compileErrors: EditPlanIssue[] = [];
-  const sourceByShotId = new Map<string, EditPlanShotSource>();
+  const sourceByCandidateId = new Map<string, EditPlanShotSource>();
   const validationSources = new Map<string, ShotValidationSource>();
 
   for (const source of sources) {
     const shotId = source.shot.id;
-    const startUs = secondsToUs(source.shot.startSec);
-    const endUs = secondsToUs(source.shot.endSec);
-    if (!shotId || startUs == null || endUs == null || endUs <= startUs) continue;
-    if (sourceByShotId.has(shotId)) {
+    const shotStartUs = secondsToUs(source.shot.startSec);
+    const shotEndUs = secondsToUs(source.shot.endSec);
+    if (
+      !source.candidateId
+      || !shotId
+      || shotStartUs == null
+      || shotEndUs == null
+      || shotEndUs <= shotStartUs
+      || !Number.isSafeInteger(source.sourceInUs)
+      || !Number.isSafeInteger(source.sourceOutUs)
+      || source.sourceInUs < shotStartUs
+      || source.sourceOutUs > shotEndUs
+      || source.sourceOutUs <= source.sourceInUs
+    ) {
       compileErrors.push({
-        code: "DUPLICATE_SOURCE_SHOT",
-        message: "候选素材中出现重复 shotId。",
-        path: `sources.${shotId}`,
+        code: "INVALID_CANDIDATE_SOURCE",
+        message: "候选窗口没有可解析的真实 Shot 时间范围。",
+        path: `sources.${source.candidateId || shotId || "(missing)"}`,
       });
       continue;
     }
-    sourceByShotId.set(shotId, source);
+    if (sourceByCandidateId.has(source.candidateId)) {
+      compileErrors.push({
+        code: "DUPLICATE_SOURCE_CANDIDATE",
+        message: "候选素材中出现重复 candidateId。",
+        path: `sources.${source.candidateId}`,
+      });
+      continue;
+    }
+    sourceByCandidateId.set(source.candidateId, source);
     validationSources.set(shotId, {
       shotId,
       videoId: source.videoId,
       sourcePath: source.sourcePath,
-      startUs,
-      endUs,
+      startUs: shotStartUs,
+      endUs: shotEndUs,
     });
   }
 
   const clips: VideoClip[] = [];
-  const seenShotIds = new Set<string>();
+  const seenCandidateIds = new Set<string>();
   let timelineUs = 0;
 
   for (const [index, selection] of selections.entries()) {
-    if (!selection.shotId) {
+    if (!selection.candidateId) {
       compileErrors.push({
-        code: "MISSING_SELECTION_SHOT",
-        message: "Planner 返回了缺少 shotId 的选择。",
-        path: `selections[${index}].shotId`,
+        code: "MISSING_SELECTION_CANDIDATE",
+        message: "Planner 返回了缺少 candidateId 的选择。",
+        path: `selections[${index}].candidateId`,
       });
       continue;
     }
-    if (seenShotIds.has(selection.shotId)) {
+    if (seenCandidateIds.has(selection.candidateId)) {
       compileErrors.push({
-        code: "DUPLICATE_SELECTION_SHOT",
-        message: "Planner 重复选择了同一个 Shot。",
-        path: `selections[${index}].shotId`,
-        meta: { shotId: selection.shotId },
+        code: "DUPLICATE_SELECTION_CANDIDATE",
+        message: "Planner 重复选择了同一个候选窗口。",
+        path: `selections[${index}].candidateId`,
+        meta: { candidateId: selection.candidateId },
       });
       continue;
     }
-    seenShotIds.add(selection.shotId);
+    seenCandidateIds.add(selection.candidateId);
 
-    const source = sourceByShotId.get(selection.shotId);
+    const source = sourceByCandidateId.get(selection.candidateId);
     if (!source) {
       compileErrors.push({
-        code: "UNKNOWN_SELECTION_SHOT",
-        message: "Planner 引用了候选集之外的 Shot。",
-        path: `selections[${index}].shotId`,
-        meta: { shotId: selection.shotId },
+        code: "UNKNOWN_SELECTION_CANDIDATE",
+        message: "Planner 引用了候选集之外的候选窗口。",
+        path: `selections[${index}].candidateId`,
+        meta: { candidateId: selection.candidateId },
+      });
+      continue;
+    }
+    if (selection.shotId !== source.shot.id) {
+      compileErrors.push({
+        code: "CANDIDATE_SHOT_MISMATCH",
+        message: "Planner 候选窗口与解析后的 Shot 不一致。",
+        path: `selections[${index}]`,
       });
       continue;
     }
     if (timelineUs >= options.targetDurationUs) continue;
 
-    const shotStartUs = secondsToUs(source.shot.startSec)!;
-    const shotEndUs = secondsToUs(source.shot.endSec)!;
-    const fullDurationUs = shotEndUs - shotStartUs;
+    const fullDurationUs = source.sourceOutUs - source.sourceInUs;
     const maxClipDurationUs = options.maxClipDurationUs && options.maxClipDurationUs > 0
       ? Math.min(fullDurationUs, options.maxClipDurationUs)
       : fullDurationUs;
@@ -415,10 +446,10 @@ export function compileEditPlan(
     const durationUs = Math.min(maxClipDurationUs, remainingUs);
     if (durationUs <= 0) continue;
 
-    const sourceOutUs = shotStartUs + durationUs;
+    const sourceOutUs = source.sourceInUs + durationUs;
     const clipAppearances = (source.appearances || []).filter((appearance) => (
       appearance.videoId === source.videoId
-      && overlaps(shotStartUs, sourceOutUs, appearance.startSec, appearance.endSec)
+      && overlaps(source.sourceInUs, sourceOutUs, appearance.startSec, appearance.endSec)
     ));
     const crop = personAwareCrop({
       sourceWidth: source.sourceWidth,
@@ -428,10 +459,11 @@ export function compileEditPlan(
     });
     clips.push({
       id: `${options.planId}-video-${clips.length + 1}`,
-      shotId: selection.shotId,
+      candidateId: selection.candidateId,
+      shotId: source.shot.id,
       videoId: source.videoId,
       sourcePath: source.sourcePath,
-      sourceInUs: shotStartUs,
+      sourceInUs: source.sourceInUs,
       sourceOutUs,
       timelineInUs: timelineUs,
       speed: 1,
@@ -441,7 +473,7 @@ export function compileEditPlan(
       confidence: selection.confidence,
       evidence: buildEvidence(
         source,
-        shotStartUs,
+        source.sourceInUs,
         sourceOutUs,
         options.minimumIdentityConfidence,
       ),
@@ -485,14 +517,15 @@ export function compileEditPlan(
         : {}),
     })));
   const voiceovers = (options.voiceovers || []).flatMap((voiceover, index) => {
-    const anchorIndex = clips.findIndex((clip) => clip.shotId === voiceover.afterShotId);
+    const anchorIndex = clips.findIndex((clip) =>
+      clip.candidateId === voiceover.afterCandidateId);
     const anchorClip = anchorIndex >= 0 ? clips[anchorIndex + 1] : undefined;
     if (!anchorClip) {
       compileErrors.push({
         code: "VOICEOVER_ANCHOR_MISSING",
         message: "旁白锚点没有对应的后续镜头。",
-        path: `voiceovers[${index}].afterShotId`,
-        meta: { afterShotId: voiceover.afterShotId },
+        path: `voiceovers[${index}].afterCandidateId`,
+        meta: { afterCandidateId: voiceover.afterCandidateId },
       });
       return [];
     }

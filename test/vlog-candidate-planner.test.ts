@@ -247,6 +247,61 @@ describe("Vlog Candidate Builder", () => {
     })).toThrow("候选素材时间范围无效");
   });
 
+  it("长 Shot 按对齐证据边界生成多个固定范围候选，而不是默认截开头", () => {
+    const result = buildVlogCandidates([
+      shot({
+        id: "shot-long",
+        startSec: 0,
+        endSec: 15,
+        subtitleSegments: [
+          { startSec: 0.2, endSec: 1.8, text: "先整理装备" },
+          { startSec: 4, endSec: 5, text: "准备出发" },
+          { startSec: 8, endSec: 9, text: "终于到了" },
+        ],
+      }),
+    ], [video({})], [], [], {
+      maximumWindowDurationUs: 6_000_000,
+      minimumWindowDurationUs: 800_000,
+    });
+    const ordered = [...result.candidates].sort((left, right) =>
+      left.startUs - right.startUs);
+
+    expect(ordered.map((candidate) => ({
+      candidateId: candidate.candidateId,
+      startUs: candidate.startUs,
+      endUs: candidate.endUs,
+      boundaryReason: candidate.boundaryReason,
+    }))).toEqual([
+      {
+        candidateId: "shot-long::0-5000000",
+        startUs: 0,
+        endUs: 5_000_000,
+        boundaryReason: "evidence",
+      },
+      {
+        candidateId: "shot-long::5000000-9000000",
+        startUs: 5_000_000,
+        endUs: 9_000_000,
+        boundaryReason: "evidence",
+      },
+      {
+        candidateId: "shot-long::9000000-15000000",
+        startUs: 9_000_000,
+        endUs: 15_000_000,
+        boundaryReason: "duration",
+      },
+    ]);
+    expect(ordered[1].subtitleSegments).toEqual([{
+      startUs: 8_000_000,
+      endUs: 9_000_000,
+      text: "终于到了",
+    }]);
+    expect(ordered.every((candidate) =>
+      candidate.alignedSegments.at(0)?.startUs === candidate.startUs
+      && candidate.alignedSegments.at(-1)?.endUs === candidate.endUs))
+      .toBe(true);
+  });
+
   it("跨素材同一可信人物在时间片中复用稳定 personId", () => {
     const result = buildVlogCandidates([
       shot({}),
@@ -305,6 +360,7 @@ describe("Vlog Candidate Builder", () => {
 
 describe("Vlog Planner 契约", () => {
   const candidate = {
+    candidateId: "shot-1::0-4000000",
     shotId: "shot-1",
     videoId: "video-1",
     sourcePath: "/private/path.mp4",
@@ -334,6 +390,7 @@ describe("Vlog Planner 契约", () => {
       endUs: 1_800_000,
       confidence: 0.9,
     }],
+    boundaryReason: "shot" as const,
     alignedSegments: [{
       startUs: 0,
       endUs: 300_000,
@@ -397,6 +454,7 @@ describe("Vlog Planner 契约", () => {
       "R-VLOG-007",
     ]);
     expect(prompt.userText).toContain("shotId=shot-1");
+    expect(prompt.userText).toContain("candidateId=shot-1::0-4000000");
     expect(prompt.userText).toContain("people=person-a");
     expect(prompt.userText).toContain("[0.30-1.80] 先把装备整理好");
     expect(prompt.userText).toContain(
@@ -404,60 +462,67 @@ describe("Vlog Planner 契约", () => {
     );
     expect(prompt.userText).not.toContain("/private/path.mp4");
     expect(prompt.systemText).toContain("严禁生成 startSec/endSec");
+    expect(prompt.systemText).toContain("每个 candidateId 已绑定真实 shotId");
   });
 
   it("解析时拒绝候选集外引用、重复引用和非法置信度", () => {
     const result = parseVlogPlannerOutput({
       selections: [
-        { shotId: "shot-1", intent: "开场钩子", confidence: 0.9 },
-        { shotId: "missing", intent: "虚构", confidence: 0.8 },
-        { shotId: "shot-1", intent: "重复", confidence: 0.7 },
-        { shotId: "shot-1", intent: "非法置信度", confidence: 2 },
+        { candidateId: candidate.candidateId, intent: "开场钩子", confidence: 0.9 },
+        { candidateId: "missing", intent: "虚构", confidence: 0.8 },
+        { candidateId: candidate.candidateId, intent: "重复", confidence: 0.7 },
+        { candidateId: candidate.candidateId, intent: "非法置信度", confidence: 2 },
       ],
     }, [candidate]);
 
     expect(result.selections).toEqual([
-      { shotId: "shot-1", intent: "开场钩子", confidence: 0.9 },
+      {
+        candidateId: candidate.candidateId,
+        shotId: "shot-1",
+        intent: "开场钩子",
+        confidence: 0.9,
+      },
     ]);
     expect(result.errors).toHaveLength(3);
   });
 
-  it("旁白只能锚定已选择且非末尾的 Shot", () => {
+  it("旁白只能锚定已选择且非末尾的候选窗口", () => {
     const secondCandidate = {
       ...candidate,
+      candidateId: "shot-2::4000000-8000000",
       shotId: "shot-2",
       startUs: 4_000_000,
       endUs: 8_000_000,
     };
     const valid = parseVlogPlannerOutput({
       selections: [
-        { shotId: "shot-1", intent: "准备", confidence: 0.9 },
-        { shotId: "shot-2", intent: "出发", confidence: 0.9 },
+        { candidateId: candidate.candidateId, intent: "准备", confidence: 0.9 },
+        { candidateId: secondCandidate.candidateId, intent: "出发", confidence: 0.9 },
       ],
       voiceover: [{
-        afterShotId: "shot-1",
+        afterCandidateId: candidate.candidateId,
         text: "山谷天气比预想得更冷。",
       }],
     }, [candidate, secondCandidate]);
     expect(valid.errors).toEqual([]);
     expect(valid.voiceovers).toEqual([{
-      afterShotId: "shot-1",
+      afterCandidateId: candidate.candidateId,
       text: "山谷天气比预想得更冷。",
     }]);
 
     const invalid = parseVlogPlannerOutput({
       selections: [
-        { shotId: "shot-1", intent: "准备", confidence: 0.9 },
-        { shotId: "shot-2", intent: "出发", confidence: 0.9 },
+        { candidateId: candidate.candidateId, intent: "准备", confidence: 0.9 },
+        { candidateId: secondCandidate.candidateId, intent: "出发", confidence: 0.9 },
       ],
       voiceover: [
-        { afterShotId: "shot-2", text: "不能锚定最后一段" },
-        { afterShotId: "missing", text: "不能引用虚构镜头" },
+        { afterCandidateId: secondCandidate.candidateId, text: "不能锚定最后一段" },
+        { afterCandidateId: "missing", text: "不能引用虚构镜头" },
       ],
     }, [candidate, secondCandidate]);
     expect(invalid.errors).toEqual(expect.arrayContaining([
-      "voiceover[0] 不能锚定最后一个 Shot: shot-2",
-      "voiceover[1] 引用了未选择的 shotId: missing",
+      `voiceover[0] 不能锚定最后一个候选窗口: ${secondCandidate.candidateId}`,
+      "voiceover[1] 引用了未选择的 candidateId: missing",
     ]));
   });
 });

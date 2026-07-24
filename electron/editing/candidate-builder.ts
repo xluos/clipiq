@@ -5,15 +5,21 @@ import type {
   SpeakerTrack,
   TimedWordEvidence,
   Video,
+  VideoClipEvidence,
   VideoClipEvidenceSegment,
   VideoClipPersonEvidence,
   VideoClipSpeakerEvidence,
   VideoClipSubtitleEvidence,
 } from "../../src/types";
-import { buildAlignedEvidenceSegments } from "./aligned-evidence";
+import {
+  buildAlignedEvidenceSegments,
+  clipVideoEvidenceToRange,
+} from "./aligned-evidence";
+import { buildCandidateWindows } from "./candidate-windows";
 import { hasUsableWordTimings } from "./transcript-evidence";
 
 export type VlogCandidate = {
+  candidateId: string;
   shotId: string;
   videoId: string;
   sourcePath: string;
@@ -26,6 +32,7 @@ export type VlogCandidate = {
   personAppearances: VideoClipPersonEvidence[];
   speakerTracks: VideoClipSpeakerEvidence[];
   alignedSegments: VideoClipEvidenceSegment[];
+  boundaryReason: "shot" | "evidence" | "duration";
   personIds: string[];
   speakerIds: string[];
   usageTags: string[];
@@ -35,6 +42,7 @@ export type VlogCandidate = {
 
 export type CandidateRejection = {
   shotId: string;
+  candidateId?: string;
   code:
     | "INVALID_TIME"
     | "MISSING_VIDEO"
@@ -66,6 +74,8 @@ export type BuildVlogCandidatesOptions = {
   eventQuery?: string;
   dialogueQuery?: string;
   sourceTimeRanges?: CandidateSourceTimeRange[];
+  maximumWindowDurationUs?: number;
+  minimumWindowDurationUs?: number;
 };
 
 export type VlogCandidateBuildResult = {
@@ -403,11 +413,6 @@ export function buildVlogCandidates(
         ...(track.manualLocked ? { manualConfirmed: true } : {}),
       }];
     });
-    const trustedPeople = personAppearances
-      .map((appearance) => appearance.personId)
-      .filter((personId): personId is string => Boolean(personId));
-    const speakers = timedSpeakerTracks.map((track) => track.speakerId);
-    const { score, signals } = scoreShot(shot, durationUs, subtitles.length);
     const transcriptGranularity = subtitles.length
       ? subtitles.every((segment) => segment.words?.length)
         ? "word" as const
@@ -422,31 +427,75 @@ export function buildVlogCandidates(
       personAppearances,
       speakerTracks: timedSpeakerTracks,
     });
-    const candidate: VlogCandidate = {
-      shotId: shot.id,
-      videoId,
-      sourcePath,
+    const baseEvidence: VideoClipEvidence = {
+      ...(shot.description ? { eventSummary: shot.description } : {}),
+      ...(transcriptGranularity ? { transcriptGranularity } : {}),
+      ...(subtitles.length ? { subtitleSegments: subtitles } : {}),
+      ...(personAppearances.length ? { personAppearances } : {}),
+      ...(timedSpeakerTracks.length ? { speakerTracks: timedSpeakerTracks } : {}),
+      alignedSegments,
+    };
+    const windows = buildCandidateWindows(
+      shot.id,
       startUs,
       endUs,
-      durationUs,
-      description: String(shot.description || "").trim(),
-      subtitleSegments: subtitles,
-      ...(transcriptGranularity ? { transcriptGranularity } : {}),
-      personAppearances,
-      speakerTracks: timedSpeakerTracks,
       alignedSegments,
-      personIds: [...new Set(trustedPeople)].sort(),
-      speakerIds: [...new Set(speakers)].sort(),
-      usageTags: [...new Set(shot.usageTags || [])].sort(),
-      qualityScore: score,
-      qualitySignals: signals,
-    };
-    const filtered = filterCandidate(candidate, options);
-    if (filtered) {
-      rejected.push({ shotId: shot.id, ...filtered });
-      continue;
+      {
+        maximumDurationUs: options.maximumWindowDurationUs,
+        minimumDurationUs: options.minimumWindowDurationUs,
+      },
+    );
+    for (const window of windows) {
+      const windowEvidence = clipVideoEvidenceToRange(
+        baseEvidence,
+        window.startUs,
+        window.endUs,
+      );
+      const windowSubtitles = windowEvidence.subtitleSegments || [];
+      const windowAppearances = windowEvidence.personAppearances || [];
+      const windowSpeakerTracks = windowEvidence.speakerTracks || [];
+      const windowPersonIds = windowEvidence.personIds || [];
+      const windowSpeakerIds = windowEvidence.speakerIds || [];
+      const windowDurationUs = window.endUs - window.startUs;
+      const { score, signals } = scoreShot(
+        shot,
+        windowDurationUs,
+        windowSubtitles.length,
+      );
+      const candidate: VlogCandidate = {
+        candidateId: window.candidateId,
+        shotId: shot.id,
+        videoId,
+        sourcePath,
+        startUs: window.startUs,
+        endUs: window.endUs,
+        durationUs: windowDurationUs,
+        description: String(shot.description || "").trim(),
+        subtitleSegments: windowSubtitles,
+        ...(windowEvidence.transcriptGranularity
+          ? { transcriptGranularity: windowEvidence.transcriptGranularity }
+          : {}),
+        personAppearances: windowAppearances,
+        speakerTracks: windowSpeakerTracks,
+        alignedSegments: windowEvidence.alignedSegments || [],
+        boundaryReason: window.boundaryReason,
+        personIds: windowPersonIds,
+        speakerIds: windowSpeakerIds,
+        usageTags: [...new Set(shot.usageTags || [])].sort(),
+        qualityScore: score,
+        qualitySignals: signals,
+      };
+      const filtered = filterCandidate(candidate, options);
+      if (filtered) {
+        rejected.push({
+          shotId: shot.id,
+          candidateId: window.candidateId,
+          ...filtered,
+        });
+        continue;
+      }
+      rawCandidates.push(candidate);
     }
-    rawCandidates.push(candidate);
   }
 
   const ranked = rawCandidates.sort((a, b) =>
@@ -460,6 +509,7 @@ export function buildVlogCandidates(
     if (deduplicated.some((kept) => temporalOverlapRatio(kept, candidate) >= 0.8)) {
       rejected.push({
         shotId: candidate.shotId,
+        candidateId: candidate.candidateId,
         code: "OVERLAPPING_DUPLICATE",
         message: "与同素材中更高质量的候选时间范围高度重叠。",
       });

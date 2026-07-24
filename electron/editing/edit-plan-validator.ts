@@ -78,6 +78,15 @@ function validateClip(
   if (!validIntegerTime(clip.timelineInUs)) {
     add(target, "error", "TIMELINE_NOT_INTEGER_US", "时间线位置必须是非负整数微秒。", `${path}.timelineInUs`);
   }
+  if (!clip.candidateId) {
+    add(
+      target,
+      "warning",
+      "LEGACY_CANDIDATE_ID_MISSING",
+      "旧粗剪片段缺少 candidateId，重新生成或替换后将补齐。",
+      `${path}.candidateId`,
+    );
+  }
   if (!clip.shotId) add(target, "error", "MISSING_SHOT_ID", "视频片段缺少 shotId。", `${path}.shotId`);
   if (!clip.videoId) add(target, "error", "MISSING_VIDEO_ID", "视频片段缺少 videoId。", `${path}.videoId`);
   if (!clip.sourcePath) {

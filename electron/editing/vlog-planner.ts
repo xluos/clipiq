@@ -1,6 +1,6 @@
 import type { AnalysisEvidenceQualityReport } from "../../src/types";
 import type { VlogCandidate } from "./candidate-builder";
-import type { PlannerShotSelection } from "./edit-plan-compiler";
+import type { PlannerCandidateSelection } from "./edit-plan-compiler";
 
 export const VLOG_PLANNER_CONSTRAINTS = [
   {
@@ -43,11 +43,11 @@ export const VLOG_PLANNER_OUTPUT_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          shotId: { type: "string" },
+          candidateId: { type: "string" },
           intent: { type: "string" },
           confidence: { type: "number" },
         },
-        required: ["shotId", "intent", "confidence"],
+        required: ["candidateId", "intent", "confidence"],
       },
     },
     voiceover: {
@@ -55,10 +55,10 @@ export const VLOG_PLANNER_OUTPUT_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          afterShotId: { type: "string" },
+          afterCandidateId: { type: "string" },
           text: { type: "string" },
         },
-        required: ["afterShotId", "text"],
+        required: ["afterCandidateId", "text"],
       },
     },
   },
@@ -66,7 +66,7 @@ export const VLOG_PLANNER_OUTPUT_SCHEMA = {
 };
 
 export type PlannerVoiceover = {
-  afterShotId: string;
+  afterCandidateId: string;
   text: string;
 };
 
@@ -116,10 +116,12 @@ function candidateText(candidate: VlogCandidate): string {
     .join(",");
   const alignedTimeline = alignedSegmentText(candidate);
   return [
+    `candidateId=${candidate.candidateId}`,
     `shotId=${candidate.shotId}`,
     `videoId=${candidate.videoId}`,
     `range=${(candidate.startUs / 1_000_000).toFixed(2)}-${(candidate.endUs / 1_000_000).toFixed(2)}s`,
     `duration=${(candidate.durationUs / 1_000_000).toFixed(2)}s`,
+    `boundary=${candidate.boundaryReason}`,
     `quality=${candidate.qualityScore.toFixed(2)}`,
     `roles=${candidate.usageTags.join(",") || "unknown"}`,
     `transcript=${candidate.transcriptGranularity || "none"}`,
@@ -159,14 +161,14 @@ export function buildVlogPlannerPrompt(input: {
   return {
     systemText: [
       "你是 Vlog 粗剪规划器。",
-      "你只能从候选集中选择 shotId，并为选择写剪辑意图和 0-1 置信度。",
+      "你只能从候选集中选择 candidateId，并为选择写剪辑意图和 0-1 置信度。",
       "严禁生成 startSec/endSec、文件路径、虚构镜头或虚构人物身份。",
-      "程序会把 shotId 编译为真实素材时间；你只负责叙事选择与排序。",
+      "每个 candidateId 已绑定真实 shotId 和固定素材时间；程序负责解析，你不能修改范围。",
       "personId 只代表达到可信阈值或人工确认的跨素材身份；track: 前缀只在单素材内保持连续，不能当成同一人。",
       "speakerId 与 personId 是不同证据；没有显式关联时不得推断说话人就是出镜人物。",
       "alignedTimeline 是程序按时间边界对齐后的证据；event@shot 表示事件只精确到 Shot，不得伪装为更细粒度语义。",
       "旁白只补充画面和对白没有表达的信息，不复述现有字幕；最多 3 段，每段不超过 80 个字符。",
-      "旁白 afterShotId 必须引用已选择且不是最后一个的 shotId，旁白会从它的下一个镜头开始播放。",
+      "旁白 afterCandidateId 必须引用已选择且不是最后一个的 candidateId，旁白会从它的下一个镜头开始播放。",
       "只返回合法 JSON，不要 Markdown，不要解释。",
     ].join("\n"),
     userText: [
@@ -179,12 +181,12 @@ export function buildVlogPlannerPrompt(input: {
       ...(methodology ? ["", "# 已选方法论摘要", methodology] : []),
       ...(evidenceQuality ? ["", "# 分析证据质量", evidenceQuality] : []),
       "",
-      "# 真实候选 Shot",
+      "# 真实候选时间窗口",
       candidates,
       "",
       "# 输出",
-      '{"selections":[{"shotId":"真实候选 shotId","intent":"该镜头在叙事中的作用","confidence":0.9}],"voiceover":[{"afterShotId":"已选择且非末尾的 shotId","text":"下一镜头开始播放的必要补充旁白"}]}',
-      "按最终播放顺序排列。不得返回候选集之外的 shotId，不得重复 shotId。",
+      '{"selections":[{"candidateId":"真实候选 candidateId","intent":"该时间窗口在叙事中的作用","confidence":0.9}],"voiceover":[{"afterCandidateId":"已选择且非末尾的 candidateId","text":"下一镜头开始播放的必要补充旁白"}]}',
+      "按最终播放顺序排列。不得返回候选集之外的 candidateId，不得重复 candidateId。",
     ].join("\n"),
   };
 }
@@ -193,45 +195,55 @@ export function parseVlogPlannerOutput(
   parsed: unknown,
   candidates: VlogCandidate[],
 ): {
-  selections: PlannerShotSelection[];
+  selections: PlannerCandidateSelection[];
   voiceovers: PlannerVoiceover[];
   errors: string[];
 } {
-  const candidateIds = new Set(candidates.map((candidate) => candidate.shotId));
+  const candidateById = new Map(
+    candidates.map((candidate) => [candidate.candidateId, candidate]),
+  );
   const rawSelections = Array.isArray((parsed as any)?.selections)
     ? (parsed as any).selections
     : [];
   const errors: string[] = [];
-  const selections: PlannerShotSelection[] = [];
+  const selections: PlannerCandidateSelection[] = [];
   const voiceovers: PlannerVoiceover[] = [];
   const seen = new Set<string>();
 
   for (const [index, raw] of rawSelections.entries()) {
-    const shotId = String(raw?.shotId || "").trim();
+    const candidateId = String(raw?.candidateId || "").trim();
     const intent = String(raw?.intent || "").trim();
     const confidence = Number(raw?.confidence);
-    if (!candidateIds.has(shotId)) {
-      errors.push(`selections[${index}] 引用了候选集之外的 shotId: ${shotId || "(空)"}`);
+    const candidate = candidateById.get(candidateId);
+    if (!candidate) {
+      errors.push(`selections[${index}] 引用了候选集之外的 candidateId: ${candidateId || "(空)"}`);
       continue;
     }
-    if (seen.has(shotId)) {
-      errors.push(`selections[${index}] 重复引用 shotId: ${shotId}`);
+    if (seen.has(candidateId)) {
+      errors.push(`selections[${index}] 重复引用 candidateId: ${candidateId}`);
       continue;
     }
     if (!intent) {
-      errors.push(`selections[${index}] 缺少剪辑意图: ${shotId}`);
+      errors.push(`selections[${index}] 缺少剪辑意图: ${candidateId}`);
       continue;
     }
     if (!(Number.isFinite(confidence) && confidence >= 0 && confidence <= 1)) {
-      errors.push(`selections[${index}] confidence 不在 0-1: ${shotId}`);
+      errors.push(`selections[${index}] confidence 不在 0-1: ${candidateId}`);
       continue;
     }
-    seen.add(shotId);
-    selections.push({ shotId, intent, confidence });
+    seen.add(candidateId);
+    selections.push({
+      candidateId,
+      shotId: candidate.shotId,
+      intent,
+      confidence,
+    });
   }
-  if (selections.length === 0) errors.push("Planner 没有返回任何有效 Shot。");
-  const selectedIds = selections.map((selection) => selection.shotId);
-  const selectedIndex = new Map(selectedIds.map((shotId, index) => [shotId, index]));
+  if (selections.length === 0) errors.push("Planner 没有返回任何有效候选窗口。");
+  const selectedIds = selections.map((selection) => selection.candidateId);
+  const selectedIndex = new Map(
+    selectedIds.map((candidateId, index) => [candidateId, index]),
+  );
   const seenVoiceoverAnchors = new Set<string>();
   const rawVoiceovers = Array.isArray((parsed as any)?.voiceover)
     ? (parsed as any).voiceover
@@ -240,31 +252,31 @@ export function parseVlogPlannerOutput(
     errors.push("voiceover 最多允许 3 段。");
   }
   for (const [index, raw] of rawVoiceovers.slice(0, 3).entries()) {
-    const afterShotId = String(raw?.afterShotId || "").trim();
+    const afterCandidateId = String(raw?.afterCandidateId || "").trim();
     const text = String(raw?.text || "").trim();
-    const anchorIndex = selectedIndex.get(afterShotId);
+    const anchorIndex = selectedIndex.get(afterCandidateId);
     if (anchorIndex == null) {
-      errors.push(`voiceover[${index}] 引用了未选择的 shotId: ${afterShotId || "(空)"}`);
+      errors.push(`voiceover[${index}] 引用了未选择的 candidateId: ${afterCandidateId || "(空)"}`);
       continue;
     }
     if (anchorIndex >= selectedIds.length - 1) {
-      errors.push(`voiceover[${index}] 不能锚定最后一个 Shot: ${afterShotId}`);
+      errors.push(`voiceover[${index}] 不能锚定最后一个候选窗口: ${afterCandidateId}`);
       continue;
     }
-    if (seenVoiceoverAnchors.has(afterShotId)) {
-      errors.push(`voiceover[${index}] 重复锚定 Shot: ${afterShotId}`);
+    if (seenVoiceoverAnchors.has(afterCandidateId)) {
+      errors.push(`voiceover[${index}] 重复锚定候选窗口: ${afterCandidateId}`);
       continue;
     }
     if (!text) {
-      errors.push(`voiceover[${index}] 文本为空: ${afterShotId}`);
+      errors.push(`voiceover[${index}] 文本为空: ${afterCandidateId}`);
       continue;
     }
     if (text.length > 80) {
-      errors.push(`voiceover[${index}] 超过 80 个字符: ${afterShotId}`);
+      errors.push(`voiceover[${index}] 超过 80 个字符: ${afterCandidateId}`);
       continue;
     }
-    seenVoiceoverAnchors.add(afterShotId);
-    voiceovers.push({ afterShotId, text });
+    seenVoiceoverAnchors.add(afterCandidateId);
+    voiceovers.push({ afterCandidateId, text });
   }
   return { selections, voiceovers, errors };
 }

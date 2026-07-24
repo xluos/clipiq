@@ -79,6 +79,7 @@ export type EditPlanPreview = {
 };
 
 export type EditReplacementCandidate = {
+  candidateId: string;
   shotId: string;
   videoId: string;
   startUs: number;

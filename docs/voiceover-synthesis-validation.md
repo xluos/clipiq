@@ -2,7 +2,7 @@
 
 ## 当前链路
 
-1. Vlog Planner 可输出最多三段 `{ afterShotId, text }`，只能引用已选择且不是最后一个的 Shot。
+1. Vlog Planner 可输出最多三段 `{ afterCandidateId, text }`，只能引用已选择且不是最后一个的候选窗口。
 2. 编译器把旁白锚定到后续真实视频片段，写入 `AudioClip.anchorClipId`，不接受模型生成的路径或时间线坐标。
 3. Studio 可按镜头添加、修改、合成和移除旁白。
 4. Electron 使用 macOS `say` 生成 `48 kHz / mono / PCM WAV`，用 `ffprobe` 校验真实时长。

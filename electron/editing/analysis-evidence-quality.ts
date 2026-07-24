@@ -290,8 +290,8 @@ export function buildAnalysisEvidenceQualityReport(
     },
     planning: {
       readiness,
-      eligibleShotCount: candidateResult.candidates.length,
-      rejectedShotCount: candidateResult.rejected.length,
+      eligibleCandidateCount: candidateResult.candidates.length,
+      rejectedCandidateCount: candidateResult.rejected.length,
       issues,
     },
   };

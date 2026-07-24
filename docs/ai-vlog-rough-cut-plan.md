@@ -1,6 +1,6 @@
 # ClipIQ AI Vlog 粗剪迭代计划
 
-> 状态：实施中（M0-1～M3、M5 已完成；M4 待安装剪映实测；M6 已开始迭代）
+> 状态：实施中（M0-1～M3 已完成；M4/M5 待安装剪映实测；M6 持续迭代）
 > 适用分支基线：`feature/v2`  
 > 建议实施分支：`feature/ai-vlog-rough-cut`  
 > 更新日期：2026-07-24
@@ -85,10 +85,10 @@ Video / Analysis / Shot
  Candidate Builder
           ↓
  LLM Planner
-  只返回 shotId + 剪辑意图
+  只返回 candidateId + 剪辑意图
           ↓
  Deterministic Compiler
-  将 shotId 编译为真实时间范围
+  将 candidateId 解析为真实 Shot 时间范围
           ↓
  EditPlan Validator
           ↓
@@ -371,6 +371,7 @@ type VideoClipEvidenceSegment = {
 
 模型输入必须包含真实候选镜头，至少提供：
 
+- `candidateId`
 - `shotId`
 - 所属 `videoId`
 - 真实起止时间
@@ -395,8 +396,7 @@ type VideoClipEvidenceSegment = {
       "targetDurationSec": 4,
       "clips": [
         {
-          "shotId": "shot_123",
-          "preferredDurationSec": 2.5,
+          "candidateId": "shot_123::1200000-3700000",
           "reason": "露营失败的反差画面，适合作为开场"
         }
       ]
@@ -404,7 +404,7 @@ type VideoClipEvidenceSegment = {
   ],
   "voiceover": [
     {
-      "afterShotId": "shot_123",
+      "afterCandidateId": "shot_123::1200000-3700000",
       "text": "本来以为今天会很顺利。"
     }
   ]
@@ -414,7 +414,7 @@ type VideoClipEvidenceSegment = {
 禁止模型输出：
 
 - 本地文件路径
-- 不存在的 `shotId`
+- 不存在的 `candidateId`
 - 任意 `sourceIn/sourceOut`
 - 剪映资源 ID
 - 最终轨道坐标
@@ -425,7 +425,7 @@ type VideoClipEvidenceSegment = {
 
 编译器负责：
 
-- 将 `shotId` 解析为真实素材路径和时间范围。
+- 将 `candidateId` 解析为真实 `shotId`、素材路径和固定时间范围。
 - 根据目标时长裁切镜头，但不得越过原 Shot 边界。
 - 处理相邻镜头、转场占用时间和音频衔接。
 - 根据画布方向生成初始裁切建议。
@@ -503,7 +503,8 @@ type VideoClipEvidenceSegment = {
 - [x] 新增 Vlog 候选镜头构建器。
 - [x] 增加基础质量评分和重复镜头过滤。
 - [x] 将 `prompts/methodology/genre/vlog.md` 的规则转成 planner 可消费的约束。
-- [x] 新增真实 Shot Planner 后端契约：模型只输出 `shotId`、剪辑意图和置信度。
+- [x] 新增真实候选 Planner 后端契约：模型只输出 `candidateId`、剪辑意图和置信度。
+- [x] 长 Shot 按字幕、人物和说话人证据边界生成最长 6 秒的确定性子镜头候选；同一 Shot 可选择多个不重叠窗口，验证见 [`subshot-candidate-validation.md`](./subshot-candidate-validation.md)。
 - [x] 将 Studio UI 从旧 `generateSteps` 切到 `generateEditPlan`，移除猜测时间段的旧契约和启发式 fallback。
 - [x] 新增确定性编译器，禁止模型直接生成时间段。
 - [x] 新增 `EditPlan` schema、版本号和校验器。

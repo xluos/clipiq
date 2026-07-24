@@ -276,8 +276,11 @@ export function applyEditPlanFeedback(
     }
     case "replace_clip": {
       const replacement = options.replacementClip;
-      if (!replacement || replacement.shotId !== action.replacementShotId) {
-        throw new Error("替换镜头尚未解析为真实 Shot");
+      if (
+        !replacement
+        || replacement.candidateId !== action.replacementCandidateId
+      ) {
+        throw new Error("替换镜头尚未解析为真实候选窗口");
       }
       const oldClip = video.items[clipIndex];
       const replacementClip = {

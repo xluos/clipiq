@@ -879,8 +879,8 @@ export type AnalysisEvidenceQualityReport = {
   };
   planning: {
     readiness: "ready" | "partial" | "blocked";
-    eligibleShotCount: number;
-    rejectedShotCount: number;
+    eligibleCandidateCount: number;
+    rejectedCandidateCount: number;
     issues: AnalysisEvidenceQualityIssue[];
   };
 };
@@ -961,6 +961,7 @@ export type VideoClipEvidence = {
 
 export type VideoClip = {
   id: string;
+  candidateId?: string;
   shotId: string;
   videoId: string;
   sourcePath: string;
@@ -1110,7 +1111,12 @@ export type EditFeedbackAction =
   | { type: "delete_clip"; clipId: string }
   | { type: "move_clip"; clipId: string; toIndex: number }
   | { type: "trim_clip"; clipId: string; sourceInUs: number; sourceOutUs: number }
-  | { type: "replace_clip"; clipId: string; replacementShotId: string; intent?: string }
+  | {
+    type: "replace_clip";
+    clipId: string;
+    replacementCandidateId: string;
+    intent?: string;
+  }
   | { type: "update_caption"; cueId: string; text: string }
   | { type: "set_music"; music: AudioClip }
   | { type: "remove_music"; audioClipId: string }

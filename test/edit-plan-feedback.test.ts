@@ -5,6 +5,7 @@ import type { EditPlan, Shot } from "../src/types";
 import { compileEditPlan } from "../electron/editing/edit-plan-compiler";
 import { applyEditPlanFeedback } from "../electron/editing/edit-plan-feedback";
 import { validateEditPlan } from "../electron/editing/edit-plan-validator";
+import { candidateIdForShotWindow } from "../electron/editing/candidate-windows";
 import {
   createEditFeedbackRepository,
   migrateEditFeedbackSchema,
@@ -43,17 +44,26 @@ function sourcePlan(): EditPlan {
     shot("shot-2", 4, 7, "第二句"),
     shot("shot-3", 8, 11, "第三句"),
   ];
-  return compileEditPlan(
-    shots.map((item) => ({
-      shotId: item.id,
-      intent: item.description || item.id,
-      confidence: 1,
-    })),
-    shots.map((item) => ({
+  const sources = shots.map((item) => {
+    const sourceInUs = Math.round(item.startSec * 1_000_000);
+    const sourceOutUs = Math.round(item.endSec * 1_000_000);
+    return {
+      candidateId: candidateIdForShotWindow(item.id, sourceInUs, sourceOutUs),
+      sourceInUs,
+      sourceOutUs,
       shot: item,
       videoId: "video-1",
       sourcePath: "/videos/video-1.mp4",
+    };
+  });
+  return compileEditPlan(
+    sources.map((source) => ({
+      candidateId: source.candidateId,
+      shotId: source.shot.id,
+      intent: source.shot.description || source.shot.id,
+      confidence: 1,
     })),
+    sources,
     {
       planId: "plan-1",
       sessionId: "session-1",
@@ -184,6 +194,7 @@ describe("EditPlan 结构化反馈", () => {
     const replacement = {
       ...structuredClone(oldClip),
       id: "replacement-clip",
+      candidateId: "shot-99::20000000-22000000",
       shotId: "shot-99",
       videoId: "video-2",
       sourcePath: "/videos/video-2.mp4",
@@ -201,7 +212,7 @@ describe("EditPlan 结构化反馈", () => {
     const replaced = applyEditPlanFeedback(original, {
       type: "replace_clip",
       clipId: oldClip.id,
-      replacementShotId: "shot-99",
+      replacementCandidateId: "shot-99::20000000-22000000",
     }, {
       newPlanId: "plan-replaced",
       now: 2,

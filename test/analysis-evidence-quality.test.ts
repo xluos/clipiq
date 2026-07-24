@@ -160,8 +160,8 @@ describe("分析证据质量报告", () => {
       },
       planning: {
         readiness: "ready",
-        eligibleShotCount: 2,
-        rejectedShotCount: 0,
+        eligibleCandidateCount: 2,
+        rejectedCandidateCount: 0,
       },
     });
   });

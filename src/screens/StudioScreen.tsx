@@ -1059,7 +1059,7 @@ function StudioEditorScreen() {
                                 applyFeedback({
                                   type: "replace_clip",
                                   clipId: currentVideoTrack.items[i].id,
-                                  replacementShotId: event.target.value,
+                                  replacementCandidateId: event.target.value,
                                   intent: "用户替换镜头",
                                 });
                               }}
@@ -1069,12 +1069,15 @@ function StudioEditorScreen() {
                                 {editingAction === "load_replacements"
                                   ? "加载候选中…"
                                   : (replacementCandidates[currentVideoTrack.items[i].id]?.length || 0) > 0
-                                    ? "选择真实 Shot"
-                                    : "没有未使用的候选 Shot"}
+                                    ? "选择候选片段"
+                                    : "没有未使用的候选片段"}
                               </option>
                               {(replacementCandidates[currentVideoTrack.items[i].id] || [])
                                 .map((candidate) => (
-                                  <option key={candidate.shotId} value={candidate.shotId}>
+                                  <option
+                                    key={candidate.candidateId}
+                                    value={candidate.candidateId}
+                                  >
                                     {candidate.description || candidate.subtitle || candidate.shotId}
                                     {" · "}
                                     {(candidate.startUs / 1_000_000).toFixed(1)}-
