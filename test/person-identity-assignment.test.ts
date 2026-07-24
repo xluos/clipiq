@@ -28,6 +28,14 @@ function appearance(
 }
 
 describe("跨素材人物身份分配", () => {
+  it("SFace 默认阈值使用真人固定集标定值", () => {
+    expect(SFACE_AUTO_IDENTITY_POLICY).toEqual({
+      minimumQuality: 0.5,
+      autoMergeThreshold: 0.5,
+      minimumMargin: 0.08,
+    });
+  });
+
   it("同一人物跨视频复用 personId，不同人物创建独立实体", () => {
     const existing = appearance(
       "appearance-a",

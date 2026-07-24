@@ -8,9 +8,11 @@ import {
   type PersonPrototype,
 } from "./person-clusterer";
 
+// OpenCV 的 0.363 LFW 示例值在本地 18 条真人固定集中产生了误合并；
+// 0.5 保留 75% 同人 pair 召回且错误合并为 0。变更前必须重跑固定集。
 export const SFACE_AUTO_IDENTITY_POLICY: PersonMatchPolicy = {
   minimumQuality: 0.5,
-  autoMergeThreshold: 0.82,
+  autoMergeThreshold: 0.5,
   minimumMargin: 0.08,
 };
 

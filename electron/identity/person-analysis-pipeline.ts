@@ -16,7 +16,9 @@ import {
 } from "./face-tracker";
 import {
   assignPersonIdentities,
+  SFACE_AUTO_IDENTITY_POLICY,
 } from "./person-identity-assignment";
+import type { PersonMatchPolicy } from "./person-clusterer";
 import {
   linkSpeakerTracksToPeople,
   type SpeakerPersonLinkDecision,
@@ -51,6 +53,7 @@ export type RunPersonAnalysisInput = {
   repository: PersonAnalysisRepository;
   usePolicy: FaceProviderUsePolicy;
   trackPolicy?: Partial<FaceTrackPolicy>;
+  identityPolicy?: Partial<PersonMatchPolicy>;
 };
 
 function validateInputFrames(videoId: string, frames: FaceAnalysisFrame[]): void {
@@ -85,6 +88,7 @@ export async function runPersonAppearanceAnalysis(
     repository,
     usePolicy,
     trackPolicy,
+    identityPolicy,
   } = input;
   if (!videoId) throw new Error("人物分析缺少 videoId");
   validateInputFrames(videoId, frames);
@@ -143,6 +147,9 @@ export async function runPersonAppearanceAnalysis(
     existingEvidence: repository.listAppearanceEvidence?.() || [],
     people: repository.listPeople?.() || [],
     differentPersonPairs: repository.listDifferentPersonPairs?.() || [],
+    ...(identityPolicy
+      ? { policy: { ...SFACE_AUTO_IDENTITY_POLICY, ...identityPolicy } }
+      : {}),
   });
   const linkedSpeakers = linkSpeakerTracksToPeople({
     speakerTracks: repository.listSpeakerTracks?.(videoId) || [],

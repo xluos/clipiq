@@ -102,7 +102,9 @@ function videoClips(plan: EditPlan) {
   return track?.kind === "video" ? track.items : [];
 }
 
-function evaluateIdentity(items: IdentityGroundTruthItem[] | undefined) {
+export function evaluateIdentityGroundTruth(
+  items: IdentityGroundTruthItem[] | undefined,
+): VlogQualityEvaluationReport["identity"] {
   if (!items || items.length < 2) {
     return {
       status: "not_evaluated" as const,
@@ -237,7 +239,7 @@ export function evaluateVlogQuality(
 
   const preview = runtimeMetric(input.previewAttempts);
   const jianyingDraftOpen = runtimeMetric(input.jianyingDraftOpenAttempts);
-  const identity = evaluateIdentity(input.identityGroundTruth);
+  const identity = evaluateIdentityGroundTruth(input.identityGroundTruth);
   const feedbackEvents = input.feedbackEvents || [];
   const initialClips = input.initialPlan ? videoClips(input.initialPlan) : [];
   const finalClipIds = new Set(clips.map((clip) => clip.id));

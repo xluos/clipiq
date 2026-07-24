@@ -208,6 +208,78 @@ describe("人物分析编排", () => {
     });
   });
 
+  it("评测可覆盖身份阈值而不修改生产默认策略", async () => {
+    const replaceEvidenceForVideo = vi.fn();
+    const embeddingDescriptor: FaceAnalysisProviderDescriptor = {
+      id: "licensed-embedding-provider",
+      version: "1",
+      capabilities: {
+        detection: true,
+        landmarks: true,
+        embedding: true,
+      },
+      models: [
+        {
+          id: "detector",
+          role: "detection",
+          productionUse: "allowed",
+        },
+        {
+          id: "identity",
+          role: "embedding",
+          productionUse: "allowed",
+        },
+      ],
+    };
+    const result = await runPersonAppearanceAnalysis({
+      videoId: "video-a",
+      frames: [inputFrame],
+      provider: provider([{
+        frame: inputFrame,
+        detections: [{
+          detectionId: "face-1",
+          bbox: { x: 0.1, y: 0.2, width: 0.2, height: 0.3 },
+          confidence: 0.95,
+          quality: 0.9,
+          embedding: {
+            modelId: "licensed-face-v1",
+            vector: [0.6, 0.8],
+          },
+        }],
+      }], true, embeddingDescriptor),
+      repository: {
+        replaceEvidenceForVideo,
+        listAppearanceEvidence: () => [{
+          id: "existing-appearance",
+          personId: "person-a",
+          videoId: "video-b",
+          trackId: "video-b:face-track-1",
+          startSec: 0,
+          endSec: 1,
+          confidence: 0.95,
+          source: "face_track" as const,
+          embedding: [1, 0],
+          embeddingModel: "licensed-face-v1",
+          embeddingQuality: 0.9,
+        }],
+        listPeople: () => [{ id: "person-a", status: "auto" as const }],
+        listDifferentPersonPairs: () => [],
+      },
+      usePolicy: { environment: "production" },
+      identityPolicy: { autoMergeThreshold: 0.7 },
+    });
+
+    expect(result.matchedExistingPersonCount).toBe(0);
+    expect(replaceEvidenceForVideo).toHaveBeenCalledWith("video-a", {
+      appearances: [expect.objectContaining({
+        personId: expect.stringMatching(/^person-auto-/),
+      })],
+      people: [expect.objectContaining({
+        id: expect.stringMatching(/^person-auto-/),
+      })],
+    });
+  });
+
   it("Provider 返回请求范围外的帧时拒绝写入", async () => {
     const repository = { replaceEvidenceForVideo: vi.fn() };
     await expect(runPersonAppearanceAnalysis({

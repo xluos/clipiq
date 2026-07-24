@@ -117,13 +117,13 @@ Provider 必须显式声明：
 - YuNet 的 5 个关键点按 OpenCV `FaceRecognizerSF` 模板做相似变换，对齐到 `112 × 112`。
 - ONNX 输入为 RGB NCHW、`0..255` 浮点值，输出 128 维后做 L2 归一化。
 - 只有 `embeddingQuality >= 0.5` 的清晰人脸生成身份向量。
-- 跨素材自动复用要求余弦相似度 `>= 0.82`，且比第二候选至少高 `0.08`。
+- 跨素材自动复用要求余弦相似度 `>= 0.5`，且比第二候选至少高 `0.08`。
 - 当前视频的旧证据不进入跨视频候选原型，避免用自身历史结果证明自身。
 - 不同向量模型、维度异常、人工拆分排除或已合并人物都不能成为自动匹配候选。
 
 不能直接把官方 InsightFace 预训练识别权重作为 ClipIQ 生产默认模型：[InsightFace 官方许可说明](https://github.com/deepinsight/insightface#license)明确区分 MIT 代码和仅限非商业研究的训练数据/预训练模型，Buffalo 等识别模型需另行联系授权。
 
-当前阈值不是照搬网上经验值，已通过固定正负样本完成最小可运行验证，证据见 [`person-identity-sface-validation.md`](./person-identity-sface-validation.md)。这仍不是正式的人脸识别评测集；在扩充相似人物、侧脸和遮挡样本前继续采用低误合并优先策略。
+OpenCV 的 SFace LFW 示例阈值是 `0.363`，但本地 18 条真实素材中该值发生了 1 个不同人物误合并，因此不能直接照搬。当前 `0.5` 由同一主人物 8 条、不同人物 10 条的 bootstrap 标定：同人物 pair 召回 `75%`、错误合并 `0`、精确率 `100%`。证据与复现命令见 [`person-identity-sface-validation.md`](./person-identity-sface-validation.md)。这仍不是正式大样本人脸评测集；侧脸低头会被保守拆开，继续优先避免错误合并。
 
 ### 说话人分离
 

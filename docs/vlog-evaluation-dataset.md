@@ -31,6 +31,14 @@ npm run vlog:validate-dataset -- /absolute/path/to/dataset/manifest.json
 npm run vlog:validate-dataset -- /absolute/path/to/dataset/manifest.json --json
 ```
 
+`identity_bootstrap` 通过文件校验后，可运行生产人物链路评测：
+
+```bash
+npm run vlog:evaluate-identity-dataset -- /absolute/path/to/dataset/manifest.json
+```
+
+该命令只抽人物真值窄窗的中间帧，使用临时 SQLite，不写业务数据库；阈值对比时可传 `--threshold <number>`。
+
 命令通过项目内 `ffprobe-static` 读取真实文件，不修改素材，检查：
 
 - 10～20 条素材、总时长 10～30 分钟。
@@ -86,8 +94,9 @@ FFprobe 只能验证文件、时长、方向和音轨；模糊、遮挡、相似
 契约、文件探测、覆盖校验和身份真值转换已经自动化。仓库外已建立本机 `identity_bootstrap`：
 
 - manifest：`~/Library/Application Support/clipiq/evaluation-datasets/人物 身份 bootstrap v1/manifest.json`
-- 10 条真实素材，共 22.2 分钟；1 个主人物跨 8 条素材，另含 2 个不同人物负例
+- 18 条真实素材，共 25.2 分钟；1 个主人物跨 8 条素材，另含 10 个不同人物负例
 - 素材使用硬链接复用 ClipIQ 已下载文件，不复制视频，也不进入 Git
-- FFprobe 和覆盖校验已通过；还未运行人物检测、聚类及召回/误合并评估，因此模型指标仍为“未评估”
+- FFprobe 和覆盖校验已通过
+- 生产阈值 `0.5` 下，同人物 pair 召回 `75%`、错误合并 `0`、精确率 `100%`；侧脸低头样本保守拆开
 
 完整 Vlog 固定集仍需另行准备经同意的生活素材，覆盖横竖屏、事件镜头角色和粗剪负样本。
