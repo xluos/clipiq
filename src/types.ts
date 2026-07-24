@@ -858,12 +858,14 @@ export type StudioStep = {
 // ==================== v3 数据模型 ====================
 
 export type VideoStatus = "ready" | "downloading" | "download_failed" | "failed" | "cancelled" | "interrupted" | "analyzing" | "not_analyzed" | "completed";
+export type VideoRole = "analysis" | "asset" | "account_video";
 
 export type Video = {
   id: string;
   title: string;
   sourceType: "url" | "local";
   sourceUrl?: string;
+  playUrl?: string;
   platform?: AccountPlatform;
   externalId?: string;
   localPath?: string;
@@ -873,6 +875,7 @@ export type Video = {
   orientation: "landscape" | "portrait" | "square";
   thumbnailUrl?: string;
   accountId?: string;
+  videoRole: VideoRole;
   status: VideoStatus;
   uploadDate?: string;
   viewCount?: number;

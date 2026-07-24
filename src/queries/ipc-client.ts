@@ -10,6 +10,7 @@ import type {
   SlotOverrides,
   StudioSession,
   Video,
+  VideoRole,
 } from "../types";
 
 type VideoFilter = {
@@ -17,6 +18,7 @@ type VideoFilter = {
   collectionId?: string;
   platform?: string;
   status?: string;
+  videoRole?: VideoRole;
   unassigned?: boolean;
 };
 

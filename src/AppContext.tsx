@@ -329,8 +329,20 @@ export function useApp(): AppState {
     },
     sessions,
     upsertSession: (s: StudioSession) => {
-      window.videoAnalyzer?.upsertSession(s).catch((err) => console.warn("upsertSession failed", err));
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      // 先更新内存，保证新建/连续勾选时编辑器拿到最新会话；IPC 完成后再回源校准。
+      queryClient.setQueryData<StudioSession[]>(["sessions"], (current = []) => {
+        const index = current.findIndex((item) => item.id === s.id);
+        if (index < 0) return [s, ...current];
+        const next = [...current];
+        next[index] = s;
+        return next;
+      });
+      window.videoAnalyzer?.upsertSession(s)
+        .then(() => queryClient.invalidateQueries({ queryKey: ["sessions"] }))
+        .catch((err) => {
+          console.warn("upsertSession failed", err);
+          queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        });
     },
     removeSession: (id: string) => {
       window.videoAnalyzer?.deleteSession(id).catch((err) => console.warn("deleteSession failed", err));

@@ -48,6 +48,9 @@ function StudioListScreen() {
     const blank: StudioSession = {
       id,
       goal: "",
+      appliedMethodologies: [],
+      usedAssetIds: [],
+      missingShots: [],
       createdAt: now,
       updatedAt: now,
       output: { kind: "idea" },
@@ -174,11 +177,11 @@ function StudioEditorScreen() {
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState("");
 
-  const assetProjects = useMemo(() => projects.filter((p) => p.kind === "asset"), [projects]);
+  const assetProjects = useMemo(() => projects.filter((p) => p.videoRole === "asset"), [projects]);
 
   const backToList: AppLocation = { module: "studio", screen: "list" };
 
-  const save = () => {
+  const save = (patch: Partial<StudioSession> = {}) => {
     if (!session) return;
     upsertSession({
       ...session,
@@ -187,6 +190,7 @@ function StudioEditorScreen() {
       targetDurationSec: parseDuration(duration),
       appliedMethodologies,
       usedAssetIds,
+      ...patch,
       updatedAt: new Date().toISOString(),
     });
   };
@@ -233,6 +237,7 @@ function StudioEditorScreen() {
         appliedMethodologies,
         usedAssetIds,
         steps,
+        missingShots: collectMissingShots(steps),
         output: { kind: "draft" },
         updatedAt: new Date().toISOString(),
       });
@@ -247,6 +252,7 @@ function StudioEditorScreen() {
         appliedMethodologies,
         usedAssetIds,
         steps: fallbackSteps,
+        missingShots: collectMissingShots(fallbackSteps),
         output: { kind: "idea" },
         updatedAt: new Date().toISOString(),
       });
@@ -313,14 +319,14 @@ function StudioEditorScreen() {
             <textarea
               value={goalDraft}
               onChange={(e) => setGoalDraft(e.target.value)}
-              onBlur={save}
+              onBlur={() => save()}
               placeholder="做一条 10 分钟的「电池虚标」科普,适合 B 站知识区,前 30 秒必须给出反常识结论。"
               className="w-full min-h-[76px] p-2.5 text-[13px] resize-y rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900/40"
             />
           </div>
 
-          <KVRow label="目标平台" value={platform} options={PLATFORM_OPTIONS} onChange={(v) => { setPlatform(v); save(); }} />
-          <KVRow label="目标时长" value={duration} options={DURATION_OPTIONS} onChange={(v) => { setDuration(v); save(); }} />
+          <KVRow label="目标平台" value={platform} options={PLATFORM_OPTIONS} onChange={(v) => { setPlatform(v); save({ targetPlatform: v }); }} />
+          <KVRow label="目标时长" value={duration} options={DURATION_OPTIONS} onChange={(v) => { setDuration(v); save({ targetDurationSec: parseDuration(v) }); }} />
 
           <div className="text-[10.5px] font-mono tracking-[0.14em] uppercase text-slate-500 mt-5 mb-2">应用的方法论</div>
           {accounts.length === 0 && (
@@ -336,8 +342,8 @@ function StudioEditorScreen() {
                 onClick={() => {
                   const next = active ? appliedMethodologies.filter((x) => x !== a.id) : [...appliedMethodologies, a.id];
                   setAppliedMethodologies(next);
+                  save({ appliedMethodologies: next });
                 }}
-                onBlur={save}
                 className={`w-full flex items-center gap-2 p-3 mb-1.5 rounded-md border text-left transition-colors ${
                   active
                     ? "bg-indigo-50 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800/50 ring-2 ring-indigo-100 dark:ring-indigo-900/30"
@@ -371,8 +377,8 @@ function StudioEditorScreen() {
                 onClick={() => {
                   const next = active ? usedAssetIds.filter((x) => x !== p.id) : [...usedAssetIds, p.id];
                   setUsedAssetIds(next);
+                  save({ usedAssetIds: next });
                 }}
-                onBlur={save}
                 className={`w-full flex gap-2.5 p-1.5 mb-1 rounded-md transition-colors text-left ${
                   active ? "bg-indigo-50 dark:bg-indigo-950/40" : "bg-white dark:bg-slate-900/60 hover:bg-slate-50 dark:hover:bg-slate-800/40"
                 }`}
@@ -581,6 +587,12 @@ function formatDuration(sec?: number): string | null {
 function parseDuration(s: string): number {
   const m = s.match(/(\d+)\s*min/);
   return m ? Number(m[1]) * 60 : 600;
+}
+
+function collectMissingShots(steps: StudioStep[]): string[] {
+  return steps
+    .map((step) => step.missing?.trim())
+    .filter((value): value is string => Boolean(value));
 }
 
 function formatTimeShort(sec?: number): string {

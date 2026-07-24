@@ -1,12 +1,13 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ipc } from "./ipc-client";
-import type { Video } from "../types";
+import type { Video, VideoRole } from "../types";
 
 type VideoFilter = {
   accountId?: string;
   collectionId?: string;
   platform?: string;
   status?: string;
+  videoRole?: VideoRole;
   /** 既不属于任何账号、也不在任何收藏夹的散视频。 */
   unassigned?: boolean;
 };

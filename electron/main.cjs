@@ -50,6 +50,15 @@ const extensionBridge = require("./extension-bridge.cjs");
 const douyinSpider = require("./douyin-spider-sidecar.cjs");
 const log = require("./logger.cjs");
 const { createTaskScheduler } = require("./task-queue");
+const {
+  createVideoRepository,
+  migrateVideoRole,
+  rowToVideo,
+} = require("./repositories/video-repository");
+const {
+  createStudioSessionRepository,
+  migrateStudioSessionSchema,
+} = require("./repositories/studio-session-repository");
 const ElectronStore = require("electron-store");
 
 let _cfgStore = null;
@@ -1051,44 +1060,6 @@ function getAnalysisDir(videoId, analysisId) {
 
 // --- row → object 转换 (SQLite 列 → JS 对象) ---
 
-function rowToVideo(r) {
-  return {
-    id: r.id,
-    title: r.title || "",
-    sourceType: r.source_type || "local",
-    sourceUrl: r.source_url || undefined,
-    playUrl: r.play_url || undefined,
-    platform: r.platform || undefined,
-    externalId: r.external_id || undefined,
-    localPath: r.local_path || undefined,
-    durationSec: r.duration_sec || 0,
-    width: r.width || 0,
-    height: r.height || 0,
-    orientation: r.orientation || "landscape",
-    thumbnailUrl: r.thumbnail_url || undefined,
-    accountId: r.account_id || undefined,
-    status: r.status || "ready",
-    uploadDate: r.upload_date || undefined,
-    viewCount: r.view_count ?? undefined,
-    likeCount: r.like_count ?? undefined,
-    commentCount: r.comment_count ?? undefined,
-    shareCount: r.share_count ?? undefined,
-    collectCount: r.collect_count ?? undefined,
-    tags: r.tags ? JSON.parse(r.tags) : undefined,
-    createdAt: new Date(r.created_at).toISOString(),
-    updatedAt: new Date(r.updated_at).toISOString(),
-    // v2 兼容字段 (旧 UI 代码用)
-    videoName: r.title || "",
-    localVideoPath: r.local_path ? `media://local/${encodeURIComponent(r.local_path)}` : undefined,
-    localFilePath: r.local_path || undefined,
-    source: r.source_type === "url"
-      ? { type: "url", url: r.source_url || "", platform: r.platform || "unknown" }
-      : { type: "local_file", originalPath: r.local_path || "" },
-    kind: r.account_id ? "account_video" : "analysis",
-    assetTags: r.tags ? JSON.parse(r.tags) : [],
-  };
-}
-
 function rowToAnalysis(r) {
   return {
     id: r.id,
@@ -1157,20 +1128,6 @@ function rowToAccount(r) {
     totalVideoCount: r.total_video_count > 0 ? r.total_video_count : undefined,
     secUid: r.sec_uid || undefined,
     analysisConfig: r.analysis_config ? JSON.parse(r.analysis_config) : undefined,
-    createdAt: new Date(r.created_at).toISOString(),
-    updatedAt: new Date(r.updated_at).toISOString(),
-  };
-}
-
-function rowToStudioSession(r) {
-  return {
-    id: r.id,
-    goal: r.goal || undefined,
-    targetPlatform: r.target_platform || undefined,
-    targetDurationSec: r.target_duration || undefined,
-    steps: r.steps ? JSON.parse(r.steps) : undefined,
-    scriptDraft: r.script_draft || undefined,
-    output: r.output ? JSON.parse(r.output) : undefined,
     createdAt: new Date(r.created_at).toISOString(),
     updatedAt: new Date(r.updated_at).toISOString(),
   };
@@ -1257,6 +1214,7 @@ function getDb() {
       orientation TEXT DEFAULT 'landscape',
       thumbnail_url TEXT,
       account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+      video_role TEXT NOT NULL DEFAULT 'analysis',
       status TEXT NOT NULL DEFAULT 'ready',
       upload_date TEXT,
       view_count INTEGER,
@@ -1357,8 +1315,12 @@ function getDb() {
       goal TEXT,
       target_platform TEXT,
       target_duration INTEGER,
+      main_shot_ratio REAL,
+      applied_methodologies TEXT,
+      used_asset_ids TEXT,
       steps TEXT,
       script_draft TEXT,
+      missing_shots TEXT,
       output TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
@@ -1404,6 +1366,8 @@ function getDb() {
   try { db.exec("ALTER TABLE videos ADD COLUMN play_url TEXT"); } catch { /* 列已存在 */ }
   try { db.exec("ALTER TABLE accounts ADD COLUMN total_video_count INTEGER DEFAULT 0"); } catch { /* 列已存在 */ }
   try { db.exec("ALTER TABLE accounts ADD COLUMN sec_uid TEXT"); } catch { /* 列已存在 */ }
+  migrateVideoRole(db);
+  migrateStudioSessionSchema(db);
 
   // (methodologies 旧 schema 已在上方建表前弃掉重建,不再做数据迁移)
 
@@ -1456,6 +1420,18 @@ function getDb() {
 
   _db = db;
   return db;
+}
+
+let _videoRepository = null;
+function getVideoRepository() {
+  if (!_videoRepository) _videoRepository = createVideoRepository(getDb());
+  return _videoRepository;
+}
+
+let _studioSessionRepository = null;
+function getStudioSessionRepository() {
+  if (!_studioSessionRepository) _studioSessionRepository = createStudioSessionRepository(getDb());
+  return _studioSessionRepository;
 }
 
 // ── tasks 表读写(task-queue 调度器的持久层)──
@@ -7455,59 +7431,12 @@ app.whenReady().then(async () => {
 
   // --- videos ---
   ipcMain.handle("videos:list", async (_event, filter = {}) => {
-    const db = getDb();
-    const conditions = [];
-    const params = [];
-    if (filter.accountId) { conditions.push("account_id = ?"); params.push(filter.accountId); }
-    if (filter.platform) { conditions.push("platform = ?"); params.push(filter.platform); }
-    if (filter.status) { conditions.push("status = ?"); params.push(filter.status); }
-    const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
-
-    if (filter.collectionId) {
-      const sql = `SELECT v.* FROM videos v JOIN collection_videos cv ON cv.video_id = v.id WHERE cv.collection_id = ?${conditions.length > 0 ? " AND " + conditions.join(" AND ") : ""} ORDER BY cv.position, v.updated_at DESC`;
-      return db.prepare(sql).all(filter.collectionId, ...params).map(rowToVideo);
-    }
-
-    // 「其他视频」:不属于任何账号、也不在任何收藏夹的散视频。
-    if (filter.unassigned) {
-      const extra = conditions.length > 0 ? " AND " + conditions.join(" AND ") : "";
-      const sql = `SELECT * FROM videos WHERE account_id IS NULL AND id NOT IN (SELECT video_id FROM collection_videos)${extra} ORDER BY updated_at DESC`;
-      return db.prepare(sql).all(...params).map(rowToVideo);
-    }
-
-    return db.prepare(`SELECT * FROM videos${where} ORDER BY updated_at DESC`).all(...params).map(rowToVideo);
+    return getVideoRepository().list(filter);
   });
 
   ipcMain.handle("videos:upsert", async (_event, video) => {
     if (!video?.id) throw new Error("videos:upsert 需要 video.id");
-    const db = getDb();
-    const now = Date.now();
-    db.prepare(`
-      INSERT INTO videos (id, title, source_type, source_url, play_url, platform, external_id, local_path,
-        duration_sec, width, height, orientation, thumbnail_url, account_id, status,
-        upload_date, view_count, like_count, comment_count, share_count, collect_count,
-        tags, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        title=excluded.title, source_type=excluded.source_type, source_url=excluded.source_url,
-        play_url=excluded.play_url,
-        platform=excluded.platform, external_id=excluded.external_id, local_path=excluded.local_path,
-        duration_sec=excluded.duration_sec, width=excluded.width, height=excluded.height,
-        orientation=excluded.orientation, thumbnail_url=excluded.thumbnail_url, account_id=excluded.account_id,
-        status=excluded.status, upload_date=excluded.upload_date, view_count=excluded.view_count,
-        like_count=excluded.like_count, comment_count=excluded.comment_count, share_count=excluded.share_count,
-        collect_count=excluded.collect_count, tags=excluded.tags, updated_at=excluded.updated_at
-    `).run(
-      video.id, video.title || "", video.sourceType || "local", video.sourceUrl || null,
-      video.playUrl || null,
-      video.platform || null, video.externalId || null, video.localPath || null,
-      video.durationSec || 0, video.width || 0, video.height || 0, video.orientation || "landscape",
-      video.thumbnailUrl || null, video.accountId || null, video.status || "ready",
-      video.uploadDate || null, video.viewCount ?? null, video.likeCount ?? null,
-      video.commentCount ?? null, video.shareCount ?? null, video.collectCount ?? null,
-      video.tags ? JSON.stringify(video.tags) : null,
-      Date.parse(video.createdAt) || now, now,
-    );
+    getVideoRepository().upsert(video);
     return { ok: true };
   });
 
@@ -7763,36 +7692,18 @@ app.whenReady().then(async () => {
 
   // --- studio sessions ---
   ipcMain.handle("sessions:list", async () => {
-    const db = getDb();
-    const rows = db.prepare("SELECT * FROM studio_sessions ORDER BY updated_at DESC").all();
-    return rows.map(rowToStudioSession);
+    return getStudioSessionRepository().list();
   });
 
   ipcMain.handle("sessions:upsert", async (_event, session) => {
     if (!session?.id) throw new Error("sessions:upsert 需要 session.id");
-    const db = getDb();
-    const now = Date.now();
-    db.prepare(`
-      INSERT INTO studio_sessions (id, goal, target_platform, target_duration, steps, script_draft, output, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        goal=excluded.goal, target_platform=excluded.target_platform, target_duration=excluded.target_duration,
-        steps=excluded.steps, script_draft=excluded.script_draft, output=excluded.output, updated_at=excluded.updated_at
-    `).run(
-      session.id, session.goal || null, session.targetPlatform || null,
-      session.targetDurationSec || null,
-      session.steps ? JSON.stringify(session.steps) : null,
-      session.scriptDraft || null,
-      session.output ? JSON.stringify(session.output) : null,
-      Date.parse(session.createdAt) || now, now,
-    );
+    getStudioSessionRepository().upsert(session);
     return { ok: true };
   });
 
   ipcMain.handle("sessions:delete", async (_event, sessionId) => {
     if (!sessionId) return { ok: false, message: "缺少 sessionId" };
-    const db = getDb();
-    db.prepare("DELETE FROM studio_sessions WHERE id = ?").run(sessionId);
+    getStudioSessionRepository().delete(sessionId);
     return { ok: true };
   });
 
@@ -8182,12 +8093,13 @@ app.whenReady().then(async () => {
 
       const upsertVideoStmt = db.prepare(`
         INSERT INTO videos (id, title, source_type, source_url, play_url, platform, external_id, local_path,
-          duration_sec, width, height, orientation, thumbnail_url, account_id, status,
+          duration_sec, width, height, orientation, thumbnail_url, account_id, video_role, status,
           upload_date, view_count, like_count, comment_count, share_count, collect_count,
           tags, created_at, updated_at)
-        VALUES (?, ?, 'url', ?, ?, ?, ?, NULL, ?, 0, 0, 'landscape', ?, ?, 'ready', ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        VALUES (?, ?, 'url', ?, ?, ?, ?, NULL, ?, 0, 0, 'landscape', ?, ?, 'account_video', 'ready', ?, ?, ?, ?, ?, ?, NULL, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           title=excluded.title, source_url=excluded.source_url, play_url=excluded.play_url,
+          video_role=excluded.video_role,
           upload_date=excluded.upload_date, view_count=excluded.view_count, like_count=excluded.like_count,
           comment_count=excluded.comment_count, share_count=excluded.share_count, collect_count=excluded.collect_count,
           updated_at=excluded.updated_at

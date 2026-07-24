@@ -48,7 +48,7 @@ function LibraryListScreen() {
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
-  const assets = useMemo(() => projects.filter((p) => p.kind === "asset"), [projects]);
+  const assets = useMemo(() => projects.filter((p) => p.videoRole === "asset"), [projects]);
   const totalDurationSec = useMemo(() => assets.reduce((sum, a) => sum + (a.durationSec || 0), 0), [assets]);
 
   const filtered = useMemo(() => {
@@ -246,6 +246,7 @@ function LibraryUploadScreen() {
         width: video.width,
         height: video.height,
         orientation: video.orientation,
+        videoRole: "asset",
         status: "ready",
         tags: [],
         createdAt: now,
@@ -330,7 +331,7 @@ const SHOT_KIND_LABEL: Record<string, string> = {
 function ShotListScreen() {
   const { projects, shotsByAsset, setLocation, setShotsForAsset } = useApp();
   const id = activeAssetId();
-  const asset = projects.find((p) => p.id === id && p.kind === "asset");
+  const asset = projects.find((p) => p.id === id && p.videoRole === "asset");
   const shots = (id && shotsByAsset[id]) || asset?.shots || [];
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [reanalyzing, setReanalyzing] = useState(false);

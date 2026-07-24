@@ -19,6 +19,7 @@ import type {
   Shot,
   StudioSession,
   Video,
+  VideoRole,
   VideoContentAnalysis,
 } from "./types";
 
@@ -340,7 +341,7 @@ declare global {
       saveConfigField: (key: string, value: unknown) => Promise<{ ok: true }>;
 
       // v3: videos
-      listVideos: (filter?: { accountId?: string; collectionId?: string; platform?: string; status?: string; unassigned?: boolean }) => Promise<Video[]>;
+      listVideos: (filter?: { accountId?: string; collectionId?: string; platform?: string; status?: string; videoRole?: VideoRole; unassigned?: boolean }) => Promise<Video[]>;
       upsertVideo: (video: Video) => Promise<{ ok: true }>;
       deleteVideo: (videoId: string) => Promise<{ ok: true }>;
 
