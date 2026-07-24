@@ -334,6 +334,10 @@ export function validateEditPlan(
         }
         if (audio.kind !== "voiceover" && !audio.sourcePath) {
           add(target, "error", "MISSING_AUDIO_SOURCE", "音轨缺少本地音频路径。", `${itemPath}.sourcePath`);
+        } else if (audio.kind === "voiceover" && !audio.ttsText?.trim()) {
+          add(target, "error", "MISSING_VOICEOVER_TEXT", "旁白缺少合成文本。", `${itemPath}.ttsText`);
+        } else if (audio.kind === "voiceover" && !audio.sourcePath) {
+          add(target, "warning", "VOICEOVER_NOT_SYNTHESIZED", "旁白尚未合成音频，预览将跳过该段旁白。", itemPath);
         } else if (
           audio.sourcePath
           && options.sourceExists
@@ -378,6 +382,29 @@ export function validateEditPlan(
   const clipIndex = new Map(videoClips.map((clip, index) => [clip.id, index]));
   const videoClipById = new Map(videoClips.map((clip) => [clip.id, clip]));
   for (const audio of audioClips) {
+    if (audio.kind === "voiceover") {
+      const anchor = audio.anchorClipId
+        ? videoClipById.get(audio.anchorClipId)
+        : undefined;
+      const voiceoverPath = `audio.${audio.id}`;
+      if (!audio.anchorClipId) {
+        add(target, "error", "VOICEOVER_ANCHOR_MISSING", "旁白缺少锚定的视频片段。", `${voiceoverPath}.anchorClipId`);
+      } else if (!anchor) {
+        add(target, "error", "VOICEOVER_ANCHOR_INVALID", "旁白引用了不存在的视频片段。", `${voiceoverPath}.anchorClipId`);
+      } else {
+        if (audio.timelineInUs !== anchor.timelineInUs) {
+          add(target, "error", "VOICEOVER_TIMELINE_STALE", "旁白位置与锚定镜头不一致。", `${voiceoverPath}.timelineInUs`);
+        }
+        const maximumDurationUs = videoClipDurationUs.get(anchor.id) || 0;
+        const voiceoverDurationUs = audio.sourceOutUs - audio.sourceInUs;
+        if (voiceoverDurationUs > maximumDurationUs) {
+          add(target, "error", "VOICEOVER_TOO_LONG", "旁白时长超过锚定镜头。", voiceoverPath, {
+            maximumDurationUs,
+            voiceoverDurationUs,
+          });
+        }
+      }
+    }
     for (const [index, suggestion] of (audio.beatSyncSuggestions || []).entries()) {
       const suggestionPath = `audio.${audio.id}.beatSyncSuggestions[${index}]`;
       const fromIndex = clipIndex.get(suggestion.fromClipId);

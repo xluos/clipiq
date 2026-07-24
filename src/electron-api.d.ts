@@ -7,6 +7,7 @@ import type {
   AnalysisOptions,
   AnalysisProgressEvent,
   AnalysisBudgetEvent,
+  AudioClip,
   AudioBeatAnalysis,
   AnalysisEvidenceQualityReport,
   AnalysisReport,
@@ -530,6 +531,21 @@ declare global {
           event: EditFeedbackEvent;
         }
       >;
+      synthesizeEditPlanVoiceover: (payload: {
+        planId: string;
+        text: string;
+        audioClipId?: string;
+        anchorClipId?: string;
+        voice?: string;
+        rateWpm?: number;
+      }) => Promise<{
+        ok: true;
+        taskId: string;
+        plan: EditPlan;
+        event: EditFeedbackEvent;
+        voiceover: AudioClip;
+        cacheHit: boolean;
+      }>;
       listEditFeedbackEvents: (filter: {
         sessionId?: string;
         planId?: string;

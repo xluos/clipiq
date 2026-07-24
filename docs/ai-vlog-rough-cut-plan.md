@@ -173,6 +173,7 @@ export type AudioClip = {
   kind: "original" | "voiceover" | "music";
   sourcePath?: string;
   ttsText?: string;
+  anchorClipId?: string;
   timelineInUs: number;
   sourceInUs: number;
   sourceOutUs: number;
@@ -182,6 +183,13 @@ export type AudioClip = {
   ducking?: {
     enabled: boolean;
     targetVolume: number;
+  };
+  synthesis?: {
+    engine: "macos-say";
+    voice?: string;
+    rateWpm: number;
+    textDigest: string;
+    synthesizedAt: number;
   };
 };
 
@@ -523,7 +531,7 @@ type PersonAppearance = {
 - [x] 调整镜头前后顺序。
 - [x] 缩短镜头。
 - [x] 修改字幕。
-- [ ] 修改旁白并重新合成对应音频。
+- [x] 修改旁白并只重新合成对应音频；使用镜头锚点保持重排一致，未合成或合成失败时代理预览明确跳过并保留 warning。验证见 [`voiceover-synthesis-validation.md`](./voiceover-synthesis-validation.md)。
 - [x] 开关相邻镜头的硬切/叠化。
 - [x] 重新生成预览。
 - [x] 每次操作生成不可变的新 `EditPlan` revision，并支持撤销到父版本。

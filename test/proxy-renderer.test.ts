@@ -4,6 +4,7 @@ import {
   buildProxyAssemblyArgs,
   buildProxySegmentArgs,
   collectProxyCaptions,
+  collectProxyWarnings,
   proxyVideoSpecForCanvas,
   serializeSrt,
 } from "../electron/editing/proxy-renderer";
@@ -139,6 +140,30 @@ describe("代理字幕", () => {
     ]);
     expect(serializeSrt(cues)).toContain("00:00:00,500 --> 00:00:01,500");
     expect(serializeSrt(cues)).toContain("第二句");
+  });
+});
+
+describe("代理旁白降级", () => {
+  it("文本旁白未合成时保留明确 warning，不阻断无旁白预览", () => {
+    const currentPlan = plan();
+    currentPlan.tracks.push({
+      id: "audio-track",
+      kind: "audio",
+      items: [{
+        id: "voiceover-1",
+        kind: "voiceover",
+        ttsText: "先把装备整理好",
+        anchorClipId: "clip-1",
+        timelineInUs: 0,
+        sourceInUs: 0,
+        sourceOutUs: 2_000_000,
+        volume: 1,
+      }],
+    });
+
+    expect(collectProxyWarnings(currentPlan)).toEqual([
+      "有 1 段旁白尚未合成，代理预览已跳过。",
+    ]);
   });
 });
 

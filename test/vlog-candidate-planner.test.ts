@@ -324,4 +324,43 @@ describe("Vlog Planner 契约", () => {
     ]);
     expect(result.errors).toHaveLength(3);
   });
+
+  it("旁白只能锚定已选择且非末尾的 Shot", () => {
+    const secondCandidate = {
+      ...candidate,
+      shotId: "shot-2",
+      startUs: 4_000_000,
+      endUs: 8_000_000,
+    };
+    const valid = parseVlogPlannerOutput({
+      selections: [
+        { shotId: "shot-1", intent: "准备", confidence: 0.9 },
+        { shotId: "shot-2", intent: "出发", confidence: 0.9 },
+      ],
+      voiceover: [{
+        afterShotId: "shot-1",
+        text: "山谷天气比预想得更冷。",
+      }],
+    }, [candidate, secondCandidate]);
+    expect(valid.errors).toEqual([]);
+    expect(valid.voiceovers).toEqual([{
+      afterShotId: "shot-1",
+      text: "山谷天气比预想得更冷。",
+    }]);
+
+    const invalid = parseVlogPlannerOutput({
+      selections: [
+        { shotId: "shot-1", intent: "准备", confidence: 0.9 },
+        { shotId: "shot-2", intent: "出发", confidence: 0.9 },
+      ],
+      voiceover: [
+        { afterShotId: "shot-2", text: "不能锚定最后一段" },
+        { afterShotId: "missing", text: "不能引用虚构镜头" },
+      ],
+    }, [candidate, secondCandidate]);
+    expect(invalid.errors).toEqual(expect.arrayContaining([
+      "voiceover[0] 不能锚定最后一个 Shot: shot-2",
+      "voiceover[1] 引用了未选择的 shotId: missing",
+    ]));
+  });
 });

@@ -87,6 +87,7 @@ const { applyEditPlanFeedback } = require("./editing/edit-plan-feedback");
 const { renderEditPlanProxy } = require("./editing/proxy-renderer");
 const { exportEditPlanPackage } = require("./editing/exporters/package-exporter");
 const { analyzeAudioBeatSource } = require("./editing/audio-beat-runtime");
+const { synthesizeSystemVoiceover } = require("./editing/voiceover-runtime");
 const {
   buildAnalysisEvidenceQualityReport,
 } = require("./editing/analysis-evidence-quality");
@@ -616,6 +617,7 @@ const TASK_CONCURRENCY = {
   methodology: 1,
   "edit-preview": 1,
   "audio-beat": 1,
+  "voiceover-synthesis": 1,
 };
 
 let learnedBaselines = { providers: {} };
@@ -8225,6 +8227,7 @@ app.whenReady().then(async () => {
 
   // --- edit plans ---
   const getEditPreviewRoot = () => path.join(app.getPath("userData"), "editing");
+  const getEditVoiceoverRoot = () => path.join(getEditPreviewRoot(), "voiceovers");
   const safeEditPreviewPlanId = (planId) => {
     const value = String(planId || "").trim();
     return /^[A-Za-z0-9._-]+$/.test(value) ? value : null;
@@ -8304,6 +8307,97 @@ app.whenReady().then(async () => {
       registerChild: ctx.registerChild,
       onProgress: ctx.onProgress,
     });
+  };
+  const runVoiceoverSynthesis = async (task, ctx) => {
+    if (process.platform !== "darwin") {
+      throw new Error("当前版本的本地旁白合成仅支持 macOS");
+    }
+    const planId = String(task.payload.planId || "").trim();
+    const text = String(task.payload.text || "").trim();
+    if (!planId || !text) throw new Error("旁白合成需要 planId 和文本");
+    const plan = getEditPlanRepository().get(planId);
+    if (!plan) throw new Error(`EditPlan 不存在: ${planId}`);
+    const videoTrack = plan.tracks.find((track) => track.kind === "video");
+    if (videoTrack?.kind !== "video") throw new Error("EditPlan 没有视频轨道");
+    const audioTrack = plan.tracks.find((track) => track.kind === "audio");
+    const requestedAudioClipId = String(task.payload.audioClipId || "").trim();
+    const existing = audioTrack?.kind === "audio"
+      ? audioTrack.items.find((clip) =>
+        clip.kind === "voiceover" && clip.id === requestedAudioClipId)
+      : undefined;
+    if (requestedAudioClipId && !existing) {
+      throw new Error(`旁白片段不存在: ${requestedAudioClipId}`);
+    }
+    const anchorClipId = String(
+      existing?.anchorClipId || task.payload.anchorClipId || "",
+    ).trim();
+    const anchor = videoTrack.items.find((clip) => clip.id === anchorClipId);
+    if (!anchor) throw new Error("旁白锚定的视频片段不存在");
+    const maximumDurationUs = Math.round(
+      (anchor.sourceOutUs - anchor.sourceInUs) / anchor.speed,
+    );
+    const [sayPath, ffprobePath] = await Promise.all([
+      commandPath("say"),
+      commandPath("ffprobe"),
+    ]);
+    if (!sayPath || !ffprobePath) {
+      throw new Error("未检测到 macOS say 或 ffprobe，无法合成旁白");
+    }
+    const voice = String(task.payload.voice || "").trim() || undefined;
+    const rateWpm = Math.max(
+      80,
+      Math.min(360, Math.round(Number(task.payload.rateWpm) || 190)),
+    );
+    const audioClipId = existing?.id || `voiceover-${require("node:crypto").randomUUID()}`;
+    const safeAudioClipId = /^[A-Za-z0-9._-]+$/.test(audioClipId)
+      ? audioClipId
+      : require("node:crypto").createHash("sha256").update(audioClipId).digest("hex");
+    const sessionDigest = require("node:crypto")
+      .createHash("sha256")
+      .update(plan.sessionId)
+      .digest("hex")
+      .slice(0, 16);
+    const synthesis = await synthesizeSystemVoiceover({
+      sayPath,
+      ffprobePath,
+      text,
+      outputPath: ({ textDigest }) => path.join(
+        getEditVoiceoverRoot(),
+        sessionDigest,
+        `${safeAudioClipId}-${textDigest.slice(0, 20)}.wav`,
+      ),
+      maximumDurationUs,
+      voice,
+      rateWpm,
+      signal: ctx.signal,
+      registerChild: ctx.registerChild,
+      onProgress: ctx.onProgress,
+    });
+    const durationUs = synthesis.durationUs;
+    return {
+      voiceover: {
+        ...(existing || {}),
+        id: audioClipId,
+        kind: "voiceover",
+        ttsText: text,
+        anchorClipId,
+        sourcePath: synthesis.outputPath,
+        timelineInUs: anchor.timelineInUs,
+        sourceInUs: 0,
+        sourceOutUs: durationUs,
+        volume: existing?.volume ?? 1,
+        fadeInUs: Math.min(80_000, Math.floor(durationUs / 4)),
+        fadeOutUs: Math.min(120_000, Math.floor(durationUs / 4)),
+        synthesis: {
+          engine: "macos-say",
+          ...(synthesis.voice ? { voice: synthesis.voice } : {}),
+          rateWpm: synthesis.rateWpm,
+          textDigest: synthesis.textDigest,
+          synthesizedAt: Date.now(),
+        },
+      },
+      cacheHit: synthesis.cacheHit,
+    };
   };
 
   ipcMain.handle("editPlans:list", async (_event, sessionId) => {
@@ -8564,6 +8658,7 @@ app.whenReady().then(async () => {
         Math.max(1, Number(payload.maxClipDurationSec) || 12) * 1_000_000,
       ),
       minimumIdentityConfidence: identityConfidence,
+      voiceovers: plannerResult.voiceovers,
       sourceExists: (sourcePath) => fsSync.existsSync(sourcePath),
     });
     getEditPlanRepository().save(plan);
@@ -8848,6 +8943,46 @@ app.whenReady().then(async () => {
       ...applied,
       analysis,
       ...(taskId ? { taskId } : {}),
+    };
+  });
+
+  ipcMain.handle("editPlans:synthesizeVoiceover", async (_event, payload = {}) => {
+    const planId = String(payload.planId || "").trim();
+    const text = String(payload.text || "").trim();
+    if (!planId || !text) throw new Error("旁白合成需要 planId 和文本");
+    const sourcePlan = getEditPlanRepository().get(planId);
+    if (!sourcePlan) throw new Error(`EditPlan 不存在: ${planId}`);
+    const sourceSession = getStudioSessionRepository().get(sourcePlan.sessionId);
+    if (
+      sourceSession?.currentEditPlanId
+      && sourceSession.currentEditPlanId !== sourcePlan.id
+    ) {
+      throw new Error("当前粗剪版本已更新，请刷新后再修改旁白");
+    }
+    if (!taskScheduler) throw new Error("任务队列尚未就绪");
+    const task = taskScheduler.enqueue("voiceover-synthesis", {
+      planId,
+      text,
+      audioClipId: payload.audioClipId,
+      anchorClipId: payload.anchorClipId,
+      voice: payload.voice,
+      rateWpm: payload.rateWpm,
+      title: "旁白合成",
+    }, {
+      refId: planId,
+      title: "旁白合成",
+      dedupeKey: `voiceover-synthesis:${planId}:${payload.audioClipId || payload.anchorClipId}:${text}`,
+    });
+    const synthesized = await taskScheduler.whenSettled(task.id);
+    const applied = await applyEditPlanAction(planId, {
+      type: "set_voiceover",
+      voiceover: synthesized.voiceover,
+    });
+    return {
+      ...applied,
+      taskId: task.id,
+      voiceover: synthesized.voiceover,
+      cacheHit: synthesized.cacheHit,
     };
   });
 
@@ -10138,6 +10273,13 @@ app.whenReady().then(async () => {
       dedupeKey: (p) => `audio-beat:${p.planId}:${p.sourcePath}`,
       title: (p) => p.title || "BGM 节拍分析",
       run: runAudioBeatAnalysis,
+    });
+    taskScheduler.registerKind("voiceover-synthesis", {
+      concurrency: TASK_CONCURRENCY["voiceover-synthesis"],
+      dedupeKey: (p) =>
+        `voiceover-synthesis:${p.planId}:${p.audioClipId || p.anchorClipId}:${p.text}`,
+      title: (p) => p.title || "旁白合成",
+      run: runVoiceoverSynthesis,
     });
     // 重启恢复:running → interrupted,queued 重新调度起跑。
     try { taskScheduler.hydrate(tasksRepo.list()); } catch (err) { log.warn("task-queue", "hydrate 失败:", err?.message || err); }

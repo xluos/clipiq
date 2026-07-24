@@ -141,6 +141,14 @@ function explicitCaptions(plan: EditPlan): CaptionCue[] {
     .flatMap((item) => item.kind === "caption" ? item.items : []);
 }
 
+export function collectProxyWarnings(plan: EditPlan): string[] {
+  const unsupportedTts = audioTrack(plan)
+    .filter((clip) => clip.kind === "voiceover" && clip.ttsText && !clip.sourcePath);
+  return unsupportedTts.length > 0
+    ? [`有 ${unsupportedTts.length} 段旁白尚未合成，代理预览已跳过。`]
+    : [];
+}
+
 export function collectProxyCaptions(plan: EditPlan): CaptionCue[] {
   const explicit = explicitCaptions(plan);
   if (explicit.length > 0) {
@@ -597,18 +605,17 @@ export async function renderEditPlanProxy(
   if (!plan.validation.valid) throw new Error("EditPlan 未通过校验，不能生成代理预览");
   const clips = videoTrack(plan);
   if (clips.length === 0) throw new Error("EditPlan 没有可渲染的视频片段");
-  const unsupportedTts = audioTrack(plan).find((clip) => clip.ttsText && !clip.sourcePath);
-  if (unsupportedTts) {
-    throw new Error(`配音片段 ${unsupportedTts.id} 尚未生成音频文件`);
-  }
 
   const subtitleMode = options.subtitleMode || "external";
   let effectiveSubtitleMode = subtitleMode;
-  const warnings: string[] = [];
+  const warnings = collectProxyWarnings(plan);
   const spec = proxyVideoSpecForCanvas(plan.canvas);
   const now = options.now || Date.now;
   const fingerprints = await Promise.all(
-    [...new Set(clips.map((clip) => clip.sourcePath))].map(sourceFingerprint),
+    [...new Set([
+      ...clips.map((clip) => clip.sourcePath),
+      ...audioTrack(plan).flatMap((clip) => clip.sourcePath ? [clip.sourcePath] : []),
+    ])].map(sourceFingerprint),
   );
   const renderDigest = digest({
     // rendered/exported 是生命周期状态，不应让同一时间线的代理缓存失效。
@@ -782,7 +789,8 @@ export async function renderEditPlanProxy(
       }
     }
 
-    const extraAudio = audioTrack(plan).filter((clip) => clip.kind !== "original");
+    const extraAudio = audioTrack(plan)
+      .filter((clip) => clip.kind !== "original" && clip.sourcePath);
     if (extraAudio.length > 0) {
       await runProcess(
         options.ffmpegPath,

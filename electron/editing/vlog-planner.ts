@@ -50,8 +50,24 @@ export const VLOG_PLANNER_OUTPUT_SCHEMA = {
         required: ["shotId", "intent", "confidence"],
       },
     },
+    voiceover: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          afterShotId: { type: "string" },
+          text: { type: "string" },
+        },
+        required: ["afterShotId", "text"],
+      },
+    },
   },
-  required: ["selections"],
+  required: ["selections", "voiceover"],
+};
+
+export type PlannerVoiceover = {
+  afterShotId: string;
+  text: string;
 };
 
 function candidateText(candidate: VlogCandidate): string {
@@ -121,6 +137,8 @@ export function buildVlogPlannerPrompt(input: {
       "程序会把 shotId 编译为真实素材时间；你只负责叙事选择与排序。",
       "personId 只代表达到可信阈值或人工确认的跨素材身份；track: 前缀只在单素材内保持连续，不能当成同一人。",
       "speakerId 与 personId 是不同证据；没有显式关联时不得推断说话人就是出镜人物。",
+      "旁白只补充画面和对白没有表达的信息，不复述现有字幕；最多 3 段，每段不超过 80 个字符。",
+      "旁白 afterShotId 必须引用已选择且不是最后一个的 shotId，旁白会从它的下一个镜头开始播放。",
       "只返回合法 JSON，不要 Markdown，不要解释。",
     ].join("\n"),
     userText: [
@@ -137,7 +155,7 @@ export function buildVlogPlannerPrompt(input: {
       candidates,
       "",
       "# 输出",
-      '{"selections":[{"shotId":"真实候选 shotId","intent":"该镜头在叙事中的作用","confidence":0.9}]}',
+      '{"selections":[{"shotId":"真实候选 shotId","intent":"该镜头在叙事中的作用","confidence":0.9}],"voiceover":[{"afterShotId":"已选择且非末尾的 shotId","text":"下一镜头开始播放的必要补充旁白"}]}',
       "按最终播放顺序排列。不得返回候选集之外的 shotId，不得重复 shotId。",
     ].join("\n"),
   };
@@ -148,6 +166,7 @@ export function parseVlogPlannerOutput(
   candidates: VlogCandidate[],
 ): {
   selections: PlannerShotSelection[];
+  voiceovers: PlannerVoiceover[];
   errors: string[];
 } {
   const candidateIds = new Set(candidates.map((candidate) => candidate.shotId));
@@ -156,6 +175,7 @@ export function parseVlogPlannerOutput(
     : [];
   const errors: string[] = [];
   const selections: PlannerShotSelection[] = [];
+  const voiceovers: PlannerVoiceover[] = [];
   const seen = new Set<string>();
 
   for (const [index, raw] of rawSelections.entries()) {
@@ -182,5 +202,41 @@ export function parseVlogPlannerOutput(
     selections.push({ shotId, intent, confidence });
   }
   if (selections.length === 0) errors.push("Planner 没有返回任何有效 Shot。");
-  return { selections, errors };
+  const selectedIds = selections.map((selection) => selection.shotId);
+  const selectedIndex = new Map(selectedIds.map((shotId, index) => [shotId, index]));
+  const seenVoiceoverAnchors = new Set<string>();
+  const rawVoiceovers = Array.isArray((parsed as any)?.voiceover)
+    ? (parsed as any).voiceover
+    : [];
+  if (rawVoiceovers.length > 3) {
+    errors.push("voiceover 最多允许 3 段。");
+  }
+  for (const [index, raw] of rawVoiceovers.slice(0, 3).entries()) {
+    const afterShotId = String(raw?.afterShotId || "").trim();
+    const text = String(raw?.text || "").trim();
+    const anchorIndex = selectedIndex.get(afterShotId);
+    if (anchorIndex == null) {
+      errors.push(`voiceover[${index}] 引用了未选择的 shotId: ${afterShotId || "(空)"}`);
+      continue;
+    }
+    if (anchorIndex >= selectedIds.length - 1) {
+      errors.push(`voiceover[${index}] 不能锚定最后一个 Shot: ${afterShotId}`);
+      continue;
+    }
+    if (seenVoiceoverAnchors.has(afterShotId)) {
+      errors.push(`voiceover[${index}] 重复锚定 Shot: ${afterShotId}`);
+      continue;
+    }
+    if (!text) {
+      errors.push(`voiceover[${index}] 文本为空: ${afterShotId}`);
+      continue;
+    }
+    if (text.length > 80) {
+      errors.push(`voiceover[${index}] 超过 80 个字符: ${afterShotId}`);
+      continue;
+    }
+    seenVoiceoverAnchors.add(afterShotId);
+    voiceovers.push({ afterShotId, text });
+  }
+  return { selections, voiceovers, errors };
 }

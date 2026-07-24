@@ -87,6 +87,7 @@ async function fixture(): Promise<{
             id: "voiceover-1",
             kind: "voiceover",
             ttsText: "尚未合成的旁白",
+            anchorClipId: "clip-1",
             timelineInUs: 0,
             sourceInUs: 0,
             sourceOutUs: 4_000_000,

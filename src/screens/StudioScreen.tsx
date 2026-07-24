@@ -35,6 +35,7 @@ import {
   Captions,
   Trash2,
   Music2,
+  Mic2,
 } from "lucide-react";
 
 export function StudioScreen() {
@@ -337,7 +338,7 @@ function StudioEditorScreen() {
     const planId = currentPlan?.id || session?.currentEditPlanId;
     if (!planId || !window.videoAnalyzer?.applyEditPlanFeedback || !session) {
       setEditError("当前环境不能保存粗剪调整");
-      return;
+      return false;
     }
     setEditError("");
     setEditingAction(action.type);
@@ -359,8 +360,10 @@ function StudioEditorScreen() {
         output: { kind: "draft" },
         updatedAt: new Date().toISOString(),
       });
+      return true;
     } catch (error) {
       setEditError(error instanceof Error ? error.message : String(error));
+      return false;
     } finally {
       setEditingAction("");
     }
@@ -440,6 +443,45 @@ function StudioEditorScreen() {
     }
   };
 
+  const synthesizeVoiceover = async (
+    anchorClipId: string,
+    audioClipId: string | undefined,
+    text: string,
+  ) => {
+    const planId = currentPlan?.id || session?.currentEditPlanId;
+    if (!planId || !window.videoAnalyzer?.synthesizeEditPlanVoiceover || !session) {
+      setEditError("当前环境不能合成旁白");
+      return false;
+    }
+    setEditError("");
+    setEditingAction("synthesize_voiceover");
+    try {
+      const result = await window.videoAnalyzer.synthesizeEditPlanVoiceover({
+        planId,
+        anchorClipId,
+        ...(audioClipId ? { audioClipId } : {}),
+        text,
+      });
+      const steps = editPlanToStudioSteps(result.plan, assetProjects);
+      setCurrentPlan(result.plan);
+      setPreview(null);
+      upsertSession({
+        ...session,
+        steps,
+        missingShots: collectMissingShots(steps),
+        currentEditPlanId: result.plan.id,
+        output: { kind: "draft" },
+        updatedAt: new Date().toISOString(),
+      });
+      return true;
+    } catch (error) {
+      setEditError(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      setEditingAction("");
+    }
+  };
+
   if (!session) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center bg-slate-50 dark:bg-[#0A0A0B] gap-4">
@@ -461,6 +503,9 @@ function StudioEditorScreen() {
   const currentMusic = currentAudioTrack?.kind === "audio"
     ? currentAudioTrack.items.find((clip) => clip.kind === "music")
     : undefined;
+  const currentVoiceovers = currentAudioTrack?.kind === "audio"
+    ? currentAudioTrack.items.filter((clip) => clip.kind === "voiceover")
+    : [];
   const evidenceQuality = currentPlan?.provenance.evidenceQuality;
 
   return (
@@ -841,6 +886,23 @@ function StudioEditorScreen() {
                           <span>缺失镜头 · {s.missing}</span>
                         </div>
                       )}
+                      {currentVideoTrack?.kind === "video"
+                        && currentVideoTrack.items[i]
+                        && currentVoiceovers
+                          .filter((voiceover) =>
+                            voiceover.anchorClipId === currentVideoTrack.items[i].id)
+                          .map((voiceover) => (
+                            <div
+                              key={voiceover.id}
+                              className="flex items-center gap-2 text-[11.5px] text-slate-600 dark:text-slate-400"
+                            >
+                              <Mic2 className="w-3 h-3 text-slate-400" strokeWidth={1.5} />
+                              <span className="truncate">旁白：{voiceover.ttsText}</span>
+                              <span className="font-mono text-[10.5px]">
+                                {voiceover.sourcePath ? "已合成" : "待合成"}
+                              </span>
+                            </div>
+                          ))}
                     </div>
                     {currentVideoTrack?.kind === "video" && currentVideoTrack.items[i] && (
                       <div className="mt-3 flex flex-wrap items-center gap-1.5">
@@ -957,6 +1019,31 @@ function StudioEditorScreen() {
                               />
                             ))
                         )}
+                        {(() => {
+                          const clip = currentVideoTrack.items[i];
+                          const voiceover = currentVoiceovers.find((item) =>
+                            item.anchorClipId === clip.id);
+                          return (
+                            <VoiceoverEditor
+                              key={`${currentPlan?.id}-${voiceover?.id || clip.id}`}
+                              initialText={voiceover?.ttsText || ""}
+                              synthesized={Boolean(voiceover?.sourcePath)}
+                              disabled={Boolean(editingAction)}
+                              busy={editingAction === "synthesize_voiceover"}
+                              onSave={(text) => synthesizeVoiceover(
+                                clip.id,
+                                voiceover?.id,
+                                text,
+                              )}
+                              onRemove={voiceover
+                                ? () => applyFeedback({
+                                  type: "remove_voiceover",
+                                  audioClipId: voiceover.id,
+                                })
+                                : undefined}
+                            />
+                          );
+                        })()}
                         {replacingClipId === currentVideoTrack.items[i].id && (
                           <div className="basis-full mt-1 flex items-center gap-1.5">
                             <select
@@ -1137,7 +1224,7 @@ function StudioEditorScreen() {
 const CaptionEditor: FunctionComponent<{
   initialText: string;
   disabled: boolean;
-  onSave: (text: string) => Promise<void>;
+  onSave: (text: string) => Promise<boolean>;
 }> = ({ initialText, disabled, onSave }) => {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(initialText);
@@ -1163,8 +1250,7 @@ const CaptionEditor: FunctionComponent<{
       />
       <button
         onClick={async () => {
-          await onSave(value);
-          setEditing(false);
+          if (await onSave(value)) setEditing(false);
         }}
         disabled={disabled || !value.trim()}
         className="h-8 px-2 rounded-md bg-indigo-600 text-white text-[11.5px] disabled:opacity-50"
@@ -1180,6 +1266,74 @@ const CaptionEditor: FunctionComponent<{
       >
         取消
       </button>
+    </div>
+  );
+};
+
+const VoiceoverEditor: FunctionComponent<{
+  initialText: string;
+  synthesized: boolean;
+  disabled: boolean;
+  busy: boolean;
+  onSave: (text: string) => Promise<boolean>;
+  onRemove?: () => Promise<boolean>;
+}> = ({ initialText, synthesized, disabled, busy, onSave, onRemove }) => {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(initialText);
+
+  if (!editing) {
+    return (
+      <button
+        onClick={() => setEditing(true)}
+        disabled={disabled}
+        className="h-7 px-2 inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-600 dark:text-slate-300 disabled:opacity-50"
+      >
+        <Mic2 className="w-3 h-3" strokeWidth={1.5} />
+        {initialText ? (synthesized ? "改旁白" : "合成旁白") : "加旁白"}
+      </button>
+    );
+  }
+
+  return (
+    <div className="basis-full mt-1 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 p-2">
+      <textarea
+        value={value}
+        maxLength={500}
+        onChange={(event) => setValue(event.target.value)}
+        placeholder="输入这段镜头的旁白"
+        className="min-h-16 w-full resize-y rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-1.5 text-[12.5px] leading-relaxed text-slate-800 dark:text-slate-200"
+      />
+      <div className="mt-2 flex items-center gap-1.5">
+        <button
+          onClick={async () => {
+            if (await onSave(value)) setEditing(false);
+          }}
+          disabled={disabled || !value.trim()}
+          className="h-8 px-2 rounded-md bg-indigo-600 text-white text-[11.5px] disabled:opacity-50"
+        >
+          {busy ? "合成中…" : synthesized ? "重新合成" : "合成"}
+        </button>
+        {onRemove && (
+          <button
+            onClick={async () => {
+              if (await onRemove()) setEditing(false);
+            }}
+            disabled={disabled}
+            className="h-8 px-2 rounded-md text-[11.5px] text-red-600 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/30 disabled:opacity-50"
+          >
+            移除
+          </button>
+        )}
+        <button
+          onClick={() => {
+            setValue(initialText);
+            setEditing(false);
+          }}
+          className="h-8 px-2 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-600 dark:text-slate-300"
+        >
+          取消
+        </button>
+      </div>
     </div>
   );
 };

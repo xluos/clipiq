@@ -239,6 +239,60 @@ describe("EditPlan 确定性编译", () => {
       "DUPLICATE_SELECTION_SHOT",
     ]);
   });
+
+  it("把 Planner 旁白锚定到后续真实镜头，并保留待合成降级状态", () => {
+    const plan = compileEditPlan([
+      { shotId: "shot-1", intent: "准备", confidence: 0.9 },
+      { shotId: "shot-2", intent: "出发", confidence: 0.9 },
+    ], [
+      {
+        shot: shot({ id: "shot-1", startSec: 0, endSec: 4 }),
+        videoId: "video-1",
+        sourcePath: "/videos/video-1.mp4",
+      },
+      {
+        shot: shot({ id: "shot-2", shotIndex: 2, startSec: 5, endSec: 9 }),
+        videoId: "video-1",
+        sourcePath: "/videos/video-1.mp4",
+      },
+    ], {
+      planId: "plan-voiceover",
+      sessionId: "session-1",
+      targetDurationUs: 8_000_000,
+      canvas: { width: 1920, height: 1080, fps: 30 },
+      goal: "测试旁白",
+      generatedAt: 1000,
+      voiceovers: [{
+        afterShotId: "shot-1",
+        text: "山谷天气比预想得更冷。",
+      }],
+    });
+
+    const video = plan.tracks.find((track) => track.kind === "video");
+    const audio = plan.tracks.find((track) => track.kind === "audio");
+    if (video?.kind !== "video" || audio?.kind !== "audio") throw new Error("fixture");
+    expect(plan.validation.valid).toBe(true);
+    expect(plan.validation.warnings.map((issue) => issue.code))
+      .toContain("VOICEOVER_NOT_SYNTHESIZED");
+    expect(audio.items).toEqual([
+      expect.objectContaining({
+        kind: "voiceover",
+        ttsText: "山谷天气比预想得更冷。",
+        anchorClipId: video.items[1].id,
+        timelineInUs: video.items[1].timelineInUs,
+      }),
+    ]);
+    expect(plan.provenance.plannerOutput).toEqual({
+      selections: [
+        { shotId: "shot-1", intent: "准备", confidence: 0.9 },
+        { shotId: "shot-2", intent: "出发", confidence: 0.9 },
+      ],
+      voiceover: [{
+        afterShotId: "shot-1",
+        text: "山谷天气比预想得更冷。",
+      }],
+    });
+  });
 });
 
 describe("EditPlan 硬校验", () => {

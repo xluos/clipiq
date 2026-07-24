@@ -9,6 +9,7 @@ import type {
   SpeakerTrack,
   VideoClip,
 } from "../../src/types";
+import type { PlannerVoiceover } from "./vlog-planner";
 import {
   validateEditPlan,
   type EditPlanValidationOptions,
@@ -46,6 +47,7 @@ export type CompileEditPlanOptions = {
   evidenceQuality?: AnalysisEvidenceQualityReport;
   maxClipDurationUs?: number;
   minimumIdentityConfidence?: number;
+  voiceovers?: PlannerVoiceover[];
   sourceExists?: EditPlanValidationOptions["sourceExists"];
 };
 
@@ -72,6 +74,7 @@ function stablePlannerDigest(
     methodologyIds: [...new Set(options.methodologyIds || [])].sort(),
     evidenceQuality,
     selections,
+    voiceovers: options.voiceovers || [],
     sources: sources
       .map((source) => ({
         shotId: source.shot.id,
@@ -431,6 +434,35 @@ export function compileEditPlan(
         }
         : {}),
     })));
+  const voiceovers = (options.voiceovers || []).flatMap((voiceover, index) => {
+    const anchorIndex = clips.findIndex((clip) => clip.shotId === voiceover.afterShotId);
+    const anchorClip = anchorIndex >= 0 ? clips[anchorIndex + 1] : undefined;
+    if (!anchorClip) {
+      compileErrors.push({
+        code: "VOICEOVER_ANCHOR_MISSING",
+        message: "旁白锚点没有对应的后续镜头。",
+        path: `voiceovers[${index}].afterShotId`,
+        meta: { afterShotId: voiceover.afterShotId },
+      });
+      return [];
+    }
+    const durationUs = Math.min(
+      Math.max(600_000, Math.round(voiceover.text.length / 4.5 * US_PER_SECOND)),
+      Math.round((anchorClip.sourceOutUs - anchorClip.sourceInUs) / anchorClip.speed),
+    );
+    return [{
+      id: `${options.planId}-voiceover-${index + 1}`,
+      kind: "voiceover" as const,
+      ttsText: voiceover.text,
+      anchorClipId: anchorClip.id,
+      timelineInUs: anchorClip.timelineInUs,
+      sourceInUs: 0,
+      sourceOutUs: durationUs,
+      volume: 1,
+      fadeInUs: Math.min(80_000, Math.floor(durationUs / 4)),
+      fadeOutUs: Math.min(120_000, Math.floor(durationUs / 4)),
+    }];
+  });
   const basePlan: EditPlan = {
     id: options.planId,
     version: 1,
@@ -451,6 +483,11 @@ export function compileEditPlan(
         kind: "caption" as const,
         items: captions,
       }] : []),
+      ...(voiceovers.length > 0 ? [{
+        id: `${options.planId}-audio-track-1`,
+        kind: "audio" as const,
+        items: voiceovers,
+      }] : []),
     ],
     transitions,
     provenance: {
@@ -461,7 +498,10 @@ export function compileEditPlan(
       ...(options.plannerProvider ? { plannerProvider: options.plannerProvider } : {}),
       ...(options.plannerModel ? { plannerModel: options.plannerModel } : {}),
       plannerInputDigest: stablePlannerDigest(selections, sources, options),
-      plannerOutput: selections,
+      plannerOutput: {
+        selections,
+        voiceover: options.voiceovers || [],
+      },
       ...(options.evidenceQuality ? { evidenceQuality: options.evidenceQuality } : {}),
     },
     validation: {

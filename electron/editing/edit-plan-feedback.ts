@@ -152,6 +152,16 @@ function reflowPlan(plan: EditPlan): void {
   plan.actualDurationUs = timelineUs;
 
   const clipById = new Map(video.items.map((clip) => [clip.id, clip]));
+  for (const track of plan.tracks) {
+    if (track.kind !== "audio") continue;
+    track.items = track.items.flatMap((audio) => {
+      if (audio.kind !== "voiceover" || !audio.anchorClipId) return [audio];
+      const anchor = clipById.get(audio.anchorClipId);
+      if (!anchor) return [];
+      audio.timelineInUs = anchor.timelineInUs;
+      return [audio];
+    });
+  }
   captions.items = captions.items
     .filter((cue) => !cue.sourceClipId || clipById.has(cue.sourceClipId))
     .flatMap((cue) => {
@@ -188,6 +198,21 @@ function replaceTransitionClipId(
   for (const transition of transitions) {
     if (transition.fromClipId === oldClipId) transition.fromClipId = newClipId;
     if (transition.toClipId === oldClipId) transition.toClipId = newClipId;
+  }
+}
+
+function replaceVoiceoverAnchorClipId(
+  plan: EditPlan,
+  oldClipId: string,
+  newClipId: string,
+): void {
+  for (const track of plan.tracks) {
+    if (track.kind !== "audio") continue;
+    for (const audio of track.items) {
+      if (audio.kind === "voiceover" && audio.anchorClipId === oldClipId) {
+        audio.anchorClipId = newClipId;
+      }
+    }
   }
 }
 
@@ -265,6 +290,7 @@ export function applyEditPlanFeedback(
         ...captionCuesFromClip(replacementClip),
       ];
       replaceTransitionClipId(plan.transitions, oldClip.id, replacementClip.id);
+      replaceVoiceoverAnchorClipId(plan, oldClip.id, replacementClip.id);
       break;
     }
     case "update_caption": {
@@ -304,6 +330,43 @@ export function applyEditPlanFeedback(
       audio.items = audio.items.filter((item) =>
         !(item.kind === "music" && item.id === action.audioClipId));
       if (audio.items.length === before) throw new Error("BGM 音轨不存在");
+      if (audio.items.length === 0) {
+        plan.tracks = plan.tracks.filter((item) => item !== audio);
+      }
+      break;
+    }
+    case "set_voiceover": {
+      const voiceover = structuredClone(action.voiceover);
+      if (
+        voiceover.kind !== "voiceover"
+        || !voiceover.id
+        || !voiceover.anchorClipId
+        || !voiceover.ttsText?.trim()
+        || !voiceover.sourcePath
+        || !Number.isSafeInteger(voiceover.sourceInUs)
+        || !Number.isSafeInteger(voiceover.sourceOutUs)
+        || voiceover.sourceInUs < 0
+        || voiceover.sourceOutUs <= voiceover.sourceInUs
+      ) {
+        throw new Error("已合成旁白音轨无效");
+      }
+      const anchor = video.items.find((clip) => clip.id === voiceover.anchorClipId);
+      if (!anchor) throw new Error("旁白锚定的视频片段不存在");
+      voiceover.timelineInUs = anchor.timelineInUs;
+      const audio = getOrCreateAudioTrack(plan);
+      audio.items = [
+        ...audio.items.filter((item) => item.id !== voiceover.id),
+        voiceover,
+      ];
+      break;
+    }
+    case "remove_voiceover": {
+      const audio = plan.tracks.find((item) => item.kind === "audio");
+      if (audio?.kind !== "audio") throw new Error("EditPlan 没有旁白音轨");
+      const before = audio.items.length;
+      audio.items = audio.items.filter((item) =>
+        !(item.kind === "voiceover" && item.id === action.audioClipId));
+      if (audio.items.length === before) throw new Error("旁白音轨不存在");
       if (audio.items.length === 0) {
         plan.tracks = plan.tracks.filter((item) => item !== audio);
       }

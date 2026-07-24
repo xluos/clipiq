@@ -214,6 +214,71 @@ describe("EditPlan 结构化反馈", () => {
     expect(replacedCaptions?.items.map((cue) => cue.text)).not.toContain("第二句");
   });
 
+  it("已合成旁白形成新版本，并跟随锚定镜头移动和移除", () => {
+    const original = sourcePlan();
+    const video = original.tracks.find((track) => track.kind === "video");
+    if (video?.kind !== "video") throw new Error("fixture");
+    const anchor = video.items[1];
+    const withVoiceover = applyEditPlanFeedback(original, {
+      type: "set_voiceover",
+      voiceover: {
+        id: "voiceover-1",
+        kind: "voiceover",
+        ttsText: "山谷天气比预想得更冷。",
+        anchorClipId: anchor.id,
+        sourcePath: "/voiceovers/voiceover-1.wav",
+        timelineInUs: anchor.timelineInUs,
+        sourceInUs: 0,
+        sourceOutUs: 2_000_000,
+        volume: 1,
+        synthesis: {
+          engine: "macos-say",
+          voice: "Tingting",
+          rateWpm: 190,
+          textDigest: "digest",
+          synthesizedAt: 2,
+        },
+      },
+    }, {
+      newPlanId: "plan-voiceover",
+      now: 2,
+      sourceExists: () => true,
+    });
+    const audio = withVoiceover.tracks.find((track) => track.kind === "audio");
+    if (audio?.kind !== "audio") throw new Error("fixture");
+    expect(audio.items[0]).toMatchObject({
+      id: "voiceover-1",
+      anchorClipId: anchor.id,
+      timelineInUs: 3_000_000,
+    });
+
+    const moved = applyEditPlanFeedback(withVoiceover, {
+      type: "move_clip",
+      clipId: anchor.id,
+      toIndex: 0,
+    }, {
+      newPlanId: "plan-voiceover-moved",
+      now: 3,
+      sourceExists: () => true,
+    });
+    const movedAudio = moved.tracks.find((track) => track.kind === "audio");
+    if (movedAudio?.kind !== "audio") throw new Error("fixture");
+    expect(movedAudio.items[0]).toMatchObject({
+      anchorClipId: anchor.id,
+      timelineInUs: 0,
+    });
+
+    const removed = applyEditPlanFeedback(moved, {
+      type: "remove_voiceover",
+      audioClipId: "voiceover-1",
+    }, {
+      newPlanId: "plan-voiceover-removed",
+      now: 4,
+      sourceExists: () => true,
+    });
+    expect(removed.tracks.some((track) => track.kind === "audio")).toBe(false);
+  });
+
   it("添加 BGM 形成新版本，并在镜头调整后刷新卡点建议", () => {
     const original = sourcePlan();
     const withMusic = applyEditPlanFeedback(original, {

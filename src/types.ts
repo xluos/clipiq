@@ -977,6 +977,7 @@ export type AudioClip = {
   kind: "original" | "voiceover" | "music";
   sourcePath?: string;
   ttsText?: string;
+  anchorClipId?: string;
   timelineInUs: number;
   sourceInUs: number;
   sourceOutUs: number;
@@ -986,6 +987,13 @@ export type AudioClip = {
   ducking?: {
     enabled: boolean;
     targetVolume: number;
+  };
+  synthesis?: {
+    engine: "macos-say";
+    voice?: string;
+    rateWpm: number;
+    textDigest: string;
+    synthesizedAt: number;
   };
   beatAnalysis?: AudioBeatAnalysis;
   beatSyncSuggestions?: BeatSyncSuggestion[];
@@ -1084,6 +1092,8 @@ export type EditFeedbackAction =
   | { type: "update_caption"; cueId: string; text: string }
   | { type: "set_music"; music: AudioClip }
   | { type: "remove_music"; audioClipId: string }
+  | { type: "set_voiceover"; voiceover: AudioClip }
+  | { type: "remove_voiceover"; audioClipId: string }
   | {
     type: "set_transition";
     fromClipId: string;
