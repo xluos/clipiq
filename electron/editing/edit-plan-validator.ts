@@ -7,6 +7,15 @@ import type {
   VideoClip,
 } from "../../src/types";
 
+const EMOTION_TONES = new Set([
+  "neutral",
+  "calm",
+  "warm",
+  "upbeat",
+  "tense",
+  "reflective",
+]);
+
 export type ShotValidationSource = {
   shotId: string;
   videoId: string;
@@ -104,6 +113,28 @@ function validateClip(
   }
   if (!(Number.isFinite(clip.confidence) && clip.confidence >= 0 && clip.confidence <= 1)) {
     add(target, "error", "INVALID_CONFIDENCE", "选择置信度必须在 0 到 1 之间。", `${path}.confidence`);
+  }
+  if (clip.emotion) {
+    if (!EMOTION_TONES.has(clip.emotion.tone)) {
+      add(target, "error", "INVALID_CLIP_EMOTION_TONE", "镜头情绪类型无效。", `${path}.emotion.tone`);
+    }
+    if (
+      !Number.isFinite(clip.emotion.intensity)
+      || clip.emotion.intensity < 0
+      || clip.emotion.intensity > 1
+    ) {
+      add(target, "error", "INVALID_CLIP_EMOTION_INTENSITY", "镜头情绪强度必须在 0 到 1 之间。", `${path}.emotion.intensity`);
+    }
+    if (
+      !Number.isFinite(clip.emotion.confidence)
+      || clip.emotion.confidence < 0
+      || clip.emotion.confidence > 1
+    ) {
+      add(target, "error", "INVALID_CLIP_EMOTION_CONFIDENCE", "镜头情绪置信度必须在 0 到 1 之间。", `${path}.emotion.confidence`);
+    }
+    if (!clip.emotion.reason.trim() || clip.emotion.source !== "planner") {
+      add(target, "error", "INVALID_CLIP_EMOTION_PROVENANCE", "镜头情绪缺少 Planner 依据。", `${path}.emotion`);
+    }
   }
 
   const source = options.shots?.get(clip.shotId);
@@ -552,7 +583,36 @@ export function validateEditPlan(
 
   const clipIndex = new Map(videoClips.map((clip, index) => [clip.id, index]));
   const videoClipById = new Map(videoClips.map((clip) => [clip.id, clip]));
+  const emotionSegmentById = new Map(
+    (plan.emotionSegments || []).map((segment) => [segment.id, segment]),
+  );
   for (const audio of audioClips) {
+    const audioDurationUs = audio.sourceOutUs - audio.sourceInUs;
+    if (
+      Number.isSafeInteger(audio.timelineInUs)
+      && Number.isSafeInteger(audioDurationUs)
+      && audio.timelineInUs + audioDurationUs > plan.actualDurationUs
+    ) {
+      add(target, "warning", "AUDIO_TRIMMED_TO_TIMELINE", "音轨尾部超出成片，将按时间线截断。", `audio.${audio.id}`);
+    }
+    if (audio.kind === "music" && audio.emotionSegmentId) {
+      const segment = emotionSegmentById.get(audio.emotionSegmentId);
+      if (!segment) {
+        add(target, "error", "MUSIC_EMOTION_SEGMENT_MISSING", "BGM 引用了不存在的情绪段落。", `audio.${audio.id}.emotionSegmentId`);
+      } else {
+        if (audio.timelineInUs !== segment.startUs) {
+          add(target, "error", "MUSIC_EMOTION_TIMELINE_MISMATCH", "BGM 起点与情绪段落不一致。", `audio.${audio.id}.timelineInUs`);
+        }
+        if (audioDurationUs > segment.endUs - segment.startUs) {
+          add(target, "error", "MUSIC_EMOTION_DURATION_OVERFLOW", "BGM 超出了对应情绪段落。", `audio.${audio.id}.source`);
+        } else if (audioDurationUs < segment.endUs - segment.startUs - 100_000) {
+          add(target, "warning", "MUSIC_EMOTION_DURATION_UNDERRUN", "BGM 短于对应情绪段落，尾部将保留原声。", `audio.${audio.id}.source`);
+        }
+        if (audio.mood !== segment.tone) {
+          add(target, "error", "MUSIC_EMOTION_TONE_MISMATCH", "BGM 情绪标签与段落不一致。", `audio.${audio.id}.mood`);
+        }
+      }
+    }
     if (audio.kind === "voiceover") {
       const anchor = audio.anchorClipId
         ? videoClipById.get(audio.anchorClipId)
@@ -614,6 +674,58 @@ export function validateEditPlan(
         || suggestion.confidence > 1
       ) {
         add(target, "error", "BEAT_SUGGESTION_CONFIDENCE_INVALID", "卡点建议置信度无效。", `${suggestionPath}.confidence`);
+      }
+    }
+  }
+  if (plan.emotionSegments) {
+    const segmentIds = new Set<string>();
+    const coveredClipIds = new Set<string>();
+    let expectedStartUs = 0;
+    for (const [index, segment] of plan.emotionSegments.entries()) {
+      const segmentPath = `emotionSegments[${index}]`;
+      if (!segment.id || segmentIds.has(segment.id)) {
+        add(target, "error", "DUPLICATE_EMOTION_SEGMENT_ID", "情绪段落 ID 为空或重复。", `${segmentPath}.id`);
+      }
+      segmentIds.add(segment.id);
+      if (!validateTimeRange(target, segment.startUs, segment.endUs, segmentPath)) {
+        continue;
+      }
+      if (segment.startUs !== expectedStartUs) {
+        add(target, "error", "EMOTION_SEGMENT_TIMELINE_GAP", "情绪段落必须连续覆盖成片时间线。", segmentPath);
+      }
+      expectedStartUs = segment.endUs;
+      if (!EMOTION_TONES.has(segment.tone)) {
+        add(target, "error", "INVALID_EMOTION_SEGMENT_TONE", "情绪段落类型无效。", `${segmentPath}.tone`);
+      }
+      if (
+        !Number.isFinite(segment.intensity)
+        || segment.intensity < 0
+        || segment.intensity > 1
+        || !Number.isFinite(segment.confidence)
+        || segment.confidence < 0
+        || segment.confidence > 1
+      ) {
+        add(target, "error", "INVALID_EMOTION_SEGMENT_SCORE", "情绪段落强度或置信度无效。", segmentPath);
+      }
+      if (!segment.reason.trim() || segment.clipIds.length === 0) {
+        add(target, "error", "INCOMPLETE_EMOTION_SEGMENT", "情绪段落缺少镜头或依据。", segmentPath);
+      }
+      for (const clipId of segment.clipIds) {
+        if (!videoClipById.has(clipId) || coveredClipIds.has(clipId)) {
+          add(target, "error", "INVALID_EMOTION_SEGMENT_CLIP", "情绪段落引用了不存在或重复的镜头。", `${segmentPath}.clipIds`);
+        }
+        coveredClipIds.add(clipId);
+      }
+    }
+    if (
+      plan.emotionSegments.length > 0
+      && expectedStartUs !== plan.actualDurationUs
+    ) {
+      add(target, "error", "EMOTION_SEGMENT_DURATION_MISMATCH", "情绪段落没有覆盖完整成片时长。", "emotionSegments");
+    }
+    for (const clip of videoClips.filter((item) => item.emotion)) {
+      if (!coveredClipIds.has(clip.id)) {
+        add(target, "error", "EMOTION_CLIP_NOT_SEGMENTED", "带情绪标注的镜头未进入情绪段落。", `video.${clip.id}.emotion`);
       }
     }
   }

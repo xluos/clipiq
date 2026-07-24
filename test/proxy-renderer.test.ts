@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { EditPlan, VideoClip } from "../src/types";
 import {
   buildProxyAssemblyArgs,
+  buildAudioMixArgs,
   buildProxySegmentArgs,
   collectProxyCaptions,
   collectProxyWarnings,
@@ -239,6 +240,48 @@ describe("代理旁白降级", () => {
     expect(collectProxyWarnings(currentPlan)).toEqual([
       "有 1 段旁白尚未合成，代理预览已跳过。",
     ]);
+  });
+});
+
+describe("多段 BGM 混音", () => {
+  it("为每段音乐应用独立裁切、淡入淡出和时间线延迟", () => {
+    const args = buildAudioMixArgs("/cache/base.mp4", [
+      {
+        id: "music-1",
+        kind: "music",
+        sourcePath: "/music/calm.wav",
+        timelineInUs: 0,
+        sourceInUs: 1_000_000,
+        sourceOutUs: 5_000_000,
+        volume: 0.18,
+        fadeInUs: 400_000,
+        fadeOutUs: 400_000,
+      },
+      {
+        id: "music-2",
+        kind: "music",
+        sourcePath: "/music/upbeat.wav",
+        timelineInUs: 4_000_000,
+        sourceInUs: 0,
+        sourceOutUs: 4_000_000,
+        volume: 0.2,
+        fadeInUs: 400_000,
+        fadeOutUs: 400_000,
+      },
+    ], "/cache/mixed.mp4");
+    const filters = args[args.indexOf("-filter_complex") + 1];
+
+    expect(args).toEqual(expect.arrayContaining([
+      "-i", "/music/calm.wav",
+      "-i", "/music/upbeat.wav",
+    ]));
+    expect(filters).toContain(
+      "[1:a]atrim=start=1.000000:duration=4.000000,asetpts=PTS-STARTPTS,volume=0.180000,afade=t=in:st=0:d=0.400000,afade=t=out:st=3.600000:d=0.400000,adelay=0|0[extra0]",
+    );
+    expect(filters).toContain("adelay=4000|4000[extra1]");
+    expect(filters).toContain(
+      "[basea][extra0][extra1]amix=inputs=3:duration=first:dropout_transition=0[mix]",
+    );
   });
 });
 

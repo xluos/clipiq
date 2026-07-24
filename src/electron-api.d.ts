@@ -574,7 +574,9 @@ declare global {
           cancelled: false;
           ok: true;
           taskId?: string;
+          taskIds?: string[];
           analysis: AudioBeatAnalysis;
+          analyses?: AudioBeatAnalysis[];
           plan: EditPlan;
           event: EditFeedbackEvent;
         }

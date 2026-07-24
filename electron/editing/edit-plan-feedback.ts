@@ -11,6 +11,7 @@ import {
 } from "./audio-beat-analysis";
 import { clipVideoEvidenceToRange } from "./aligned-evidence";
 import { captionCueFromEvidenceSegment } from "./caption-highlights";
+import { buildEmotionSegments } from "./emotion-segments";
 import {
   validateEditPlan,
   type EditPlanValidationOptions,
@@ -136,11 +137,53 @@ function reflowPlan(plan: EditPlan): void {
   }
   plan.transitions = nextTransitions;
   plan.actualDurationUs = timelineUs;
+  const emotionSegments = buildEmotionSegments(video.items, timelineUs);
+  if (emotionSegments.length > 0) {
+    plan.emotionSegments = emotionSegments;
+  } else {
+    delete plan.emotionSegments;
+  }
 
   const clipById = new Map(video.items.map((clip) => [clip.id, clip]));
   for (const track of plan.tracks) {
     if (track.kind !== "audio") continue;
+    const mappedMusic = track.items
+      .filter((audio) =>
+        audio.kind === "music" && Boolean(audio.emotionSegmentId))
+      .sort((left, right) => left.timelineInUs - right.timelineInUs);
+    const retainedMappedMusicIds = new Set<string>();
+    for (
+      let index = 0;
+      index < Math.min(mappedMusic.length, emotionSegments.length);
+      index += 1
+    ) {
+      const music = mappedMusic[index];
+      const segment = emotionSegments[index];
+      const sourceDurationUs = music.sourceOutUs - music.sourceInUs;
+      const segmentDurationUs = segment.endUs - segment.startUs;
+      music.timelineInUs = segment.startUs;
+      music.sourceOutUs = music.sourceInUs
+        + Math.min(sourceDurationUs, segmentDurationUs);
+      music.emotionSegmentId = segment.id;
+      music.mood = segment.tone;
+      music.fadeInUs = Math.min(
+        music.fadeInUs || 0,
+        Math.floor((music.sourceOutUs - music.sourceInUs) / 2),
+      );
+      music.fadeOutUs = Math.min(
+        music.fadeOutUs || 0,
+        Math.floor((music.sourceOutUs - music.sourceInUs) / 2),
+      );
+      retainedMappedMusicIds.add(music.id);
+    }
     track.items = track.items.flatMap((audio) => {
+      if (
+        audio.kind === "music"
+        && audio.emotionSegmentId
+        && !retainedMappedMusicIds.has(audio.id)
+      ) {
+        return [];
+      }
       if (audio.kind !== "voiceover" || !audio.anchorClipId) return [audio];
       const anchor = clipById.get(audio.anchorClipId);
       if (!anchor) return [];
@@ -286,6 +329,9 @@ export function applyEditPlanFeedback(
       const replacementClip = {
         ...structuredClone(replacement),
         timelineInUs: oldClip.timelineInUs,
+        ...(replacement.emotion || !oldClip.emotion
+          ? {}
+          : { emotion: structuredClone(oldClip.emotion) }),
       };
       video.items[clipIndex] = replacementClip;
       captions.items = [
@@ -325,6 +371,31 @@ export function applyEditPlanFeedback(
       audio.items = [
         ...audio.items.filter((item) => item.kind !== "music"),
         music,
+      ];
+      break;
+    }
+    case "set_music_sequence": {
+      const music = action.music.map((item) => structuredClone(item));
+      if (
+        music.length === 0
+        || music.some((item) =>
+          item.kind !== "music"
+          || !item.id
+          || !item.sourcePath
+          || !Number.isSafeInteger(item.timelineInUs)
+          || !Number.isSafeInteger(item.sourceInUs)
+          || !Number.isSafeInteger(item.sourceOutUs)
+          || item.timelineInUs < 0
+          || item.sourceInUs < 0
+          || item.sourceOutUs <= item.sourceInUs)
+        || new Set(music.map((item) => item.id)).size !== music.length
+      ) {
+        throw new Error("情绪 BGM 编排无效");
+      }
+      const audio = getOrCreateAudioTrack(plan);
+      audio.items = [
+        ...audio.items.filter((item) => item.kind !== "music"),
+        ...music,
       ];
       break;
     }

@@ -14,6 +14,7 @@ import type {
   AppLocation,
   EditFeedbackAction,
   EditPlan,
+  EmotionTone,
   StudioSession,
   StudioStep,
 } from "../types";
@@ -57,6 +58,15 @@ function setActiveSessionId(id: string | null) {
     else window.sessionStorage.removeItem("clipiq-active-session-id");
   } catch { /* noop */ }
 }
+
+const EMOTION_TONE_LABELS: Record<EmotionTone, string> = {
+  neutral: "中性",
+  calm: "平静",
+  warm: "温暖",
+  upbeat: "轻快",
+  tense: "紧张",
+  reflective: "回味",
+};
 
 function StudioListScreen() {
   const { sessions, setLocation, upsertSession } = useApp();
@@ -500,14 +510,20 @@ function StudioEditorScreen() {
   const currentVideoTrack = currentPlan?.tracks.find((track) => track.kind === "video");
   const currentCaptionTrack = currentPlan?.tracks.find((track) => track.kind === "caption");
   const currentAudioTrack = currentPlan?.tracks.find((track) => track.kind === "audio");
-  const currentMusic = currentAudioTrack?.kind === "audio"
-    ? currentAudioTrack.items.find((clip) => clip.kind === "music")
-    : undefined;
+  const currentMusics = currentAudioTrack?.kind === "audio"
+    ? currentAudioTrack.items
+      .filter((clip) => clip.kind === "music")
+      .sort((left, right) => left.timelineInUs - right.timelineInUs)
+    : [];
   const currentVoiceovers = currentAudioTrack?.kind === "audio"
     ? currentAudioTrack.items.filter((clip) => clip.kind === "voiceover")
     : [];
-  const currentBeatSuggestions = currentMusic?.beatSyncSuggestions || [];
-  const pendingBeatSuggestions = currentBeatSuggestions.filter((suggestion) =>
+  const currentBeatSuggestions = currentMusics.flatMap((music) =>
+    (music.beatSyncSuggestions || []).map((suggestion) => ({
+      music,
+      suggestion,
+    })));
+  const pendingBeatSuggestions = currentBeatSuggestions.filter(({ suggestion }) =>
     Math.abs(suggestion.offsetUs) > 1_000);
   const alignedBeatSuggestionCount = currentBeatSuggestions.length
     - pendingBeatSuggestions.length;
@@ -1153,29 +1169,61 @@ function StudioEditorScreen() {
             <div className="rounded-md border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 p-3 mb-3">
               <div className="flex items-center gap-1.5 text-[10.5px] font-mono tracking-wider uppercase text-slate-500 dark:text-slate-400">
                 <Music2 className="w-3 h-3" strokeWidth={1.5} />
-                BGM
+                {currentPlan.emotionSegments?.length
+                  ? `情绪 BGM · ${currentPlan.emotionSegments.length} 段`
+                  : "BGM"}
               </div>
-              {currentMusic ? (
+              {currentMusics.length > 0 ? (
                 <>
-                  <div className="mt-2 text-[12.5px] text-slate-900 dark:text-slate-100 truncate">
-                    {currentMusic.sourcePath?.split(/[\\/]/).pop() || "本地音频"}
+                  <div className="mt-2 space-y-1.5">
+                    {currentMusics.map((music) => {
+                      const durationUs = music.sourceOutUs - music.sourceInUs;
+                      const endUs = music.timelineInUs + durationUs;
+                      return (
+                        <div
+                          key={music.id}
+                          className="rounded-md bg-slate-50 dark:bg-slate-950/70 px-2 py-1.5"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="min-w-0 flex-1 truncate text-[12px] text-slate-900 dark:text-slate-100">
+                              {music.sourcePath?.split(/[\\/]/).pop() || "本地音频"}
+                            </span>
+                            <button
+                              onClick={() => applyFeedback({
+                                type: "remove_music",
+                                audioClipId: music.id,
+                              })}
+                              disabled={musicBusy || Boolean(editingAction)}
+                              aria-label={`移除 ${music.sourcePath?.split(/[\\/]/).pop() || "BGM"}`}
+                              className="h-6 px-1.5 rounded-sm text-[10.5px] text-red-600 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/30 disabled:opacity-50"
+                            >
+                              移除
+                            </button>
+                          </div>
+                          <div className="mt-0.5 text-[10.5px] font-mono text-slate-500 dark:text-slate-400">
+                            {music.mood ? `${EMOTION_TONE_LABELS[music.mood]} · ` : ""}
+                            {formatTimeShort(music.timelineInUs / 1_000_000)}
+                            {"–"}{formatTimeShort(endUs / 1_000_000)}
+                            {music.beatAnalysis?.status === "usable"
+                              ? ` · ${music.beatAnalysis.bpm?.toFixed(1)} BPM`
+                              : music.beatAnalysis?.status === "low_confidence"
+                                ? ` · 置信度 ${Math.round(music.beatAnalysis.confidence * 100)}%`
+                                : " · 无稳定节拍"}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
-                  <div className="mt-1 text-[10.5px] font-mono text-slate-500 dark:text-slate-400">
-                    {currentMusic.beatAnalysis?.status === "usable"
-                      ? `${currentMusic.beatAnalysis.bpm?.toFixed(1)} BPM · ${
-                        pendingBeatSuggestions.length > 0
-                          ? `${pendingBeatSuggestions.length} 个待对齐`
-                          : alignedBeatSuggestionCount > 0
-                            ? "切点已对齐"
-                            : "暂无近邻切点"
-                      }`
-                      : currentMusic.beatAnalysis?.status === "low_confidence"
-                        ? `节拍置信度 ${Math.round(currentMusic.beatAnalysis.confidence * 100)}%`
-                        : "未识别稳定节拍"}
+                  <div className="mt-1.5 text-[10.5px] font-mono text-slate-500 dark:text-slate-400">
+                    {pendingBeatSuggestions.length > 0
+                      ? `${pendingBeatSuggestions.length} 个待对齐`
+                      : alignedBeatSuggestionCount > 0
+                        ? "切点已对齐"
+                        : "暂无近邻切点"}
                   </div>
                   {pendingBeatSuggestions.length > 0 && (
                     <div className="mt-2 space-y-1.5">
-                      {pendingBeatSuggestions.slice(0, 3).map((suggestion) => {
+                      {pendingBeatSuggestions.slice(0, 3).map(({ music, suggestion }) => {
                         const toIndex = currentVideoTrack?.kind === "video"
                           ? currentVideoTrack.items.findIndex((clip) =>
                             clip.id === suggestion.toClipId)
@@ -1184,7 +1232,7 @@ function StudioEditorScreen() {
                         const offsetMs = Math.round(Math.abs(suggestion.offsetUs) / 1_000);
                         return (
                           <div
-                            key={`${suggestion.fromClipId}-${suggestion.toClipId}`}
+                            key={`${music.id}-${suggestion.fromClipId}-${suggestion.toClipId}`}
                             className="flex items-center gap-2 rounded-md bg-slate-50 dark:bg-slate-950/70 px-2 py-1.5"
                           >
                             <span className="min-w-0 flex-1 truncate text-[10.5px] font-mono text-slate-600 dark:text-slate-400">
@@ -1194,7 +1242,7 @@ function StudioEditorScreen() {
                             <button
                               onClick={() => applyFeedback({
                                 type: "apply_beat_sync",
-                                audioClipId: currentMusic.id,
+                                audioClipId: music.id,
                                 fromClipId: suggestion.fromClipId,
                                 toClipId: suggestion.toClipId,
                                 beatTimeUs: suggestion.beatTimeUs,
@@ -1216,17 +1264,7 @@ function StudioEditorScreen() {
                       disabled={musicBusy || Boolean(editingAction)}
                       className="h-7 px-2 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-600 dark:text-slate-300 disabled:opacity-50"
                     >
-                      {musicBusy ? "分析中…" : "替换"}
-                    </button>
-                    <button
-                      onClick={() => applyFeedback({
-                        type: "remove_music",
-                        audioClipId: currentMusic.id,
-                      })}
-                      disabled={musicBusy || Boolean(editingAction)}
-                      className="h-7 px-2 rounded-md text-[11.5px] text-red-600 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/30 disabled:opacity-50"
-                    >
-                      移除
+                      {musicBusy ? "分析中…" : "替换编排"}
                     </button>
                   </div>
                 </>

@@ -56,6 +56,17 @@ function shot(patch: Partial<Shot>): Shot {
   };
 }
 
+function emotion(
+  tone: "neutral" | "calm" | "warm" | "upbeat" | "tense" | "reflective" = "upbeat",
+) {
+  return {
+    tone,
+    intensity: 0.7,
+    confidence: 0.8,
+    reason: "动作推进，节奏轻快",
+  };
+}
+
 describe("Vlog Candidate Builder", () => {
   it("只产出有真实路径和有效时间的候选，并保守过滤人物身份", () => {
     const appearances: PersonAppearance[] = [
@@ -507,15 +518,21 @@ describe("Vlog Planner 契约", () => {
     expect(prompt.userText).not.toContain("/private/path.mp4");
     expect(prompt.systemText).toContain("严禁生成 startSec/endSec");
     expect(prompt.systemText).toContain("每个 candidateId 已绑定真实 shotId");
+    expect(prompt.systemText).toContain("emotion 表示成片这一镜头需要承载的情绪");
   });
 
-  it("解析时拒绝候选集外引用、重复引用和非法置信度", () => {
+  it("解析时保留剪辑情绪，并拒绝候选集外引用、重复引用和非法置信度", () => {
     const result = parseVlogPlannerOutput({
       selections: [
-        { candidateId: candidate.candidateId, intent: "开场钩子", confidence: 0.9 },
-        { candidateId: "missing", intent: "虚构", confidence: 0.8 },
-        { candidateId: candidate.candidateId, intent: "重复", confidence: 0.7 },
-        { candidateId: candidate.candidateId, intent: "非法置信度", confidence: 2 },
+        {
+          candidateId: candidate.candidateId,
+          intent: "开场钩子",
+          confidence: 0.9,
+          emotion: emotion(),
+        },
+        { candidateId: "missing", intent: "虚构", confidence: 0.8, emotion: emotion() },
+        { candidateId: candidate.candidateId, intent: "重复", confidence: 0.7, emotion: emotion() },
+        { candidateId: candidate.candidateId, intent: "非法置信度", confidence: 2, emotion: emotion() },
       ],
     }, [candidate]);
 
@@ -525,9 +542,34 @@ describe("Vlog Planner 契约", () => {
         shotId: "shot-1",
         intent: "开场钩子",
         confidence: 0.9,
+        emotion: {
+          ...emotion(),
+          source: "planner",
+        },
       },
     ]);
     expect(result.errors).toHaveLength(3);
+  });
+
+  it("拒绝缺失、越界或无依据的剪辑情绪", () => {
+    const result = parseVlogPlannerOutput({
+      selections: [{
+        candidateId: candidate.candidateId,
+        intent: "开场钩子",
+        confidence: 0.9,
+        emotion: {
+          tone: "excited",
+          intensity: 2,
+          confidence: 0.8,
+          reason: "",
+        },
+      }],
+    }, [candidate]);
+
+    expect(result.selections).toEqual([]);
+    expect(result.errors).toContain(
+      `selections[0] emotion 无效: ${candidate.candidateId}`,
+    );
   });
 
   it("旁白只能锚定已选择且非末尾的候选窗口", () => {
@@ -540,8 +582,8 @@ describe("Vlog Planner 契约", () => {
     };
     const valid = parseVlogPlannerOutput({
       selections: [
-        { candidateId: candidate.candidateId, intent: "准备", confidence: 0.9 },
-        { candidateId: secondCandidate.candidateId, intent: "出发", confidence: 0.9 },
+        { candidateId: candidate.candidateId, intent: "准备", confidence: 0.9, emotion: emotion("calm") },
+        { candidateId: secondCandidate.candidateId, intent: "出发", confidence: 0.9, emotion: emotion() },
       ],
       voiceover: [{
         afterCandidateId: candidate.candidateId,
@@ -556,8 +598,8 @@ describe("Vlog Planner 契约", () => {
 
     const invalid = parseVlogPlannerOutput({
       selections: [
-        { candidateId: candidate.candidateId, intent: "准备", confidence: 0.9 },
-        { candidateId: secondCandidate.candidateId, intent: "出发", confidence: 0.9 },
+        { candidateId: candidate.candidateId, intent: "准备", confidence: 0.9, emotion: emotion("calm") },
+        { candidateId: secondCandidate.candidateId, intent: "出发", confidence: 0.9, emotion: emotion() },
       ],
       voiceover: [
         { afterCandidateId: secondCandidate.candidateId, text: "不能锚定最后一段" },

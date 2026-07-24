@@ -19,12 +19,14 @@ import {
 import { hasUsableWordTimings } from "./transcript-evidence";
 import { personAwareCrop } from "./smart-reframe";
 import { captionCueFromEvidenceSegment } from "./caption-highlights";
+import { buildEmotionSegments } from "./emotion-segments";
 
 export type PlannerCandidateSelection = {
   candidateId: string;
   shotId: string;
   intent: string;
   confidence: number;
+  emotion?: VideoClip["emotion"];
 };
 
 export type EditPlanShotSource = {
@@ -523,6 +525,7 @@ export function compileEditPlan(
       ...(crop ? { crop } : {}),
       selectionReason: selection.intent,
       confidence: selection.confidence,
+      ...(selection.emotion ? { emotion: structuredClone(selection.emotion) } : {}),
       evidence: buildEvidence(
         source,
         source.sourceInUs,
@@ -575,6 +578,7 @@ export function compileEditPlan(
       fadeOutUs: Math.min(120_000, Math.floor(durationUs / 4)),
     }];
   });
+  const emotionSegments = buildEmotionSegments(clips, timelineUs);
   const basePlan: EditPlan = {
     id: options.planId,
     version: 1,
@@ -602,6 +606,7 @@ export function compileEditPlan(
       }] : []),
     ],
     transitions,
+    ...(emotionSegments.length > 0 ? { emotionSegments } : {}),
     provenance: {
       goal: options.goal,
       genre: "vlog",

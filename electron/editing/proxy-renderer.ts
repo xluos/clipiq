@@ -464,7 +464,7 @@ function escapeSubtitleFilterPath(filePath: string): string {
     .replace(/\]/g, "\\]");
 }
 
-function buildAudioMixArgs(
+export function buildAudioMixArgs(
   basePath: string,
   clips: AudioClip[],
   outputPath: string,

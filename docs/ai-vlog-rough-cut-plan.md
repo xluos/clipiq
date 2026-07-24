@@ -671,7 +671,7 @@ export-package/
 
 - [x] 节拍检测和卡点：Studio 已接入本地 BGM 选择、FFmpeg PCM 解码、`energy-onset-v1` 节拍网格和置信度降级；用户逐个确认后，以不超过 5% 的轻微变速将硬切精确落到节拍，每次生成可撤销的 `EditPlan revision`。验证见 [`audio-beat-analysis-validation.md`](./audio-beat-analysis-validation.md)。
 - [x] 基于人物焦点的横竖屏智能重构图；多人无法完整容纳或无可靠焦点时降级为留边。
-- [ ] 情绪段落驱动的 BGM 切换。
+- [x] 情绪段落驱动的 BGM 切换：Planner 基于候选窗口的真实事件、字幕和剪辑作用输出镜头级剪辑情绪，确定性编译为连续且最多 4 段的 `emotionSegments`；Studio 可选择 1 首全片 BGM，或按段落顺序选择等量音频，代理预览逐段裁切、淡入淡出、延迟和混音。当前不伪装自动识别歌曲情绪，验证见 [`emotion-bgm-validation.md`](./emotion-bgm-validation.md)。
 - [x] 字幕关键词高亮：词级时间与镜头事件语义共同生成可追溯 `CaptionCue.highlights`，ASS 代理烧录显示强调色；句级字幕、人工改文和无 libass 环境均有明确降级，验证见 [`caption-keyword-highlight-validation.md`](./caption-keyword-highlight-validation.md)。
 - [ ] 贴纸和花字模板。
 - [ ] 多版本粗剪对比。
@@ -704,7 +704,7 @@ MVP 可以暂缓：
 
 - 自动贴纸选择。
 - 复杂花字。
-- 多首 BGM 情绪编排。
+- 自动检索并推荐匹配情绪的音乐素材。
 - 智能运镜。
 - 自动学习剪映内的后续修改。
 

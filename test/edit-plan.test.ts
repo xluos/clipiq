@@ -159,8 +159,26 @@ describe("EditPlan 确定性编译", () => {
       },
     ].map(candidateSource);
     const plan = compileEditPlan([
-      candidateSelection(sources[0], "交代准备过程", 0.95),
-      candidateSelection(sources[1], "推进到出发", 0.9),
+      {
+        ...candidateSelection(sources[0], "交代准备过程", 0.95),
+        emotion: {
+          tone: "calm" as const,
+          intensity: 0.35,
+          confidence: 0.88,
+          reason: "整理装备，建立情境",
+          source: "planner" as const,
+        },
+      },
+      {
+        ...candidateSelection(sources[1], "推进到出发", 0.9),
+        emotion: {
+          tone: "upbeat" as const,
+          intensity: 0.8,
+          confidence: 0.91,
+          reason: "背起装备出发",
+          source: "planner" as const,
+        },
+      },
     ], sources, {
       planId: "plan-1",
       sessionId: "session-1",
@@ -252,6 +270,18 @@ describe("EditPlan 确定性编译", () => {
       type: "cut",
       durationUs: 0,
     }]);
+    expect(plan.emotionSegments).toEqual([
+      {
+        id: "emotion-01",
+        startUs: 0,
+        endUs: 6_000_000,
+        tone: "calm",
+        intensity: 0.5,
+        confidence: 0.89,
+        clipIds: ["plan-1-video-1", "plan-1-video-2"],
+        reason: "整理装备，建立情境；背起装备出发",
+      },
+    ]);
     expect(plan.provenance.plannerInputDigest).toMatch(/^[a-f0-9]{64}$/);
     const firstVideoTrack = plan.tracks.find((track) => track.kind === "video");
     if (firstVideoTrack?.kind !== "video") throw new Error("测试期望视频轨道");

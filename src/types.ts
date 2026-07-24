@@ -987,6 +987,22 @@ export type VideoClipEvidence = {
   alignedSegments?: VideoClipEvidenceSegment[];
 };
 
+export type EmotionTone =
+  | "neutral"
+  | "calm"
+  | "warm"
+  | "upbeat"
+  | "tense"
+  | "reflective";
+
+export type ClipEmotion = {
+  tone: EmotionTone;
+  intensity: number;
+  confidence: number;
+  reason: string;
+  source: "planner";
+};
+
 export type VideoClip = {
   id: string;
   candidateId?: string;
@@ -1002,6 +1018,7 @@ export type VideoClip = {
   transform?: TransformSpec;
   selectionReason: string;
   confidence: number;
+  emotion?: ClipEmotion;
   evidence?: VideoClipEvidence;
 };
 
@@ -1042,6 +1059,8 @@ export type AudioClip = {
   sourceInUs: number;
   sourceOutUs: number;
   volume: number;
+  emotionSegmentId?: string;
+  mood?: EmotionTone;
   fadeInUs?: number;
   fadeOutUs?: number;
   ducking?: {
@@ -1124,6 +1143,16 @@ export type EditPlan = {
   actualDurationUs: number;
   tracks: EditTrack[];
   transitions: EditTransition[];
+  emotionSegments?: Array<{
+    id: string;
+    startUs: number;
+    endUs: number;
+    tone: EmotionTone;
+    intensity: number;
+    confidence: number;
+    clipIds: string[];
+    reason: string;
+  }>;
   provenance: {
     goal: string;
     genre: "vlog";
@@ -1156,6 +1185,7 @@ export type EditFeedbackAction =
   }
   | { type: "update_caption"; cueId: string; text: string }
   | { type: "set_music"; music: AudioClip }
+  | { type: "set_music_sequence"; music: AudioClip[] }
   | { type: "remove_music"; audioClipId: string }
   | {
     type: "apply_beat_sync";

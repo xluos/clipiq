@@ -1,4 +1,8 @@
-import type { AnalysisEvidenceQualityReport } from "../../src/types";
+import type {
+  AnalysisEvidenceQualityReport,
+  ClipEmotion,
+  EmotionTone,
+} from "../../src/types";
 import type { VlogCandidate } from "./candidate-builder";
 import type { PlannerCandidateSelection } from "./edit-plan-compiler";
 
@@ -46,8 +50,21 @@ export const VLOG_PLANNER_OUTPUT_SCHEMA = {
           candidateId: { type: "string" },
           intent: { type: "string" },
           confidence: { type: "number" },
+          emotion: {
+            type: "object",
+            properties: {
+              tone: {
+                type: "string",
+                enum: ["neutral", "calm", "warm", "upbeat", "tense", "reflective"],
+              },
+              intensity: { type: "number" },
+              confidence: { type: "number" },
+              reason: { type: "string" },
+            },
+            required: ["tone", "intensity", "confidence", "reason"],
+          },
         },
-        required: ["candidateId", "intent", "confidence"],
+        required: ["candidateId", "intent", "confidence", "emotion"],
       },
     },
     voiceover: {
@@ -69,6 +86,15 @@ export type PlannerVoiceover = {
   afterCandidateId: string;
   text: string;
 };
+
+const EMOTION_TONES = new Set<EmotionTone>([
+  "neutral",
+  "calm",
+  "warm",
+  "upbeat",
+  "tense",
+  "reflective",
+]);
 
 function alignedSegmentText(
   candidate: VlogCandidate,
@@ -169,6 +195,8 @@ export function buildVlogPlannerPrompt(input: {
       "alignedTimeline 是程序按时间边界对齐后的证据；event@segment 可用于具体时间段，event@shot 只代表整 Shot 降级描述，不得伪装为更细粒度语义。",
       "旁白只补充画面和对白没有表达的信息，不复述现有字幕；最多 3 段，每段不超过 80 个字符。",
       "旁白 afterCandidateId 必须引用已选择且不是最后一个的 candidateId，旁白会从它的下一个镜头开始播放。",
+      "每个选择必须根据该候选真实事件、字幕和剪辑作用标注 emotion：tone 只能是 neutral/calm/warm/upbeat/tense/reflective，intensity 与 confidence 均为 0-1，reason 不超过 40 个字符。",
+      "emotion 表示成片这一镜头需要承载的情绪，不得把素材中没有证据的具体情感或人物心理当成事实。",
       "只返回合法 JSON，不要 Markdown，不要解释。",
     ].join("\n"),
     userText: [
@@ -185,7 +213,7 @@ export function buildVlogPlannerPrompt(input: {
       candidates,
       "",
       "# 输出",
-      '{"selections":[{"candidateId":"真实候选 candidateId","intent":"该时间窗口在叙事中的作用","confidence":0.9}],"voiceover":[{"afterCandidateId":"已选择且非末尾的 candidateId","text":"下一镜头开始播放的必要补充旁白"}]}',
+      '{"selections":[{"candidateId":"真实候选 candidateId","intent":"该时间窗口在叙事中的作用","confidence":0.9,"emotion":{"tone":"upbeat","intensity":0.7,"confidence":0.8,"reason":"动作推进，节奏轻快"}}],"voiceover":[{"afterCandidateId":"已选择且非末尾的 candidateId","text":"下一镜头开始播放的必要补充旁白"}]}',
       "按最终播放顺序排列。不得返回候选集之外的 candidateId，不得重复 candidateId。",
     ].join("\n"),
   };
@@ -214,6 +242,10 @@ export function parseVlogPlannerOutput(
     const candidateId = String(raw?.candidateId || "").trim();
     const intent = String(raw?.intent || "").trim();
     const confidence = Number(raw?.confidence);
+    const emotionTone = String(raw?.emotion?.tone || "").trim() as EmotionTone;
+    const emotionIntensity = Number(raw?.emotion?.intensity);
+    const emotionConfidence = Number(raw?.emotion?.confidence);
+    const emotionReason = String(raw?.emotion?.reason || "").trim();
     const candidate = candidateById.get(candidateId);
     if (!candidate) {
       errors.push(`selections[${index}] 引用了候选集之外的 candidateId: ${candidateId || "(空)"}`);
@@ -231,12 +263,34 @@ export function parseVlogPlannerOutput(
       errors.push(`selections[${index}] confidence 不在 0-1: ${candidateId}`);
       continue;
     }
+    if (
+      !EMOTION_TONES.has(emotionTone)
+      || !(Number.isFinite(emotionIntensity)
+        && emotionIntensity >= 0
+        && emotionIntensity <= 1)
+      || !(Number.isFinite(emotionConfidence)
+        && emotionConfidence >= 0
+        && emotionConfidence <= 1)
+      || !emotionReason
+      || emotionReason.length > 40
+    ) {
+      errors.push(`selections[${index}] emotion 无效: ${candidateId}`);
+      continue;
+    }
+    const emotion: ClipEmotion = {
+      tone: emotionTone,
+      intensity: emotionIntensity,
+      confidence: emotionConfidence,
+      reason: emotionReason,
+      source: "planner",
+    };
     seen.add(candidateId);
     selections.push({
       candidateId,
       shotId: candidate.shotId,
       intent,
       confidence,
+      emotion,
     });
   }
   if (selections.length === 0) errors.push("Planner 没有返回任何有效候选窗口。");

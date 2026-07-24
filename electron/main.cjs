@@ -8958,51 +8958,87 @@ app.whenReady().then(async () => {
       throw new Error("当前粗剪版本已更新，请刷新后再添加 BGM");
     }
     const result = await dialog.showOpenDialog({
-      title: "选择 BGM",
-      properties: ["openFile"],
+      title: sourcePlan.emotionSegments?.length > 1
+        ? `选择 1 首全片 BGM，或选择 ${sourcePlan.emotionSegments.length} 首按文件名排序的情绪 BGM`
+        : "选择 BGM",
+      properties: ["openFile", "multiSelections"],
       filters: [{ name: "Audio", extensions: AUDIO_EXTENSIONS }],
     });
-    if (result.canceled || !result.filePaths?.[0]) return { cancelled: true };
-    const sourcePath = path.resolve(result.filePaths[0]);
-    let analysis;
-    let taskId;
-    if (taskScheduler) {
-      const task = taskScheduler.enqueue("audio-beat", {
-        planId,
-        sourcePath,
-        title: path.basename(sourcePath),
-      }, {
-        refId: planId,
-        title: "BGM 节拍分析",
-        dedupeKey: `audio-beat:${planId}:${sourcePath}`,
-      });
-      taskId = task.id;
-      analysis = await taskScheduler.whenSettled(task.id);
-    } else {
-      analysis = await runAudioBeatAnalysis(
-        { payload: { planId, sourcePath } },
-        {
-          signal: new AbortController().signal,
-          onProgress: () => {},
-          registerChild: () => {},
-        },
+    if (result.canceled || !result.filePaths?.length) return { cancelled: true };
+    const sourcePaths = [...new Set(result.filePaths.map((filePath) =>
+      path.resolve(filePath)))].sort((left, right) =>
+      path.basename(left).localeCompare(
+        path.basename(right),
+        "zh-CN",
+        { numeric: true, sensitivity: "base" },
+      ));
+    const emotionSegments = sourcePlan.emotionSegments || [];
+    if (
+      sourcePaths.length > 1
+      && sourcePaths.length !== emotionSegments.length
+    ) {
+      throw new Error(
+        `当前粗剪有 ${emotionSegments.length} 个情绪段落；请选择 1 首全片 BGM，或正好选择 ${emotionSegments.length} 首，系统将按文件名排序`,
       );
     }
-    const sourceOutUs = Math.min(
-      sourcePlan.actualDurationUs,
-      Number(analysis?.analyzedEndUs) || 0,
-    );
-    if (!Number.isSafeInteger(sourceOutUs) || sourceOutUs <= 0) {
-      throw new Error("BGM 没有可用音频");
+    const analyzeSource = async (sourcePath) => {
+      if (taskScheduler) {
+        const task = taskScheduler.enqueue("audio-beat", {
+          planId,
+          sourcePath,
+          title: path.basename(sourcePath),
+        }, {
+          refId: planId,
+          title: "BGM 节拍分析",
+          dedupeKey: `audio-beat:${planId}:${sourcePath}`,
+        });
+        return {
+          taskId: task.id,
+          analysis: await taskScheduler.whenSettled(task.id),
+        };
+      }
+      return {
+        analysis: await runAudioBeatAnalysis(
+          { payload: { planId, sourcePath } },
+          {
+            signal: new AbortController().signal,
+            onProgress: () => {},
+            registerChild: () => {},
+          },
+        ),
+      };
+    };
+    const analyzedSources = [];
+    for (const sourcePath of sourcePaths) {
+      analyzedSources.push({
+        sourcePath,
+        ...await analyzeSource(sourcePath),
+      });
     }
-    const fadeUs = Math.min(500_000, Math.floor(sourceOutUs / 2));
-    const applied = await applyEditPlanAction(planId, {
-      type: "set_music",
-      music: {
+    const assignedSegments = sourcePaths.length === 1
+      ? [{
+        id: undefined,
+        startUs: 0,
+        endUs: sourcePlan.actualDurationUs,
+        tone: undefined,
+      }]
+      : emotionSegments;
+    const music = analyzedSources.map((item, index) => {
+      const segment = assignedSegments[index];
+      const segmentDurationUs = segment.endUs - segment.startUs;
+      const sourceOutUs = Math.min(
+        segmentDurationUs,
+        Number(item.analysis?.analyzedEndUs) || 0,
+      );
+      if (!Number.isSafeInteger(sourceOutUs) || sourceOutUs <= 0) {
+        throw new Error(`BGM 没有可用音频: ${path.basename(item.sourcePath)}`);
+      }
+      const fadeUs = Math.min(400_000, Math.floor(sourceOutUs / 2));
+      return {
         id: `music-${require("node:crypto").randomUUID()}`,
         kind: "music",
-        sourcePath,
-        timelineInUs: 0,
+        sourcePath: item.sourcePath,
+        timelineInUs: segment.startUs,
         sourceInUs: 0,
         sourceOutUs,
         volume: 0.18,
@@ -9012,14 +9048,27 @@ app.whenReady().then(async () => {
           enabled: true,
           targetVolume: 0.08,
         },
-        beatAnalysis: analysis,
-      },
+        beatAnalysis: item.analysis,
+        ...(segment.id ? {
+          emotionSegmentId: segment.id,
+          mood: segment.tone,
+        } : {}),
+      };
+    });
+    const applied = await applyEditPlanAction(planId, {
+      type: "set_music_sequence",
+      music,
     });
     return {
       cancelled: false,
       ...applied,
-      analysis,
-      ...(taskId ? { taskId } : {}),
+      analysis: analyzedSources[0].analysis,
+      analyses: analyzedSources.map((item) => item.analysis),
+      ...(analyzedSources[0].taskId
+        ? { taskId: analyzedSources[0].taskId }
+        : {}),
+      taskIds: analyzedSources.flatMap((item) =>
+        item.taskId ? [item.taskId] : []),
     };
   });
 

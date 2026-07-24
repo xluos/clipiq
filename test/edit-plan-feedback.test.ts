@@ -5,6 +5,7 @@ import type { EditPlan, Shot } from "../src/types";
 import { compileEditPlan } from "../electron/editing/edit-plan-compiler";
 import { applyEditPlanFeedback } from "../electron/editing/edit-plan-feedback";
 import { validateEditPlan } from "../electron/editing/edit-plan-validator";
+import { buildEmotionSegments } from "../electron/editing/emotion-segments";
 import { candidateIdForShotWindow } from "../electron/editing/candidate-windows";
 import {
   createEditFeedbackRepository,
@@ -435,6 +436,105 @@ describe("EditPlan 结构化反馈", () => {
       sourceExists: () => true,
     });
     expect(removed.tracks.some((track) => track.kind === "audio")).toBe(false);
+  });
+
+  it("一次反馈原子替换整组情绪 BGM", () => {
+    const original = sourcePlan();
+    const video = original.tracks.find((track) => track.kind === "video");
+    if (video?.kind !== "video") throw new Error("fixture");
+    video.items.forEach((item, index) => {
+      item.emotion = {
+        tone: index < 2 ? "calm" : "upbeat",
+        intensity: index < 2 ? 0.35 : 0.8,
+        confidence: 0.9,
+        reason: index < 2 ? "铺垫" : "推进",
+        source: "planner",
+      };
+    });
+    original.emotionSegments = buildEmotionSegments(
+      video.items,
+      original.actualDurationUs,
+      { minimumSegmentDurationUs: 0 },
+    );
+
+    const result = applyEditPlanFeedback(original, {
+      type: "set_music_sequence",
+      music: [
+        {
+          id: "music-calm",
+          kind: "music",
+          sourcePath: "/music/calm.wav",
+          timelineInUs: 0,
+          sourceInUs: 0,
+          sourceOutUs: 6_000_000,
+          volume: 0.18,
+          emotionSegmentId: "emotion-01",
+          mood: "calm",
+        },
+        {
+          id: "music-upbeat",
+          kind: "music",
+          sourcePath: "/music/upbeat.wav",
+          timelineInUs: 6_000_000,
+          sourceInUs: 0,
+          sourceOutUs: 3_000_000,
+          volume: 0.18,
+          emotionSegmentId: "emotion-02",
+          mood: "upbeat",
+        },
+      ],
+    }, {
+      newPlanId: "plan-emotion-music",
+      now: 2,
+      sourceExists: () => true,
+    });
+    const audio = result.tracks.find((track) => track.kind === "audio");
+
+    expect(audio?.items).toEqual([
+      expect.objectContaining({
+        id: "music-calm",
+        emotionSegmentId: "emotion-01",
+      }),
+      expect.objectContaining({
+        id: "music-upbeat",
+        emotionSegmentId: "emotion-02",
+      }),
+    ]);
+    expect(result.validation.valid).toBe(true);
+
+    const shortened = applyEditPlanFeedback(result, {
+      type: "trim_clip",
+      clipId: video.items[0].id,
+      sourceInUs: video.items[0].sourceInUs,
+      sourceOutUs: video.items[0].sourceOutUs - 500_000,
+    }, {
+      newPlanId: "plan-emotion-music-shortened",
+      now: 3,
+      sourceExists: () => true,
+    });
+    const shortenedAudio = shortened.tracks.find((track) => track.kind === "audio");
+    expect(shortened.emotionSegments?.map((segment) => [
+      segment.id,
+      segment.startUs,
+      segment.endUs,
+    ])).toEqual([
+      ["emotion-01", 0, 5_500_000],
+      ["emotion-02", 5_500_000, 8_500_000],
+    ]);
+    expect(shortenedAudio?.items).toEqual([
+      expect.objectContaining({
+        id: "music-calm",
+        timelineInUs: 0,
+        sourceOutUs: 5_500_000,
+        emotionSegmentId: "emotion-01",
+      }),
+      expect.objectContaining({
+        id: "music-upbeat",
+        timelineInUs: 5_500_000,
+        sourceOutUs: 3_000_000,
+        emotionSegmentId: "emotion-02",
+      }),
+    ]);
   });
 });
 
