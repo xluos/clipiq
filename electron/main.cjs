@@ -1347,6 +1347,7 @@ function getDb() {
       usage_tags TEXT,
       is_favorite INTEGER DEFAULT 0,
       subtitle_text TEXT,
+      event_segments TEXT,
       subtitle_segments TEXT,
       transcript_granularity TEXT,
       audio_summary TEXT,

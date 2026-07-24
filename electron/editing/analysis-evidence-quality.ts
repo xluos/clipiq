@@ -35,6 +35,29 @@ function isMeaningfulDescription(value: unknown): boolean {
   return Boolean(text) && !/^镜头\s*\d+$/.test(text) && text !== "未分析" && text !== "—";
 }
 
+function coveredDuration(ranges: Array<{ start: number; end: number }>): number {
+  const sorted = [...ranges].sort((left, right) =>
+    left.start - right.start || left.end - right.end);
+  let total = 0;
+  let currentStart: number | null = null;
+  let currentEnd = 0;
+  for (const range of sorted) {
+    if (currentStart == null) {
+      currentStart = range.start;
+      currentEnd = range.end;
+      continue;
+    }
+    if (range.start <= currentEnd) {
+      currentEnd = Math.max(currentEnd, range.end);
+      continue;
+    }
+    total += currentEnd - currentStart;
+    currentStart = range.start;
+    currentEnd = range.end;
+  }
+  return currentStart == null ? 0 : total + currentEnd - currentStart;
+}
+
 function isTrustedAppearance(
   appearance: PersonAppearance,
   minimumIdentityConfidence: number | undefined,
@@ -161,6 +184,44 @@ export function buildAnalysisEvidenceQualityReport(
 
   const describedShotCount = scopedShots.filter((shot) =>
     isMeaningfulDescription(shot.description)).length;
+  let eventSegmentCount = 0;
+  let segmentEventCount = 0;
+  let invalidEventSegmentCount = 0;
+  let segmentCoveredDurationSec = 0;
+  let totalShotDurationSec = 0;
+  for (const shot of scopedShots) {
+    totalShotDurationSec += Math.max(0, shot.endSec - shot.startSec);
+    const validSegmentRanges: Array<{ start: number; end: number }> = [];
+    for (const segment of shot.eventSegments || []) {
+      const segmentValid = validRange(segment.startSec, segment.endSec)
+        && segment.startSec >= shot.startSec
+        && segment.endSec <= shot.endSec
+        && (segment.granularity === "shot" || segment.granularity === "segment")
+        && isMeaningfulDescription(segment.summary);
+      if (!segmentValid) {
+        invalidEventSegmentCount += 1;
+        continue;
+      }
+      eventSegmentCount += 1;
+      if (segment.granularity === "segment") {
+        segmentEventCount += 1;
+        validSegmentRanges.push({
+          start: segment.startSec,
+          end: segment.endSec,
+        });
+      }
+    }
+    segmentCoveredDurationSec += coveredDuration(validSegmentRanges);
+  }
+  const segmentCoverageRatio = ratio(
+    segmentCoveredDurationSec,
+    totalShotDurationSec,
+  );
+  const semanticCapability = segmentEventCount > 0
+    ? "segment"
+    : describedShotCount > 0
+      ? "shot"
+      : "none";
   const issues: AnalysisEvidenceQualityIssue[] = [];
   if (candidateResult.candidates.length === 0) {
     issues.push({
@@ -174,6 +235,26 @@ export function buildAnalysisEvidenceQualityReport(
       code: "SEMANTIC_DESCRIPTION_INCOMPLETE",
       severity: "warning",
       message: `${scopedShots.length - describedShotCount} 个 Shot 缺少可用的事件描述。`,
+    });
+  }
+  if (invalidEventSegmentCount > 0) {
+    issues.push({
+      code: "EVENT_RANGE_INVALID",
+      severity: "error",
+      message: `${invalidEventSegmentCount} 个事件语义分段时间越界或无效。`,
+    });
+  }
+  if (semanticCapability === "shot") {
+    issues.push({
+      code: "EVENT_TIMING_SHOT_ONLY",
+      severity: "info",
+      message: "事件语义只精确到 Shot，不能声称某个更细时间段发生了独立事件。",
+    });
+  } else if (semanticCapability === "segment" && segmentCoverageRatio < 1) {
+    issues.push({
+      code: "EVENT_TIMING_PARTIAL",
+      severity: "info",
+      message: `分段级事件语义覆盖 ${Math.round(segmentCoverageRatio * 100)}%，其余范围仍按 Shot 级降级。`,
     });
   }
   if (transcriptSegmentCount === 0) {
@@ -257,8 +338,13 @@ export function buildAnalysisEvidenceQualityReport(
     videoCount: scopedVideoIds.size,
     shotCount: scopedShots.length,
     semantic: {
+      capability: semanticCapability,
       describedShotCount,
       coverageRatio: ratio(describedShotCount, scopedShots.length),
+      eventSegmentCount,
+      segmentEventCount,
+      invalidEventSegmentCount,
+      segmentCoverageRatio,
     },
     transcript: {
       capability: transcriptCapability,

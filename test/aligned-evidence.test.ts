@@ -7,6 +7,24 @@ import {
 describe("素材时间片证据", () => {
   const evidence = {
     eventSummary: "小林在营地整理装备",
+    eventSegments: [
+      {
+        startUs: 0,
+        endUs: 2_000_000,
+        summary: "小林整理露营装备",
+        granularity: "segment" as const,
+        source: "analysis_node" as const,
+        sourceNodeId: "node-prepare",
+      },
+      {
+        startUs: 2_000_000,
+        endUs: 4_000_000,
+        summary: "小林背起装备出发",
+        granularity: "segment" as const,
+        source: "analysis_node" as const,
+        sourceNodeId: "node-leave",
+      },
+    ],
     transcriptGranularity: "word" as const,
     subtitleSegments: [{
       startUs: 300_000,
@@ -61,11 +79,12 @@ describe("素材时间片证据", () => {
       [300_000, 800_000],
       [800_000, 1_200_000],
       [1_200_000, 1_800_000],
-      [1_800_000, 4_000_000],
+      [1_800_000, 2_000_000],
+      [2_000_000, 4_000_000],
     ]);
     expect(segments[0]).toMatchObject({
-      eventSummary: "小林在营地整理装备",
-      eventGranularity: "shot",
+      eventSummary: "小林整理露营装备",
+      eventGranularity: "segment",
       visiblePeople: [{
         appearanceId: "appearance-a",
         trackId: "track-a",
@@ -113,6 +132,21 @@ describe("素材时间片证据", () => {
         speakerId: "speaker-1",
       }],
     }]);
+    expect(clipped.eventSummary).toBe("小林整理露营装备 → 小林背起装备出发");
+    expect(clipped.eventSegments).toEqual([
+      expect.objectContaining({
+        startUs: 800_000,
+        endUs: 2_000_000,
+        summary: "小林整理露营装备",
+        granularity: "segment",
+      }),
+      expect.objectContaining({
+        startUs: 2_000_000,
+        endUs: 3_000_000,
+        summary: "小林背起装备出发",
+        granularity: "segment",
+      }),
+    ]);
     expect(clipped.personAppearances).toEqual(expect.arrayContaining([
       expect.objectContaining({
         appearanceId: "appearance-a",

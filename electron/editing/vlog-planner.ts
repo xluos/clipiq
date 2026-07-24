@@ -86,7 +86,7 @@ function alignedSegmentText(
         .join(",");
       return [
         `[${(segment.startUs / 1_000_000).toFixed(2)}-${(segment.endUs / 1_000_000).toFixed(2)}]`,
-        `event=${segment.eventSummary || "(无描述)"}${segment.eventGranularity === "shot" ? "@shot" : ""}`,
+        `event=${segment.eventSummary || "(无描述)"}${segment.eventGranularity ? `@${segment.eventGranularity}` : ""}`,
         `subtitle=${segment.subtitleText || "(无字幕)"}`,
         `visible=${visiblePeople || "unknown"}`,
         `speaking=${activeSpeakers || "unknown"}`,
@@ -149,7 +149,7 @@ export function buildVlogPlannerPrompt(input: {
   const candidates = input.candidates.map(candidateText).join("\n");
   const evidenceQuality = input.evidenceQuality
     ? [
-      `语义覆盖：${Math.round(input.evidenceQuality.semantic.coverageRatio * 100)}%`,
+      `语义能力：${input.evidenceQuality.semantic.capability}，镜头描述覆盖 ${Math.round(input.evidenceQuality.semantic.coverageRatio * 100)}%，分段覆盖 ${Math.round(input.evidenceQuality.semantic.segmentCoverageRatio * 100)}%`,
       `字幕能力：${input.evidenceQuality.transcript.capability}，${input.evidenceQuality.transcript.segmentCount} 段`,
       `人物能力：${input.evidenceQuality.identity.capability}，可信出镜 ${input.evidenceQuality.identity.trustedAppearanceCount} 条，跨素材人物 ${input.evidenceQuality.identity.crossVideoPersonCount} 个`,
       `说话人能力：${input.evidenceQuality.speakers.capability}，${input.evidenceQuality.speakers.trackCount} 条轨迹`,
@@ -166,7 +166,7 @@ export function buildVlogPlannerPrompt(input: {
       "每个 candidateId 已绑定真实 shotId 和固定素材时间；程序负责解析，你不能修改范围。",
       "personId 只代表达到可信阈值或人工确认的跨素材身份；track: 前缀只在单素材内保持连续，不能当成同一人。",
       "speakerId 与 personId 是不同证据；没有显式关联时不得推断说话人就是出镜人物。",
-      "alignedTimeline 是程序按时间边界对齐后的证据；event@shot 表示事件只精确到 Shot，不得伪装为更细粒度语义。",
+      "alignedTimeline 是程序按时间边界对齐后的证据；event@segment 可用于具体时间段，event@shot 只代表整 Shot 降级描述，不得伪装为更细粒度语义。",
       "旁白只补充画面和对白没有表达的信息，不复述现有字幕；最多 3 段，每段不超过 80 个字符。",
       "旁白 afterCandidateId 必须引用已选择且不是最后一个的 candidateId，旁白会从它的下一个镜头开始播放。",
       "只返回合法 JSON，不要 Markdown，不要解释。",

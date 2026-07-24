@@ -129,6 +129,25 @@ function validateClip(
     });
   }
 
+  for (const [index, segment] of (clip.evidence?.eventSegments || []).entries()) {
+    const segmentPath = `${path}.evidence.eventSegments[${index}]`;
+    if (!validateTimeRange(target, segment.startUs, segment.endUs, segmentPath)) continue;
+    if (
+      rangeValid
+      && (segment.startUs < clip.sourceInUs || segment.endUs > clip.sourceOutUs)
+    ) {
+      add(target, "error", "EVENT_OUTSIDE_CLIP", "事件语义证据超出了片段来源范围。", segmentPath);
+    }
+    if (!segment.summary.trim()) {
+      add(target, "error", "EVENT_SUMMARY_MISSING", "事件语义证据缺少摘要。", `${segmentPath}.summary`);
+    }
+    if (segment.granularity !== "shot" && segment.granularity !== "segment") {
+      add(target, "error", "EVENT_GRANULARITY_INVALID", "事件语义粒度无效。", `${segmentPath}.granularity`);
+    }
+    if (segment.source !== "analysis_node" && segment.source !== "shot_description") {
+      add(target, "error", "EVENT_SOURCE_INVALID", "事件语义来源无效。", `${segmentPath}.source`);
+    }
+  }
   for (const [index, segment] of (clip.evidence?.subtitleSegments || []).entries()) {
     const segmentPath = `${path}.evidence.subtitleSegments[${index}]`;
     if (!validateTimeRange(target, segment.startUs, segment.endUs, segmentPath)) continue;
@@ -159,6 +178,22 @@ function validateClip(
         && (segment.startUs < clip.sourceInUs || segment.endUs > clip.sourceOutUs)
       ) {
         add(target, "error", "ALIGNED_EVIDENCE_OUTSIDE_CLIP", "对齐证据超出了片段来源范围。", segmentPath);
+      }
+      if (segment.eventSummary && clip.evidence?.eventSegments?.length) {
+        const matchedEvent = clip.evidence.eventSegments.some((event) =>
+          event.summary === segment.eventSummary
+          && event.granularity === segment.eventGranularity
+          && event.startUs < segment.endUs
+          && event.endUs > segment.startUs);
+        if (!matchedEvent) {
+          add(
+            target,
+            "error",
+            "ALIGNED_EVENT_REFERENCE_INVALID",
+            "对齐证据引用了不存在或粒度不一致的事件语义分段。",
+            `${segmentPath}.eventSummary`,
+          );
+        }
       }
       if (segment.startUs !== expectedStartUs) {
         add(

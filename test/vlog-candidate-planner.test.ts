@@ -253,6 +253,32 @@ describe("Vlog Candidate Builder", () => {
         id: "shot-long",
         startSec: 0,
         endSec: 15,
+        eventSegments: [
+          {
+            startSec: 0,
+            endSec: 5,
+            summary: "人物整理装备并准备出发",
+            granularity: "segment",
+            source: "analysis_node",
+            sourceNodeId: "event-prepare",
+          },
+          {
+            startSec: 5,
+            endSec: 9,
+            summary: "人物到达营地并确认位置",
+            granularity: "segment",
+            source: "analysis_node",
+            sourceNodeId: "event-arrive",
+          },
+          {
+            startSec: 9,
+            endSec: 15,
+            summary: "人物开始搭建帐篷",
+            granularity: "segment",
+            source: "analysis_node",
+            sourceNodeId: "event-build",
+          },
+        ],
         subtitleSegments: [
           { startSec: 0.2, endSec: 1.8, text: "先整理装备" },
           { startSec: 4, endSec: 5, text: "准备出发" },
@@ -296,6 +322,17 @@ describe("Vlog Candidate Builder", () => {
       endUs: 9_000_000,
       text: "终于到了",
     }]);
+    expect(ordered[1]).toMatchObject({
+      description: "人物到达营地并确认位置",
+      eventSegments: [{
+        startUs: 5_000_000,
+        endUs: 9_000_000,
+        summary: "人物到达营地并确认位置",
+        granularity: "segment",
+        source: "analysis_node",
+        sourceNodeId: "event-arrive",
+      }],
+    });
     expect(ordered.every((candidate) =>
       candidate.alignedSegments.at(0)?.startUs === candidate.startUs
       && candidate.alignedSegments.at(-1)?.endUs === candidate.endUs))
@@ -368,6 +405,13 @@ describe("Vlog Planner 契约", () => {
     endUs: 4_000_000,
     durationUs: 4_000_000,
     description: "小林整理装备",
+    eventSegments: [{
+      startUs: 0,
+      endUs: 4_000_000,
+      summary: "小林整理装备",
+      granularity: "shot" as const,
+      source: "shot_description" as const,
+    }],
     subtitleSegments: [{
       startUs: 300_000,
       endUs: 1_800_000,

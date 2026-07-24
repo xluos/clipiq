@@ -37,6 +37,15 @@ function shot(videoId: string, id: string, startSec: number): Shot {
     endSec: startSec + 3,
     description: "人物在厨房准备早餐",
     usageTags: ["action"],
+    eventSegments: [{
+      startSec,
+      endSec: startSec + 3,
+      summary: "人物在厨房准备早餐",
+      granularity: "segment",
+      source: "analysis_node",
+      sourceNodeId: `${id}-event`,
+      confidence: 0.95,
+    }],
     transcriptGranularity: "word",
     subtitleSegments: [{
       startSec: startSec + 0.2,
@@ -129,8 +138,13 @@ describe("分析证据质量报告", () => {
       videoCount: 2,
       shotCount: 2,
       semantic: {
+        capability: "segment",
         describedShotCount: 2,
         coverageRatio: 1,
+        eventSegmentCount: 2,
+        segmentEventCount: 2,
+        invalidEventSegmentCount: 0,
+        segmentCoverageRatio: 1,
       },
       transcript: {
         capability: "word",
@@ -171,6 +185,7 @@ describe("分析证据质量报告", () => {
     const shots = [{
       ...shot("video-1", "shot-1", 0),
       description: "镜头 1",
+      eventSegments: undefined,
       subtitleSegments: undefined,
       transcriptGranularity: undefined,
     }];

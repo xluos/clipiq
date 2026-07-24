@@ -93,6 +93,20 @@ function stablePlannerDigest(
         sourceOutUs: source.sourceOutUs,
         description: source.shot.description,
         usageTags: [...new Set(source.shot.usageTags || [])].sort(),
+        eventSegments: (source.shot.eventSegments || [])
+          .map((segment) => ({
+            startSec: segment.startSec,
+            endSec: segment.endSec,
+            summary: segment.summary,
+            granularity: segment.granularity,
+            source: segment.source,
+            sourceNodeId: segment.sourceNodeId,
+            confidence: segment.confidence,
+          }))
+          .sort((left, right) =>
+            left.startSec - right.startSec
+            || left.endSec - right.endSec
+            || left.summary.localeCompare(right.summary)),
         subtitleSegments: (source.shot.subtitleSegments || [])
           .map((segment) => ({
             startSec: segment.startSec,
@@ -168,6 +182,32 @@ function buildEvidence(
   sourceOutUs: number,
   minimumIdentityConfidence?: number,
 ): VideoClip["evidence"] {
+  const eventSegments = (source.shot.eventSegments || []).flatMap((segment) => {
+    const startUs = secondsToUs(segment.startSec);
+    const endUs = secondsToUs(segment.endSec);
+    const summary = String(segment.summary || "").trim();
+    if (
+      startUs == null
+      || endUs == null
+      || endUs <= sourceInUs
+      || startUs >= sourceOutUs
+      || endUs <= startUs
+      || !summary
+    ) {
+      return [];
+    }
+    return [{
+      startUs: Math.max(startUs, sourceInUs),
+      endUs: Math.min(endUs, sourceOutUs),
+      summary,
+      granularity: segment.granularity,
+      source: segment.source,
+      ...(segment.sourceNodeId ? { sourceNodeId: segment.sourceNodeId } : {}),
+      ...(Number.isFinite(segment.confidence)
+        ? { confidence: Number(segment.confidence) }
+        : {}),
+    }];
+  });
   const subtitleSegments = (source.shot.subtitleSegments || [])
     .map((segment) => ({
       startUs: secondsToUs(segment.startSec),
@@ -321,10 +361,20 @@ function buildEvidence(
       ? "word" as const
       : "segment" as const
     : undefined;
+  const eventSummary = [...new Set(
+    (
+      eventSegments.some((segment) => segment.granularity === "segment")
+        ? eventSegments.filter((segment) => segment.granularity === "segment")
+        : eventSegments
+    )
+      .map((segment) => segment.summary)
+      .filter(Boolean),
+  )].join(" → ") || source.shot.description;
   const alignedSegments = buildAlignedEvidenceSegments({
     startUs: sourceInUs,
     endUs: sourceOutUs,
-    eventSummary: source.shot.description,
+    eventSummary,
+    eventSegments,
     transcriptGranularity,
     subtitleSegments,
     personAppearances,
@@ -332,7 +382,8 @@ function buildEvidence(
   });
 
   const evidence: NonNullable<VideoClip["evidence"]> = {
-    ...(source.shot.description ? { eventSummary: source.shot.description } : {}),
+    ...(eventSummary ? { eventSummary } : {}),
+    ...(eventSegments.length ? { eventSegments } : {}),
     ...(transcriptGranularity ? { transcriptGranularity } : {}),
     ...(subtitleSegments.length ? { subtitleSegments } : {}),
     ...(personAppearances.length ? { personAppearances } : {}),

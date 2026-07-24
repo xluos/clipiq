@@ -6,6 +6,7 @@ import type {
   TimedWordEvidence,
   Video,
   VideoClipEvidence,
+  VideoClipEventEvidence,
   VideoClipEvidenceSegment,
   VideoClipPersonEvidence,
   VideoClipSpeakerEvidence,
@@ -27,6 +28,7 @@ export type VlogCandidate = {
   endUs: number;
   durationUs: number;
   description: string;
+  eventSegments: VideoClipEventEvidence[];
   subtitleSegments: VideoClipSubtitleEvidence[];
   transcriptGranularity?: "segment" | "word";
   personAppearances: VideoClipPersonEvidence[];
@@ -161,6 +163,33 @@ function transcriptSegments(
           : {}),
       };
     });
+}
+
+function timedEventSegments(
+  segments: Shot["eventSegments"],
+  shotStartUs: number,
+  shotEndUs: number,
+): VideoClipEventEvidence[] {
+  return (segments || []).flatMap((segment) => {
+    const range = clippedRange(
+      segment.startSec,
+      segment.endSec,
+      shotStartUs,
+      shotEndUs,
+    );
+    const summary = String(segment.summary || "").trim();
+    if (!range || !summary) return [];
+    return [{
+      ...range,
+      summary,
+      granularity: segment.granularity,
+      source: segment.source,
+      ...(segment.sourceNodeId ? { sourceNodeId: segment.sourceNodeId } : {}),
+      ...(Number.isFinite(segment.confidence)
+        ? { confidence: Number(segment.confidence) }
+        : {}),
+    }];
+  });
 }
 
 function trustedPersonId(
@@ -370,6 +399,7 @@ export function buildVlogCandidates(
       continue;
     }
 
+    const events = timedEventSegments(shot.eventSegments, startUs, endUs);
     const subtitles = transcriptSegments(shot.subtitleSegments, startUs, endUs);
     const personAppearances = appearances.flatMap((appearance) => {
       if (appearance.videoId !== videoId) return [];
@@ -422,6 +452,7 @@ export function buildVlogCandidates(
       startUs,
       endUs,
       eventSummary: String(shot.description || "").trim(),
+      eventSegments: events,
       transcriptGranularity,
       subtitleSegments: subtitles,
       personAppearances,
@@ -429,6 +460,7 @@ export function buildVlogCandidates(
     });
     const baseEvidence: VideoClipEvidence = {
       ...(shot.description ? { eventSummary: shot.description } : {}),
+      ...(events.length ? { eventSegments: events } : {}),
       ...(transcriptGranularity ? { transcriptGranularity } : {}),
       ...(subtitles.length ? { subtitleSegments: subtitles } : {}),
       ...(personAppearances.length ? { personAppearances } : {}),
@@ -451,6 +483,7 @@ export function buildVlogCandidates(
         window.startUs,
         window.endUs,
       );
+      const windowEvents = windowEvidence.eventSegments || [];
       const windowSubtitles = windowEvidence.subtitleSegments || [];
       const windowAppearances = windowEvidence.personAppearances || [];
       const windowSpeakerTracks = windowEvidence.speakerTracks || [];
@@ -470,7 +503,8 @@ export function buildVlogCandidates(
         startUs: window.startUs,
         endUs: window.endUs,
         durationUs: windowDurationUs,
-        description: String(shot.description || "").trim(),
+        description: String(windowEvidence.eventSummary || shot.description || "").trim(),
+        eventSegments: windowEvents,
         subtitleSegments: windowSubtitles,
         ...(windowEvidence.transcriptGranularity
           ? { transcriptGranularity: windowEvidence.transcriptGranularity }

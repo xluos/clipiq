@@ -1,5 +1,6 @@
 import type {
   VideoClipEvidence,
+  VideoClipEventEvidence,
   VideoClipEvidenceSegment,
   VideoClipPersonEvidence,
   VideoClipSpeakerEvidence,
@@ -10,6 +11,7 @@ export type BuildAlignedEvidenceSegmentsInput = {
   startUs: number;
   endUs: number;
   eventSummary?: string;
+  eventSegments?: VideoClipEventEvidence[];
   transcriptGranularity?: "segment" | "word";
   subtitleSegments?: VideoClipSubtitleEvidence[];
   personAppearances?: VideoClipPersonEvidence[];
@@ -96,6 +98,20 @@ function activeSpeakers(
     || left.trackId.localeCompare(right.trackId));
 }
 
+function activeEvent(
+  events: VideoClipEventEvidence[],
+  startUs: number,
+  endUs: number,
+): VideoClipEventEvidence | undefined {
+  return events
+    .filter((event) => overlaps(event, startUs, endUs))
+    .sort((left, right) =>
+      Number(right.granularity === "segment") - Number(left.granularity === "segment")
+      || (right.confidence ?? 0) - (left.confidence ?? 0)
+      || (left.endUs - left.startUs) - (right.endUs - right.startUs)
+      || left.summary.localeCompare(right.summary))[0];
+}
+
 export function buildAlignedEvidenceSegments(
   input: BuildAlignedEvidenceSegmentsInput,
 ): VideoClipEvidenceSegment[] {
@@ -111,9 +127,17 @@ export function buildAlignedEvidenceSegments(
   const speakers = (input.speakerTracks || []).filter((track) =>
     validRange(track.startUs, track.endUs)
     && overlaps(track, input.startUs, input.endUs));
+  const events = (input.eventSegments || []).filter((event) =>
+    validRange(event.startUs, event.endUs)
+    && Boolean(event.summary.trim())
+    && overlaps(event, input.startUs, input.endUs));
   const boundaries = sortedUnique([
     input.startUs,
     input.endUs,
+    ...events.flatMap((event) => [
+      Math.max(input.startUs, event.startUs),
+      Math.min(input.endUs, event.endUs),
+    ]),
     ...subtitles.flatMap((segment) => [
       Math.max(input.startUs, segment.startUs),
       Math.min(input.endUs, segment.endUs),
@@ -142,11 +166,16 @@ export function buildAlignedEvidenceSegments(
     const subtitleText = [...new Set(
       activeSubtitles.map((segment) => segment.text.trim()).filter(Boolean),
     )].join(" / ");
+    const event = activeEvent(events, startUs, endUs);
+    const eventSummary = event?.summary.trim() || input.eventSummary?.trim();
     atomicSegments.push({
       startUs,
       endUs,
-      ...(input.eventSummary?.trim()
-        ? { eventSummary: input.eventSummary.trim(), eventGranularity: "shot" as const }
+      ...(eventSummary
+        ? {
+          eventSummary,
+          eventGranularity: event?.granularity || "shot" as const,
+        }
         : {}),
       ...(subtitleText ? { subtitleText } : {}),
       ...(subtitleText && input.transcriptGranularity
@@ -181,6 +210,15 @@ export function clipVideoEvidenceToRange(
   if (!validRange(startUs, endUs)) {
     throw new Error("裁切后的素材证据时间范围无效");
   }
+  const eventSegments = (evidence.eventSegments || []).flatMap((event) =>
+    validRange(event.startUs, event.endUs)
+    && overlaps(event, startUs, endUs)
+      ? [{
+        ...event,
+        startUs: Math.max(startUs, event.startUs),
+        endUs: Math.min(endUs, event.endUs),
+      }]
+      : []);
   const subtitleSegments = (evidence.subtitleSegments || []).flatMap((segment) => {
     if (!validRange(segment.startUs, segment.endUs) || !overlaps(segment, startUs, endUs)) {
       return [];
@@ -226,8 +264,18 @@ export function clipVideoEvidenceToRange(
   const transcriptGranularity = subtitleSegments.length
     ? evidence.transcriptGranularity
     : undefined;
+  const eventSummary = [...new Set(
+    (
+      eventSegments.some((segment) => segment.granularity === "segment")
+        ? eventSegments.filter((segment) => segment.granularity === "segment")
+        : eventSegments
+    )
+      .map((segment) => segment.summary.trim())
+      .filter(Boolean),
+  )].join(" → ") || evidence.eventSummary;
   return {
-    ...(evidence.eventSummary ? { eventSummary: evidence.eventSummary } : {}),
+    ...(eventSummary ? { eventSummary } : {}),
+    ...(eventSegments.length ? { eventSegments } : {}),
     ...(transcriptGranularity ? { transcriptGranularity } : {}),
     ...(subtitleSegments.length ? { subtitleSegments } : {}),
     ...(personAppearances.length ? { personAppearances } : {}),
@@ -237,7 +285,8 @@ export function clipVideoEvidenceToRange(
     alignedSegments: buildAlignedEvidenceSegments({
       startUs,
       endUs,
-      eventSummary: evidence.eventSummary,
+      eventSummary,
+      eventSegments,
       transcriptGranularity,
       subtitleSegments,
       personAppearances,

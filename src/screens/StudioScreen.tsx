@@ -764,7 +764,11 @@ function StudioEditorScreen() {
               </div>
               <div className="mt-2 grid grid-cols-4 gap-2">
                 {[
-                  ["语义", `${Math.round(evidenceQuality.semantic.coverageRatio * 100)}%`],
+                  ["语义", evidenceQuality.semantic.capability === "segment"
+                    ? `分段 ${Math.round(evidenceQuality.semantic.segmentCoverageRatio * 100)}%`
+                    : evidenceQuality.semantic.capability === "none"
+                      ? "无"
+                      : `镜头 ${Math.round(evidenceQuality.semantic.coverageRatio * 100)}%`],
                   ["字幕", evidenceQuality.transcript.capability === "word"
                     ? "逐字"
                     : evidenceQuality.transcript.capability === "segment"

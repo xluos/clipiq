@@ -308,6 +308,24 @@ describe("EditPlan 确定性编译", () => {
       id: "shot-long",
       startSec: 0,
       endSec: 10,
+      eventSegments: [
+        {
+          startSec: 0,
+          endSec: 5,
+          summary: "人物整理装备",
+          granularity: "segment",
+          source: "analysis_node",
+          sourceNodeId: "event-prepare",
+        },
+        {
+          startSec: 5,
+          endSec: 10,
+          summary: "人物到达营地",
+          granularity: "segment",
+          source: "analysis_node",
+          sourceNodeId: "event-arrive",
+        },
+      ],
       subtitleSegments: [
         { startSec: 0.2, endSec: 1, text: "第一段" },
         { startSec: 7, endSec: 8, text: "第二段" },
@@ -379,6 +397,34 @@ describe("EditPlan 确定性编译", () => {
     }))).toEqual([
       { text: "第一段", startUs: 200_000, endUs: 1_000_000 },
       { text: "第二段", startUs: 7_000_000, endUs: 8_000_000 },
+    ]);
+    expect(video.items.map((clip) => ({
+      eventSummary: clip.evidence?.eventSummary,
+      events: clip.evidence?.eventSegments?.map((segment) => ({
+        startUs: segment.startUs,
+        endUs: segment.endUs,
+        summary: segment.summary,
+        granularity: segment.granularity,
+      })),
+    }))).toEqual([
+      {
+        eventSummary: "人物整理装备",
+        events: [{
+          startUs: 0,
+          endUs: 5_000_000,
+          summary: "人物整理装备",
+          granularity: "segment",
+        }],
+      },
+      {
+        eventSummary: "人物到达营地",
+        events: [{
+          startUs: 5_000_000,
+          endUs: 10_000_000,
+          summary: "人物到达营地",
+          granularity: "segment",
+        }],
+      },
     ]);
   });
 

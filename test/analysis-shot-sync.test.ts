@@ -134,6 +134,13 @@ describe("完整分析结果 → Shot", () => {
       shotType: "medium",
       cameraMovement: "手持跟拍",
       usageTags: ["hook", "highlight"],
+      eventSegments: [{
+        startSec: 0,
+        endSec: 3,
+        summary: "小林在营地展开帐篷并说明搭建顺序。",
+        granularity: "shot",
+        source: "shot_description",
+      }],
       subtitleText: "我们先把帐篷铺开",
       subtitleSegments: [{
         startSec: 0.25,
@@ -155,8 +162,88 @@ describe("完整分析结果 → Shot", () => {
       thumbnailUrl: "media://shot-2.jpg",
       shotType: "wide",
       usageTags: ["ending"],
+      eventSegments: [{
+        startSec: 3,
+        endSec: 6,
+        summary: "帐篷搭好后，小林面向镜头收尾。",
+        granularity: "shot",
+        source: "shot_description",
+      }],
       audioSummary: "环境自然声",
     });
+  });
+
+  it("把 Shot 内多个分析节点规范化为连续的分段级事件语义", () => {
+    const shots = buildShotsFromAnalysis("video-events", {
+      nodes: [
+        analysisNode({
+          id: "node-shot-summary",
+          startSec: 0,
+          endSec: 6,
+          shotDescription: "小林完成帐篷搭建。",
+          confidence: 0.99,
+        }),
+        analysisNode({
+          id: "node-prepare",
+          startSec: 0,
+          endSec: 2,
+          shotDescription: "小林摊开帐篷外帐。",
+          confidence: 0.94,
+        }),
+        analysisNode({
+          id: "node-build",
+          startSec: 2,
+          endSec: 4.5,
+          shotDescription: "小林穿入帐杆并撑起帐篷。",
+          confidence: 0.92,
+        }),
+        analysisNode({
+          id: "node-check",
+          startSec: 4.5,
+          endSec: 6,
+          shotDescription: "小林检查固定点。",
+          confidence: 0.9,
+        }),
+      ],
+      report: {
+        shotContexts: [{
+          shotIndex: 0,
+          startSec: 0,
+          endSec: 6,
+          shotDescription: "小林完成帐篷搭建。",
+        }],
+      },
+    });
+
+    expect(shots[0].eventSegments).toEqual([
+      {
+        startSec: 0,
+        endSec: 2,
+        summary: "小林摊开帐篷外帐。",
+        granularity: "segment",
+        source: "analysis_node",
+        sourceNodeId: "node-prepare",
+        confidence: 0.94,
+      },
+      {
+        startSec: 2,
+        endSec: 4.5,
+        summary: "小林穿入帐杆并撑起帐篷。",
+        granularity: "segment",
+        source: "analysis_node",
+        sourceNodeId: "node-build",
+        confidence: 0.92,
+      },
+      {
+        startSec: 4.5,
+        endSec: 6,
+        summary: "小林检查固定点。",
+        granularity: "segment",
+        source: "analysis_node",
+        sourceNodeId: "node-check",
+        confidence: 0.9,
+      },
+    ]);
   });
 
   it("过滤非法时间范围，并按真实时间生成稳定 ID", () => {
@@ -226,6 +313,13 @@ describe("Shot repository", () => {
         description: "新描述",
         usageTags: ["action"],
         isFavorite: true,
+        eventSegments: [{
+          startSec: 0,
+          endSec: 3,
+          summary: "新描述",
+          granularity: "shot",
+          source: "shot_description",
+        }],
         subtitleSegments: [{
           startSec: 0.4,
           endSec: 1.8,

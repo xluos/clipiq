@@ -35,6 +35,7 @@ function temporalOverlapRatio(a: Shot, b: Shot): number {
 
 export function migrateShotSchema(db: DatabaseSync): void {
   for (const column of [
+    "event_segments TEXT",
     "subtitle_segments TEXT",
     "transcript_granularity TEXT",
     "audio_summary TEXT",
@@ -61,6 +62,7 @@ export function rowToShot(row: ShotRow): Shot {
     cameraMovement: row.camera_movement || undefined,
     usageTags: parseStringArray(row.usage_tags),
     isFavorite: Boolean(row.is_favorite),
+    eventSegments: parseJson<Shot["eventSegments"]>(row.event_segments),
     subtitleText: row.subtitle_text || undefined,
     subtitleSegments: parseJson<Shot["subtitleSegments"]>(row.subtitle_segments),
     transcriptGranularity: row.transcript_granularity || undefined,
@@ -80,9 +82,9 @@ export function createShotRepository(db: DatabaseSync) {
     INSERT INTO shots (
       id, video_id, shot_index, start_sec, end_sec, thumbnail_url, description,
       shot_type, camera_movement, usage_tags, is_favorite, subtitle_text,
-      subtitle_segments, transcript_granularity, audio_summary, created_at
+      event_segments, subtitle_segments, transcript_granularity, audio_summary, created_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const list = (videoId?: string): Shot[] => {
@@ -132,6 +134,7 @@ export function createShotRepository(db: DatabaseSync) {
             JSON.stringify(shot.usageTags || []),
             isFavorite ? 1 : 0,
             shot.subtitleText || null,
+            shot.eventSegments ? JSON.stringify(shot.eventSegments) : null,
             shot.subtitleSegments ? JSON.stringify(shot.subtitleSegments) : null,
             shot.transcriptGranularity || null,
             shot.audioSummary || null,

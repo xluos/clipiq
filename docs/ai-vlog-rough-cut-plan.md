@@ -284,7 +284,8 @@ export type EditTransition = {
 - `ShotContext` 已有镜头起止时间、字幕分段、内容描述和代表帧。
 - 已有结构化人物实体、出镜区间、说话人轨迹和跨素材身份聚类的数据契约、持久化与保守匹配策略。
 - 已接入 YuNet 检测/关键点、SFace 128 维特征、单素材连续跟踪和保守跨素材聚类；清晰正脸在最小固定正负样本中可复用同一 `personId`，不同人物未发生自动误合并。
-- Candidate Builder 已将 Shot 事件、字幕分段、人物出镜和说话人轨迹按全部起止边界合成为连续 `alignedSegments`；Planner 和 `EditPlan` 使用同一份时间片证据，验证见 [`aligned-material-evidence-validation.md`](./aligned-material-evidence-validation.md)。
+- 分析同步已将 `AnalysisNode` 与 Shot 的时间交集持久化为 `eventSegments`；能形成 Shot 内部边界时标为分段级，否则明确降级为 Shot 级。
+- Candidate Builder 已将分段事件、字幕、人物出镜和说话人轨迹按全部起止边界合成为连续 `alignedSegments`；Planner 和 `EditPlan` 使用同一份时间片证据，验证见 [`aligned-material-evidence-validation.md`](./aligned-material-evidence-validation.md)。
 - 每个人物出镜区间同时保存归一化人脸焦点范围；`EditPlan` 在焦点可完整容纳时生成横竖屏裁切，多人跨度过大或焦点缺失时保持等比缩放留边。
 - 未知人数聚类采用避免误合并的保守参数，可能把同一人拆成多个匿名 speaker；当前不做跨素材声纹复用，也不自动把 speaker 等同于同屏人物。
 - 侧脸、遮挡、相似人物和跨设备样本还需扩大固定集，低质量人脸继续保持匿名。
@@ -292,6 +293,16 @@ export type EditTransition = {
 写入 `shots` 的剪辑证据至少包含：
 
 ```ts
+type ShotEventSegment = {
+  startSec: number;
+  endSec: number;
+  summary: string;
+  granularity: "shot" | "segment";
+  source: "analysis_node" | "shot_description";
+  sourceNodeId?: string;
+  confidence?: number;
+};
+
 type ShotTranscriptSegment = {
   startSec: number;
   endSec: number;
@@ -333,7 +344,7 @@ type VideoClipEvidenceSegment = {
   startUs: number;
   endUs: number;
   eventSummary?: string;
-  eventGranularity?: "shot"; // 明确事件语义没有伪装成逐秒视觉分析
+  eventGranularity?: "shot" | "segment"; // segment 有节点内部边界；shot 是明确降级
   subtitleText?: string;
   transcriptGranularity?: "segment" | "word";
   visiblePeople: Array<{
@@ -659,6 +670,8 @@ export-package/
 - [x] 将词级字幕（存在时）、人物出镜区间和说话人区间完整传入候选，并以连续对齐时间片写入 `EditPlan`。
 - [x] 为每次 Planner 输入生成并持久化分析证据质量报告，缺失能力不伪装为可用。
 - [x] Studio 显示语义覆盖、字幕粒度、人物一致性和说话人分离状态。
+- [x] 将 Shot 内分析节点规范化为可追溯事件时间段；Planner 区分 `event@segment` 和 `event@shot`，验证见 [`event-semantic-quality-validation.md`](./event-semantic-quality-validation.md)。
+- [x] 建立程序化 Vlog 质量评估器，覆盖候选/时间越界、预览和剪映尝试、人物 pair 指标及编辑反馈；未实测项保持 `null`。
 
 ## 11. 首个可交付 MVP
 
@@ -703,9 +716,11 @@ MVP 可以暂缓：
 - 预览成功率：目标 `100%`
 - 剪映草稿可打开率：通过 Spike 后目标 `100%`
 - 字幕分段时间越界率：目标 `0%`
+- 事件语义分段时间越界率：目标 `0%`
 - 人物错误自动合并数：固定测试集目标 `0`
 - 跨素材同人物召回率：单独记录，不以降低错误合并为代价追求高召回
 - 分析证据报告：记录语义覆盖率、字幕粒度/越界数、可信人物区间、跨素材人物数和说话人关联数
+- 程序化评估器：已落地 [`vlog-quality-evaluator.ts`](../electron/editing/vlog-quality-evaluator.ts)，口径与未实测降级见 [`event-semantic-quality-validation.md`](./event-semantic-quality-validation.md)
 
 粗剪质量：
 

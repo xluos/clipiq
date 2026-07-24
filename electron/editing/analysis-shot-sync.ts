@@ -2,6 +2,7 @@ import type {
   AnalysisNode,
   FrameContext,
   Shot,
+  ShotEventSegment,
   ShotContext,
 } from "../../src/types";
 
@@ -112,6 +113,104 @@ function descriptionForContext(
     || `镜头 ${index + 1}`;
 }
 
+function eventSummaryForNode(node: AnalysisNode): string | undefined {
+  return nonPlaceholder(node.shotDescription)
+    || nonPlaceholder(node.title)
+    || nonPlaceholder(node.editIntent)
+    || nonPlaceholder(node.narrativeFunction);
+}
+
+function eventSegmentPayload(segment: ShotEventSegment): string {
+  return JSON.stringify({
+    summary: segment.summary,
+    granularity: segment.granularity,
+    source: segment.source,
+    sourceNodeId: segment.sourceNodeId,
+    confidence: segment.confidence,
+  });
+}
+
+function eventSegmentsForContext(
+  context: TimedItem,
+  nodes: AnalysisNode[],
+  fallbackSummary: string,
+): ShotEventSegment[] {
+  const nodeSegments = nodes.flatMap((node) => {
+    const startSec = finiteTime(node.startSec);
+    const endSec = finiteTime(node.endSec);
+    const summary = eventSummaryForNode(node);
+    if (
+      startSec == null
+      || endSec == null
+      || endSec <= startSec
+      || !summary
+      || overlapDuration(context, { startSec, endSec }) <= 0
+    ) {
+      return [];
+    }
+    return [{
+      startSec: Math.max(context.startSec, startSec),
+      endSec: Math.min(context.endSec, endSec),
+      summary,
+      sourceNodeId: node.id,
+      precise: startSec > context.startSec || endSec < context.endSec,
+      ...(Number.isFinite(node.confidence)
+        ? { confidence: Math.max(0, Math.min(1, Number(node.confidence))) }
+        : {}),
+    }];
+  });
+  const boundaries = [...new Set([
+    context.startSec,
+    context.endSec,
+    ...nodeSegments.flatMap((segment) => [segment.startSec, segment.endSec]),
+  ])].sort((left, right) => left - right);
+  const segments: ShotEventSegment[] = [];
+
+  for (let index = 0; index < boundaries.length - 1; index += 1) {
+    const startSec = boundaries[index];
+    const endSec = boundaries[index + 1];
+    if (endSec <= startSec) continue;
+    const active = nodeSegments
+      .filter((segment) =>
+        segment.precise
+        && segment.startSec < endSec
+        && segment.endSec > startSec)
+      .sort((left, right) =>
+        (right.confidence ?? 0) - (left.confidence ?? 0)
+        || (left.endSec - left.startSec) - (right.endSec - right.startSec)
+        || left.sourceNodeId.localeCompare(right.sourceNodeId));
+    const selected = active[0];
+    const next: ShotEventSegment = selected
+      ? {
+        startSec,
+        endSec,
+        summary: selected.summary,
+        granularity: "segment",
+        source: "analysis_node",
+        sourceNodeId: selected.sourceNodeId,
+        ...(selected.confidence == null ? {} : { confidence: selected.confidence }),
+      }
+      : {
+        startSec,
+        endSec,
+        summary: fallbackSummary,
+        granularity: "shot",
+        source: "shot_description",
+      };
+    const previous = segments.at(-1);
+    if (
+      previous
+      && previous.endSec === next.startSec
+      && eventSegmentPayload(previous) === eventSegmentPayload(next)
+    ) {
+      previous.endSec = next.endSec;
+    } else {
+      segments.push(next);
+    }
+  }
+  return segments;
+}
+
 export function buildShotsFromAnalysis(
   videoId: string,
   result: AnalysisResultLike,
@@ -190,6 +289,7 @@ export function buildShotsFromAnalysis(
       .filter((text): text is string => Boolean(text));
     const audioSummary = audioElements?.join(" / ") || subtitleText;
     const shotIndex = index + 1;
+    const description = descriptionForContext(context, node, index);
 
     return {
       id: `${videoId}-shot-${shotIndex}`,
@@ -199,10 +299,15 @@ export function buildShotsFromAnalysis(
       startSec,
       endSec,
       thumbnailUrl: firstFrame(context)?.thumbnailUrl || node?.thumbnailUrl,
-      description: descriptionForContext(context, node, index),
+      description,
       shotType: nonPlaceholder(node?.shotType),
       cameraMovement: nonPlaceholder(node?.cameraMovement),
       usageTags: usageTagsForNode(node, index, contexts.length),
+      eventSegments: eventSegmentsForContext(
+        { startSec, endSec },
+        nodes,
+        description,
+      ),
       subtitleText,
       subtitleSegments,
       transcriptGranularity: subtitleSegments?.some((segment) => segment.words?.length)

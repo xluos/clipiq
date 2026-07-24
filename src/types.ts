@@ -740,6 +740,16 @@ export type ShotTranscriptSegment = {
   }>;
 };
 
+export type ShotEventSegment = {
+  startSec: number;
+  endSec: number;
+  summary: string;
+  granularity: "shot" | "segment";
+  source: "analysis_node" | "shot_description";
+  sourceNodeId?: string;
+  confidence?: number;
+};
+
 // 单个镜头(Shot)— 素材分镜后的最小单位
 export type Shot = {
   id: string;
@@ -754,6 +764,7 @@ export type Shot = {
   cameraMovement?: string;
   usageTags: string[];             // 用户/LLM 标的用途标签: ["开场","转场","B-roll"]
   isFavorite?: boolean;
+  eventSegments?: ShotEventSegment[];
   subtitleText?: string;
   subtitleSegments?: ShotTranscriptSegment[];
   transcriptGranularity?: "segment" | "word";
@@ -848,8 +859,13 @@ export type AnalysisEvidenceQualityReport = {
   videoCount: number;
   shotCount: number;
   semantic: {
+    capability: "none" | "shot" | "segment";
     describedShotCount: number;
     coverageRatio: number;
+    eventSegmentCount: number;
+    segmentEventCount: number;
+    invalidEventSegmentCount: number;
+    segmentCoverageRatio: number;
   };
   transcript: {
     capability: "none" | "segment" | "word";
@@ -893,6 +909,16 @@ export type TimedWordEvidence = {
   speakerId?: string;
 };
 
+export type VideoClipEventEvidence = {
+  startUs: number;
+  endUs: number;
+  summary: string;
+  granularity: "shot" | "segment";
+  source: "analysis_node" | "shot_description";
+  sourceNodeId?: string;
+  confidence?: number;
+};
+
 export type VideoClipSubtitleEvidence = {
   startUs: number;
   endUs: number;
@@ -933,7 +959,7 @@ export type VideoClipEvidenceSegment = {
   startUs: number;
   endUs: number;
   eventSummary?: string;
-  eventGranularity?: "shot";
+  eventGranularity?: "shot" | "segment";
   subtitleText?: string;
   transcriptGranularity?: "segment" | "word";
   visiblePeople: Array<{
@@ -950,6 +976,7 @@ export type VideoClipEvidenceSegment = {
 
 export type VideoClipEvidence = {
   eventSummary?: string;
+  eventSegments?: VideoClipEventEvidence[];
   transcriptGranularity?: "segment" | "word";
   subtitleSegments?: VideoClipSubtitleEvidence[];
   personAppearances?: VideoClipPersonEvidence[];
