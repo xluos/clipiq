@@ -440,6 +440,9 @@ type PersonAppearance = {
 - [ ] 接入独立本地说话人分离后端，产出 `speakerId`，不与人物 ID 强绑定。
 - [x] 建立 `people / person_appearances / speaker_tracks / person_identity_events / person_identity_constraints` 本地数据层。
 - [x] 建立保守的跨素材人物原型匹配策略；阈值由具体模型和固定测试集标定。
+- [x] 建立可插拔人脸分析 Provider 契约和生产模型许可门禁。
+- [x] 建立确定性单素材轨迹构建器；无向量时不跨 Shot 猜测同一人物。
+- [x] 建立人物分析编排器；Provider 未就绪或异常时不覆盖旧人物证据。
 - [ ] 新增单素材人脸检测与连续跟踪，保存 `person_appearances`。
 - [ ] 新增本地人脸特征与跨素材聚类，生成稳定 `personId`。
 - [ ] 在人物管理 UI 支持命名、合并、拆分；后端人工锁定与重分析保留已完成。
@@ -742,7 +745,9 @@ electron/
 │       ├── jianying-exporter.ts
 │       └── package-exporter.ts
 ├── identity/
+│   ├── face-analysis-provider.ts
 │   ├── face-tracker.ts
+│   ├── person-analysis-pipeline.ts
 │   ├── person-clusterer.ts
 │   └── speaker-linker.ts
 └── migrations/

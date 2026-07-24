@@ -361,9 +361,11 @@ export function createIdentityRepository(db: DatabaseSync) {
         db.prepare(`
           DELETE FROM person_appearances WHERE video_id = ? AND manual_locked = 0
         `).run(videoId);
-        db.prepare(`
-          DELETE FROM speaker_tracks WHERE video_id = ? AND manual_locked = 0
-        `).run(videoId);
+        if (batch.speakerTracks !== undefined) {
+          db.prepare(`
+            DELETE FROM speaker_tracks WHERE video_id = ? AND manual_locked = 0
+          `).run(videoId);
+        }
 
         for (const appearance of batch.appearances || []) {
           if (manualAppearanceIds.has(appearance.id)) continue;

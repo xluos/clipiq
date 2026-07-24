@@ -169,6 +169,37 @@ describe("人物身份 repository", () => {
     ]));
     expect(repository.listDifferentPersonPairs()).toEqual([]);
   });
+
+  it("只重跑人物分析时不删除独立的说话人证据", () => {
+    const repository = createIdentityRepository(createDatabase());
+    repository.replaceEvidenceForVideo("video-1", {
+      appearances: [],
+      speakerTracks: [{
+        id: "speaker-track-1",
+        videoId: "video-1",
+        speakerId: "speaker-1",
+        startSec: 0,
+        endSec: 2,
+        confidence: 0.8,
+      }],
+    });
+
+    repository.replaceEvidenceForVideo("video-1", {
+      appearances: [{
+        id: "appearance-1",
+        videoId: "video-1",
+        trackId: "track-1",
+        startSec: 0,
+        endSec: 1,
+        confidence: 0.9,
+        source: "face_track",
+      }],
+    });
+
+    expect(repository.listSpeakerTracks("video-1")).toEqual([
+      expect.objectContaining({ id: "speaker-track-1" }),
+    ]);
+  });
 });
 
 describe("跨素材人物匹配策略", () => {
