@@ -62,6 +62,15 @@ export type EditingAppEnvironmentReport = {
   issues: EditingAppEnvironmentIssue[];
 };
 
+export type VerifiedEditingAppTarget = {
+  kind: EditingAppKind;
+  bundleId: string;
+  version: string;
+  build: string;
+  reportId: string;
+  testedAt: string;
+};
+
 export type EditingAppEnvironmentOptions = {
   platform?: string;
   homeDir?: string;
@@ -70,10 +79,7 @@ export type EditingAppEnvironmentOptions = {
     kind: EditingAppKind;
     path: string;
   }>;
-  verifiedTargets?: ReadonlyArray<{
-    kind: EditingAppKind;
-    version: string;
-  }>;
+  verifiedTargets?: ReadonlyArray<VerifiedEditingAppTarget>;
   readAppMetadata?: (appPath: string) => EditingAppMetadata;
   canAccess?: (targetPath: string, mode: number) => boolean;
   detectedAt?: number;
@@ -85,12 +91,10 @@ const KNOWN_APP_NAMES = [
   "CapCut.app",
 ];
 
-// 只有完成五个固定用例、重启重开和手工导出的精确版本才能加入。
+// 只有九项真机检查和证据报告全部通过的精确 build 才能加入。
 // 当前真机 Spike 尚未执行，保持空数组会让 exporterReady 永远为 false。
-export const VERIFIED_EDITING_APP_TARGETS: ReadonlyArray<{
-  kind: EditingAppKind;
-  version: string;
-}> = Object.freeze([]);
+export const VERIFIED_EDITING_APP_TARGETS:
+  ReadonlyArray<VerifiedEditingAppTarget> = Object.freeze([]);
 
 function canAccessDefault(targetPath: string, mode: number): boolean {
   try {
@@ -348,9 +352,16 @@ export function detectEditingAppEnvironment(
       metadata.bundleId,
     ].filter(Boolean).join(" "));
     if (!kind) continue;
-    const compatibility = metadata.version
+    const compatibility = metadata.bundleId
+      && metadata.version
+      && metadata.build
       && verifiedTargets.some((target) =>
-        target.kind === kind && target.version === metadata.version)
+        target.kind === kind
+        && target.bundleId === metadata.bundleId
+        && target.version === metadata.version
+        && target.build === metadata.build
+        && Boolean(target.reportId)
+        && Number.isFinite(Date.parse(target.testedAt)))
       ? "verified"
       : "unverified";
     installations.push({

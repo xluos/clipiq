@@ -139,7 +139,14 @@ describe("剪映 / CapCut 环境只读探测", () => {
     const value = fixture();
     const report = detectEditingAppEnvironment({
       ...value.options,
-      verifiedTargets: [{ kind: "jianying", version: "8.1.0" }],
+      verifiedTargets: [{
+        kind: "jianying",
+        bundleId: "com.lemon.lv",
+        version: "8.1.0",
+        build: "810001",
+        reportId: "jianying-8.1.0-macos-arm64-001",
+        testedAt: "2026-07-24T10:00:00.000Z",
+      }],
     });
 
     expect(report.readiness).toBe("ready_for_spike");
@@ -147,6 +154,24 @@ describe("剪映 / CapCut 环境只读探测", () => {
     expect(report.installations[0].compatibility).toBe("verified");
     expect(report.issues.some((issue) =>
       issue.code === "TARGET_VERSION_UNVERIFIED")).toBe(false);
+  });
+
+  it("只有版本号而 bundle 或 build 不同仍不能解锁 exporter", () => {
+    const value = fixture();
+    const report = detectEditingAppEnvironment({
+      ...value.options,
+      verifiedTargets: [{
+        kind: "jianying",
+        bundleId: "com.lemon.lv",
+        version: "8.1.0",
+        build: "另一个 build",
+        reportId: "other-build-report",
+        testedAt: "2026-07-24T10:00:00.000Z",
+      }],
+    });
+
+    expect(report.exporterReady).toBe(false);
+    expect(report.installations[0].compatibility).toBe("unverified");
   });
 
   it("可以从用户目录发现非默认命名的剪映草稿根目录", () => {

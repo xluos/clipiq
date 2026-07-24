@@ -53,6 +53,36 @@ npm run vlog:probe-editing-app -- --json
 
 真机验证矩阵目前保持空。只有五个固定用例、重启重开和手工导出全部通过的精确版本，才能加入 `VERIFIED_EDITING_APP_TARGETS`；安装但未验证的版本最多进入 `ready_for_spike`，不能令正式 exporter 解锁。
 
+## 真机报告门禁
+
+已增加可复核的报告契约和只读校验命令：
+
+```bash
+cp docs/jianying-spike-report.example.json /path/to/spike/report.json
+npm run vlog:validate-jianying-spike -- /path/to/spike/report.json
+```
+
+报告中的 fixture manifest 和证据路径都相对于 `report.json` 所在目录。校验命令会重新读取当前机器，而不是信任报告内的环境声明，并同时检查：
+
+1. 当前应用的 kind、名称、bundle ID、version、build 和安装路径与报告完全一致。
+2. 当前环境仍为 `ready_for_spike`，草稿根目录仍可读写。
+3. 隔离草稿目录真实存在，且是草稿根目录的严格子目录。
+4. fixture manifest 和每项证据文件真实存在、不是符号链接，SHA-256 与报告一致。
+5. 以下九项检查全部为 `passed` 且各自至少有一份有效证据：
+   - 视频裁切、排序和时间线
+   - 原声、BGM 和旁白音轨
+   - 中文字幕
+   - 转场和自定义图片贴图
+   - 保存、退出、重启和重开
+   - 手工导出
+   - 中文和空格路径
+   - 源素材移动或缺失诊断
+   - 用户已有草稿未被覆盖
+
+命令返回 `0` 才表示报告有效；未通过返回 `1`，参数或 JSON 无法读取返回 `2`。`passedCheckCount` 只统计证据文件和哈希也验证成功的项目，不能靠手改 `status = passed` 增加。
+
+有效报告会产生带 `bundleId / version / build / reportId / testedAt` 的 `target`。支持矩阵也要求这些字段完整匹配，只有版本号不能解锁 exporter。示例报告故意保持全部 `not_run` 和占位字段，用于填写模板，不是通过凭证。
+
 ## 固定测试素材
 
 测试素材全部在临时目录生成，不写入 ClipIQ 数据目录：
@@ -144,4 +174,5 @@ npm run vlog:probe-editing-app -- --json
 6. 重启剪映，打开草稿并核对媒体、字幕、音轨、转场和贴图。
 7. 保存、退出、重启并再次打开。
 8. 手工导出，记录缺失资源、时间偏移和兼容性错误。
-9. 只有全部通过，才把目标版本写入支持矩阵并启动 M5 草稿导出器。
+9. 为每项检查保存截图、导出文件或诊断日志，计算 SHA-256 后填写真机报告。
+10. 运行 `vlog:validate-jianying-spike`；只有返回 `0` 并产生 `target`，才把该目标写入支持矩阵并启动 M5 草稿导出器。

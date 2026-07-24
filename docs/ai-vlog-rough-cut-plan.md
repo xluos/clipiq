@@ -590,6 +590,8 @@ type VideoClipEvidenceSegment = {
 - [x] 只读探测剪映 / CapCut 的安装位置、bundle/version、已有草稿根目录和权限。
 - [x] 未进入真机验证矩阵的版本保持 `exporterReady = false`。
 - [x] 通过 IPC 和 `npm run vlog:probe-editing-app -- --json` 输出同一份机器可读报告。
+- [x] 建立真机 Spike 报告契约和 `vlog:validate-jianying-spike` 门禁；应用身份、隔离草稿、固定 fixture、九项检查及本地证据 SHA-256 必须全部复核通过。
+- [x] 支持矩阵要求 `bundleId / version / build / reportId / testedAt` 完整匹配，不能只凭版本号解锁 exporter。
 
 在正式接入前，用目标机器和目标剪映版本验证以下固定用例：
 

@@ -18,6 +18,7 @@
     "test:watch": "vitest",
     "vlog:validate-dataset": "tsx scripts/validate-vlog-evaluation-dataset.ts",
     "vlog:probe-editing-app": "tsx scripts/probe-editing-app-environment.ts",
+    "vlog:validate-jianying-spike": "tsx scripts/validate-editing-app-spike-report.ts",
     "dist": "npm run build && node scripts/build-daemon.cjs && electron-builder",
     "dist:mac": "npm run build && node scripts/build-daemon.cjs --mac && electron-builder --mac",
     "dist:win": "npm run build && node scripts/build-daemon.cjs --win && electron-builder --win",

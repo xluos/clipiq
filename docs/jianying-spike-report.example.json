@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "id": "replace-with-stable-report-id",
+  "testedAt": "2026-07-24T00:00:00.000Z",
+  "app": {
+    "kind": "jianying",
+    "name": "剪映专业版",
+    "bundleId": "replace-with-current-bundle-id",
+    "version": "replace-with-current-version",
+    "build": "replace-with-current-build",
+    "appPath": "/Applications/剪映专业版.app"
+  },
+  "draft": {
+    "rootPath": "/replace/with/current/draft/root",
+    "isolatedDraftPath": "/replace/with/current/draft/root/ClipIQ Spike 001"
+  },
+  "fixture": {
+    "id": "ai-vlog-spike-v1",
+    "manifestPath": "fixtures/ai-vlog-spike-v1.json",
+    "sha256": "replace-with-fixture-sha256"
+  },
+  "checks": {
+    "video_timeline": { "status": "not_run", "evidence": [] },
+    "audio_tracks": { "status": "not_run", "evidence": [] },
+    "chinese_subtitles": { "status": "not_run", "evidence": [] },
+    "transition_overlay": { "status": "not_run", "evidence": [] },
+    "restart_reopen_save": { "status": "not_run", "evidence": [] },
+    "manual_export": { "status": "not_run", "evidence": [] },
+    "chinese_space_paths": { "status": "not_run", "evidence": [] },
+    "source_missing_diagnostic": { "status": "not_run", "evidence": [] },
+    "existing_drafts_preserved": { "status": "not_run", "evidence": [] }
+  }
+}
