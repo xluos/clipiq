@@ -381,10 +381,49 @@ export type CacheSetDirResult =
   | { ok: true; cacheDir: string; mode: "rename" | "merge" | "copy" | "fresh" | "noop" }
   | { ok: false; message: string };
 
+export type EditingAppEnvironmentReport = {
+  platform: string;
+  detectedAt: number;
+  readiness:
+    | "unsupported_platform"
+    | "not_installed"
+    | "app_detected"
+    | "ready_for_spike";
+  exporterReady: boolean;
+  installations: Array<{
+    kind: "jianying" | "capcut";
+    name: string;
+    appPath: string;
+    bundleId?: string;
+    version?: string;
+    build?: string;
+    readable: boolean;
+    compatibility: "verified" | "unverified";
+  }>;
+  draftRoots: Array<{
+    kind: "jianying" | "capcut";
+    path: string;
+    source: "known_default" | "discovered" | "override";
+    exists: boolean;
+    isDirectory: boolean;
+    readable: boolean;
+    writable: boolean;
+    projectCount: number;
+  }>;
+  issues: Array<{
+    code: string;
+    severity: "info" | "warning" | "error";
+    message: string;
+    kind?: "jianying" | "capcut";
+    path?: string;
+  }>;
+};
+
 declare global {
   interface Window {
     videoAnalyzer?: {
       getRuntimeStatus: () => Promise<RuntimeStatus>;
+      detectEditingAppEnvironment: () => Promise<EditingAppEnvironmentReport>;
       getSystemStats: () => Promise<SystemStats>;
       getProcessList: () => Promise<ProcessEntry[]>;
       openVideoFile: () => Promise<InspectedVideo | null>;

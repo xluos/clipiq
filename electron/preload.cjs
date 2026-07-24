@@ -15,6 +15,7 @@
 const CHANNELS = [
   // ── 运行时 / 系统 ──
   { method: "getRuntimeStatus", channel: "runtime:getStatus", kind: "invoke" },
+  { method: "detectEditingAppEnvironment", channel: "editingApps:detectEnvironment", kind: "invoke" },
   { method: "getSystemStats", channel: "system:getStats", kind: "invoke" },
   { method: "getProcessList", channel: "system:listProcesses", kind: "invoke" },
 

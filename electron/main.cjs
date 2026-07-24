@@ -92,6 +92,9 @@ const {
   buildAnalysisEvidenceQualityReport,
 } = require("./editing/analysis-evidence-quality");
 const {
+  detectEditingAppEnvironment,
+} = require("./editing/editing-app-environment");
+const {
   buildPersonFrameSamplePlan,
 } = require("./identity/person-frame-sampler");
 const {
@@ -7694,6 +7697,12 @@ app.whenReady().then(async () => {
       ytDlpVersion: ytDlp ? await getYtDlpVersion(ytDlp).catch(() => null) : null,
     };
   });
+
+  ipcMain.handle("editingApps:detectEnvironment", async () =>
+    detectEditingAppEnvironment({
+      platform: process.platform,
+      homeDir: os.homedir(),
+    }));
 
   // 系统资源采样。
   //
