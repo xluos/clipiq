@@ -8406,6 +8406,13 @@ app.whenReady().then(async () => {
         videoIds,
         maximumCandidates: Math.max(1, Math.min(200, Number(payload.maximumCandidates) || 80)),
         minimumIdentityConfidence: identityConfidence,
+        personIds: Array.isArray(payload.personIds) ? payload.personIds : undefined,
+        speakerIds: Array.isArray(payload.speakerIds) ? payload.speakerIds : undefined,
+        eventQuery: typeof payload.eventQuery === "string" ? payload.eventQuery : undefined,
+        dialogueQuery: typeof payload.dialogueQuery === "string" ? payload.dialogueQuery : undefined,
+        sourceTimeRanges: Array.isArray(payload.sourceTimeRanges)
+          ? payload.sourceTimeRanges
+          : undefined,
       },
     );
     const evidenceGeneratedAt = Date.now();

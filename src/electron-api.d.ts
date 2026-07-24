@@ -485,6 +485,15 @@ declare global {
         methodologyIds?: string[];
         maximumCandidates?: number;
         minimumIdentityConfidence?: number;
+        personIds?: string[];
+        speakerIds?: string[];
+        eventQuery?: string;
+        dialogueQuery?: string;
+        sourceTimeRanges?: Array<{
+          videoId: string;
+          startUs: number;
+          endUs: number;
+        }>;
         maxClipDurationSec?: number;
         canvas?: EditPlan["canvas"];
       }) => Promise<{

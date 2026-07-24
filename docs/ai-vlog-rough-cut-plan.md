@@ -1,6 +1,6 @@
 # ClipIQ AI Vlog 粗剪迭代计划
 
-> 状态：实施中（M0-1、M0-2、M1、M2、M3、M5 已完成；M0-3 已接入人物身份与独立说话人时间轴，人物管理 UI 待完成；M4 待安装剪映实测）
+> 状态：实施中（M0-1～M3、M5 已完成；M4 待安装剪映实测；M6 增强项待迭代）
 > 适用分支基线：`feature/v2`  
 > 建议实施分支：`feature/ai-vlog-rough-cut`  
 > 更新日期：2026-07-24
@@ -448,8 +448,8 @@ type PersonAppearance = {
 - [x] 建立人物分析编排器；Provider 未就绪或异常时不覆盖旧人物证据。
 - [x] 新增 YuNet 单素材人脸检测与连续跟踪，按 1 秒证据窗口保存 `person_appearances`；长素材最多 900 帧并显式降采样。
 - [x] 新增 SFace 本地人脸特征与跨素材聚类，生成稳定 `personId`；最小正负样本验证和阈值记录见 `docs/person-identity-sface-validation.md`。
-- [ ] 在人物管理 UI 支持命名、合并、拆分；后端人工锁定与重分析保留已完成。
-- [ ] Candidate Builder 可按人物、事件、对白和时间范围检索真实 Shot。
+- [x] 在素材库人物管理 UI 支持命名、合并、按出镜区间拆分，以及人工关联/取消关联说话人。
+- [x] Candidate Builder 可按人物、说话人、事件、对白和素材内时间范围检索真实 Shot。
 
 验收：
 

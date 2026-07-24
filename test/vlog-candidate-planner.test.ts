@@ -179,6 +179,71 @@ describe("Vlog Candidate Builder", () => {
       .not.toHaveProperty("personId");
     expect(result.candidates[0].speakerTracks[0]).not.toHaveProperty("personId");
   });
+
+  it("可按人物、说话人、事件、对白和素材时间范围检索真实 Shot", () => {
+    const shots = [
+      shot({}),
+      shot({
+        id: "shot-2",
+        shotIndex: 2,
+        startSec: 10,
+        endSec: 14,
+        description: "营地远景",
+        usageTags: ["ending"],
+        subtitleSegments: [{
+          startSec: 10.2,
+          endSec: 11.5,
+          text: "今天先到这里",
+        }],
+      }),
+    ];
+    const appearances: PersonAppearance[] = [{
+      id: "appearance-1",
+      personId: "person-a",
+      videoId: "video-1",
+      trackId: "track-a",
+      startSec: 0,
+      endSec: 4,
+      confidence: 0.95,
+      identityConfidence: 0.92,
+      source: "face_track",
+    }];
+    const speakers: SpeakerTrack[] = [{
+      id: "speaker-track-1",
+      videoId: "video-1",
+      speakerId: "speaker-1",
+      startSec: 0.2,
+      endSec: 2,
+      confidence: 0.5,
+    }];
+
+    const result = buildVlogCandidates(
+      shots,
+      [video({})],
+      appearances,
+      speakers,
+      {
+        minimumIdentityConfidence: 0.8,
+        personIds: ["person-a"],
+        speakerIds: ["speaker-1"],
+        eventQuery: "整理装备",
+        dialogueQuery: "装备",
+        sourceTimeRanges: [{
+          videoId: "video-1",
+          startUs: 0,
+          endUs: 5_000_000,
+        }],
+      },
+    );
+
+    expect(result.candidates.map((candidate) => candidate.shotId)).toEqual(["shot-1"]);
+    expect(result.rejected).toEqual(expect.arrayContaining([
+      expect.objectContaining({ shotId: "shot-2", code: "FILTER_PERSON" }),
+    ]));
+    expect(() => buildVlogCandidates(shots, [video({})], appearances, speakers, {
+      sourceTimeRanges: [{ videoId: "video-1", startUs: 2, endUs: 1 }],
+    })).toThrow("候选素材时间范围无效");
+  });
 });
 
 describe("Vlog Planner 契约", () => {

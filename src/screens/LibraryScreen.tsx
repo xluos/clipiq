@@ -16,6 +16,7 @@ import {
   Play,
   Sparkles,
 } from "lucide-react";
+import { PeopleManager } from "../components/PeopleManager";
 
 export function LibraryScreen() {
   const { currentLocation } = useApp();
@@ -45,6 +46,7 @@ const ASSET_TAG_OPTIONS = ["采访", "主拍", "B-roll", "空镜", "动画"];
 function LibraryListScreen() {
   const { projects, setLocation, shotsByAsset } = useApp();
   const [tab, setTab] = useState<"all" | "unused" | "used" | "favorite">("all");
+  const [view, setView] = useState<"assets" | "people">("assets");
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
@@ -79,50 +81,65 @@ function LibraryListScreen() {
             素材库 · LIBRARY
           </div>
           <div className="flex items-baseline gap-3 mt-1.5">
-            <h1 className="text-[22px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">所有素材</h1>
+            <h1 className="text-[22px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+              {view === "assets" ? "所有素材" : "人物"}
+            </h1>
             <span className="text-[11.5px] font-mono text-slate-500 dark:text-slate-400">
-              {assets.length} 条 · {formatTotalDuration(totalDurationSec)} 总时长
+              {view === "assets"
+                ? `${assets.length} 条 · ${formatTotalDuration(totalDurationSec)} 总时长`
+                : "跨素材人物档案"}
             </span>
             <div className="flex-1" />
-            <button
-              onClick={() => setLocation(uploadLoc)}
-              className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-[13px] text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
-            >
-              <UploadIcon className="w-3.5 h-3.5" strokeWidth={1.5} />
-              导入素材
-            </button>
+            {view === "assets" && (
+              <button
+                onClick={() => setLocation(uploadLoc)}
+                className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-[13px] text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+              >
+                <UploadIcon className="w-3.5 h-3.5" strokeWidth={1.5} />
+                导入素材
+              </button>
+            )}
           </div>
           {/* filters */}
           <div className="flex items-center gap-1.5 mt-4">
-            {([
-              ["all", "全部"],
-              ["unused", "未用过"],
-              ["used", "已用"],
-              ["favorite", "收藏"],
-            ] as const).map(([k, l]) => (
-              <FilterChip key={k} active={tab === k} onClick={() => setTab(k)}>{l}</FilterChip>
-            ))}
-            <div className="w-px h-4 bg-slate-200 dark:bg-slate-800 mx-1" />
-            {ASSET_TAG_OPTIONS.map((t) => (
-              <FilterChip key={t} active={tagFilter === t} onClick={() => setTagFilter(tagFilter === t ? null : t)}>{t}</FilterChip>
-            ))}
-            <div className="flex-1" />
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400" strokeWidth={1.5} />
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="搜索素材名 / 标签"
-                className="h-7 pl-7 pr-3 text-[12px] w-52 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900/40"
-              />
-            </div>
+            <FilterChip active={view === "assets"} onClick={() => setView("assets")}>素材</FilterChip>
+            <FilterChip active={view === "people"} onClick={() => setView("people")}>人物</FilterChip>
+            {view === "assets" && (
+              <>
+                <div className="w-px h-4 bg-slate-200 dark:bg-slate-800 mx-1" />
+                {([
+                  ["all", "全部"],
+                  ["unused", "未用过"],
+                  ["used", "已用"],
+                  ["favorite", "收藏"],
+                ] as const).map(([k, l]) => (
+                  <FilterChip key={k} active={tab === k} onClick={() => setTab(k)}>{l}</FilterChip>
+                ))}
+                <div className="w-px h-4 bg-slate-200 dark:bg-slate-800 mx-1" />
+                {ASSET_TAG_OPTIONS.map((t) => (
+                  <FilterChip key={t} active={tagFilter === t} onClick={() => setTagFilter(tagFilter === t ? null : t)}>{t}</FilterChip>
+                ))}
+                <div className="flex-1" />
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-400" strokeWidth={1.5} />
+                  <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="搜索素材名 / 标签"
+                    className="h-7 pl-7 pr-3 text-[12px] w-52 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900/40"
+                  />
+                </div>
+              </>
+            )}
           </div>
         </div>
       </header>
 
       <main className="flex-1 overflow-y-auto">
         <div className="max-w-6xl mx-auto px-8 py-8">
-          {assets.length === 0 ? (
+          {view === "people" ? (
+            <PeopleManager videos={projects} />
+          ) : assets.length === 0 ? (
             <EmptyLibrary onUpload={() => setLocation(uploadLoc)} />
           ) : filtered.length === 0 ? (
             <div className="text-center py-12 text-[13px] text-slate-500">没有匹配的素材</div>

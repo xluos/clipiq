@@ -5,9 +5,12 @@ import type {
   AnalysisOptions,
   Collection,
   Methodology,
+  Person,
+  PersonAppearance,
   Pipeline,
   Shot,
   SlotOverrides,
+  SpeakerTrack,
   StudioSession,
   Video,
   VideoRole,
@@ -90,6 +93,26 @@ export const ipc = {
     api()?.listShots(videoId) ?? Promise.resolve([]),
   setShotsForVideo: (videoId: string, shots: Shot[]) =>
     api()?.setShotsForVideo(videoId, shots) ?? Promise.resolve({ ok: true as const }),
+
+  // 人物 / 说话人证据
+  listPeople: (): Promise<Person[]> =>
+    api()?.listPeople() ?? Promise.resolve([]),
+  listPersonAppearances: (videoId?: string): Promise<PersonAppearance[]> =>
+    api()?.listPersonAppearances(videoId) ?? Promise.resolve([]),
+  listSpeakerTracks: (videoId?: string): Promise<SpeakerTrack[]> =>
+    api()?.listSpeakerTracks(videoId) ?? Promise.resolve([]),
+  renamePerson: (personId: string, displayName?: string) =>
+    api()?.renamePerson(personId, displayName)
+      ?? Promise.reject(new Error("当前环境不能修改人物")),
+  mergePeople: (sourcePersonId: string, targetPersonId: string) =>
+    api()?.mergePeople(sourcePersonId, targetPersonId)
+      ?? Promise.reject(new Error("当前环境不能合并人物")),
+  splitPersonAppearance: (appearanceId: string, person: Person) =>
+    api()?.splitPersonAppearance(appearanceId, person)
+      ?? Promise.reject(new Error("当前环境不能拆分人物")),
+  linkSpeakerTrackPerson: (speakerTrackId: string, personId?: string) =>
+    api()?.linkSpeakerTrackPerson(speakerTrackId, personId)
+      ?? Promise.reject(new Error("当前环境不能关联说话人")),
 
   // config
   loadConfig: () => api()?.loadConfig() ?? Promise.resolve(null),
