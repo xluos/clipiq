@@ -425,6 +425,7 @@ function StudioEditorScreen() {
   const steps = session.steps || [];
   const currentVideoTrack = currentPlan?.tracks.find((track) => track.kind === "video");
   const currentCaptionTrack = currentPlan?.tracks.find((track) => track.kind === "caption");
+  const evidenceQuality = currentPlan?.provenance.evidenceQuality;
 
   return (
     <div className="flex-1 flex flex-col bg-slate-50 dark:bg-[#0A0A0B] overflow-hidden">
@@ -653,6 +654,63 @@ function StudioEditorScreen() {
                   </div>
                 ))}
               </div>
+            </section>
+          )}
+          {evidenceQuality && (
+            <section className="mb-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-[10.5px] font-mono tracking-[0.14em] uppercase text-slate-500">
+                  分析证据
+                </div>
+                <span className={`text-[10.5px] font-mono ${
+                  evidenceQuality.planning.readiness === "ready"
+                    ? "text-emerald-700 dark:text-emerald-300"
+                    : evidenceQuality.planning.readiness === "blocked"
+                      ? "text-rose-700 dark:text-rose-300"
+                      : "text-amber-700 dark:text-amber-300"
+                }`}>
+                  {evidenceQuality.planning.readiness === "ready"
+                    ? "可用"
+                    : evidenceQuality.planning.readiness === "blocked"
+                      ? "不可用"
+                      : "部分可用"}
+                </span>
+              </div>
+              <div className="mt-2 grid grid-cols-4 gap-2">
+                {[
+                  ["语义", `${Math.round(evidenceQuality.semantic.coverageRatio * 100)}%`],
+                  ["字幕", evidenceQuality.transcript.capability === "word"
+                    ? "逐字"
+                    : evidenceQuality.transcript.capability === "segment"
+                      ? "分段"
+                      : "无"],
+                  ["人物", evidenceQuality.identity.capability === "cross_video"
+                    ? `跨素材 ${evidenceQuality.identity.crossVideoPersonCount}`
+                    : evidenceQuality.identity.capability === "tracking"
+                      ? "单素材轨迹"
+                      : "无"],
+                  ["说话人", evidenceQuality.speakers.capability === "linked"
+                    ? "已关联人物"
+                    : evidenceQuality.speakers.capability === "diarized"
+                      ? "已分离"
+                      : "无"],
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded-md bg-slate-50 dark:bg-slate-800/60 px-2 py-1.5">
+                    <div className="text-[10px] text-slate-500">{label}</div>
+                    <div className="mt-0.5 text-[11.5px] font-mono text-slate-800 dark:text-slate-200">
+                      {value}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {evidenceQuality.planning.issues.slice(0, 3).map((issue) => (
+                <div
+                  key={issue.code}
+                  className="mt-1.5 text-[11px] text-slate-600 dark:text-slate-400"
+                >
+                  {issue.message}
+                </div>
+              ))}
             </section>
           )}
           {editError && (

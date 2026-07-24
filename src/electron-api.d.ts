@@ -7,6 +7,7 @@ import type {
   AnalysisOptions,
   AnalysisProgressEvent,
   AnalysisBudgetEvent,
+  AnalysisEvidenceQualityReport,
   AnalysisReport,
   AppConfig,
   Collection,
@@ -491,6 +492,7 @@ declare global {
         plan: EditPlan;
         candidateCount: number;
         rejectedCount: number;
+        evidenceQuality: AnalysisEvidenceQualityReport;
       }>;
       getEditPlanPreview: (planId: string) => Promise<EditPlanPreview | null>;
       renderEditPlanPreview: (payload: {

@@ -45,7 +45,12 @@ function shot(patch: Partial<Shot>): Shot {
       startSec: 0.3,
       endSec: 1.8,
       text: "先把装备整理好",
+      words: [
+        { text: "先把", startSec: 0.3, endSec: 0.8 },
+        { text: "装备整理好", startSec: 0.8, endSec: 1.8 },
+      ],
     }],
+    transcriptGranularity: "word",
     ...patch,
   };
 }
@@ -91,9 +96,11 @@ describe("Vlog Candidate Builder", () => {
       id: "speaker-track-1",
       videoId: "video-1",
       speakerId: "speaker-1",
+      personId: "person-a",
       startSec: 0.3,
       endSec: 1.8,
       confidence: 0.9,
+      linkConfidence: 0.5,
     }];
     const result = buildVlogCandidates([
       shot({}),
@@ -138,7 +145,26 @@ describe("Vlog Candidate Builder", () => {
           startUs: 300_000,
           endUs: 1_800_000,
           text: "先把装备整理好",
+          words: [
+            { text: "先把", startUs: 300_000, endUs: 800_000 },
+            { text: "装备整理好", startUs: 800_000, endUs: 1_800_000 },
+          ],
         }],
+        transcriptGranularity: "word",
+        personAppearances: expect.arrayContaining([
+          expect.objectContaining({
+            trackId: "track-a",
+            personId: "person-a",
+          }),
+          expect.objectContaining({
+            trackId: "track-b",
+          }),
+          expect.objectContaining({
+            trackId: "track-c",
+            personId: "person-c",
+            manualConfirmed: true,
+          }),
+        ]),
       }),
     ]);
     expect(result.rejected.map((item) => item.code)).toEqual(expect.arrayContaining([
@@ -146,6 +172,10 @@ describe("Vlog Candidate Builder", () => {
       "TOO_SHORT",
       "MISSING_SOURCE_PATH",
     ]));
+    expect(result.candidates[0].personAppearances
+      .find((appearance) => appearance.trackId === "track-b"))
+      .not.toHaveProperty("personId");
+    expect(result.candidates[0].speakerTracks[0]).not.toHaveProperty("personId");
   });
 });
 
@@ -162,6 +192,23 @@ describe("Vlog Planner 契约", () => {
       startUs: 300_000,
       endUs: 1_800_000,
       text: "先把装备整理好",
+    }],
+    transcriptGranularity: "segment" as const,
+    personAppearances: [{
+      appearanceId: "appearance-1",
+      trackId: "track-a",
+      personId: "person-a",
+      startUs: 0,
+      endUs: 4_000_000,
+      detectionConfidence: 0.95,
+      identityConfidence: 0.92,
+    }],
+    speakerTracks: [{
+      trackId: "speaker-track-1",
+      speakerId: "speaker-1",
+      startUs: 300_000,
+      endUs: 1_800_000,
+      confidence: 0.9,
     }],
     personIds: ["person-a"],
     speakerIds: ["speaker-1"],

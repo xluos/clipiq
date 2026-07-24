@@ -405,7 +405,13 @@ export type AnalysisNode = {
   // 金字塔管线新增字段 (PR2)
   representativeFrames?: FrameContext[];   // 由 medium_text 选出的该镜头代表帧 (1-3 张)
   framesInShot?: FrameContext[];           // 该镜头内所有抽帧候选, 调试/详情面板用
-  subtitleSegments?: Array<{ start: number; end: number; text: string }>; // 落在该镜头区间内的字幕段
+  subtitleSegments?: Array<{
+    start: number;
+    end: number;
+    text: string;
+    speakerId?: string;
+    words?: Array<{ text: string; start: number; end: number }>;
+  }>; // 落在该镜头区间内的字幕段
   audienceReaction?: AudienceReaction;     // B 站弹幕情绪聚合(可选; 仅 platform=bilibili 项目产出)
 };
 
@@ -417,7 +423,13 @@ export type ShotContext = {
   shotDescription: string;          // medium_text 输出: 综合画面+字幕的一段话 (30-80 汉字)
   frames?: FrameContext[];          // 该镜头内全部抽帧 (带 thumbnailUrl + caption + midSec), 严格拉片时间线渲染用
   representativeFrames?: FrameContext[]; // 由 medium_text 挑出的 1-3 张代表帧 (frames 的子集)
-  subtitleSegments?: Array<{ start: number; end: number; text: string }>; // 落在该镜头区间的字幕段, 保留分段
+  subtitleSegments?: Array<{
+    start: number;
+    end: number;
+    text: string;
+    speakerId?: string;
+    words?: Array<{ text: string; start: number; end: number }>;
+  }>; // 落在该镜头区间的字幕段, 保留分段
   subtitleText?: string;            // 该镜头时间段内的拼接字幕 (向后兼容老 report)
   framesInShot?: number;            // 兼容字段: 旧 report 只存了帧数; 新 report 用 frames.length
 };
@@ -797,14 +809,93 @@ export type EditPlanIssue = {
   meta?: Record<string, unknown>;
 };
 
+export type AnalysisEvidenceQualityIssue = {
+  code: string;
+  severity: "info" | "warning" | "error";
+  message: string;
+};
+
+export type AnalysisEvidenceQualityReport = {
+  generatedAt: number;
+  videoCount: number;
+  shotCount: number;
+  semantic: {
+    describedShotCount: number;
+    coverageRatio: number;
+  };
+  transcript: {
+    capability: "none" | "segment" | "word";
+    segmentCount: number;
+    wordTimedSegmentCount: number;
+    invalidSegmentCount: number;
+    videosWithTranscript: number;
+    shotCoverageRatio: number;
+  };
+  identity: {
+    capability: "none" | "tracking" | "cross_video";
+    appearanceCount: number;
+    trustedAppearanceCount: number;
+    unassignedAppearanceCount: number;
+    untrustedAppearanceCount: number;
+    invalidAppearanceCount: number;
+    videosWithTracks: number;
+    crossVideoPersonCount: number;
+  };
+  speakers: {
+    capability: "none" | "diarized" | "linked";
+    trackCount: number;
+    invalidTrackCount: number;
+    linkedTrackCount: number;
+    videosWithTracks: number;
+  };
+  planning: {
+    readiness: "ready" | "partial" | "blocked";
+    eligibleShotCount: number;
+    rejectedShotCount: number;
+    issues: AnalysisEvidenceQualityIssue[];
+  };
+};
+
+export type TimedWordEvidence = {
+  text: string;
+  startUs: number;
+  endUs: number;
+};
+
+export type VideoClipPersonEvidence = {
+  appearanceId: string;
+  trackId: string;
+  personId?: string;
+  startUs: number;
+  endUs: number;
+  detectionConfidence: number;
+  identityConfidence?: number;
+  manualConfirmed?: boolean;
+};
+
+export type VideoClipSpeakerEvidence = {
+  trackId: string;
+  speakerId: string;
+  personId?: string;
+  startUs: number;
+  endUs: number;
+  confidence: number;
+  linkConfidence?: number;
+  manualConfirmed?: boolean;
+};
+
 export type VideoClipEvidence = {
   eventSummary?: string;
+  transcriptGranularity?: "segment" | "word";
   subtitleSegments?: Array<{
     startUs: number;
     endUs: number;
     text: string;
     speakerId?: string;
+    words?: TimedWordEvidence[];
   }>;
+  personAppearances?: VideoClipPersonEvidence[];
+  speakerTracks?: VideoClipSpeakerEvidence[];
   personIds?: string[];
   speakerIds?: string[];
 };
@@ -912,6 +1003,7 @@ export type EditPlan = {
     plannerModel?: string;
     plannerInputDigest?: string;
     plannerOutput?: unknown;
+    evidenceQuality?: AnalysisEvidenceQualityReport;
   };
   validation: {
     valid: boolean;

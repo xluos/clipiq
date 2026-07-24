@@ -140,12 +140,39 @@ export function buildShotsFromAnalysis(
         const legacySegment = segment as typeof segment & {
           startSec?: number;
           endSec?: number;
+          words?: Array<{
+            text: string;
+            start?: number;
+            end?: number;
+            startSec?: number;
+            endSec?: number;
+          }>;
         };
         const segmentStart = finiteTime(segment.start ?? legacySegment.startSec);
         const segmentEnd = finiteTime(segment.end ?? legacySegment.endSec);
         const text = String(segment.text || "").trim();
+        const words = (legacySegment.words || [])
+          .map((word) => {
+            const legacyWord = word as typeof word & {
+              startSec?: number;
+              endSec?: number;
+            };
+            const wordStart = finiteTime(word.start ?? legacyWord.startSec);
+            const wordEnd = finiteTime(word.end ?? legacyWord.endSec);
+            const wordText = String(word.text || "").trim();
+            return wordStart != null && wordEnd != null && wordEnd > wordStart && wordText
+              ? { text: wordText, startSec: wordStart, endSec: wordEnd }
+              : null;
+          })
+          .filter((word): word is NonNullable<typeof word> => Boolean(word));
         return segmentStart != null && segmentEnd != null && segmentEnd > segmentStart && text
-          ? { startSec: segmentStart, endSec: segmentEnd, text }
+          ? {
+            startSec: segmentStart,
+            endSec: segmentEnd,
+            text,
+            ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
+            ...(words.length ? { words } : {}),
+          }
           : null;
       })
       .filter((segment): segment is NonNullable<typeof segment> => Boolean(segment));
@@ -169,7 +196,11 @@ export function buildShotsFromAnalysis(
       usageTags: usageTagsForNode(node, index, contexts.length),
       subtitleText,
       subtitleSegments,
-      transcriptGranularity: subtitleSegments?.length ? "segment" : undefined,
+      transcriptGranularity: subtitleSegments?.some((segment) => segment.words?.length)
+        ? "word"
+        : subtitleSegments?.length
+          ? "segment"
+          : undefined,
       audioSummary,
       createdAt: now,
     };

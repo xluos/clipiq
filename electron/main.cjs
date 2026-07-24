@@ -86,6 +86,9 @@ const { compileEditPlan } = require("./editing/edit-plan-compiler");
 const { applyEditPlanFeedback } = require("./editing/edit-plan-feedback");
 const { renderEditPlanProxy } = require("./editing/proxy-renderer");
 const { exportEditPlanPackage } = require("./editing/exporters/package-exporter");
+const {
+  buildAnalysisEvidenceQualityReport,
+} = require("./editing/analysis-evidence-quality");
 const ElectronStore = require("electron-store");
 
 let _cfgStore = null;
@@ -7994,6 +7997,18 @@ app.whenReady().then(async () => {
         minimumIdentityConfidence: identityConfidence,
       },
     );
+    const evidenceGeneratedAt = Date.now();
+    const evidenceQuality = buildAnalysisEvidenceQualityReport(
+      videos,
+      shots,
+      appearances,
+      speakerTracks,
+      candidateResult,
+      {
+        generatedAt: evidenceGeneratedAt,
+        minimumIdentityConfidence: identityConfidence,
+      },
+    );
     if (candidateResult.candidates.length === 0) {
       const reasons = [...new Set(candidateResult.rejected.map((item) => item.message))];
       throw new Error(`没有可执行的真实 Shot 候选${reasons.length ? `: ${reasons.join("；")}` : ""}`);
@@ -8046,6 +8061,7 @@ app.whenReady().then(async () => {
       targetDurationUs,
       candidates: candidateResult.candidates,
       methodologySummaries,
+      evidenceQuality,
     });
     const result = await openaiClient.callJsonCompletion(provider, {
       ...prompt,
@@ -8088,9 +8104,10 @@ app.whenReady().then(async () => {
       canvas: payload.canvas || { width: 1080, height: 1920, fps: 30 },
       goal,
       methodologyIds,
-      generatedAt: Date.now(),
+      generatedAt: evidenceGeneratedAt,
       plannerProvider: provider.id,
       plannerModel: result.model || provider.model,
+      evidenceQuality,
       maxClipDurationUs: Math.round(
         Math.max(1, Number(payload.maxClipDurationSec) || 12) * 1_000_000,
       ),
@@ -8108,6 +8125,7 @@ app.whenReady().then(async () => {
       plan,
       candidateCount: candidateResult.candidates.length,
       rejectedCount: candidateResult.rejected.length,
+      evidenceQuality,
     };
   });
 

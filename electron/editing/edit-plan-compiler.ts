@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type {
+  AnalysisEvidenceQualityReport,
   CaptionCue,
   EditPlan,
   EditPlanIssue,
@@ -38,6 +39,7 @@ export type CompileEditPlanOptions = {
   generatedAt: number;
   plannerProvider?: string;
   plannerModel?: string;
+  evidenceQuality?: AnalysisEvidenceQualityReport;
   maxClipDurationUs?: number;
   minimumIdentityConfidence?: number;
   sourceExists?: EditPlanValidationOptions["sourceExists"];
@@ -56,11 +58,15 @@ function stablePlannerDigest(
   sources: EditPlanShotSource[],
   options: CompileEditPlanOptions,
 ): string {
+  const evidenceQuality = options.evidenceQuality
+    ? { ...options.evidenceQuality, generatedAt: 0 }
+    : null;
   const canonical = {
     goal: options.goal,
     targetDurationUs: options.targetDurationUs,
     canvas: options.canvas,
     methodologyIds: [...new Set(options.methodologyIds || [])].sort(),
+    evidenceQuality,
     selections,
     sources: sources
       .map((source) => ({
@@ -101,51 +107,132 @@ function buildEvidence(
       endUs: secondsToUs(segment.endSec),
       text: segment.text,
       speakerId: segment.speakerId,
+      words: (segment.words || [])
+        .map((word) => ({
+          text: String(word.text || "").trim(),
+          startUs: secondsToUs(word.startSec),
+          endUs: secondsToUs(word.endSec),
+        }))
+        .filter((word): word is {
+          text: string;
+          startUs: number;
+          endUs: number;
+        } =>
+          word.startUs != null
+          && word.endUs != null
+          && word.endUs > word.startUs
+          && word.startUs >= sourceInUs
+          && word.endUs <= sourceOutUs
+          && Boolean(word.text)),
     }))
     .filter((segment): segment is {
       startUs: number;
       endUs: number;
       text: string;
       speakerId: string | undefined;
+      words: Array<{ text: string; startUs: number; endUs: number }>;
     } =>
       segment.startUs != null
       && segment.endUs != null
-      && segment.startUs >= sourceInUs
-      && segment.endUs <= sourceOutUs
+      && segment.endUs > sourceInUs
+      && segment.startUs < sourceOutUs
       && segment.endUs > segment.startUs
       && Boolean(segment.text.trim()))
-    .map((segment) => ({
-      startUs: segment.startUs,
-      endUs: segment.endUs,
-      text: segment.text,
-      ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
-    }));
+    .map((segment) => {
+      const clippedStartUs = Math.max(segment.startUs, sourceInUs);
+      const clippedEndUs = Math.min(segment.endUs, sourceOutUs);
+      const words = segment.words.filter((word) =>
+        word.startUs >= clippedStartUs && word.endUs <= clippedEndUs);
+      return {
+        startUs: clippedStartUs,
+        endUs: clippedEndUs,
+        text: words.length
+          ? words.map((word) => word.text).join("").trim()
+          : segment.text,
+        ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
+        ...(words.length ? { words } : {}),
+      };
+    });
 
-  const personIds = [...new Set(
-    (source.appearances || [])
-      .filter((appearance) =>
-        appearance.personId
-        && (
-          appearance.manualLocked
-          || (
-            minimumIdentityConfidence != null
-            && appearance.identityConfidence != null
-            && appearance.identityConfidence >= minimumIdentityConfidence
-          )
-        )
-        && overlaps(sourceInUs, sourceOutUs, appearance.startSec, appearance.endSec))
-      .map((appearance) => appearance.personId as string),
-  )].sort();
-  const speakerIds = [...new Set(
-    (source.speakerTracks || [])
-      .filter((track) => overlaps(sourceInUs, sourceOutUs, track.startSec, track.endSec))
-      .map((track) => track.speakerId)
-      .filter(Boolean),
-  )].sort();
+  const personAppearances = (source.appearances || []).flatMap((appearance) => {
+    if (
+      appearance.videoId !== source.videoId
+      || !overlaps(sourceInUs, sourceOutUs, appearance.startSec, appearance.endSec)
+    ) return [];
+    const appearanceStartUs = secondsToUs(appearance.startSec);
+    const appearanceEndUs = secondsToUs(appearance.endSec);
+    if (appearanceStartUs == null || appearanceEndUs == null) return [];
+    const personId = appearance.personId && (
+      appearance.manualLocked
+      || (
+        minimumIdentityConfidence != null
+        && appearance.identityConfidence != null
+        && appearance.identityConfidence >= minimumIdentityConfidence
+      )
+    )
+      ? appearance.personId
+      : undefined;
+    return [{
+      appearanceId: appearance.id,
+      trackId: appearance.trackId,
+      ...(personId ? { personId } : {}),
+      startUs: Math.max(sourceInUs, appearanceStartUs),
+      endUs: Math.min(sourceOutUs, appearanceEndUs),
+      detectionConfidence: appearance.confidence,
+      ...(appearance.identityConfidence == null
+        ? {}
+        : { identityConfidence: appearance.identityConfidence }),
+      ...(appearance.manualLocked ? { manualConfirmed: true } : {}),
+    }];
+  });
+  const timedSpeakerTracks = (source.speakerTracks || []).flatMap((track) => {
+    if (
+      track.videoId !== source.videoId
+      || !overlaps(sourceInUs, sourceOutUs, track.startSec, track.endSec)
+    ) return [];
+    const trackStartUs = secondsToUs(track.startSec);
+    const trackEndUs = secondsToUs(track.endSec);
+    if (trackStartUs == null || trackEndUs == null) return [];
+    const linkedPersonId = track.personId && (
+      track.manualLocked
+      || (
+        minimumIdentityConfidence != null
+        && track.linkConfidence != null
+        && track.linkConfidence >= minimumIdentityConfidence
+      )
+    )
+      ? track.personId
+      : undefined;
+    return [{
+      trackId: track.id,
+      speakerId: track.speakerId,
+      ...(linkedPersonId ? { personId: linkedPersonId } : {}),
+      startUs: Math.max(sourceInUs, trackStartUs),
+      endUs: Math.min(sourceOutUs, trackEndUs),
+      confidence: track.confidence,
+      ...(track.linkConfidence == null ? {} : { linkConfidence: track.linkConfidence }),
+      ...(track.manualLocked ? { manualConfirmed: true } : {}),
+    }];
+  });
+  const personIds = [...new Set(personAppearances
+    .map((appearance) => appearance.personId)
+    .filter((personId): personId is string => Boolean(personId)))].sort();
+  const speakerIds = [...new Set(timedSpeakerTracks
+    .map((track) => track.speakerId)
+    .filter(Boolean))].sort();
 
   const evidence: NonNullable<VideoClip["evidence"]> = {
     ...(source.shot.description ? { eventSummary: source.shot.description } : {}),
+    ...(subtitleSegments.length
+      ? {
+        transcriptGranularity: subtitleSegments.every((segment) => segment.words?.length)
+          ? "word"
+          : "segment",
+      }
+      : {}),
     ...(subtitleSegments.length ? { subtitleSegments } : {}),
+    ...(personAppearances.length ? { personAppearances } : {}),
+    ...(timedSpeakerTracks.length ? { speakerTracks: timedSpeakerTracks } : {}),
     ...(personIds.length ? { personIds } : {}),
     ...(speakerIds.length ? { speakerIds } : {}),
   };
@@ -272,6 +359,17 @@ export function compileEditPlan(
       sourceClipId: clip.id,
       sourceStartUs: segment.startUs,
       sourceEndUs: segment.endUs,
+      ...(segment.words?.length
+        ? {
+          wordTimings: segment.words.map((word) => ({
+            text: word.text,
+            startUs: clip.timelineInUs
+              + Math.round((word.startUs - clip.sourceInUs) / clip.speed),
+            endUs: clip.timelineInUs
+              + Math.round((word.endUs - clip.sourceInUs) / clip.speed),
+          })),
+        }
+        : {}),
     })));
   const basePlan: EditPlan = {
     id: options.planId,
@@ -304,6 +402,7 @@ export function compileEditPlan(
       ...(options.plannerModel ? { plannerModel: options.plannerModel } : {}),
       plannerInputDigest: stablePlannerDigest(selections, sources, options),
       plannerOutput: selections,
+      ...(options.evidenceQuality ? { evidenceQuality: options.evidenceQuality } : {}),
     },
     validation: {
       valid: false,

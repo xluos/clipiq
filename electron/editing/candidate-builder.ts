@@ -3,7 +3,10 @@ import type {
   Shot,
   ShotTranscriptSegment,
   SpeakerTrack,
+  TimedWordEvidence,
   Video,
+  VideoClipPersonEvidence,
+  VideoClipSpeakerEvidence,
 } from "../../src/types";
 
 export type VlogCandidate = {
@@ -19,7 +22,11 @@ export type VlogCandidate = {
     endUs: number;
     text: string;
     speakerId?: string;
+    words?: TimedWordEvidence[];
   }>;
+  transcriptGranularity?: "segment" | "word";
+  personAppearances: VideoClipPersonEvidence[];
+  speakerTracks: VideoClipSpeakerEvidence[];
   personIds: string[];
   speakerIds: string[];
   usageTags: string[];
@@ -70,12 +77,24 @@ function transcriptSegments(
       endUs: secondsToUs(segment.endSec),
       text: String(segment.text || "").trim(),
       speakerId: segment.speakerId,
+      words: (segment.words || [])
+        .map((word) => ({
+          text: String(word.text || "").trim(),
+          startUs: secondsToUs(word.startSec),
+          endUs: secondsToUs(word.endSec),
+        }))
+        .filter((word): word is TimedWordEvidence =>
+          word.startUs != null
+          && word.endUs != null
+          && word.endUs > word.startUs
+          && Boolean(word.text)),
     }))
     .filter((segment): segment is {
       startUs: number;
       endUs: number;
       text: string;
       speakerId: string | undefined;
+      words: TimedWordEvidence[];
     } =>
       segment.startUs != null
       && segment.endUs != null
@@ -83,26 +102,47 @@ function transcriptSegments(
       && segment.startUs < shotEndUs
       && segment.endUs > shotStartUs
       && Boolean(segment.text))
-    .map((segment) => ({
-      startUs: segment.startUs,
-      endUs: segment.endUs,
-      text: segment.text,
-      ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
-    }));
+    .map((segment) => {
+      const words = segment.words.filter((word) =>
+        word.startUs >= segment.startUs
+        && word.endUs <= segment.endUs
+        && word.startUs >= shotStartUs
+        && word.endUs <= shotEndUs);
+      return {
+        startUs: segment.startUs,
+        endUs: segment.endUs,
+        text: segment.text,
+        ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
+        ...(words.length ? { words } : {}),
+      };
+    });
 }
 
-function overlapsRange(
-  startUs: number,
-  endUs: number,
-  startSec: number,
-  endSec: number,
-): boolean {
-  const otherStartUs = secondsToUs(startSec);
-  const otherEndUs = secondsToUs(endSec);
-  return otherStartUs != null
-    && otherEndUs != null
-    && otherStartUs < endUs
-    && otherEndUs > startUs;
+function trustedPersonId(
+  appearance: PersonAppearance,
+  minimumIdentityConfidence: number | undefined,
+): string | undefined {
+  if (!appearance.personId) return undefined;
+  if (appearance.manualLocked) return appearance.personId;
+  return minimumIdentityConfidence != null
+    && appearance.identityConfidence != null
+    && appearance.identityConfidence >= minimumIdentityConfidence
+    ? appearance.personId
+    : undefined;
+}
+
+function clippedRange(
+  itemStartSec: number,
+  itemEndSec: number,
+  rangeStartUs: number,
+  rangeEndUs: number,
+): { startUs: number; endUs: number } | null {
+  const itemStartUs = secondsToUs(itemStartSec);
+  const itemEndUs = secondsToUs(itemEndSec);
+  if (itemStartUs == null || itemEndUs == null) return null;
+  const startUs = Math.max(itemStartUs, rangeStartUs);
+  const endUs = Math.min(itemEndUs, rangeEndUs);
+  return endUs > startUs ? { startUs, endUs } : null;
 }
 
 function temporalOverlapRatio(a: VlogCandidate, b: VlogCandidate): number {
@@ -207,25 +247,51 @@ export function buildVlogCandidates(
     }
 
     const subtitles = transcriptSegments(shot.subtitleSegments, startUs, endUs);
-    const trustedPeople = appearances
-      .filter((appearance) =>
-        appearance.videoId === videoId
-        && appearance.personId
-        && (
-          appearance.manualLocked
-          || (
-            options.minimumIdentityConfidence != null
-            && appearance.identityConfidence != null
-            && appearance.identityConfidence >= options.minimumIdentityConfidence
-          )
+    const personAppearances = appearances.flatMap((appearance) => {
+      if (appearance.videoId !== videoId) return [];
+      const range = clippedRange(appearance.startSec, appearance.endSec, startUs, endUs);
+      if (!range) return [];
+      const personId = trustedPersonId(appearance, options.minimumIdentityConfidence);
+      return [{
+        appearanceId: appearance.id,
+        trackId: appearance.trackId,
+        ...(personId ? { personId } : {}),
+        ...range,
+        detectionConfidence: appearance.confidence,
+        ...(appearance.identityConfidence == null
+          ? {}
+          : { identityConfidence: appearance.identityConfidence }),
+        ...(appearance.manualLocked ? { manualConfirmed: true } : {}),
+      }];
+    });
+    const timedSpeakerTracks = speakerTracks.flatMap((track) => {
+      if (track.videoId !== videoId) return [];
+      const range = clippedRange(track.startSec, track.endSec, startUs, endUs);
+      if (!range) return [];
+      const linkedPersonId = track.personId && (
+        track.manualLocked
+        || (
+          options.minimumIdentityConfidence != null
+          && track.linkConfidence != null
+          && track.linkConfidence >= options.minimumIdentityConfidence
         )
-        && overlapsRange(startUs, endUs, appearance.startSec, appearance.endSec))
-      .map((appearance) => appearance.personId as string);
-    const speakers = speakerTracks
-      .filter((track) =>
-        track.videoId === videoId
-        && overlapsRange(startUs, endUs, track.startSec, track.endSec))
-      .map((track) => track.speakerId);
+      )
+        ? track.personId
+        : undefined;
+      return [{
+        trackId: track.id,
+        speakerId: track.speakerId,
+        ...(linkedPersonId ? { personId: linkedPersonId } : {}),
+        ...range,
+        confidence: track.confidence,
+        ...(track.linkConfidence == null ? {} : { linkConfidence: track.linkConfidence }),
+        ...(track.manualLocked ? { manualConfirmed: true } : {}),
+      }];
+    });
+    const trustedPeople = personAppearances
+      .map((appearance) => appearance.personId)
+      .filter((personId): personId is string => Boolean(personId));
+    const speakers = timedSpeakerTracks.map((track) => track.speakerId);
     const { score, signals } = scoreShot(shot, durationUs, subtitles.length);
     rawCandidates.push({
       shotId: shot.id,
@@ -236,6 +302,15 @@ export function buildVlogCandidates(
       durationUs,
       description: String(shot.description || "").trim(),
       subtitleSegments: subtitles,
+      ...(subtitles.length
+        ? {
+          transcriptGranularity: subtitles.every((segment) => segment.words?.length)
+            ? "word" as const
+            : "segment" as const,
+        }
+        : {}),
+      personAppearances,
+      speakerTracks: timedSpeakerTracks,
       personIds: [...new Set(trustedPeople)].sort(),
       speakerIds: [...new Set(speakers)].sort(),
       usageTags: [...new Set(shot.usageTags || [])].sort(),

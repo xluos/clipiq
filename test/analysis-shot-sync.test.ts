@@ -76,6 +76,11 @@ describe("完整分析结果 → Shot", () => {
           start: 0.25,
           end: 2.2,
           text: "我们先把帐篷铺开",
+          speakerId: "speaker-1",
+          words: [
+            { text: "我们先", start: 0.25, end: 0.9 },
+            { text: "把帐篷铺开", start: 0.9, end: 2.2 },
+          ],
         }],
         subtitleText: "我们先把帐篷铺开",
       },
@@ -134,8 +139,13 @@ describe("完整分析结果 → Shot", () => {
         startSec: 0.25,
         endSec: 2.2,
         text: "我们先把帐篷铺开",
+        speakerId: "speaker-1",
+        words: [
+          { text: "我们先", startSec: 0.25, endSec: 0.9 },
+          { text: "把帐篷铺开", startSec: 0.9, endSec: 2.2 },
+        ],
       }],
-      transcriptGranularity: "segment",
+      transcriptGranularity: "word",
       audioSummary: "人物对白 / 帐篷布摩擦声",
     });
     expect(shots[1]).toMatchObject({

@@ -1,3 +1,4 @@
+import type { AnalysisEvidenceQualityReport } from "../../src/types";
 import type { VlogCandidate } from "./candidate-builder";
 import type { PlannerShotSelection } from "./edit-plan-compiler";
 
@@ -58,6 +59,20 @@ function candidateText(candidate: VlogCandidate): string {
     .map((segment) =>
       `[${(segment.startUs / 1_000_000).toFixed(2)}-${(segment.endUs / 1_000_000).toFixed(2)}] ${segment.text}`)
     .join(" / ");
+  const people = candidate.personAppearances
+    .slice(0, 12)
+    .map((appearance) => {
+      const identity = appearance.personId || `track:${appearance.trackId}`;
+      return `${identity}@${(appearance.startUs / 1_000_000).toFixed(2)}-${(appearance.endUs / 1_000_000).toFixed(2)}`;
+    })
+    .join(",");
+  const speakers = candidate.speakerTracks
+    .slice(0, 12)
+    .map((track) => {
+      const linkedPerson = track.personId ? `->${track.personId}` : "";
+      return `${track.speakerId}${linkedPerson}@${(track.startUs / 1_000_000).toFixed(2)}-${(track.endUs / 1_000_000).toFixed(2)}`;
+    })
+    .join(",");
   return [
     `shotId=${candidate.shotId}`,
     `videoId=${candidate.videoId}`,
@@ -65,8 +80,9 @@ function candidateText(candidate: VlogCandidate): string {
     `duration=${(candidate.durationUs / 1_000_000).toFixed(2)}s`,
     `quality=${candidate.qualityScore.toFixed(2)}`,
     `roles=${candidate.usageTags.join(",") || "unknown"}`,
-    `people=${candidate.personIds.join(",") || "unknown"}`,
-    `speakers=${candidate.speakerIds.join(",") || "unknown"}`,
+    `transcript=${candidate.transcriptGranularity || "none"}`,
+    `people=${people || "unknown"}`,
+    `speakers=${speakers || "unknown"}`,
     `event=${candidate.description || "(无描述)"}`,
     `subtitles=${subtitles || "(无字幕)"}`,
   ].join(" | ");
@@ -77,6 +93,7 @@ export function buildVlogPlannerPrompt(input: {
   targetDurationUs: number;
   candidates: VlogCandidate[];
   methodologySummaries?: string[];
+  evidenceQuality?: AnalysisEvidenceQualityReport;
 }): { systemText: string; userText: string } {
   const constraints = VLOG_PLANNER_CONSTRAINTS
     .map((rule) => `- ${rule.ruleId} [${rule.priority}]: ${rule.instruction}`)
@@ -85,6 +102,16 @@ export function buildVlogPlannerPrompt(input: {
     .map((summary) => `- ${summary}`)
     .join("\n");
   const candidates = input.candidates.map(candidateText).join("\n");
+  const evidenceQuality = input.evidenceQuality
+    ? [
+      `语义覆盖：${Math.round(input.evidenceQuality.semantic.coverageRatio * 100)}%`,
+      `字幕能力：${input.evidenceQuality.transcript.capability}，${input.evidenceQuality.transcript.segmentCount} 段`,
+      `人物能力：${input.evidenceQuality.identity.capability}，可信出镜 ${input.evidenceQuality.identity.trustedAppearanceCount} 条，跨素材人物 ${input.evidenceQuality.identity.crossVideoPersonCount} 个`,
+      `说话人能力：${input.evidenceQuality.speakers.capability}，${input.evidenceQuality.speakers.trackCount} 条轨迹`,
+      ...input.evidenceQuality.planning.issues.map((issue) =>
+        `${issue.severity.toUpperCase()} ${issue.code}: ${issue.message}`),
+    ].map((line) => `- ${line}`).join("\n")
+    : "";
 
   return {
     systemText: [
@@ -92,6 +119,8 @@ export function buildVlogPlannerPrompt(input: {
       "你只能从候选集中选择 shotId，并为选择写剪辑意图和 0-1 置信度。",
       "严禁生成 startSec/endSec、文件路径、虚构镜头或虚构人物身份。",
       "程序会把 shotId 编译为真实素材时间；你只负责叙事选择与排序。",
+      "personId 只代表达到可信阈值或人工确认的跨素材身份；track: 前缀只在单素材内保持连续，不能当成同一人。",
+      "speakerId 与 personId 是不同证据；没有显式关联时不得推断说话人就是出镜人物。",
       "只返回合法 JSON，不要 Markdown，不要解释。",
     ].join("\n"),
     userText: [
@@ -102,6 +131,7 @@ export function buildVlogPlannerPrompt(input: {
       "# Vlog 约束",
       constraints,
       ...(methodology ? ["", "# 已选方法论摘要", methodology] : []),
+      ...(evidenceQuality ? ["", "# 分析证据质量", evidenceQuality] : []),
       "",
       "# 真实候选 Shot",
       candidates,

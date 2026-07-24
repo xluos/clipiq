@@ -46,7 +46,12 @@ describe("EditPlan 确定性编译", () => {
             startSec: 0.2,
             endSec: 1.4,
             text: "先把装备整理好",
+            words: [
+              { text: "先把", startSec: 0.2, endSec: 0.6 },
+              { text: "装备整理好", startSec: 0.6, endSec: 1.4 },
+            ],
           }],
+          transcriptGranularity: "word",
         }),
         videoId: "video-1",
         sourcePath: "/videos/video-1.mp4",
@@ -73,15 +78,36 @@ describe("EditPlan 确定性编译", () => {
             identityConfidence: 0.5,
             source: "face_track" as const,
           },
+          {
+            id: "appearance-other-video",
+            personId: "person-other",
+            videoId: "video-2",
+            trackId: "track-other",
+            startSec: 0,
+            endSec: 4,
+            confidence: 1,
+            identityConfidence: 1,
+            source: "face_track" as const,
+          },
         ],
-        speakerTracks: [{
-          id: "speaker-track-1",
-          videoId: "video-1",
-          speakerId: "speaker-1",
-          startSec: 0.2,
-          endSec: 1.4,
-          confidence: 0.8,
-        }],
+        speakerTracks: [
+          {
+            id: "speaker-track-1",
+            videoId: "video-1",
+            speakerId: "speaker-1",
+            startSec: 0.2,
+            endSec: 1.4,
+            confidence: 0.8,
+          },
+          {
+            id: "speaker-track-other",
+            videoId: "video-2",
+            speakerId: "speaker-other",
+            startSec: 0.2,
+            endSec: 1.4,
+            confidence: 1,
+          },
+        ],
       },
       {
         shot: shot({
@@ -129,7 +155,12 @@ describe("EditPlan 确定性编译", () => {
               startUs: 200_000,
               endUs: 1_400_000,
               text: "先把装备整理好",
+              words: [
+                { text: "先把", startUs: 200_000, endUs: 600_000 },
+                { text: "装备整理好", startUs: 600_000, endUs: 1_400_000 },
+              ],
             }],
+            transcriptGranularity: "word",
           },
         },
         {
@@ -148,6 +179,21 @@ describe("EditPlan 确定性编译", () => {
       durationUs: 0,
     }]);
     expect(plan.provenance.plannerInputDigest).toMatch(/^[a-f0-9]{64}$/);
+    const firstVideoTrack = plan.tracks.find((track) => track.kind === "video");
+    if (firstVideoTrack?.kind !== "video") throw new Error("测试期望视频轨道");
+    expect(firstVideoTrack?.items[0].evidence?.personAppearances
+      ?.map((appearance) => appearance.trackId)).toEqual(["track-a", "track-b"]);
+    expect(firstVideoTrack?.items[0].evidence?.speakerTracks
+      ?.map((track) => track.speakerId)).toEqual(["speaker-1"]);
+    expect(plan.tracks.find((track) => track.kind === "caption")).toMatchObject({
+      kind: "caption",
+      items: [{
+        wordTimings: [
+          { text: "先把", startUs: 200_000, endUs: 600_000 },
+          { text: "装备整理好", startUs: 600_000, endUs: 1_400_000 },
+        ],
+      }],
+    });
   });
 
   it("候选集外引用和重复引用会产生可解释错误，不猜测时间", () => {
