@@ -163,7 +163,9 @@ async function main(): Promise<void> {
   } else {
     const mark = report.valid ? "通过" : "未通过";
     console.log(`Vlog 固定素材集校验：${mark}`);
-    console.log(`数据集：${report.datasetId || "(无 id)"}`);
+    console.log(
+      `数据集：${report.datasetId || "(无 id)"} · ${report.profile}`,
+    );
     console.log(
       `素材 ${report.stats.materialCount} 条 · `
       + `总时长 ${(report.stats.totalDurationSec / 60).toFixed(1)} 分钟 · `

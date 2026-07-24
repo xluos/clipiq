@@ -89,6 +89,7 @@ describe("Vlog 真人固定素材集", () => {
     expect(report).toMatchObject({
       valid: true,
       datasetId: "weekend-vlog-real-v1",
+      profile: "full_vlog",
       stats: {
         materialCount: 10,
         probedMaterialCount: 10,
@@ -101,6 +102,51 @@ describe("Vlog 真人固定素材集", () => {
       },
       issues: [],
     });
+  });
+
+  it("identity_bootstrap 只放宽叙事覆盖，不放宽人物真值门槛", () => {
+    const value = manifest();
+    value.id = "identity-real-v1";
+    value.profile = "identity_bootstrap";
+    value.materials = value.materials.map((item) => ({
+      ...item,
+      orientation: "portrait",
+      eventKey: undefined,
+      shotRoles: ["person"],
+      traits: [],
+    }));
+    const report = validateVlogEvaluationDataset(
+      value,
+      probes(value),
+      { requireFileProbes: true },
+    );
+
+    expect(report).toMatchObject({
+      valid: true,
+      datasetId: "identity-real-v1",
+      profile: "identity_bootstrap",
+      stats: {
+        portraitCount: 10,
+        landscapeCount: 0,
+        personCount: 2,
+        crossVideoPersonCount: 1,
+      },
+      issues: [],
+    });
+
+    value.materials.forEach((item) => {
+      item.identities = item.identities.filter((label) =>
+        label.personKey !== "friend");
+    });
+    const missingNegative = validateVlogEvaluationDataset(
+      value,
+      probes(value),
+      { requireFileProbes: true },
+    );
+    expect(missingNegative.valid).toBe(false);
+    expect(missingNegative.issues).toContainEqual(expect.objectContaining({
+      code: "IDENTITY_NEGATIVE_PERSON_MISSING",
+    }));
   });
 
   it("缺少真实文件、必要负样本和跨素材人物时明确失败", () => {

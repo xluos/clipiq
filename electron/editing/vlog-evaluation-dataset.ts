@@ -25,6 +25,10 @@ export type VlogIdentityCondition =
   | "side_face"
   | "lighting_change";
 
+export type VlogEvaluationDatasetProfile =
+  | "full_vlog"
+  | "identity_bootstrap";
+
 export type VlogIdentityLabel = {
   id: string;
   personKey: string;
@@ -54,6 +58,7 @@ export type VlogEvaluationDatasetManifest = {
   version: 1;
   id: string;
   title?: string;
+  profile?: VlogEvaluationDatasetProfile;
   materials: VlogEvaluationMaterial[];
 };
 
@@ -78,6 +83,7 @@ export type VlogEvaluationDatasetIssue = {
 export type VlogEvaluationDatasetReport = {
   valid: boolean;
   datasetId: string;
+  profile: VlogEvaluationDatasetProfile;
   stats: {
     materialCount: number;
     probedMaterialCount: number;
@@ -207,11 +213,16 @@ export function validateVlogEvaluationDataset(
   const issues: VlogEvaluationDatasetIssue[] = [];
   const materials = Array.isArray(manifest?.materials) ? manifest.materials : [];
   const datasetId = String(manifest?.id || "").trim();
+  const profile = manifest?.profile || "full_vlog";
+  const fullVlogProfile = profile === "full_vlog";
   if (manifest?.version !== 1) {
     addIssue(issues, "VERSION_UNSUPPORTED", "error", "测试集 manifest.version 必须为 1。");
   }
   if (!datasetId) {
     addIssue(issues, "DATASET_ID_MISSING", "error", "测试集缺少稳定 id。");
+  }
+  if (profile !== "full_vlog" && profile !== "identity_bootstrap") {
+    addIssue(issues, "PROFILE_UNSUPPORTED", "error", "测试集 profile 不受支持。");
   }
   if (materials.length < 10 || materials.length > 20) {
     addIssue(
@@ -409,7 +420,7 @@ export function validateVlogEvaluationDataset(
       `素材总时长需要 10～30 分钟，当前为 ${(totalDurationSec / 60).toFixed(1)} 分钟。`,
     );
   }
-  if (landscapeCount === 0 || portraitCount === 0) {
+  if (fullVlogProfile && (landscapeCount === 0 || portraitCount === 0)) {
     addIssue(issues, "ORIENTATION_MIX_MISSING", "error", "固定集必须同时包含横屏和竖屏素材。");
   }
   if (!hasChinesePath) {
@@ -418,20 +429,22 @@ export function validateVlogEvaluationDataset(
   if (!hasSpacePath) {
     addIssue(issues, "SPACE_PATH_MISSING", "error", "固定集必须包含带空格路径。");
   }
-  for (const trait of REQUIRED_TRAITS) {
-    if (!traitSet.has(trait)) {
-      addIssue(issues, "REQUIRED_TRAIT_MISSING", "error", `固定集缺少负样本特征：${trait}。`);
+  if (fullVlogProfile) {
+    for (const trait of REQUIRED_TRAITS) {
+      if (!traitSet.has(trait)) {
+        addIssue(issues, "REQUIRED_TRAIT_MISSING", "error", `固定集缺少负样本特征：${trait}。`);
+      }
     }
-  }
-  const hasCompleteEvent = [...eventRoles.values()].some((roles) =>
-    REQUIRED_SHOT_ROLES.every((role) => roles.has(role)));
-  if (!hasCompleteEvent) {
-    addIssue(
-      issues,
-      "EVENT_ROLE_COVERAGE_MISSING",
-      "error",
-      "至少一个 eventKey 必须覆盖全景、人物、动作、细节和反应镜头。",
-    );
+    const hasCompleteEvent = [...eventRoles.values()].some((roles) =>
+      REQUIRED_SHOT_ROLES.every((role) => roles.has(role)));
+    if (!hasCompleteEvent) {
+      addIssue(
+        issues,
+        "EVENT_ROLE_COVERAGE_MISSING",
+        "error",
+        "至少一个 eventKey 必须覆盖全景、人物、动作、细节和反应镜头。",
+      );
+    }
   }
   const crossVideoPeople = [...personMaterialKeys.entries()]
     .filter(([, keys]) => keys.size >= 3);
@@ -463,6 +476,7 @@ export function validateVlogEvaluationDataset(
   return {
     valid: !issues.some((issue) => issue.severity === "error"),
     datasetId,
+    profile,
     stats: {
       materialCount: materials.length,
       probedMaterialCount,
