@@ -89,6 +89,8 @@ describe("人物分析编排", () => {
       embeddingTrackCount: 0,
       assignedTrackCount: 0,
       matchedExistingPersonCount: 0,
+      linkedSpeakerTrackCount: 0,
+      speakerLinkDecisions: [],
     });
     expect(repository.replaceEvidenceForVideo).toHaveBeenCalledWith(
       "video-a",
@@ -105,6 +107,107 @@ describe("人物分析编排", () => {
     );
   });
 
+  it("身份向量和独立口型证据都可信时重算已有说话人关联", async () => {
+    const replaceEvidenceForVideo = vi.fn();
+    const repository = {
+      replaceEvidenceForVideo,
+      listAppearanceEvidence: () => [{
+        id: "existing-appearance",
+        personId: "person-a",
+        videoId: "video-b",
+        trackId: "video-b:face-track-1",
+        startSec: 0,
+        endSec: 1,
+        confidence: 0.95,
+        identityConfidence: 1,
+        source: "face_track" as const,
+        embedding: [1, 0],
+        embeddingModel: "licensed-face-v1",
+        embeddingQuality: 0.9,
+      }],
+      listPeople: () => [{
+        id: "person-a",
+        status: "auto" as const,
+      }],
+      listDifferentPersonPairs: () => [],
+      listSpeakerTracks: () => [{
+        id: "speaker-track-1",
+        videoId: "video-a",
+        speakerId: "video-a:speaker:1",
+        startSec: 1,
+        endSec: 1.2,
+        confidence: 0.5,
+      }],
+    };
+    const speakingDescriptor: FaceAnalysisProviderDescriptor = {
+      id: "licensed-speaking-provider",
+      version: "1",
+      capabilities: {
+        detection: true,
+        landmarks: true,
+        embedding: true,
+        speakingActivity: true,
+      },
+      models: [
+        {
+          id: "detector",
+          role: "detection",
+          productionUse: "allowed",
+        },
+        {
+          id: "identity",
+          role: "embedding",
+          productionUse: "allowed",
+        },
+        {
+          id: "lip-activity",
+          role: "speaking_activity",
+          productionUse: "allowed",
+        },
+      ],
+    };
+
+    const result = await runPersonAppearanceAnalysis({
+      videoId: "video-a",
+      frames: [inputFrame],
+      provider: provider([{
+        frame: inputFrame,
+        detections: [{
+          detectionId: "face-1",
+          bbox: { x: 0.1, y: 0.2, width: 0.2, height: 0.3 },
+          confidence: 0.95,
+          quality: 0.9,
+          speakingConfidence: 0.94,
+          embedding: {
+            modelId: "licensed-face-v1",
+            vector: [1, 0],
+          },
+        }],
+      }], true, speakingDescriptor),
+      repository,
+      usePolicy: { environment: "production" },
+    });
+
+    expect(result).toMatchObject({
+      matchedExistingPersonCount: 1,
+      linkedSpeakerTrackCount: 1,
+      speakerLinkDecisions: [{
+        reason: "linked",
+        personId: "person-a",
+      }],
+    });
+    expect(replaceEvidenceForVideo).toHaveBeenCalledWith("video-a", {
+      appearances: [expect.objectContaining({
+        personId: "person-a",
+        speakingConfidence: 0.94,
+      })],
+      speakerTracks: [expect.objectContaining({
+        personId: "person-a",
+        linkConfidence: expect.any(Number),
+      })],
+    });
+  });
+
   it("Provider 返回请求范围外的帧时拒绝写入", async () => {
     const repository = { replaceEvidenceForVideo: vi.fn() };
     await expect(runPersonAppearanceAnalysis({
@@ -117,6 +220,27 @@ describe("人物分析编排", () => {
       repository,
       usePolicy: { environment: "production" },
     })).rejects.toThrow("人脸 Provider 返回了越界或被篡改的帧");
+    expect(repository.replaceEvidenceForVideo).not.toHaveBeenCalled();
+  });
+
+  it("Provider 未声明独立口型能力时拒绝伪造说话证据", async () => {
+    const repository = { replaceEvidenceForVideo: vi.fn() };
+    await expect(runPersonAppearanceAnalysis({
+      videoId: "video-a",
+      frames: [inputFrame],
+      provider: provider([{
+        frame: inputFrame,
+        detections: [{
+          detectionId: "face-1",
+          bbox: { x: 0.1, y: 0.2, width: 0.2, height: 0.3 },
+          confidence: 0.95,
+          quality: 0.9,
+          speakingConfidence: 0.99,
+        }],
+      }]),
+      repository,
+      usePolicy: { environment: "production" },
+    })).rejects.toThrow("返回了未声明的口型活动证据");
     expect(repository.replaceEvidenceForVideo).not.toHaveBeenCalled();
   });
 

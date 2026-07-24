@@ -141,6 +141,45 @@ describe("说话人识别管线", () => {
     });
   });
 
+  it("已有可信口型人物证据时写入保守的说话人关联", async () => {
+    const replaceEvidenceForVideo = vi.fn();
+    const provider: SpeakerDiarizationProvider = {
+      descriptor: SHERPA_DIARIZATION_DESCRIPTOR,
+      getReadiness: async () => ({ ready: true }),
+      diarize: async () => [{ startSec: 0, endSec: 2, speakerIndex: 0 }],
+    };
+
+    const result = await runSpeakerDiarization({
+      videoId: "video-1",
+      wavPath: "/tmp/audio.wav",
+      provider,
+      repository: {
+        replaceEvidenceForVideo,
+        listAppearances: () => [{
+          id: "appearance-1",
+          personId: "person-a",
+          videoId: "video-1",
+          trackId: "face-track-1",
+          startSec: 0,
+          endSec: 2,
+          confidence: 0.95,
+          identityConfidence: 0.92,
+          speakingConfidence: 0.94,
+          source: "face_track",
+        }],
+      },
+      usePolicy: { environment: "production" },
+    });
+
+    expect(result.linkedTrackCount).toBe(1);
+    expect(replaceEvidenceForVideo).toHaveBeenCalledWith("video-1", {
+      speakerTracks: [expect.objectContaining({
+        personId: "person-a",
+        linkConfidence: expect.any(Number),
+      })],
+    });
+  });
+
   it("模型未就绪时保留已有证据", async () => {
     const replaceEvidenceForVideo = vi.fn();
     const provider: SpeakerDiarizationProvider = {

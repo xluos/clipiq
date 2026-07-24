@@ -1,4 +1,5 @@
 import type { IdentityEvidenceBatch } from "../repositories/identity-repository";
+import type { PersonAppearance } from "../../src/types";
 import {
   validateSpeakerDiarizationProviderForUse,
   type SpeakerDiarizationProvider,
@@ -8,9 +9,14 @@ import {
   buildSpeakerTimeline,
   type SpeakerAnnotatedTranscript,
 } from "./speaker-timeline";
+import {
+  linkSpeakerTracksToPeople,
+  type SpeakerPersonLinkDecision,
+} from "./speaker-person-linker";
 
 export type SpeakerDiarizationRepository = {
   replaceEvidenceForVideo(videoId: string, batch: IdentityEvidenceBatch): void;
+  listAppearances?(videoId?: string): PersonAppearance[];
 };
 
 export type SpeakerDiarizationResult = {
@@ -18,6 +24,8 @@ export type SpeakerDiarizationResult = {
   videoId: string;
   speakerCount: number;
   trackCount: number;
+  linkedTrackCount: number;
+  linkDecisions: SpeakerPersonLinkDecision[];
   transcript: SpeakerAnnotatedTranscript | null;
   reason?: string;
 };
@@ -46,6 +54,8 @@ export async function runSpeakerDiarization(input: {
       videoId: input.videoId,
       speakerCount: 0,
       trackCount: 0,
+      linkedTrackCount: 0,
+      linkDecisions: [],
       transcript: input.transcript || null,
       reason: readiness.reason,
     };
@@ -59,14 +69,20 @@ export async function runSpeakerDiarization(input: {
     segments,
     transcript: input.transcript,
   });
-  input.repository.replaceEvidenceForVideo(input.videoId, {
+  const linked = linkSpeakerTracksToPeople({
     speakerTracks: timeline.speakerTracks,
+    appearances: input.repository.listAppearances?.(input.videoId) || [],
+  });
+  input.repository.replaceEvidenceForVideo(input.videoId, {
+    speakerTracks: linked.speakerTracks,
   });
   return {
     status: "completed",
     videoId: input.videoId,
     speakerCount: timeline.speakerCount,
     trackCount: timeline.speakerTracks.length,
+    linkedTrackCount: linked.linkedTrackCount,
+    linkDecisions: linked.decisions,
     transcript: timeline.transcript,
   };
 }

@@ -495,6 +495,7 @@ type VideoClipEvidenceSegment = {
 - [x] 新增 YuNet 单素材人脸检测与连续跟踪，按 1 秒证据窗口保存 `person_appearances`；长素材最多 900 帧并显式降采样。
 - [x] 新增 SFace 本地人脸特征与跨素材聚类，生成稳定 `personId`；最小正负样本验证和阈值记录见 `docs/person-identity-sface-validation.md`。
 - [x] 在素材库人物管理 UI 支持命名、合并、按出镜区间拆分，以及人工关联/取消关联说话人。
+- [x] 建立说话人到人物的保守关联器；只接受声明独立口型活动模型的证据，身份/覆盖/主导性不足时保持未知并输出审计原因。
 - [x] Candidate Builder 可按人物、说话人、事件、对白和素材内时间范围检索真实 Shot。
 - [x] 将事件、字幕、出镜人物和说话人按微秒边界对齐为连续素材时间片，写入 Planner 输入和 `EditPlan`；镜头裁切后同步重建并校验完整覆盖。
 

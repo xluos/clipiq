@@ -87,6 +87,26 @@ describe("人脸 Provider 许可门禁", () => {
       "人脸分析 Provider broken-provider 声明支持特征向量，但未声明 embedding 模型",
     ]);
   });
+
+  it("口型活动能力必须声明独立模型及其生产许可", () => {
+    expect(validateFaceProviderForUse({
+      id: "undeclared-speaking-provider",
+      version: "1",
+      capabilities: {
+        detection: true,
+        landmarks: true,
+        embedding: false,
+        speakingActivity: true,
+      },
+      models: [{
+        id: "yunet",
+        role: "detection",
+        productionUse: "allowed",
+      }],
+    }, { environment: "production" })).toEqual([
+      "人脸分析 Provider undeclared-speaking-provider 声明支持口型活动，但未声明 speaking_activity 模型",
+    ]);
+  });
 });
 
 describe("单素材人脸轨迹", () => {
@@ -203,5 +223,23 @@ describe("单素材人脸轨迹", () => {
       startSec: 1,
       endSec: 2,
     });
+  });
+
+  it("只在轨迹内每个观察都有显式口型结果时汇总说话置信度", () => {
+    const speakingA = face("a-1", 0.1);
+    speakingA.speakingConfidence = 0.9;
+    const speakingB = face("a-2", 0.12);
+    speakingB.speakingConfidence = 0.8;
+    const complete = buildFaceTrackAppearances(buildFaceTracks([
+      frame(0, "shot-a", [speakingA]),
+      frame(0.5, "shot-a", [speakingB]),
+    ]));
+    const incomplete = buildFaceTrackAppearances(buildFaceTracks([
+      frame(0, "shot-a", [speakingA]),
+      frame(0.5, "shot-a", [face("a-3", 0.12)]),
+    ]));
+
+    expect(complete[0].speakingConfidence).toBeCloseTo(0.85);
+    expect(incomplete[0].speakingConfidence).toBeUndefined();
   });
 });

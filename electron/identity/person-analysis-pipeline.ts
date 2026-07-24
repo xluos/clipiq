@@ -2,6 +2,7 @@ import type {
   IdentityEvidenceBatch,
   PersonAppearanceEvidence,
 } from "../repositories/identity-repository";
+import type { SpeakerTrack } from "../../src/types";
 import {
   validateFaceProviderForUse,
   type FaceAnalysisFrame,
@@ -16,12 +17,17 @@ import {
 import {
   assignPersonIdentities,
 } from "./person-identity-assignment";
+import {
+  linkSpeakerTracksToPeople,
+  type SpeakerPersonLinkDecision,
+} from "./speaker-person-linker";
 
 export type PersonAnalysisRepository = {
   replaceEvidenceForVideo(videoId: string, batch: IdentityEvidenceBatch): void;
   listAppearanceEvidence?(videoId?: string): PersonAppearanceEvidence[];
   listPeople?(): import("../../src/types").Person[];
   listDifferentPersonPairs?(): Array<{ leftPersonId: string; rightPersonId: string }>;
+  listSpeakerTracks?(videoId?: string): SpeakerTrack[];
 };
 
 export type PersonAnalysisResult = {
@@ -33,6 +39,8 @@ export type PersonAnalysisResult = {
   embeddingTrackCount: number;
   assignedTrackCount: number;
   matchedExistingPersonCount: number;
+  linkedSpeakerTrackCount: number;
+  speakerLinkDecisions: SpeakerPersonLinkDecision[];
   reason?: string;
 };
 
@@ -96,6 +104,8 @@ export async function runPersonAppearanceAnalysis(
       embeddingTrackCount: 0,
       assignedTrackCount: 0,
       matchedExistingPersonCount: 0,
+      linkedSpeakerTrackCount: 0,
+      speakerLinkDecisions: [],
       reason: readiness.reason,
     };
   }
@@ -114,6 +124,15 @@ export async function runPersonAppearanceAnalysis(
     ) {
       throw new Error(`人脸 Provider 返回了越界或被篡改的帧: ${analysis.frame.frameId}`);
     }
+    if (
+      !provider.descriptor.capabilities.speakingActivity
+      && analysis.detections.some((detection) =>
+        detection.speakingConfidence != null)
+    ) {
+      throw new Error(
+        `人脸 Provider ${provider.descriptor.id} 返回了未声明的口型活动证据`,
+      );
+    }
   }
 
   const tracks = buildFaceTracks(analyses, trackPolicy);
@@ -125,9 +144,20 @@ export async function runPersonAppearanceAnalysis(
     people: repository.listPeople?.() || [],
     differentPersonPairs: repository.listDifferentPersonPairs?.() || [],
   });
+  const linkedSpeakers = linkSpeakerTracksToPeople({
+    speakerTracks: repository.listSpeakerTracks?.(videoId) || [],
+    appearances: [
+      ...(repository.listAppearanceEvidence?.(videoId) || [])
+        .filter((appearance) => appearance.manualLocked),
+      ...identity.appearances,
+    ],
+  });
   const batch: IdentityEvidenceBatch = {
     appearances: identity.appearances,
     ...(identity.people.length ? { people: identity.people } : {}),
+    ...(linkedSpeakers.speakerTracks.length
+      ? { speakerTracks: linkedSpeakers.speakerTracks }
+      : {}),
   };
   repository.replaceEvidenceForVideo(videoId, batch);
   return {
@@ -141,5 +171,7 @@ export async function runPersonAppearanceAnalysis(
     matchedExistingPersonCount: identity.decisions.filter(
       (decision) => decision.reason === "matched",
     ).length,
+    linkedSpeakerTrackCount: linkedSpeakers.linkedTrackCount,
+    speakerLinkDecisions: linkedSpeakers.decisions,
   };
 }

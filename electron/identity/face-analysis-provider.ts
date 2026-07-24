@@ -10,7 +10,11 @@ export type FaceLandmark = {
   y: number;
 };
 
-export type FaceModelRole = "detection" | "landmarks" | "embedding";
+export type FaceModelRole =
+  | "detection"
+  | "landmarks"
+  | "embedding"
+  | "speaking_activity";
 
 export type FaceModelProductionUse =
   | "allowed"
@@ -34,6 +38,7 @@ export type FaceAnalysisProviderDescriptor = {
     detection: boolean;
     landmarks: boolean;
     embedding: boolean;
+    speakingActivity?: boolean;
   };
 };
 
@@ -60,6 +65,11 @@ export type FaceDetection = {
   bbox: FaceBoundingBox;
   confidence: number;
   quality: number;
+  /**
+   * 独立口型活动模型提供的“当前证据窗口内此人正在说话”置信度。
+   * 人脸检测、同时出镜或嘴部几何本身不能填这个字段。
+   */
+  speakingConfidence?: number;
   landmarks?: FaceLandmark[];
   embedding?: FaceEmbedding;
 };
@@ -105,6 +115,12 @@ export function validateFaceProviderForUse(
   }
   if (descriptor.capabilities.embedding && !declaredRoles.has("embedding")) {
     issues.push(`人脸分析 Provider ${descriptor.id} 声明支持特征向量，但未声明 embedding 模型`);
+  }
+  if (
+    descriptor.capabilities.speakingActivity
+    && !declaredRoles.has("speaking_activity")
+  ) {
+    issues.push(`人脸分析 Provider ${descriptor.id} 声明支持口型活动，但未声明 speaking_activity 模型`);
   }
 
   if (policy.environment !== "production") return issues;

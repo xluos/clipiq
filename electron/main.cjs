@@ -3411,6 +3411,8 @@ async function runLocalPersonAppearanceAnalysis({
       embeddingTrackCount: 0,
       assignedTrackCount: 0,
       matchedExistingPersonCount: 0,
+      linkedSpeakerTrackCount: 0,
+      speakerLinkDecisions: [],
       sampledFrameCount: 0,
       sampleIntervalSec: samplePlan.intervalSec,
       downsampled: false,
@@ -6220,12 +6222,18 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             schemaVersion: "v1",
             provider: provider.descriptor,
             speakerCount: speakerAnalysis.speakerCount,
+            linkedTrackCount: speakerAnalysis.linkedTrackCount,
+            linkDecisions: speakerAnalysis.linkDecisions,
             tracks,
           });
           send(
             pct("说话人识别完成", 1),
             "说话人识别完成",
-            `${speakerAnalysis.speakerCount} 个匿名说话人 · ${speakerAnalysis.trackCount} 段说话区间`,
+            `${speakerAnalysis.speakerCount} 个匿名说话人 · `
+              + `${speakerAnalysis.trackCount} 段说话区间`
+              + (speakerAnalysis.linkedTrackCount > 0
+                ? ` · ${speakerAnalysis.linkedTrackCount} 段已关联出镜人物`
+                : ""),
           );
         } else {
           send(
@@ -6244,6 +6252,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           videoId: project.id,
           speakerCount: 0,
           trackCount: 0,
+          linkedTrackCount: 0,
+          linkDecisions: [],
           transcript,
           reason,
         };
@@ -6280,6 +6290,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             videoId: speakerAnalysis.videoId,
             speakerCount: speakerAnalysis.speakerCount,
             trackCount: speakerAnalysis.trackCount,
+            linkedTrackCount: speakerAnalysis.linkedTrackCount,
+            linkDecisions: speakerAnalysis.linkDecisions,
             reason: speakerAnalysis.reason,
           },
         }
@@ -6912,10 +6924,15 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
                 ? ` · ${personAnalysis.matchedExistingPersonCount} 条命中跨素材身份`
                 : "")
             : " · 仅匿名人物轨迹";
+          const speakerLinkText = personAnalysis.linkedSpeakerTrackCount > 0
+            ? ` · ${personAnalysis.linkedSpeakerTrackCount} 段说话人已关联人物`
+            : "";
           send(
             98,
             "人物分析完成",
-            `${personAnalysis.trackCount} 条人物轨迹 · ${personAnalysis.appearanceCount} 个出镜区间${identityText}`,
+            `${personAnalysis.trackCount} 条人物轨迹 · `
+              + `${personAnalysis.appearanceCount} 个出镜区间`
+              + `${identityText}${speakerLinkText}`,
           );
         } else {
           send(98, "人物分析不可用", personAnalysis.reason || "本次未生成人物证据");
@@ -6936,6 +6953,8 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             embeddingTrackCount: 0,
             assignedTrackCount: 0,
             matchedExistingPersonCount: 0,
+            linkedSpeakerTrackCount: 0,
+            speakerLinkDecisions: [],
             sampledFrameCount: 0,
             sampleIntervalSec: 0,
             downsampled: false,

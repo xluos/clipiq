@@ -891,6 +891,7 @@ export type AnalysisEvidenceQualityReport = {
     trackCount: number;
     invalidTrackCount: number;
     linkedTrackCount: number;
+    speakingEvidenceAppearanceCount: number;
     videosWithTracks: number;
   };
   planning: {

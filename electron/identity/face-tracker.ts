@@ -27,6 +27,7 @@ export type FaceTrackObservation = {
   bbox: FaceBoundingBox;
   confidence: number;
   quality: number;
+  speakingConfidence?: number;
   embedding?: FaceEmbedding;
 };
 
@@ -185,6 +186,15 @@ function observationFromDetection(
     && detection.embedding.vector.every(Number.isFinite)
       ? detection.embedding
       : undefined;
+  const speakingConfidence = detection.speakingConfidence;
+  if (
+    speakingConfidence != null
+    && (!Number.isFinite(speakingConfidence)
+      || speakingConfidence < 0
+      || speakingConfidence > 1)
+  ) {
+    return null;
+  }
   return {
     videoId: frame.videoId,
     frameId: frame.frameId,
@@ -197,6 +207,7 @@ function observationFromDetection(
     bbox: detection.bbox,
     confidence: detection.confidence,
     quality: detection.quality,
+    ...(speakingConfidence == null ? {} : { speakingConfidence }),
     embedding,
   };
 }
@@ -322,6 +333,15 @@ export function buildFaceTrackAppearances(tracks: FaceTrack[]): FaceTrackAppeara
     segmentTrackByShot(track).map((observations, segmentIndex) => {
       const first = observations[0];
       const last = observations.at(-1) || first;
+      const speakingConfidences = observations.map(
+        (observation) => observation.speakingConfidence,
+      );
+      const speakingConfidence = speakingConfidences.every(
+        (value): value is number => value != null,
+      )
+        ? speakingConfidences.reduce((sum, value) => sum + value, 0)
+          / speakingConfidences.length
+        : undefined;
       return {
         id: `${track.trackId}:appearance-${segmentIndex + 1}`,
         videoId: track.videoId,
@@ -338,6 +358,7 @@ export function buildFaceTrackAppearances(tracks: FaceTrack[]): FaceTrackAppeara
           .sort((a, b) => b.quality - a.quality || a.timeSec - b.timeSec)[0]?.thumbnailUrl,
         focusBounds: focusBoundsForObservations(observations),
         source: "face_track",
+        ...(speakingConfidence == null ? {} : { speakingConfidence }),
         embedding: track.prototypeEmbedding,
         embeddingModel: track.embeddingModel,
         embeddingQuality: track.prototypeEmbedding ? track.quality : undefined,

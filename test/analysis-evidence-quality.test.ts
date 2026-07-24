@@ -170,6 +170,7 @@ describe("分析证据质量报告", () => {
         trackCount: 1,
         invalidTrackCount: 0,
         linkedTrackCount: 1,
+        speakingEvidenceAppearanceCount: 0,
         videosWithTracks: 1,
       },
       planning: {
@@ -207,5 +208,54 @@ describe("分析证据质量报告", () => {
       "PERSON_TRACKING_MISSING",
       "SPEAKER_DIARIZATION_MISSING",
     ]));
+  });
+
+  it("有说话人和出镜轨迹但没有独立口型证据时不声称人物关联", () => {
+    const videos = [video("video-1")];
+    const shots = [shot("video-1", "shot-1", 0)];
+    const appearances: PersonAppearance[] = [{
+      id: "appearance-1",
+      personId: "person-a",
+      videoId: "video-1",
+      shotId: "shot-1",
+      trackId: "track-1",
+      startSec: 0,
+      endSec: 3,
+      confidence: 0.95,
+      identityConfidence: 0.92,
+      source: "face_track",
+    }];
+    const speakers: SpeakerTrack[] = [{
+      id: "speaker-track-1",
+      videoId: "video-1",
+      speakerId: "speaker-a",
+      startSec: 0,
+      endSec: 2,
+      confidence: 0.5,
+    }];
+    const candidates = buildVlogCandidates(
+      shots,
+      videos,
+      appearances,
+      speakers,
+      { minimumIdentityConfidence: 0.8 },
+    );
+    const report = buildAnalysisEvidenceQualityReport(
+      videos,
+      shots,
+      appearances,
+      speakers,
+      candidates,
+      { minimumIdentityConfidence: 0.8 },
+    );
+
+    expect(report.speakers).toMatchObject({
+      capability: "diarized",
+      linkedTrackCount: 0,
+      speakingEvidenceAppearanceCount: 0,
+    });
+    expect(report.planning.issues).toContainEqual(expect.objectContaining({
+      code: "SPEAKING_ACTIVITY_EVIDENCE_MISSING",
+    }));
   });
 });

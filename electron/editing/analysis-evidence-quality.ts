@@ -130,6 +130,7 @@ export function buildAnalysisEvidenceQualityReport(
   let trustedAppearanceCount = 0;
   let unassignedAppearanceCount = 0;
   let untrustedAppearanceCount = 0;
+  let speakingEvidenceAppearanceCount = 0;
   const videosWithIdentityTracks = new Set<string>();
   const trustedPersonVideos = new Map<string, Set<string>>();
 
@@ -140,6 +141,13 @@ export function buildAnalysisEvidenceQualityReport(
       continue;
     }
     videosWithIdentityTracks.add(appearance.videoId);
+    if (
+      Number.isFinite(appearance.speakingConfidence)
+      && Number(appearance.speakingConfidence) >= 0
+      && Number(appearance.speakingConfidence) <= 1
+    ) {
+      speakingEvidenceAppearanceCount += 1;
+    }
     if (!appearance.personId) {
       unassignedAppearanceCount += 1;
       continue;
@@ -303,6 +311,25 @@ export function buildAnalysisEvidenceQualityReport(
       severity: "info",
       message: "没有说话人分离轨迹，字幕不能可靠归属到具体人物。",
     });
+  } else if (
+    scopedAppearances.length > 0
+    && linkedSpeakerTrackCount === 0
+    && speakingEvidenceAppearanceCount === 0
+  ) {
+    issues.push({
+      code: "SPEAKING_ACTIVITY_EVIDENCE_MISSING",
+      severity: "info",
+      message: "当前人物分析没有独立口型活动证据，不能仅凭同时出镜把说话人关联到具体人物。",
+    });
+  } else if (
+    speakingEvidenceAppearanceCount > 0
+    && linkedSpeakerTrackCount === 0
+  ) {
+    issues.push({
+      code: "SPEAKER_PERSON_LINK_UNRESOLVED",
+      severity: "info",
+      message: "口型活动、身份或多人主导证据未达到保守阈值，说话人保持未知。",
+    });
   }
   if (invalidSpeakerTrackCount > 0) {
     issues.push({
@@ -372,6 +399,7 @@ export function buildAnalysisEvidenceQualityReport(
       trackCount: scopedSpeakers.length,
       invalidTrackCount: invalidSpeakerTrackCount,
       linkedTrackCount: linkedSpeakerTrackCount,
+      speakingEvidenceAppearanceCount,
       videosWithTracks: videosWithSpeakerTracks.size,
     },
     planning: {
