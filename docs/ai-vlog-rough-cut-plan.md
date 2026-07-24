@@ -627,7 +627,7 @@ export-package/
 
 只在 M0～M5 稳定后继续：
 
-- [ ] 节拍检测和卡点：Studio 已接入本地 BGM 选择、FFmpeg PCM 解码、`energy-onset-v1` 节拍网格、置信度降级和硬切邻近节拍建议；待补用户确认后的实际时间线调整。验证见 [`audio-beat-analysis-validation.md`](./audio-beat-analysis-validation.md)。
+- [x] 节拍检测和卡点：Studio 已接入本地 BGM 选择、FFmpeg PCM 解码、`energy-onset-v1` 节拍网格和置信度降级；用户逐个确认后，以不超过 5% 的轻微变速将硬切精确落到节拍，每次生成可撤销的 `EditPlan revision`。验证见 [`audio-beat-analysis-validation.md`](./audio-beat-analysis-validation.md)。
 - [x] 基于人物焦点的横竖屏智能重构图；多人无法完整容纳或无可靠焦点时降级为留边。
 - [ ] 情绪段落驱动的 BGM 切换。
 - [ ] 字幕关键词高亮。

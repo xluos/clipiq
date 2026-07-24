@@ -6,6 +6,7 @@ import type {
   VideoClip,
 } from "../../src/types";
 import {
+  beatAlignedClipSpeed,
   refreshBeatSyncSuggestions,
 } from "./audio-beat-analysis";
 import {
@@ -333,6 +334,38 @@ export function applyEditPlanFeedback(
       if (audio.items.length === 0) {
         plan.tracks = plan.tracks.filter((item) => item !== audio);
       }
+      break;
+    }
+    case "apply_beat_sync": {
+      const audio = plan.tracks.find((item) => item.kind === "audio");
+      const music = audio?.kind === "audio"
+        ? audio.items.find((item) =>
+          item.kind === "music" && item.id === action.audioClipId)
+        : undefined;
+      if (!music) throw new Error("待卡点的 BGM 音轨不存在");
+      const suggestion = music.beatSyncSuggestions?.find((item) =>
+        item.fromClipId === action.fromClipId
+        && item.toClipId === action.toClipId
+        && item.beatTimeUs === action.beatTimeUs);
+      if (!suggestion) throw new Error("卡点建议已过期，请使用最新建议");
+      if (Math.abs(suggestion.offsetUs) <= 1_000) {
+        throw new Error("当前切点已对齐节拍");
+      }
+      const fromIndex = video.items.findIndex((clip) => clip.id === action.fromClipId);
+      if (
+        fromIndex < 0
+        || video.items[fromIndex + 1]?.id !== action.toClipId
+      ) {
+        throw new Error("卡点建议必须引用相邻镜头");
+      }
+      const nextSpeed = beatAlignedClipSpeed(
+        video.items[fromIndex],
+        suggestion.offsetUs,
+      );
+      if (nextSpeed == null) {
+        throw new Error("卡点所需变速超过安全范围");
+      }
+      video.items[fromIndex].speed = nextSpeed;
       break;
     }
     case "set_voiceover": {

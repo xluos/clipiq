@@ -1092,6 +1092,13 @@ export type EditFeedbackAction =
   | { type: "update_caption"; cueId: string; text: string }
   | { type: "set_music"; music: AudioClip }
   | { type: "remove_music"; audioClipId: string }
+  | {
+    type: "apply_beat_sync";
+    audioClipId: string;
+    fromClipId: string;
+    toClipId: string;
+    beatTimeUs: number;
+  }
   | { type: "set_voiceover"; voiceover: AudioClip }
   | { type: "remove_voiceover"; audioClipId: string }
   | {

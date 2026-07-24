@@ -341,12 +341,63 @@ describe("EditPlan 结构化反馈", () => {
       offsetUs: 100_000,
     });
 
-    const removed = applyEditPlanFeedback(shortened, {
+    const aligned = applyEditPlanFeedback(shortened, {
+      type: "apply_beat_sync",
+      audioClipId: "music-1",
+      fromClipId: videoTrack.items[0].id,
+      toClipId: videoTrack.items[1].id,
+      beatTimeUs: 3_000_000,
+    }, {
+      newPlanId: "plan-music-aligned",
+      now: 4,
+      sourceExists: () => true,
+    });
+    const alignedVideo = aligned.tracks.find((track) => track.kind === "video");
+    const alignedAudio = aligned.tracks.find((track) => track.kind === "audio");
+    if (alignedVideo?.kind !== "video" || alignedAudio?.kind !== "audio") {
+      throw new Error("fixture");
+    }
+    expect(aligned.parentPlanId).toBe("plan-music-trimmed");
+    expect(alignedVideo.items[1].timelineInUs).toBe(3_000_000);
+    expect(alignedVideo.items[0].speed).toBeCloseTo(2_900_000 / 3_000_000);
+    expect(alignedAudio.items[0].beatSyncSuggestions?.[0]).toMatchObject({
+      boundaryTimeUs: 3_000_000,
+      beatTimeUs: 3_000_000,
+      offsetUs: 0,
+    });
+    expect(shortened.tracks.find((track) => track.kind === "video")?.items[1])
+      .toMatchObject({ timelineInUs: 2_900_000 });
+
+    expect(() => applyEditPlanFeedback(aligned, {
+      type: "apply_beat_sync",
+      audioClipId: "music-1",
+      fromClipId: alignedVideo.items[0].id,
+      toClipId: alignedVideo.items[1].id,
+      beatTimeUs: 3_000_000,
+    }, {
+      newPlanId: "plan-music-aligned-again",
+      now: 5,
+      sourceExists: () => true,
+    })).toThrow("当前切点已对齐节拍");
+
+    expect(() => applyEditPlanFeedback(shortened, {
+      type: "apply_beat_sync",
+      audioClipId: "music-1",
+      fromClipId: videoTrack.items[0].id,
+      toClipId: videoTrack.items[1].id,
+      beatTimeUs: 3_500_000,
+    }, {
+      newPlanId: "plan-music-stale",
+      now: 5,
+      sourceExists: () => true,
+    })).toThrow("卡点建议已过期");
+
+    const removed = applyEditPlanFeedback(aligned, {
       type: "remove_music",
       audioClipId: "music-1",
     }, {
       newPlanId: "plan-music-removed",
-      now: 4,
+      now: 6,
       sourceExists: () => true,
     });
     expect(removed.tracks.some((track) => track.kind === "audio")).toBe(false);

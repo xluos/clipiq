@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AudioClip, EditPlan, VideoClip } from "../src/types";
 import {
+  beatAlignedClipSpeed,
   detectAudioBeats,
   suggestBeatAlignedCuts,
 } from "../electron/editing/audio-beat-analysis";
@@ -135,6 +136,38 @@ describe("音频节拍分析", () => {
     }];
     expect(suggestBeatAlignedCuts(currentPlan, music, {
       maximumOffsetUs: 100_000,
+    }).map((suggestion) => suggestion.toClipId)).toEqual(["3"]);
+  });
+
+  it("只保留轻微变速可到达的卡点，并精确计算目标速度", () => {
+    const clip = videoClip("1", 0);
+    expect(beatAlignedClipSpeed(clip, 100_000)).toBeCloseTo(2_000_000 / 2_100_000);
+    expect(beatAlignedClipSpeed(clip, -40_000)).toBeCloseTo(2_000_000 / 1_960_000);
+    expect(beatAlignedClipSpeed(clip, 150_000)).toBeNull();
+    expect(beatAlignedClipSpeed({ ...clip, speed: 0.96 }, 100_000)).toBeNull();
+
+    const currentPlan = plan();
+    const music: AudioClip = {
+      id: "music-1",
+      kind: "music",
+      timelineInUs: 0,
+      sourceInUs: 0,
+      sourceOutUs: 6_000_000,
+      volume: 0.2,
+      beatAnalysis: {
+        algorithmVersion: "energy-onset-v1",
+        status: "usable",
+        sampleRate: 16_000,
+        analyzedStartUs: 0,
+        analyzedEndUs: 6_000_000,
+        bpm: 120,
+        confidence: 0.9,
+        beatTimesUs: [0, 2_000_000, 4_000_000, 6_000_000],
+      },
+    };
+    expect(suggestBeatAlignedCuts(currentPlan, music, {
+      maximumOffsetUs: 150_000,
+      maximumSpeedChangeRatio: 0,
     }).map((suggestion) => suggestion.toClipId)).toEqual(["3"]);
   });
 

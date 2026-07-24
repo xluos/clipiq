@@ -116,6 +116,19 @@ describe("FFmpeg 代理规格", () => {
     expect(filters).toContain("pad=720:1280");
     expect(filters).toContain("[1:a:0]");
   });
+
+  it("卡点轻微变速同时作用于画面和原声", () => {
+    const spec = proxyVideoSpecForCanvas({ width: 1080, height: 1920, fps: 30 });
+    const args = buildProxySegmentArgs(
+      clip({ speed: 2_900_000 / 3_000_000 }),
+      "/cache/beat-aligned.mp4",
+      spec,
+      true,
+    );
+    const filters = args[args.indexOf("-filter_complex") + 1];
+    expect(filters).toContain("setpts=(PTS-STARTPTS)/0.966667");
+    expect(filters).toContain("atempo=0.966667");
+  });
 });
 
 describe("代理字幕", () => {

@@ -506,6 +506,11 @@ function StudioEditorScreen() {
   const currentVoiceovers = currentAudioTrack?.kind === "audio"
     ? currentAudioTrack.items.filter((clip) => clip.kind === "voiceover")
     : [];
+  const currentBeatSuggestions = currentMusic?.beatSyncSuggestions || [];
+  const pendingBeatSuggestions = currentBeatSuggestions.filter((suggestion) =>
+    Math.abs(suggestion.offsetUs) > 1_000);
+  const alignedBeatSuggestionCount = currentBeatSuggestions.length
+    - pendingBeatSuggestions.length;
   const evidenceQuality = currentPlan?.provenance.evidenceQuality;
 
   return (
@@ -1150,11 +1155,54 @@ function StudioEditorScreen() {
                   </div>
                   <div className="mt-1 text-[10.5px] font-mono text-slate-500 dark:text-slate-400">
                     {currentMusic.beatAnalysis?.status === "usable"
-                      ? `${currentMusic.beatAnalysis.bpm?.toFixed(1)} BPM · ${currentMusic.beatSyncSuggestions?.length || 0} 个卡点`
+                      ? `${currentMusic.beatAnalysis.bpm?.toFixed(1)} BPM · ${
+                        pendingBeatSuggestions.length > 0
+                          ? `${pendingBeatSuggestions.length} 个待对齐`
+                          : alignedBeatSuggestionCount > 0
+                            ? "切点已对齐"
+                            : "暂无近邻切点"
+                      }`
                       : currentMusic.beatAnalysis?.status === "low_confidence"
                         ? `节拍置信度 ${Math.round(currentMusic.beatAnalysis.confidence * 100)}%`
                         : "未识别稳定节拍"}
                   </div>
+                  {pendingBeatSuggestions.length > 0 && (
+                    <div className="mt-2 space-y-1.5">
+                      {pendingBeatSuggestions.slice(0, 3).map((suggestion) => {
+                        const toIndex = currentVideoTrack?.kind === "video"
+                          ? currentVideoTrack.items.findIndex((clip) =>
+                            clip.id === suggestion.toClipId)
+                          : -1;
+                        const direction = suggestion.offsetUs > 0 ? "延后" : "提前";
+                        const offsetMs = Math.round(Math.abs(suggestion.offsetUs) / 1_000);
+                        return (
+                          <div
+                            key={`${suggestion.fromClipId}-${suggestion.toClipId}`}
+                            className="flex items-center gap-2 rounded-md bg-slate-50 dark:bg-slate-950/70 px-2 py-1.5"
+                          >
+                            <span className="min-w-0 flex-1 truncate text-[10.5px] font-mono text-slate-600 dark:text-slate-400">
+                              切到 #{String(Math.max(0, toIndex) + 1).padStart(2, "0")}
+                              {" · "}{direction} {offsetMs} ms
+                            </span>
+                            <button
+                              onClick={() => applyFeedback({
+                                type: "apply_beat_sync",
+                                audioClipId: currentMusic.id,
+                                fromClipId: suggestion.fromClipId,
+                                toClipId: suggestion.toClipId,
+                                beatTimeUs: suggestion.beatTimeUs,
+                              })}
+                              disabled={Boolean(editingAction)}
+                              aria-label={`对齐镜头 ${Math.max(0, toIndex) + 1} 卡点`}
+                              className="h-7 px-2 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-700 dark:text-slate-300 disabled:opacity-50"
+                            >
+                              {editingAction === "apply_beat_sync" ? "对齐中…" : "对齐"}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                   <div className="mt-2 flex items-center gap-1.5">
                     <button
                       onClick={selectMusic}

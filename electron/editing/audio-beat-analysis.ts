@@ -16,6 +16,8 @@ export type BeatDetectionOptions = {
 };
 
 const US_PER_SECOND = 1_000_000;
+const MINIMUM_EDITABLE_CLIP_DURATION_US = 200_000;
+export const MAXIMUM_BEAT_SYNC_SPEED_CHANGE_RATIO = 0.05;
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
@@ -242,13 +244,60 @@ function timelineBeatTimes(clip: AudioClip): number[] {
   });
 }
 
+export function beatAlignedClipSpeed(
+  clip: VideoClip,
+  offsetUs: number,
+  options: {
+    maximumSpeedChangeRatio?: number;
+    minimumDurationUs?: number;
+  } = {},
+): number | null {
+  if (!Number.isSafeInteger(offsetUs)) return null;
+  const sourceDurationUs = clip.sourceOutUs - clip.sourceInUs;
+  if (
+    !Number.isSafeInteger(sourceDurationUs)
+    || sourceDurationUs <= 0
+    || !Number.isFinite(clip.speed)
+    || clip.speed <= 0
+  ) {
+    return null;
+  }
+  const currentDurationUs = Math.round(sourceDurationUs / clip.speed);
+  const targetDurationUs = currentDurationUs + offsetUs;
+  const minimumDurationUs = Math.max(
+    MINIMUM_EDITABLE_CLIP_DURATION_US,
+    Math.round(options.minimumDurationUs ?? MINIMUM_EDITABLE_CLIP_DURATION_US),
+  );
+  if (targetDurationUs < minimumDurationUs) return null;
+  const nextSpeed = sourceDurationUs / targetDurationUs;
+  const maximumSpeedChangeRatio = Math.max(
+    0,
+    Number.isFinite(options.maximumSpeedChangeRatio)
+      ? Number(options.maximumSpeedChangeRatio)
+      : MAXIMUM_BEAT_SYNC_SPEED_CHANGE_RATIO,
+  );
+  // EditPlan 当前的默认播放速度是 1；对同一边界反复确认时也不能累计越过安全范围。
+  const changeRatio = Math.abs(nextSpeed - 1);
+  if (
+    !Number.isFinite(nextSpeed)
+    || nextSpeed <= 0
+    || changeRatio > maximumSpeedChangeRatio + Number.EPSILON
+  ) {
+    return null;
+  }
+  return nextSpeed;
+}
+
 /**
  * 为现有硬切边界寻找附近节拍，只返回建议，不改动源入出点或时间线。
  */
 export function suggestBeatAlignedCuts(
   plan: EditPlan,
   musicClip: AudioClip,
-  options: { maximumOffsetUs?: number } = {},
+  options: {
+    maximumOffsetUs?: number;
+    maximumSpeedChangeRatio?: number;
+  } = {},
 ): BeatSyncSuggestion[] {
   const analysis = musicClip.beatAnalysis;
   if (!analysis || analysis.status !== "usable") return [];
@@ -268,6 +317,11 @@ export function suggestBeatAlignedCuts(
         : nearest);
     const offsetUs = beatTimeUs - boundaryTimeUs;
     if (Math.abs(offsetUs) > maximumOffsetUs) return [];
+    if (beatAlignedClipSpeed(previous, offsetUs, {
+      maximumSpeedChangeRatio: options.maximumSpeedChangeRatio,
+    }) == null) {
+      return [];
+    }
     return [{
       fromClipId: previous.id,
       toClipId: clip.id,
