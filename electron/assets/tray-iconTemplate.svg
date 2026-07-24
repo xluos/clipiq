@@ -1,0 +1,16 @@
+<!-- macOS 顶部状态栏模板图标:复用主 logo (src/components/BrandLogo.tsx) 的形状 ——
+     三层错位叠帧 + play 三角, 单色 (template image 模式系统会按 menubar 主题自动反色)。
+     三层 frame 用 nonzero 合并成实心阶梯形外轮廓 (保留主 logo 那个标志性的左下→右上
+     错位剪影), play 三角通过 mask 镂空。viewBox 沿用主 logo 100x100, 内容范围
+     18-84 × 22-76, 天然留出四周 ~16-22px padding, menubar 上不会顶满 22×22 显得过大。 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <mask id="play-knockout">
+    <rect width="100" height="100" fill="#fff"/>
+    <path fill="#000" d="M57 51 Q55 51 55 54 L55 64 Q55 67 57 67 Q58 67 59 66 L71 60 Q73 59 73 59 Q73 59 71 58 L59 52 Q58 51 57 51 Z"/>
+  </mask>
+  <g mask="url(#play-knockout)" fill="#000">
+    <rect x="18" y="22" width="46" height="34" rx="9"/>
+    <rect x="28" y="32" width="46" height="34" rx="9"/>
+    <rect x="38" y="42" width="46" height="34" rx="9"/>
+  </g>
+</svg>

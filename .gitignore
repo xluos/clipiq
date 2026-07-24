@@ -4,7 +4,14 @@ build/*
 !build/icon.png
 !build/icon-mac.svg
 dist/
+release/
 coverage/
+
+# electron 侧 TS 渐进迁移:.ts 的编译产物(同名 .js/.js.map)不入库。
+# *.test.js 是真源码(vitest 跑),用否定规则排除在忽略之外。
+electron/**/*.js
+electron/**/*.js.map
+!electron/**/*.test.js
 .DS_Store
 *.log
 .env*
@@ -12,3 +19,11 @@ coverage/
 .screenshots/
 .mocks/
 .claude/
+
+# vendored crawler source: keep source in git, keep local dependency/build output out.
+vendor/DouYin_Spider/.venv/
+vendor/DouYin_Spider/node_modules/
+vendor/DouYin_Spider/**/__pycache__/
+vendor/DouYin_Spider/**/*.pyc
+vendor/DouYin_Spider/.env
+vendor/DouYin_Spider/outputs/

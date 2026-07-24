@@ -1,11 +1,12 @@
 import { useApp } from "../AppContext";
+import { SummaryDetail } from "./AccountScreen";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ArrowLeft, CheckCircle2, Download, FileText, AlertTriangle, Search, RefreshCw } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Download, FileText, AlertTriangle, Search, RefreshCw, FileArchive } from "lucide-react";
 import { formatTime } from "@/lib/utils";
-import { useEffect, useMemo, useRef, useState, type FC, type PointerEvent as ReactPointerEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type FC, type PointerEvent as ReactPointerEvent } from "react";
 import type { ExportFormat } from "../electron-api";
-import type { AnalysisNode, AnalysisTiming, DanmakuReport, VideoGenre, MethodologyTag, MethodologyMiss } from "../types";
+import type { AnalysisNode, AnalysisTiming, DanmakuReport, VideoGenre, MethodologyTag, MethodologyMiss, TokenUsageSummary, StageTokenUsage } from "../types";
 import { useVideoFrames } from "@/lib/use-video-frames";
 
 const REPORT_SECTIONS = [
@@ -110,15 +111,34 @@ function formatDuration(ms: number) {
 }
 
 export function ReportScreen() {
-  const { setCurrentScreen, reportByProject, activeProjectId, projects, setProjects, nodesByProject, providers } = useApp();
+  const { setCurrentScreen, reportByAnalysis, activeProjectId, activeAnalysisId, projects, setProjects, nodesByAnalysis, providers, startAnalysisForProject, analysisRecordsByProject, analysesByVideo, switchAnalysis } = useApp();
   const [exportStatus, setExportStatus] = useState("");
   const [activeSection, setActiveSection] = useState<string>("summary");
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const project = projects.find(p => p.id === activeProjectId);
-  const report = reportByProject[activeProjectId || ""];
-  const nodes = nodesByProject[activeProjectId || ""] || [];
-  const provider = providers.find(p => p.id === project?.providerId);
+  // v3: 优先用 activeAnalysisId，fallback 到 video 的最新分析
+  const resolvedAnalysisId = activeAnalysisId
+    || project?.currentAnalysisId
+    || (analysesByVideo[activeProjectId || ""] || [])[0]?.id
+    || "";
+  // 从 analysesByVideo 找到完整分析记录（含 result）
+  const analysisRecord = (analysesByVideo[activeProjectId || ""] || []).find((a) => a.id === resolvedAnalysisId);
+  const isContentPipeline = analysisRecord?.pipelineId === "builtin-content";
+  const analysisResult = analysisRecord?.result as any;
+
+  const report = reportByAnalysis[resolvedAnalysisId] || analysisResult?.report;
+  const nodes = nodesByAnalysis[resolvedAnalysisId] || analysisResult?.nodes || [];
+  const currentRecord = (analysisRecordsByProject[project?.id || ""] || []).find((r) => r.id === resolvedAnalysisId);
+  const provider = providers.find(p => p.id === currentRecord?.providerId);
+
+  // 冷加载:analyses 列表已不含 result,缓存里没有 report 就按需取(switchAnalysis → getAnalysis)。
+  useEffect(() => {
+    if (resolvedAnalysisId && activeProjectId && !reportByAnalysis[resolvedAnalysisId]) {
+      switchAnalysis(activeProjectId, resolvedAnalysisId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedAnalysisId, activeProjectId]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -173,6 +193,24 @@ export function ReportScreen() {
     container.scrollTo({ top: target.offsetTop - 24, behavior: "smooth" });
     setActiveSection(id);
   };
+
+  // 内容分析管线: 复用 SummaryDetail 展示摘要结果
+  if (isContentPipeline && analysisResult && project) {
+    return (
+      <div className="flex-1 flex flex-col bg-slate-50 dark:bg-[#0A0A0B] overflow-y-auto">
+        <div className="max-w-3xl mx-auto px-8 py-8 w-full space-y-6">
+          <button onClick={() => setCurrentScreen("home")} className="text-[12.5px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">
+            ← 返回
+          </button>
+          <div>
+            <div className="text-[10.5px] font-mono tracking-[0.14em] uppercase text-slate-500 dark:text-slate-400">内容分析 · CONTENT</div>
+            <h1 className="text-[22px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 mt-1">{project.title || project.videoName}</h1>
+          </div>
+          <SummaryDetail summary={analysisResult} onOpenAnalysis={() => setCurrentScreen("home")} />
+        </div>
+      </div>
+    );
+  }
 
   if (!project || !report) {
     return (
@@ -233,13 +271,24 @@ export function ReportScreen() {
     boundaries.push(next);
   }
 
+  // v2: 结构段从 5 装饰色改成命中/非命中两态。
+  // 命中 = 该段时间区间内有高光节点 → accent-soft。非命中 → muted。
+  // 这样和方法论审计结果呼应,装饰色不再和情绪用色撞车 (chat 建议 + DESIGN.md "no decorative palette spam")
+  const segmentHasHighlight = (segStart: number, segEnd: number) =>
+    nodes.some((n) => n.isHighlight && n.startSec >= segStart && n.startSec < segEnd);
+
   const segmentDefs = [
-    { key: "hook", label: "开头引子", detail: report.structure?.hook, tone: "bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700" },
-    { key: "development", label: "发展", detail: report.structure?.development, tone: "bg-indigo-50 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 border-indigo-100 dark:border-indigo-800/50" },
-    { key: "turn", label: "转折", detail: report.structure?.turn, tone: "bg-amber-50 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 border-amber-100 dark:border-amber-800/50" },
-    { key: "climax", label: "高潮", detail: report.structure?.climax, tone: "bg-purple-50 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 border-purple-100 dark:border-purple-800/50" },
-    { key: "ending", label: "结尾", detail: report.structure?.ending, tone: "bg-emerald-50 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 border-emerald-100 dark:border-emerald-800/50" },
-  ] as const;
+    { key: "hook",        label: "开头引子", detail: report.structure?.hook,        highlighted: segmentHasHighlight(boundaries[0], boundaries[1]) },
+    { key: "development", label: "发展",     detail: report.structure?.development, highlighted: segmentHasHighlight(boundaries[1], boundaries[2]) },
+    { key: "turn",        label: "转折",     detail: report.structure?.turn,        highlighted: segmentHasHighlight(boundaries[2], boundaries[3]) },
+    { key: "climax",      label: "高潮",     detail: report.structure?.climax,      highlighted: segmentHasHighlight(boundaries[3], boundaries[4]) },
+    { key: "ending",      label: "结尾",     detail: report.structure?.ending,      highlighted: segmentHasHighlight(boundaries[4], boundaries[5]) },
+  ].map((d) => ({
+    ...d,
+    tone: d.highlighted
+      ? "bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border-indigo-100 dark:border-indigo-800/50"
+      : "bg-slate-50 dark:bg-slate-800/40 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700",
+  })) as ReadonlyArray<{ key: string; label: string; detail?: string; highlighted: boolean; tone: string }>;
 
   const rawSegments = segmentDefs.map((def, index) => {
     const start = boundaries[index];
@@ -252,21 +301,11 @@ export function ReportScreen() {
 
   const handleReanalyzeWithGenre = (genre: VideoGenre | "auto") => {
     if (!project) return;
-    setProjects((prev) =>
-      prev.map((p) =>
-        p.id === project.id
-          ? {
-              ...p,
-              analysisOptions: {
-                ...(p.analysisOptions || { mode: "standard", density: "standard", focus: "all" }),
-                manualGenre: genre,
-              },
-              updatedAt: new Date().toISOString(),
-            }
-          : p
-      )
-    );
-    setCurrentScreen("prepare");
+    const nextOptions = {
+      ...(currentRecord?.analysisOptions || { mode: "standard" as const, density: "standard" as const, focus: "all" as const }),
+      manualGenre: genre,
+    };
+    startAnalysisForProject(project.id, nextOptions);
   };
 
   const audit = report.methodologyAudit;
@@ -286,7 +325,7 @@ export function ReportScreen() {
     if (!project || !report) return;
     setExportStatus("");
     if (window.videoAnalyzer) {
-      const result = await window.videoAnalyzer.exportProject({ project, nodes, report, provider, format });
+      const result = await window.videoAnalyzer.exportVideo({ video: project as any, analysis: { result: { nodes, report } } as any, format });
       if (!result.canceled) setExportStatus(`已导出到 ${result.filePath}`);
       return;
     }
@@ -350,11 +389,9 @@ export function ReportScreen() {
                 </p>
               )}
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400 font-mono pt-1">
-                {report.providerSnapshot?.name && (
-                  <span>来源 · {report.providerSnapshot.name}</span>
-                )}
+                <span className="text-slate-400 dark:text-slate-600">{project.id}</span>
                 {report.providerSnapshot?.model && (
-                  <span>模型 · {report.providerSnapshot.model}</span>
+                  <span>{report.providerSnapshot.name ? `${report.providerSnapshot.name} · ` : ""}{report.providerSnapshot.model}</span>
                 )}
                 {report.pipelineVersion && <span>流水线 · {report.pipelineVersion}</span>}
                 {report.schemaVersion && <span>Schema · {report.schemaVersion}</span>}
@@ -366,6 +403,10 @@ export function ReportScreen() {
             <div className="flex items-center gap-2 shrink-0">
               <Button variant="outline" size="sm" onClick={() => handleExport("json")} className="border-slate-200 dark:border-slate-800">JSON</Button>
               <Button variant="outline" size="sm" onClick={() => handleExport("csv")} className="border-slate-200 dark:border-slate-800">CSV</Button>
+              <Button variant="outline" size="sm" onClick={() => handleExport("zip")} className="border-slate-200 dark:border-slate-800">
+                <FileArchive className="w-3.5 h-3.5 mr-1" />
+                ZIP
+              </Button>
               <Button className="bg-indigo-600 hover:bg-indigo-700 text-white border-0" onClick={() => handleExport("markdown")}>
                 <Download className="w-4 h-4 mr-2" />
                 Markdown
@@ -376,6 +417,10 @@ export function ReportScreen() {
 
           {report.timings?.length ? (
             <TimingBar timings={report.timings} totalMs={report.totalDurationMs} />
+          ) : null}
+
+          {report.tokenUsage?.stages?.length ? (
+            <TokenUsagePanel tokenUsage={report.tokenUsage} />
           ) : null}
 
           {heroSentence && (
@@ -472,7 +517,7 @@ export function ReportScreen() {
             <h2 className="text-lg font-semibold text-slate-800 dark:text-slate-100 border-l-4 border-indigo-500 pl-3">方法论诊断</h2>
             <MethodologyDiagnostics
               audit={audit}
-              currentManualGenre={project.analysisOptions?.manualGenre || "auto"}
+              currentManualGenre={currentRecord?.analysisOptions?.manualGenre || "auto"}
               onReanalyze={handleReanalyzeWithGenre}
               onSeekToNode={(time) => {
                 window.sessionStorage.setItem(
@@ -822,8 +867,9 @@ const MethodologyTagItem: FC<MethodologyTagItemProps> = ({ tag, tone, compact = 
 type MethodologyMissItemProps = { miss: MethodologyMiss };
 
 const MethodologyMissItem: FC<MethodologyMissItemProps> = ({ miss }) => {
+  // 虚线边框: miss 是"应有未有",没有挂在具体节点上,用虚线和 hit/violation 的实线两态视觉分离 (chat 建议)
   return (
-    <li className="rounded-lg border border-rose-200 dark:border-rose-500/30 bg-rose-50/40 dark:bg-rose-500/5 px-3 py-2">
+    <li className="rounded-lg border border-dashed border-rose-300/70 dark:border-rose-500/40 bg-rose-50/40 dark:bg-rose-500/5 px-3 py-2">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{miss.ruleName}</span>
         <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800/60 text-slate-500">
@@ -1105,6 +1151,31 @@ function TimingBar({ timings, totalMs }: { timings: AnalysisTiming[]; totalMs?: 
   }
   const aggregated = Array.from(buckets.values()).sort((a, b) => b.durationMs - a.durationMs);
 
+  // 合并 < 3% 的小项到「其他」, 避免色块过细 / 图例过散.
+  // 只有 ≥ 2 个小项时才合并 (1 个小项合并意义不大, 直接展示)
+  const SMALL_THRESHOLD = 0.03;
+  const major: Aggregated[] = [];
+  const minor: Aggregated[] = [];
+  for (const item of aggregated) {
+    if (item.durationMs / total < SMALL_THRESHOLD) minor.push(item);
+    else major.push(item);
+  }
+  const displayed: Aggregated[] = [...major];
+  if (minor.length >= 2) {
+    displayed.push({
+      label: `其他 (${minor.length} 项)`,
+      durationMs: minor.reduce((acc, x) => acc + x.durationMs, 0),
+      stages: minor.flatMap((x) => x.stages),
+      notes: [
+        ...minor.flatMap((x) => x.notes),
+        ...minor.map((x) => `${x.label}: ${formatDuration(x.durationMs)}`),
+      ],
+      color: "from-slate-400 to-slate-300 dark:from-slate-600 dark:to-slate-700",
+    });
+  } else {
+    displayed.push(...minor);
+  }
+
   return (
     <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] p-3">
       <div className="flex items-baseline justify-between mb-2">
@@ -1112,29 +1183,193 @@ function TimingBar({ timings, totalMs }: { timings: AnalysisTiming[]; totalMs?: 
         <span className="font-mono text-xs text-slate-700 dark:text-slate-200">总计 {formatDuration(total)}</span>
       </div>
       <div className="flex h-3 rounded-full overflow-hidden bg-slate-100 dark:bg-slate-800">
-        {aggregated.map((a) => {
+        {displayed.map((a) => {
           const pct = (a.durationMs / total) * 100;
+          const tooltip = a.notes.length > 0
+            ? `${a.label} · ${formatDuration(a.durationMs)} · ${pct.toFixed(1)}%\n${a.notes.join("\n")}`
+            : `${a.label} · ${formatDuration(a.durationMs)} · ${pct.toFixed(1)}%`;
           return (
             <div
               key={a.label}
               style={{ width: `${pct}%` }}
-              title={`${a.label} · ${formatDuration(a.durationMs)} · ${pct.toFixed(1)}%`}
+              title={tooltip}
               className={`bg-gradient-to-r ${a.color}`}
             />
           );
         })}
       </div>
       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
-        {aggregated.map((a) => {
+        {displayed.map((a) => {
           const pct = (a.durationMs / total) * 100;
+          const tooltip = a.notes.length > 0 ? a.notes.join("\n") : undefined;
           return (
-            <div key={a.label} className="flex items-center gap-1.5 text-[11px]">
+            <div
+              key={a.label}
+              className="flex items-center gap-1.5 text-[11px]"
+              title={tooltip}
+            >
               <span className={`inline-block w-2 h-2 rounded-full bg-gradient-to-r ${a.color}`} />
               <span className="text-slate-600 dark:text-slate-300">{a.label}</span>
               <span className="font-mono text-slate-400 dark:text-slate-500">{formatDuration(a.durationMs)} · {pct.toFixed(0)}%</span>
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+const TOKEN_STAGE_LABELS: Record<string, string> = {
+  prefilter: "镜头切换检测",
+  "shot-merger": "镜头合并",
+  summarizer: "镜头摘要",
+  "detect-genre": "类型识别",
+  "main-analysis": "主分析",
+  "danmaku-emotion": "弹幕情绪",
+  "title-gen": "标题生成",
+  transcribe: "语音转写",
+};
+
+function humanTokenStage(stage: string) {
+  if (TOKEN_STAGE_LABELS[stage]) return TOKEN_STAGE_LABELS[stage];
+  for (const [k, v] of Object.entries(TOKEN_STAGE_LABELS)) {
+    if (stage.includes(k)) return v;
+  }
+  return stage;
+}
+
+function formatTokenCount(n: number) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+type ModelGroup = {
+  model: string;
+  providerName: string | null;
+  source: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  callCount: number;
+  cacheHits: number;
+  stages: { stage: string; promptTokens: number; completionTokens: number; totalTokens: number; cacheReadTokens: number; cacheCreationTokens: number; callCount: number }[];
+};
+
+function TokenUsagePanel({ tokenUsage }: { tokenUsage: TokenUsageSummary }) {
+  const { totalPromptTokens, totalCompletionTokens, totalTokens, stages } = tokenUsage;
+  if (!stages.length) return null;
+
+  const byModel = new Map<string, ModelGroup>();
+  for (const s of stages) {
+    const key = `${s.providerName || ""}::${s.model || "unknown"}::${s.source}`;
+    const existing = byModel.get(key);
+    const crt = (s as { cacheReadTokens?: number }).cacheReadTokens || 0;
+    const cct = (s as { cacheCreationTokens?: number }).cacheCreationTokens || 0;
+    if (existing) {
+      existing.promptTokens += s.promptTokens;
+      existing.completionTokens += s.completionTokens;
+      existing.totalTokens += s.totalTokens;
+      existing.cacheReadTokens += crt;
+      existing.cacheCreationTokens += cct;
+      existing.callCount += s.callCount;
+      existing.cacheHits += s.cacheHits;
+      existing.stages.push({ stage: s.stage, promptTokens: s.promptTokens, completionTokens: s.completionTokens, totalTokens: s.totalTokens, cacheReadTokens: crt, cacheCreationTokens: cct, callCount: s.callCount });
+    } else {
+      byModel.set(key, {
+        model: s.model || "unknown",
+        providerName: s.providerName,
+        source: s.source,
+        promptTokens: s.promptTokens,
+        completionTokens: s.completionTokens,
+        totalTokens: s.totalTokens,
+        cacheReadTokens: crt,
+        cacheCreationTokens: cct,
+        callCount: s.callCount,
+        cacheHits: s.cacheHits,
+        stages: [{ stage: s.stage, promptTokens: s.promptTokens, completionTokens: s.completionTokens, totalTokens: s.totalTokens, cacheReadTokens: crt, cacheCreationTokens: cct, callCount: s.callCount }],
+      });
+    }
+  }
+  const groups = Array.from(byModel.values()).sort((a, b) => b.totalTokens - a.totalTokens);
+
+  const promptPct = totalTokens > 0 ? (totalPromptTokens / totalTokens) * 100 : 0;
+
+  return (
+    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] p-3">
+      <div className="flex items-baseline justify-between mb-2">
+        <span className="text-[11px] uppercase tracking-widest text-slate-500 dark:text-slate-400">Token 消耗明细</span>
+        <span className="font-mono text-xs text-slate-700 dark:text-slate-200">
+          总计 {formatTokenCount(totalTokens)}
+          <span className="text-slate-400 dark:text-slate-500 ml-1.5">
+            输入 {formatTokenCount(totalPromptTokens)} · 输出 {formatTokenCount(totalCompletionTokens)}
+          </span>
+        </span>
+      </div>
+
+      {/* 输入/输出比例条 */}
+      <div className="flex h-2 rounded-full overflow-hidden bg-slate-100 dark:bg-slate-800 mb-3">
+        <div
+          style={{ width: `${promptPct}%` }}
+          className="bg-gradient-to-r from-sky-500 to-sky-400"
+          title={`输入 ${formatTokenCount(totalPromptTokens)} · ${promptPct.toFixed(1)}%`}
+        />
+        <div
+          style={{ width: `${100 - promptPct}%` }}
+          className="bg-gradient-to-r from-amber-500 to-amber-400"
+          title={`输出 ${formatTokenCount(totalCompletionTokens)} · ${(100 - promptPct).toFixed(1)}%`}
+        />
+      </div>
+      <div className="flex gap-3 mb-3 text-[11px]">
+        <div className="flex items-center gap-1.5">
+          <span className="inline-block w-2 h-2 rounded-full bg-gradient-to-r from-sky-500 to-sky-400" />
+          <span className="text-slate-600 dark:text-slate-300">输入</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="inline-block w-2 h-2 rounded-full bg-gradient-to-r from-amber-500 to-amber-400" />
+          <span className="text-slate-600 dark:text-slate-300">输出</span>
+        </div>
+      </div>
+
+      {/* 按模型分组 */}
+      <div className="space-y-2">
+        {groups.map((g) => (
+          <div key={`${g.providerName}::${g.model}::${g.source}`} className="rounded-lg border border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-white/[0.02] p-2.5">
+            <div className="flex items-baseline justify-between mb-1.5">
+              <span className="font-mono text-xs text-slate-800 dark:text-slate-200 truncate mr-2">
+                {g.providerName ? `${g.providerName} · ` : ""}{g.model}
+              </span>
+              <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400 shrink-0">
+                {formatTokenCount(g.totalTokens)}
+                {g.callCount > 0 && <span className="ml-1.5">{g.callCount} 次调用</span>}
+                {g.cacheHits > 0 && <span className="ml-1.5 text-emerald-600 dark:text-emerald-400">{g.cacheHits} 缓存</span>}
+              </span>
+            </div>
+            {(() => {
+              const hasCache = g.cacheReadTokens > 0 || g.cacheCreationTokens > 0;
+              return (
+                <div className={`grid gap-x-3 gap-y-0.5 text-[11px] ${hasCache ? "grid-cols-[1fr_auto_auto_auto_auto]" : "grid-cols-[1fr_auto_auto_auto]"}`}>
+                  <span className="text-slate-400 dark:text-slate-600">阶段</span>
+                  <span className="text-slate-400 dark:text-slate-600 text-right">输入</span>
+                  <span className="text-slate-400 dark:text-slate-600 text-right">输出</span>
+                  {hasCache && <span className="text-slate-400 dark:text-slate-600 text-right">缓存命中</span>}
+                  <span className="text-slate-400 dark:text-slate-600 text-right">合计</span>
+                  {g.stages.map((s) => (
+                    <Fragment key={s.stage}>
+                      <span className="text-slate-600 dark:text-slate-300 truncate">{humanTokenStage(s.stage)}</span>
+                      <span className="font-mono text-slate-500 dark:text-slate-400 text-right">{formatTokenCount(s.promptTokens)}</span>
+                      <span className="font-mono text-slate-500 dark:text-slate-400 text-right">{formatTokenCount(s.completionTokens)}</span>
+                      {hasCache && <span className="font-mono text-emerald-600 dark:text-emerald-400 text-right">{s.cacheReadTokens > 0 ? formatTokenCount(s.cacheReadTokens) : "—"}</span>}
+                      <span className="font-mono text-slate-700 dark:text-slate-200 text-right">{formatTokenCount(s.totalTokens)}</span>
+                    </Fragment>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+        ))}
       </div>
     </div>
   );

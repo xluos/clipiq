@@ -2,7 +2,7 @@
 // 设计:
 // - 单例 server 实例,同一时刻只跑一个模型;切换模型先 stop 再 start
 // - 端口动态分配,避免冲突
-// - 模型文件按 modelKey 隔离到 userData/models/llama/<key>/,GGUF + mmproj 各一份
+// - 模型文件由 ai-model-daemon 集中管理(~/Library/Application Support/AIModels/<modelId>/)
 // - 对外暴露 OpenAI-compatible 接口,renderer 侧 provider 抽象零改动直接复用
 
 const { app } = require("electron");
@@ -12,25 +12,13 @@ const fsSync = require("node:fs");
 const path = require("node:path");
 const { createServer } = require("node:net");
 const sidecarUtils = require("./sidecar-utils.cjs");
+const daemonClient = require("./daemon-client.cjs");
+const log = require("./logger.cjs");
 
 function pidFilePath() {
   return path.join(app.getPath("userData"), "sidecars", "llama.json");
 }
 
-const HF_MIRROR_DEFAULT = "https://hf-mirror.com";
-const MODELSCOPE_BASE = "https://modelscope.cn";
-
-// 下载源路径模板。env HF_MIRROR 仍然优先, 让开发期可以临时绕过 UI 配置;
-// 否则按调用方传入的 mirror 选: hf-mirror (HF 镜像) 或 modelscope (魔搭).
-// ModelScope 的资源路径和 HF 兼容: /models/{owner}/{name}/resolve/master/{file}.
-function buildDownloadUrl(mirror, repo, file) {
-  const envOverride = process.env.HF_MIRROR;
-  if (envOverride) return `${envOverride}/${repo}/resolve/main/${file}`;
-  if (mirror === "modelscope") {
-    return `${MODELSCOPE_BASE}/models/${repo}/resolve/master/${file}`;
-  }
-  return `${HF_MIRROR_DEFAULT}/${repo}/resolve/main/${file}`;
-}
 
 // llama.cpp 官方 release。PIN 版本号,升级时改这里;tar.gz/zip 顶层目录是 llama-${REL}。
 const LLAMA_CPP_RELEASE = "b9128";
@@ -76,13 +64,6 @@ function getManifest() {
   return MANIFEST;
 }
 
-function modelsRootDir() {
-  return path.join(app.getPath("userData"), "models", "llama");
-}
-
-function modelDir(modelKey) {
-  return path.join(modelsRootDir(), modelKey);
-}
 
 function llamaCppPlatformKey() {
   return `${process.platform}-${process.arch}`;
@@ -311,11 +292,21 @@ const state = {
   borrowedPid: null,
   port: null,
   modelKey: null,
+  // 实际启动 llama-server 时生效的 --ctx-size。manifest 默认 + config override 解析后落定。
+  contextSize: 0,
   startedAt: 0,
   status: "idle", // idle | starting | ready | stopping | error
   lastError: null,
   logBuffer: [],
 };
+
+// 外部 (main.cjs) 注册的 ctx 解析器: modelKey → number | null。
+// 用于把 config.json 里 localModelOverrides[modelKey].contextSize 注入到 --ctx-size。
+// null 时回落到 manifest 默认。
+let contextResolver = null;
+function setContextResolver(fn) {
+  contextResolver = typeof fn === "function" ? fn : null;
+}
 
 function pushLog(channel, line) {
   state.logBuffer.push({ ts: Date.now(), channel, line });
@@ -330,6 +321,7 @@ function getStatus() {
     status: state.status,
     modelKey: state.modelKey,
     port: state.port,
+    contextSize: state.contextSize || 0,
     startedAt: state.startedAt,
     lastError: state.lastError,
     recentLogs: state.logBuffer.slice(-30),
@@ -338,116 +330,39 @@ function getStatus() {
 
 async function listModels() {
   const items = [];
+  let daemonModels = null;
+  try {
+    daemonModels = await daemonClient.listModels("clipiq");
+  } catch {
+    // daemon 不可用时 fallback 为全部未下载
+  }
+  const daemonMap = new Map();
+  if (daemonModels) {
+    for (const dm of daemonModels) daemonMap.set(dm.id, dm);
+  }
+
   for (const [key, meta] of Object.entries(MODELS)) {
-    const dir = modelDir(key);
-    const llmPath = path.join(dir, meta.llmFile);
-    const mmprojPath = path.join(dir, meta.mmprojFile);
-    const llmStat = await fs.stat(llmPath).catch(() => null);
-    const mmprojStat = await fs.stat(mmprojPath).catch(() => null);
+    const dm = daemonMap.get(key);
+    const llmFile = dm?.files?.find((f) => f.role === "llm");
+    const mmprojFile = dm?.files?.find((f) => f.role === "mmproj");
     items.push({
       key,
       name: meta.name,
       description: meta.description,
       approxBytes: meta.approxBytes,
-      llmDownloaded: !!llmStat,
-      llmBytes: llmStat?.size || 0,
-      mmprojDownloaded: !!mmprojStat,
-      mmprojBytes: mmprojStat?.size || 0,
-      downloaded: !!llmStat && !!mmprojStat,
-      llmPath,
-      mmprojPath,
+      llmDownloaded: !!llmFile?.ready,
+      llmBytes: llmFile?.bytes || 0,
+      mmprojDownloaded: !!mmprojFile?.ready,
+      mmprojBytes: mmprojFile?.bytes || 0,
+      downloaded: dm?.ready || false,
+      llmPath: llmFile?.path || "",
+      mmprojPath: mmprojFile?.path || "",
     });
   }
   return items;
 }
 
-// 支持断点续传:
-// - <dest>.part   未完成的部分文件
-// - <dest>.part.url   该 .part 对应的下载 URL (用于检测 mirror 切换 → 不能续)
-// 流中断或不完整时不 unlink .part, 让下次 fetch 用 Range 续上。
-// rename 成功后两个文件都清掉。
-async function downloadFile(url, destPath, onProgress) {
-  const tmp = `${destPath}.part`;
-  const metaPath = `${destPath}.part.url`;
 
-  // 判断能否续传: 之前的 .part + .part.url 都在, 且 url 一致
-  let startBytes = 0;
-  try {
-    const recordedUrl = (await fs.readFile(metaPath, "utf8")).trim();
-    if (recordedUrl === url) {
-      const st = await fs.stat(tmp).catch(() => null);
-      if (st && st.size > 0) startBytes = st.size;
-    } else {
-      // url 换了 (mirror 切换 / 模型重命名): 不能用老字节, 清掉
-      await fs.unlink(tmp).catch(() => {});
-      await fs.unlink(metaPath).catch(() => {});
-    }
-  } catch {
-    // meta 不存在 → 首次下载或老版本残留, 让 status 200 分支正常处理
-  }
-
-  let response = await fetch(url, startBytes > 0 ? { headers: { Range: `bytes=${startBytes}-` } } : undefined);
-  // 416 = .part 越界 (本地比远程还大, 或远程文件已变), 全部清掉重下
-  if (response.status === 416) {
-    await fs.unlink(tmp).catch(() => {});
-    await fs.unlink(metaPath).catch(() => {});
-    startBytes = 0;
-    response = await fetch(url);
-  }
-  if (!response.ok || !response.body) {
-    throw new Error(`下载失败 HTTP ${response.status} ${url}`);
-  }
-
-  // 总大小: 206 → Content-Range 末尾 /N; 200 → Content-Length 即总; 200 但 startBytes>0 = 服务端忽略 Range
-  let total = 0;
-  let appendMode = false;
-  if (response.status === 206 && startBytes > 0) {
-    const cr = response.headers.get("content-range") || "";
-    const m = cr.match(/\/(\d+)$/);
-    if (m) total = Number(m[1]);
-    appendMode = true;
-  } else {
-    total = Number(response.headers.get("content-length")) || 0;
-    startBytes = 0;
-  }
-
-  await fs.writeFile(metaPath, url, "utf8");
-
-  const reader = response.body.getReader();
-  const fh = await fs.open(tmp, appendMode ? "a" : "w");
-  let received = startBytes;
-  let streamError = null;
-  try {
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      await fh.write(value);
-      received += value.byteLength;
-      if (onProgress) onProgress({ received, total });
-    }
-  } catch (e) {
-    streamError = e;
-  } finally {
-    await fh.close();
-  }
-  if (streamError) {
-    // 保留 .part + meta, 下次续上
-    throw streamError;
-  }
-  if (total > 0 && received !== total) {
-    // 流提前结束但未抛错: 保留 .part 让下次续传
-    const mb = (n) => (n / 1024 / 1024).toFixed(1);
-    throw new Error(`下载不完整: 已收到 ${mb(received)} MB / 预期 ${mb(total)} MB (下次重试会续传)`);
-  }
-  await fs.rename(tmp, destPath);
-  await fs.unlink(metaPath).catch(() => {});
-  return { received, total };
-}
-
-// 同一 modelKey 重入复用老 promise, 避免并发 fetch 把 .part 字节流交错。
-// onProgress 通过 IPC channel 自然分发给 renderer 所有 listener, 第二个 caller 的
-// onProgress closure 虽不会被直接调用, 但事件流还是能在 renderer 上收到。
 const inflightEnsures = new Map();
 
 async function ensureModel(modelKey, onProgress = () => {}, options = {}) {
@@ -470,38 +385,40 @@ async function doEnsureModel(modelKey, onProgress, options = {}) {
   if (meta._manifest && meta._manifest.available === false) {
     throw new Error(`${meta.name} 暂未实装,即将上线`);
   }
-  const dir = modelDir(modelKey);
-  await fs.mkdir(dir, { recursive: true });
-  const mirror = options.mirror === "modelscope" ? "modelscope" : "hf-mirror";
-  const targets = [
-    { file: meta.llmFile, label: "模型权重" },
-    { file: meta.mmprojFile, label: "视觉编码器" },
-  ];
-  for (const t of targets) {
-    const dest = path.join(dir, t.file);
-    if (await fileExists(dest)) {
-      onProgress({ stage: "skip", file: t.file, label: t.label, message: `${t.label}已就绪` });
-      continue;
-    }
-    const url = buildDownloadUrl(mirror, meta.repo, t.file);
-    onProgress({ stage: "start", file: t.file, label: t.label, message: `开始下载${t.label}` });
-    await downloadFile(url, dest, (p) => {
-      const pct = p.total > 0 ? Math.floor((p.received / p.total) * 100) : 0;
-      const mb = (n) => (n / 1024 / 1024).toFixed(1);
-      onProgress({
-        stage: "progress",
-        file: t.file,
-        label: t.label,
-        receivedBytes: p.received,
-        totalBytes: p.total,
-        percent: pct,
-        message: p.total > 0
-          ? `${t.label} ${pct}% (${mb(p.received)}MB / ${mb(p.total)}MB)`
-          : `${t.label} ${mb(p.received)}MB`,
-      });
-    });
-    onProgress({ stage: "done", file: t.file, label: t.label, message: `${t.label}下载完成` });
+
+  if (options.mirror) {
+    await daemonClient.setMirrorPreference(
+      options.mirror === "modelscope" ? "modelscope" : "hf-mirror",
+    ).catch(() => {});
   }
+
+  const roleLabels = { llm: "模型权重", mmproj: "视觉编码器" };
+
+  onProgress({ stage: "start", label: meta.name, message: `开始下载 ${meta.name}` });
+
+  const result = await daemonClient.downloadModel(modelKey, (p) => {
+    const label = roleLabels[p.fileRole] || p.fileRole || meta.name;
+    const pct = p.pct || 0;
+    const mb = (n) => (n / 1024 / 1024).toFixed(1);
+    onProgress({
+      stage: "progress",
+      file: p.fileRole || "",
+      label,
+      receivedBytes: p.done,
+      totalBytes: p.total,
+      percent: pct,
+      speed: p.speed || 0,
+      message: p.total > 0
+        ? `${label} ${pct}% (${mb(p.done)}MB / ${mb(p.total)}MB)`
+        : `${label} ${mb(p.done)}MB`,
+    });
+  });
+
+  if (result?.cancelled) {
+    onProgress({ stage: "cancelled", label: meta.name, message: `${meta.name} 下载已取消` });
+    return { ok: false, cancelled: true, modelKey };
+  }
+  onProgress({ stage: "done", label: meta.name, message: `${meta.name} 下载完成` });
   return { ok: true, modelKey };
 }
 
@@ -575,11 +492,17 @@ async function waitForReady(port, timeoutMs = 60_000) {
   throw new Error("llama-server 启动超时(60s)");
 }
 
-async function start(modelKey, { onLog } = {}) {
+async function start(modelKey, { onLog, contextSize } = {}) {
   // 复用: 当前会话或上一会话残留 (borrowedPid) 都算; 模型对得上就直接返回
   if (state.process || state.borrowedPid) {
     if (state.modelKey === modelKey && state.status === "ready") {
-      return { ok: true, port: state.port, reused: true, adopted: !!state.borrowedPid };
+      return {
+        ok: true,
+        port: state.port,
+        contextSize: state.contextSize,
+        reused: true,
+        adopted: !!state.borrowedPid,
+      };
     }
     await stop();
   }
@@ -597,9 +520,12 @@ async function start(modelKey, { onLog } = {}) {
     throw err;
   }
   state.binaryPath = binary;
-  const dir = modelDir(modelKey);
-  const llmPath = path.join(dir, meta.llmFile);
-  const mmprojPath = path.join(dir, meta.mmprojFile);
+  const daemonPaths = await daemonClient.getModelPaths(modelKey);
+  if (!daemonPaths || !daemonPaths.llm || !daemonPaths.mmproj) {
+    throw new Error(`模型文件未就绪,请先在设置页下载 ${meta.name}`);
+  }
+  const llmPath = daemonPaths.llm;
+  const mmprojPath = daemonPaths.mmproj;
 
   // 启动前校验: 拦住损坏 / 半截下载的 GGUF, 避免 llama-server 拿到坏文件再 exit code=1
   // 不抛 raw "异常退出 (code=1)" 消息, 改成可操作的中文提示, 顺手清掉坏文件,
@@ -626,12 +552,25 @@ async function start(modelKey, { onLog } = {}) {
   }
 
   const port = await findFreePort();
+
+  // ctx 解析优先级: 显式传入 > setContextResolver 注册的 hook > manifest 默认 > 8192 兜底
+  let effectiveCtx = Number(contextSize) > 0 ? Number(contextSize) : 0;
+  if (!effectiveCtx && contextResolver) {
+    try {
+      const fromHook = await contextResolver(modelKey);
+      if (Number(fromHook) > 0) effectiveCtx = Number(fromHook);
+    } catch (err) {
+      log.warn("llama-runtime", `contextResolver(${modelKey}) 失败:`, err?.message || err);
+    }
+  }
+  if (!effectiveCtx) effectiveCtx = Number(meta.contextSize) > 0 ? Number(meta.contextSize) : 8192;
+
   const args = [
     "--host", "127.0.0.1",
     "--port", String(port),
     "--model", llmPath,
     "--mmproj", mmprojPath,
-    "--ctx-size", String(meta.contextSize || 8192),
+    "--ctx-size", String(effectiveCtx),
     // Apple Silicon 上让所有层 offload 到 Metal;CPU 后端会忽略该参数
     "--n-gpu-layers", "999",
   ];
@@ -642,9 +581,10 @@ async function start(modelKey, { onLog } = {}) {
   state.startedAt = Date.now();
   state.modelKey = modelKey;
   state.port = port;
+  state.contextSize = effectiveCtx;
 
   const child = spawn(binary, args, {
-    cwd: dir,
+    cwd: path.dirname(llmPath),
     env: { ...process.env },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -654,6 +594,7 @@ async function start(modelKey, { onLog } = {}) {
     pid: child.pid,
     port,
     modelKey,
+    contextSize: effectiveCtx,
     parentPid: process.pid,
     startedAt: state.startedAt,
     binaryPath: binary,
@@ -665,8 +606,7 @@ async function start(modelKey, { onLog } = {}) {
       const line = raw.trimEnd();
       if (!line) continue;
       pushLog(channel, line);
-      // eslint-disable-next-line no-console
-      console.log(`[llama-server:${channel}]`, line);
+      log.info(`llama-server:${channel}`, line);
       if (onLog) onLog({ channel, line });
     }
   };
@@ -674,12 +614,12 @@ async function start(modelKey, { onLog } = {}) {
   child.stderr.on("data", handleLine("stderr"));
 
   child.once("exit", (code, signal) => {
-    // eslint-disable-next-line no-console
-    console.log(`[llama-server] exit code=${code} signal=${signal}`);
+    log.info("llama-server", `exit code=${code} signal=${signal}`);
     const wasStopping = state.status === "stopping";
     state.process = null;
     state.port = null;
     state.modelKey = null;
+    state.contextSize = 0;
     sidecarUtils.clearPidFile(pidFilePath());
     if (wasStopping) {
       state.status = "idle";
@@ -698,11 +638,13 @@ async function start(modelKey, { onLog } = {}) {
     throw error;
   }
   state.status = "ready";
-  return { ok: true, port, reused: false };
+  return { ok: true, port, contextSize: effectiveCtx, reused: false };
 }
 
-async function selfTest({ imageDataUrl, prompt } = {}) {
-  if (state.status !== "ready" || !state.port) {
+async function selfTest({ imageDataUrl, prompt, port, modelKey } = {}) {
+  const targetPort = port || state.port;
+  const targetModel = modelKey || state.modelKey;
+  if (!targetPort) {
     throw new Error("本地推理服务未就绪,请先启动模型");
   }
   const messages = [
@@ -715,11 +657,11 @@ async function selfTest({ imageDataUrl, prompt } = {}) {
     },
   ];
   const t0 = Date.now();
-  const res = await fetch(`http://127.0.0.1:${state.port}/v1/chat/completions`, {
+  const res = await fetch(`http://127.0.0.1:${targetPort}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: state.modelKey || "local",
+      model: targetModel || "local",
       messages,
       max_tokens: 200,
       temperature: 0.3,
@@ -736,14 +678,16 @@ async function selfTest({ imageDataUrl, prompt } = {}) {
     ok: true,
     latencyMs,
     text,
-    modelKey: state.modelKey,
+    modelKey: targetModel,
     usage: json?.usage || null,
   };
 }
 
 async function init() {
   state.binaryPath = await resolveLlamaServerPath();
-  await fs.mkdir(modelsRootDir(), { recursive: true });
+  try { await daemonClient.ensureDaemon(); } catch (err) {
+    log.warn("llama-runtime", "daemon 未启动:", err?.message || err);
+  }
   await reapOrAdopt();
 }
 
@@ -755,15 +699,13 @@ async function reapOrAdopt() {
   const { info } = result;
   if (result.mode === "stale") {
     // pid 已死 (上次进程 clean exit 但没清文件, 或机器重启过)
-    // eslint-disable-next-line no-console
-    console.log("[llama-runtime] PID file stale, clearing");
+    log.info("llama-runtime", "PID file stale, clearing");
     sidecarUtils.clearPidFile(filePath);
     return;
   }
   if (result.mode === "kill") {
     // pid 活但 HTTP 不响应 —— 僵尸状态, 杀掉
-    // eslint-disable-next-line no-console
-    console.log(`[llama-runtime] orphan pid ${info.pid} unresponsive on :${info.port}, killing`);
+    log.info("llama-runtime", `orphan pid ${info.pid} unresponsive on :${info.port}, killing`);
     await sidecarUtils.killPidAsyncWait(info.pid, 1500);
     sidecarUtils.clearPidFile(filePath);
     return;
@@ -771,8 +713,7 @@ async function reapOrAdopt() {
   // adopt: pid + port 都活, 接管
   if (!MODELS[info.modelKey]) {
     // 配置变了 / 不认识的 modelKey → 杀掉, 不接管
-    // eslint-disable-next-line no-console
-    console.log(`[llama-runtime] orphan modelKey ${info.modelKey} not in current MODELS map, killing`);
+    log.info("llama-runtime", `orphan modelKey ${info.modelKey} not in current MODELS map, killing`);
     await sidecarUtils.killPidAsyncWait(info.pid, 1500);
     sidecarUtils.clearPidFile(filePath);
     return;
@@ -780,10 +721,13 @@ async function reapOrAdopt() {
   state.borrowedPid = info.pid;
   state.port = info.port;
   state.modelKey = info.modelKey;
+  // 接管时 ctx 从 PID 文件读; 老版本 PID 文件没有这个字段就用 manifest 默认作为近似
+  state.contextSize = Number(info.contextSize) > 0
+    ? Number(info.contextSize)
+    : (Number(MODELS[info.modelKey]?.contextSize) > 0 ? Number(MODELS[info.modelKey].contextSize) : 8192);
   state.startedAt = info.startedAt || Date.now();
   state.status = "ready";
-  // eslint-disable-next-line no-console
-  console.log(`[llama-runtime] adopted orphan pid=${info.pid} port=${info.port} model=${info.modelKey}`);
+  log.info("llama-runtime", `adopted orphan pid=${info.pid} port=${info.port} model=${info.modelKey}`);
 }
 
 // 同步退出路径 (process.exit / SIGTERM hook) 调用。要尽快释放 sidecar, 不能用 async。
@@ -800,6 +744,11 @@ function shutdownSync() {
   }
 }
 
+// 拿当前 sidecar PID: 本会话 spawn 的取 child.pid, 跨会话接管的取 borrowedPid。
+function getRuntimePid() {
+  return state.process?.pid || state.borrowedPid || null;
+}
+
 module.exports = {
   MODELS,
   LLAMA_CPP_RELEASE,
@@ -811,7 +760,9 @@ module.exports = {
   start,
   stop,
   getStatus,
+  getRuntimePid,
   selfTest,
   resolveLlamaServerPath,
+  setContextResolver,
   shutdownSync,
 };

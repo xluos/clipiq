@@ -4,9 +4,9 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
-import { FileText, Play, Pause, ArrowLeft, Folder, Search, Star, ExternalLink, Copy, Check } from "lucide-react";
+import { FileText, Play, Pause, ArrowLeft, Folder, Search, Star, ExternalLink, Copy, Check, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { AnalysisNode, AnalysisNodeType, DanmakuEmotionAxis, Project } from "../types";
+import { AnalysisNode, AnalysisNodeType, DanmakuEmotionAxis, Video } from "../types";
 import { formatTime } from "@/lib/utils";
 
 // 弹幕情绪 → 颜色 / 中文标签 (用于时间轴情绪带 + 节点卡片小标签)
@@ -28,13 +28,25 @@ const EMOTION_ZH: Record<DanmakuEmotionAxis | "neutral", string> = {
 };
 
 export function WorkspaceScreen() {
-  const { setCurrentScreen, projects, activeProjectId, nodesByProject, setNodesForProject, reportByProject } = useApp();
+  const { setCurrentScreen, goBack, projects, activeProjectId, activeAnalysisId: ctxAnalysisId, nodesByAnalysis, setNodesForAnalysis, reportByAnalysis, startAnalysisForProject, analysisRecordsByProject, analysesByVideo, switchAnalysis } = useApp();
 
   const project = projects.find(p => p.id === activeProjectId);
-  const nodes = nodesByProject[activeProjectId || ""] || [];
-  const report = activeProjectId ? reportByProject[activeProjectId] : undefined;
+  const currentAnalysisId = ctxAnalysisId
+    || project?.currentAnalysisId
+    || (analysesByVideo[activeProjectId || ""] || [])[0]?.id
+    || "";
+  const nodes = nodesByAnalysis[currentAnalysisId] || [];
+  const report = currentAnalysisId ? reportByAnalysis[currentAnalysisId] : undefined;
   const shotContexts = report?.shotContexts || [];
-  
+
+  // 冷加载:nodes/report 不再在启动预热,缓存里没有就按需从 DB 取(switchAnalysis → getAnalysis)。
+  useEffect(() => {
+    if (currentAnalysisId && activeProjectId && !nodesByAnalysis[currentAnalysisId]) {
+      switchAnalysis(activeProjectId, currentAnalysisId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentAnalysisId, activeProjectId]);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   
@@ -175,7 +187,8 @@ export function WorkspaceScreen() {
 
   const updateNode = (nodeId: string, patch: Partial<AnalysisNode>) => {
     if (!activeProjectId) return;
-    setNodesForProject(activeProjectId, nodes.map(node => node.id === nodeId ? { ...node, ...patch } : node));
+    if (!currentAnalysisId) return;
+    setNodesForAnalysis(currentAnalysisId, nodes.map(node => node.id === nodeId ? { ...node, ...patch } : node));
   };
 
   const filteredNodes = nodes.filter(node => {
@@ -185,6 +198,13 @@ export function WorkspaceScreen() {
   });
 
   const isPortrait = project.orientation === "portrait";
+  // 左区(视频)宽度按朝向取比例,右区(节点)拿剩下(flex-1)。
+  // 竖屏视频窄,左区给小;横屏视频宽,左区给大。横屏/方形在窄屏上下堆叠,故 w-full md:w-[..]。
+  const leftWidthClass = isPortrait
+    ? "w-[36%]"
+    : project.orientation === "square"
+      ? "w-full md:w-[50%]"
+      : "w-full md:w-[62%]";
 
   const totalNodes = nodes.length;
   const highlightCount = nodes.filter(n => n.isHighlight).length;
@@ -222,12 +242,13 @@ export function WorkspaceScreen() {
       {/* Top Toolbar */}
       <header className="h-14 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0A0A0B]/80 backdrop-blur flex flex-none items-center justify-between px-4 z-10 shrink-0">
         <div className="flex items-center gap-4 min-w-0">
-          <Button variant="ghost" size="icon" onClick={() => setCurrentScreen("home")} className="text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100">
+          <Button variant="ghost" size="icon" onClick={() => goBack()} className="text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100">
             <ArrowLeft className="w-5 h-5" />
           </Button>
           <div className="h-4 w-px bg-slate-200 dark:bg-slate-800" />
           <div className="flex items-center gap-3 min-w-0">
             <span className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate max-w-[180px] md:max-w-xs">{project.videoName}</span>
+            <span className="text-[10px] font-mono text-slate-400 dark:text-slate-600 shrink-0">{project.id}</span>
             <span className="px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-[10px] border border-indigo-100 dark:border-indigo-500/20 shrink-0">
               {project.orientation === "portrait" ? "竖屏" : project.orientation === "square" ? "方形" : "横屏"}
             </span>
@@ -258,6 +279,29 @@ export function WorkspaceScreen() {
               <span className="text-xs font-medium text-emerald-700 dark:text-emerald-400 tracking-widest">已完成</span>
             </div>
           ) : null}
+          {project.status === "completed" && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => startAnalysisForProject(project.id)}
+                className="hidden md:flex h-9 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
+                title="重新分析"
+              >
+                <RefreshCw className="w-4 h-4 mr-2" />
+                重新分析
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => startAnalysisForProject(project.id)}
+                className="flex md:hidden text-slate-600 dark:text-slate-300"
+                title="重新分析"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </Button>
+            </>
+          )}
           <Button variant="secondary" size="sm" onClick={() => setCurrentScreen("report")} className="bg-indigo-600 hover:bg-indigo-700 text-white border-0 hidden md:flex h-9 shadow-sm hover:shadow">
             <FileText className="w-4 h-4 mr-2" />
             查看报告
@@ -272,12 +316,13 @@ export function WorkspaceScreen() {
       <div className={`flex-1 flex overflow-hidden ${isPortrait ? 'flex-row' : 'flex-col md:flex-row'}`}>
         
         {/* Left: Video Player Area */}
-        <div className={`flex flex-col relative ${isPortrait ? 'w-auto max-w-[45%]' : 'flex-1'} min-h-0 bg-slate-100/50 dark:bg-black/20`}>
+        <div className={`flex flex-col relative shrink-0 ${leftWidthClass} min-h-0 bg-slate-100/50 dark:bg-black/20`}>
           <div className="flex-1 relative flex items-center justify-center p-4 min-h-0">
             <div className="relative w-full h-full max-w-full max-h-full flex items-center justify-center rounded-xl overflow-hidden bg-black shadow-xl border border-slate-200/50 dark:border-slate-800/50">
               <video 
                 ref={videoRef}
-                src={project.localVideoPath} 
+                src={project.localVideoPath}
+                poster={project.thumbnailUrl}
                 className={`w-full h-full object-contain`}
                 onClick={togglePlay}
               />
@@ -413,7 +458,7 @@ export function WorkspaceScreen() {
         </div>
 
         {/* Right: Nodes List Sidebar */}
-        <div className={`${isPortrait ? 'flex-1' : 'w-full md:w-[540px]'} border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] flex flex-col min-h-0 shadow-sm z-10`}>
+        <div className={`flex-1 min-w-0 border-l border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] flex flex-col min-h-0 shadow-sm z-10`}>
           <div className="p-3 border-b border-slate-200 dark:border-slate-800 flex-none bg-slate-50/80 dark:bg-[#0E0E10] space-y-3">
             {report?.globalSummary && (
               <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-3">
@@ -429,7 +474,7 @@ export function WorkspaceScreen() {
               {([
                 { key: "timeline", label: "逻辑节点", count: nodes.length },
                 { key: "shots", label: "镜头", count: shotContexts.length },
-                { key: "insights", label: "概览" },
+                { key: "insights", label: "概览", count: undefined as number | undefined },
               ] as const).map((item) => {
                 const isActive = tab === item.key;
                 return (
@@ -917,7 +962,7 @@ export function WorkspaceScreen() {
   );
 }
 
-function SourceBadge({ project, copied, onCopy }: { project: Project; copied: boolean; onCopy: () => void }) {
+function SourceBadge({ project, copied, onCopy }: { project: Video; copied: boolean; onCopy: () => void }) {
   const source = project.source;
   const isUrl = source.type === "url";
   const value = isUrl ? source.url : (project.localFilePath || source.originalPath);

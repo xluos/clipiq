@@ -1,0 +1,1049 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ClipIQ 数据架构：项目 · 分析 · 日志</title>
+    <style>
+      :root {
+        --paper: #f7f7f5;
+        --paper-edge: #efefea;
+        --ink: #1a1a1a;
+        --ink-soft: #4a4a4a;
+        --ink-faint: #7a7a7a;
+        --rule: #d8d8d2;
+        --rule-soft: #e8e8e2;
+        --accent: #6f9bb8;
+        --accent-soft: #d9e6f0;
+        --accent-faint: #eef4f8;
+        --warn: #b88a4a;
+        --warn-soft: #f5ecdc;
+        --danger: #a05050;
+        --code-bg: #ececea;
+
+        --brain: #6f9bb8;
+        --brain-bg: #eef4f8;
+        --hands: #b88a4a;
+        --hands-bg: #f5ecdc;
+        --session: #6b7560;
+        --session-bg: #ecede5;
+      }
+
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html { font-size: 16px; }
+
+      body {
+        font-family:
+          ui-serif, "Charter", "Iowan Old Style", "Source Serif Pro", Georgia,
+          "Songti SC", "Source Han Serif SC", "Noto Serif CJK SC", serif;
+        background: var(--paper);
+        color: var(--ink);
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+        padding: 64px 24px 96px;
+      }
+
+      .doc { max-width: 840px; margin: 0 auto; }
+
+      /* ─── Header ─── */
+      .doc-header {
+        border-bottom: 1px solid var(--rule);
+        padding-bottom: 28px;
+        margin-bottom: 48px;
+      }
+      .doc-eyebrow {
+        font-family: ui-monospace, "SF Mono", Menlo, "PingFang SC", "Hiragino Sans GB", monospace;
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--ink-faint);
+        margin-bottom: 14px;
+      }
+      .doc-title {
+        font-family: ui-serif, Charter, Georgia, "Songti SC", "Source Han Serif SC", serif;
+        font-size: 34px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        line-height: 1.2;
+      }
+      .doc-subtitle {
+        font-size: 16px;
+        color: var(--ink-soft);
+        margin-top: 10px;
+        font-style: italic;
+      }
+      .doc-meta {
+        font-family: ui-monospace, Menlo, "PingFang SC", "Hiragino Sans GB", monospace;
+        font-size: 11px;
+        color: var(--ink-faint);
+        margin-top: 18px;
+        display: flex;
+        gap: 24px;
+      }
+
+      /* ─── TL;DR ─── */
+      .tldr {
+        background: var(--accent-faint);
+        border-left: 2px solid var(--accent);
+        padding: 20px 24px;
+        margin-bottom: 56px;
+        font-size: 15px;
+      }
+      .tldr-label {
+        font-family: ui-monospace, Menlo, "PingFang SC", "Hiragino Sans GB", monospace;
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-bottom: 8px;
+        font-weight: 600;
+      }
+
+      /* ─── Sections ─── */
+      section { margin-bottom: 56px; }
+      h2 {
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: -0.005em;
+        margin-bottom: 18px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--rule);
+      }
+      h2 .num {
+        font-family: ui-monospace, Menlo, "PingFang SC", "Hiragino Sans GB", monospace;
+        font-size: 12px;
+        color: var(--ink-faint);
+        font-weight: 500;
+        margin-right: 14px;
+        letter-spacing: 0.05em;
+      }
+      h3 {
+        font-size: 16px;
+        font-weight: 600;
+        margin: 28px 0 10px;
+      }
+      h4 {
+        font-size: 14px;
+        font-weight: 600;
+        margin: 22px 0 8px;
+      }
+      p { margin-bottom: 14px; }
+      p + p { margin-top: -2px; }
+      a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-soft); }
+      a:hover { border-bottom-color: var(--accent); }
+      code {
+        font-family: ui-monospace, "SF Mono", Menlo, "PingFang SC", "Hiragino Sans GB", monospace;
+        font-size: 13px;
+        background: var(--code-bg);
+        padding: 1px 5px;
+        border-radius: 2px;
+      }
+      pre {
+        font-family: ui-monospace, Menlo, "PingFang SC", "Hiragino Sans GB", monospace;
+        font-size: 12.5px;
+        line-height: 1.55;
+        background: var(--code-bg);
+        padding: 14px 18px;
+        margin: 14px 0 18px;
+        overflow-x: auto;
+        border-left: 2px solid var(--rule);
+        position: relative;
+      }
+      pre code { background: transparent; padding: 0; }
+      ul, ol { margin: 8px 0 16px 22px; }
+      li { margin-bottom: 6px; }
+      strong { font-weight: 600; }
+      em { color: var(--ink-soft); }
+      blockquote {
+        border-left: 2px solid var(--rule);
+        padding: 4px 0 4px 18px;
+        margin: 14px 0 18px;
+        color: var(--ink-soft);
+        font-style: italic;
+      }
+
+      /* ─── Tables ─── */
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 14px 0 18px;
+        font-size: 14px;
+      }
+      th, td {
+        text-align: left;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--rule-soft);
+        vertical-align: top;
+      }
+      th {
+        font-weight: 600;
+        font-family: ui-sans-serif, system-ui, "PingFang SC", "Hiragino Sans GB", sans-serif;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--ink-faint);
+        border-bottom: 1px solid var(--rule);
+      }
+      tbody tr:hover { background: rgba(0,0,0,0.015); }
+      td.num {
+        font-family: ui-monospace, Menlo, "PingFang SC", "Hiragino Sans GB", monospace;
+        font-size: 13px;
+      }
+      td.accent { color: var(--accent); font-weight: 500; }
+
+      /* ─── Callouts ─── */
+      .callout {
+        border: 1px solid var(--rule);
+        background: #fff;
+        padding: 16px 18px;
+        margin: 16px 0 20px;
+      }
+      .callout.warn {
+        border-color: #e6d4a8;
+        background: var(--warn-soft);
+      }
+      .callout.cite {
+        border-left: 2px solid var(--accent);
+        border-top: none; border-right: none; border-bottom: none;
+        background: var(--accent-faint);
+        padding-left: 22px;
+        font-style: italic;
+      }
+      .callout-label {
+        font-family: ui-monospace, Menlo, "PingFang SC", "Hiragino Sans GB", monospace;
+        font-size: 10.5px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--ink-faint);
+        margin-bottom: 8px;
+        font-weight: 600;
+      }
+      .callout.warn .callout-label { color: var(--warn); }
+      .cite-source {
+        font-style: normal;
+        font-size: 12px;
+        color: var(--ink-faint);
+        margin-top: 10px;
+        font-family: ui-monospace, Menlo, "PingFang SC", "Hiragino Sans GB", monospace;
+      }
+
+      /* ─── Figure / Diagram ─── */
+      figure {
+        margin: 28px 0 32px;
+        border: 1px solid var(--rule);
+        background: #fff;
+      }
+      figure svg { display: block; width: 100%; height: auto; }
+      figcaption {
+        font-family: ui-monospace, Menlo, "PingFang SC", "Hiragino Sans GB", monospace;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--ink-faint);
+        padding: 10px 16px;
+        border-top: 1px solid var(--rule-soft);
+        background: var(--paper-edge);
+      }
+      figcaption .fig-num {
+        color: var(--accent);
+        margin-right: 10px;
+        font-weight: 600;
+      }
+
+      /* ─── N-column concept cards ─── */
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+        margin: 20px 0 18px;
+      }
+      .cards.cols-2 { grid-template-columns: repeat(2, 1fr); }
+      .cards.cols-4 { grid-template-columns: repeat(4, 1fr); }
+      .card {
+        border: 1px solid var(--rule);
+        background: #fff;
+        padding: 16px 16px 14px;
+      }
+      .card-icon {
+        font-family: ui-monospace, Menlo, "PingFang SC", "Hiragino Sans GB", monospace;
+        font-size: 11px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        margin-bottom: 8px;
+        font-weight: 600;
+        color: var(--accent);
+      }
+      .card-name {
+        font-family: ui-serif, Charter, Georgia, "Songti SC", "Source Han Serif SC", serif;
+        font-size: 17px;
+        font-weight: 600;
+        margin-bottom: 6px;
+      }
+      .card-where {
+        font-size: 12px;
+        color: var(--ink-faint);
+        font-style: italic;
+        margin-bottom: 10px;
+      }
+      .card-desc { font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
+
+      .card.tone-a .card-icon { color: var(--brain); }
+      .card.tone-b .card-icon { color: var(--hands); }
+      .card.tone-c .card-icon { color: var(--session); }
+
+      .mascot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        background: var(--accent);
+        margin-right: 8px;
+        vertical-align: middle;
+      }
+
+      /* ─── Footer ─── */
+      footer {
+        margin-top: 80px;
+        padding-top: 24px;
+        border-top: 1px solid var(--rule);
+        font-size: 12px;
+        color: var(--ink-faint);
+      }
+      footer h4 {
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        font-family: ui-monospace, Menlo, "PingFang SC", "Hiragino Sans GB", monospace;
+        margin-bottom: 10px;
+        color: var(--ink-soft);
+      }
+      footer ul { list-style: none; margin-left: 0; }
+      footer li { margin-bottom: 4px; }
+
+      /* ─── Collapsible sections ─── */
+      section.collapsible h2 { cursor: pointer; position: relative; padding-right: 28px; }
+      section.collapsible h2::after {
+        content: "\2212";
+        position: absolute; right: 8px; top: 0;
+        font-family: ui-monospace, Menlo, monospace;
+        color: var(--ink-faint);
+      }
+      section.collapsible.collapsed h2::after { content: "+"; }
+      section.collapsible.collapsed > *:not(h2) { display: none; }
+
+      /* ─── Copy button ─── */
+      .copy-btn {
+        position: absolute; top: 8px; right: 8px;
+        font-family: ui-monospace, Menlo, monospace; font-size: 10px;
+        letter-spacing: 0.1em; text-transform: uppercase;
+        background: #fff; border: 1px solid var(--rule);
+        padding: 4px 8px; cursor: pointer; color: var(--ink-faint);
+      }
+      .copy-btn:hover { color: var(--ink); }
+
+      /* ─── Click-to-zoom figures ─── */
+      figure.zoomable { cursor: zoom-in; }
+      figure.zoomable.zoomed {
+        position: fixed; inset: 0; z-index: 100;
+        background: rgba(0,0,0,0.85); cursor: zoom-out;
+        padding: 40px; margin: 0; border: none;
+        display: flex; align-items: center; justify-content: center;
+      }
+      figure.zoomable.zoomed svg { max-width: 95vw; max-height: 90vh; width: auto; }
+      figure.zoomable.zoomed figcaption { display: none; }
+
+      /* ─── Dark mode ─── */
+      html.dark {
+        --paper: #1a1a1a;
+        --paper-edge: #222;
+        --ink: #e8e8e2;
+        --ink-soft: #b8b8b2;
+        --ink-faint: #888;
+        --rule: #333;
+        --rule-soft: #2a2a2a;
+        --code-bg: #262624;
+        --accent-faint: #1c2a35;
+        --warn-soft: #2c2418;
+      }
+      html.dark .callout, html.dark .card, html.dark figure { background: #1f1f1f; }
+      html.dark figcaption { background: #181818; }
+
+      .theme-toggle {
+        position: fixed; top: 16px; right: 16px;
+        font-family: ui-monospace, Menlo, monospace; font-size: 10px;
+        letter-spacing: 0.1em; text-transform: uppercase;
+        background: var(--paper-edge); color: var(--ink-faint);
+        border: 1px solid var(--rule);
+        padding: 6px 10px; cursor: pointer; z-index: 10;
+      }
+
+      /* ─── Reading progress ─── */
+      .reading-progress {
+        position: fixed; top: 0; left: 0;
+        height: 2px; background: var(--accent);
+        width: 0%; z-index: 10;
+        transition: width 0.1s ease-out;
+      }
+
+      @media (max-width: 720px) {
+        body { padding: 32px 16px 64px; }
+        .doc-title { font-size: 26px; }
+        .cards, .cards.cols-2, .cards.cols-4 { grid-template-columns: 1fr; }
+        .doc-meta { flex-wrap: wrap; gap: 12px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="reading-progress" id="progress"></div>
+    <button class="theme-toggle" id="theme-toggle">dark</button>
+
+    <article class="doc">
+
+      <!-- ────── Header ────── -->
+      <header class="doc-header">
+        <div class="doc-eyebrow"><span class="mascot"></span>ClipIQ Internal &middot; Architecture Reference</div>
+        <h1 class="doc-title">项目 &middot; 分析 &middot; 日志：数据关系全景</h1>
+        <p class="doc-subtitle">从一个 projectId 出发，追踪数据在四个存储层之间的流动</p>
+        <div class="doc-meta">
+          <span>STATUS &middot; REFERENCE</span>
+          <span>DATE &middot; 2026-05-25</span>
+          <span>CODEBASE &middot; feature/v2</span>
+        </div>
+      </header>
+
+      <!-- ────── TL;DR ────── -->
+      <div class="tldr">
+        <div class="tldr-label">TL;DR</div>
+        ClipIQ 的数据围绕 <code>projectId</code> 组织，分布在四层：<strong>SQLite</strong>（项目元数据 + 节点 + 报告，持久化到磁盘）、<strong>文件系统</strong>（关键帧 / 音轨 / 字幕 / checkpoint，跨分析复用）、<strong>React 状态</strong>（进度快照 + 日志 + ETA 预算，存活于内存）、<strong>Main 进程状态</strong>（分析句柄 + 心跳 + 子进程，分析结束即销毁）。点击"重试"时，<code>startAnalysisForProject</code> 清空内存层 + 部分 SQLite 行，但保留文件系统 artifacts；ProgressScreen 挂载后向 Main 进程发起新的 <code>analyzeProject</code> IPC 调用，管线从头启动。
+      </div>
+
+      <!-- ────── Section 01 ────── -->
+      <section class="collapsible">
+        <h2><span class="num">01</span>三个核心实体</h2>
+        <p>理解 ClipIQ 的数据模型只需要抓住三个名词：<strong>Project</strong>（项目）、<strong>Analysis</strong>（一次分析执行）、<strong>Progress Log</strong>（进度日志）。它们之间是 <code>1 : N : N</code> 的关系&mdash;&mdash;一个项目可以被多次分析，每次分析产出一组进度日志。</p>
+
+        <div class="cards">
+          <div class="card tone-a">
+            <div class="card-icon">PROJECT</div>
+            <div class="card-name">项目</div>
+            <div class="card-where">&rarr; 用户看到的"一个视频"</div>
+            <div class="card-desc">由 <code>proj-{timestamp}</code> 唯一标识。携带来源（URL / 本地文件）、时长、分辨率、分析配置、状态机位。</div>
+          </div>
+          <div class="card tone-b">
+            <div class="card-icon">ANALYSIS</div>
+            <div class="card-name">分析执行</div>
+            <div class="card-where">&rarr; Main 进程的一次管线运行</div>
+            <div class="card-desc">由 <code>activeAnalyses.get(projectId)</code> 句柄代表。包含 AbortController、子进程集合、心跳定时器、Token 账本。结束后句柄销毁。</div>
+          </div>
+          <div class="card tone-c">
+            <div class="card-icon">PROGRESS LOG</div>
+            <div class="card-name">进度日志</div>
+            <div class="card-where">&rarr; React 内存中按 projectId 累积</div>
+            <div class="card-desc">每条 <code>ProgressLogEntry</code> 记录 absoluteMs / stage / message / tone / fromCache。上限 80 条，去重后追加。</div>
+          </div>
+        </div>
+
+        <p>一个关键设计：<strong>Analysis 执行没有独立 ID</strong>。它不写入数据库、不做审计追踪。系统只保留"最近一次成功"的结果（nodes + report），重跑时直接覆盖。进度日志也只保留当前运行的&mdash;&mdash;重新分析时先清空，再从零累积。</p>
+      </section>
+
+      <!-- ────── Section 02 ────── -->
+      <section class="collapsible">
+        <h2><span class="num">02</span>四层存储架构</h2>
+        <p>数据按持久性和生命周期分布在四个层。从上到下：生命周期越长、写入代价越高。</p>
+
+        <figure>
+          <svg viewBox="0 0 760 420" xmlns="http://www.w3.org/2000/svg"
+               font-family="ui-monospace, Menlo, monospace" font-size="12">
+            <rect width="760" height="420" fill="#fff"/>
+
+            <!-- Layer 1: React State -->
+            <rect x="60" y="30" width="640" height="80" fill="#eef4f8" stroke="#6f9bb8" stroke-width="1.4" rx="3"/>
+            <text x="76" y="52" fill="#6f9bb8" font-weight="600" letter-spacing="0.1em" font-size="11">LAYER 1 &middot; REACT STATE (VOLATILE)</text>
+            <text x="76" y="72" fill="#7a7a7a" font-size="10.5" font-style="italic">&rarr; 存活周期：当前 renderer 进程</text>
+            <text x="76" y="92" fill="#4a4a4a" font-size="11">progressByProject &middot; logsByProject &middot; budgetByProject &middot; projects[]</text>
+
+            <!-- Layer 2: Main Process State -->
+            <rect x="60" y="130" width="640" height="80" fill="#f5ecdc" stroke="#b88a4a" stroke-width="1.4" rx="3"/>
+            <text x="76" y="152" fill="#7a6420" font-weight="600" letter-spacing="0.1em" font-size="11">LAYER 2 &middot; MAIN PROCESS STATE (VOLATILE)</text>
+            <text x="76" y="172" fill="#7a7a7a" font-size="10.5" font-style="italic">&rarr; 存活周期：一次 analyzeProject 调用</text>
+            <text x="76" y="192" fill="#4a4a4a" font-size="11">activeAnalyses Map &middot; handle.lastProgress &middot; heartbeat &middot; tokenLedger</text>
+
+            <!-- Layer 3: File System -->
+            <rect x="60" y="230" width="640" height="80" fill="#ecede5" stroke="#6b7560" stroke-width="1.4" rx="3"/>
+            <text x="76" y="252" fill="#5a5a3a" font-weight="600" letter-spacing="0.1em" font-size="11">LAYER 3 &middot; FILE SYSTEM (PERSISTENT)</text>
+            <text x="76" y="272" fill="#7a7a7a" font-size="10.5" font-style="italic">&rarr; 存活周期：跨分析复用，直到用户删除项目</text>
+            <text x="76" y="292" fill="#4a4a4a" font-size="11">artifacts/ (帧/音轨/字幕) &middot; media-manifest.json &middot; frames-checkpoint.json</text>
+
+            <!-- Layer 4: SQLite -->
+            <rect x="60" y="330" width="640" height="80" fill="#eef4f8" stroke="#6f9bb8" stroke-width="1.4" rx="3"/>
+            <text x="76" y="352" fill="#6f9bb8" font-weight="600" letter-spacing="0.1em" font-size="11">LAYER 4 &middot; SQLITE (PERSISTENT)</text>
+            <text x="76" y="372" fill="#7a7a7a" font-size="10.5" font-style="italic">&rarr; 存活周期：永久，直到用户删除项目</text>
+            <text x="76" y="392" fill="#4a4a4a" font-size="11">projects(id, data, updated_at) &middot; analysis_nodes(project_id, data) &middot; analysis_reports(project_id, data)</text>
+          </svg>
+          <figcaption><span class="fig-num">FIG 1</span>四层存储 &middot; 按持久性从上（易失）到下（持久）排列</figcaption>
+        </figure>
+
+        <h3>各层详细拆解</h3>
+
+        <table>
+          <thead>
+            <tr>
+              <th style="width:130px;">存储层</th>
+              <th style="width:140px;">位置</th>
+              <th>存什么</th>
+              <th style="width:110px;">Key 维度</th>
+              <th style="width:90px;">重试时清除</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>React State</strong></td>
+              <td class="num">AppContext useState</td>
+              <td>进度快照、日志数组(80 条上限)、ETA 预算、项目列表</td>
+              <td class="num">projectId</td>
+              <td class="accent">清除</td>
+            </tr>
+            <tr>
+              <td><strong>Main 进程</strong></td>
+              <td class="num">activeAnalyses Map</td>
+              <td>分析句柄（AbortController + 子进程 + 心跳 + 缓存策略 + Token 账本）</td>
+              <td class="num">projectId</td>
+              <td class="accent">自动销毁</td>
+            </tr>
+            <tr>
+              <td><strong>文件系统</strong></td>
+              <td class="num">userData/projects/{id}/</td>
+              <td>关键帧 JPG、音轨 WAV、transcript.json、media-manifest.json、frames-checkpoint.json、analysis-result.json</td>
+              <td class="num">projectId + 文件名</td>
+              <td>部分清除</td>
+            </tr>
+            <tr>
+              <td><strong>SQLite</strong></td>
+              <td class="num">userData/data.db</td>
+              <td>项目元数据 JSON、分析节点 JSON、分析报告 JSON</td>
+              <td class="num">project_id PK</td>
+              <td class="accent">清除 nodes+reports</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout warn">
+          <div class="callout-label">GOTCHA</div>
+          <strong>文件系统 artifacts 有意保留。</strong><code>resetAnalysis</code> 只删除 <code>analysis-result.json</code> 和 <code>timings.json</code>，不删 <code>artifacts/</code>、<code>media-manifest.json</code>、<code>frames-checkpoint.json</code>。这是为了让重新分析能跳过耗时的抽帧和字幕识别（复用上次的结果）。但这也是用户"清缓存后重新分析还看到旧日志"的感知来源&mdash;&mdash;那些"恢复进度 &middot; 跳过抽帧"的消息是<em>新</em>日志，只是内容引用了旧 artifacts。
+        </div>
+      </section>
+
+      <!-- ────── Section 03 ────── -->
+      <section class="collapsible">
+        <h2><span class="num">03</span>SQLite 表结构</h2>
+
+        <p>核心只有三张表，全部以 <code>projectId</code> 为主键或外键。数据列都是 <code>TEXT NOT NULL</code>&mdash;&mdash;实际存的是 JSON 字符串，schema 由 TypeScript 类型定义（<code>src/types.ts</code>）约束。</p>
+
+        <pre><code>CREATE TABLE projects (
+  id         TEXT PRIMARY KEY,    -- "proj-1716652800000"
+  data       TEXT NOT NULL,       -- JSON: Project 对象全貌
+  updated_at INTEGER NOT NULL     -- Unix ms
+);
+
+CREATE TABLE analysis_nodes (
+  project_id TEXT PRIMARY KEY,    -- 1:1 关系，一个项目只保留最近一次结果
+  data       TEXT NOT NULL        -- JSON: AnalysisNode[]
+);
+
+CREATE TABLE analysis_reports (
+  project_id TEXT PRIMARY KEY,    -- 1:1 关系
+  data       TEXT NOT NULL        -- JSON: AnalysisReport 对象
+);</code></pre>
+
+        <p>注意 <code>analysis_nodes</code> 和 <code>analysis_reports</code> 都是 <code>ON CONFLICT(project_id) DO UPDATE</code>&mdash;&mdash;同一项目的多次分析结果是覆盖写，不追加。这意味着<strong>历史分析结果不可回溯</strong>。</p>
+
+        <h3>Project.data JSON 关键字段</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>字段</th>
+              <th>类型</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>status</code></td>
+              <td class="num">string</td>
+              <td><code>not_analyzed</code> | <code>downloading</code> | <code>analyzing</code> | <code>completed</code> | <code>failed</code> | <code>download_failed</code></td>
+            </tr>
+            <tr>
+              <td><code>analysisStartedAt</code></td>
+              <td class="num">ISO string</td>
+              <td>本次分析开始时间，重试时更新</td>
+            </tr>
+            <tr>
+              <td><code>analysisOptions</code></td>
+              <td class="num">AnalysisOptions</td>
+              <td>mode (quick/standard/detailed) + density + focus</td>
+            </tr>
+            <tr>
+              <td><code>providerId / model</code></td>
+              <td class="num">string</td>
+              <td>发起分析时快照的供应商和模型</td>
+            </tr>
+            <tr>
+              <td><code>lastErrorMessage</code></td>
+              <td class="num">string?</td>
+              <td>最近一次失败的错误信息</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ────── Section 04 ────── -->
+      <section class="collapsible">
+        <h2><span class="num">04</span>文件系统：Checkpoint 与 Artifacts</h2>
+
+        <p>每个项目在 <code>~/Library/Application Support/clipiq/projects/{projectId}/</code> 下有自己的目录。文件分两类：<strong>checkpoint 文件</strong>（管线中间产物，带版本校验）和 <strong>artifact 文件</strong>（最终产物）。</p>
+
+        <pre><code>projects/{projectId}/
+  artifacts/
+    shot-001.jpg            # 镜头缩略图
+    shot-002.jpg
+    ...
+    transcript.json         # 字幕识别结果
+  media-manifest.json       # checkpoint: 视频检测 + 场景分析
+  frames-checkpoint.json    # checkpoint: 抽帧结果
+  analysis-result.json      # 最终分析结果 (nodes + report 的备份)
+  timings.json              # 各阶段耗时统计
+  danmaku.json              # B站弹幕原始数据</code></pre>
+
+        <h3>Checkpoint 的版本校验机制</h3>
+        <p>每个 checkpoint 文件内含 <code>pipelineVersion</code> 字段（当前值 <code>"mvp-local-2026-05-13"</code>）。加载时只有版本匹配且文件完整（如帧文件在磁盘上存在）才复用，否则从头重跑该阶段。</p>
+
+        <div class="callout">
+          <div class="callout-label">NOTE</div>
+          <code>resetAnalysis</code> IPC 只清理 <code>analysis-result.json</code> + <code>timings.json</code>，故意保留 artifacts 和 checkpoint。这就是为什么重新分析时管线会打出"恢复进度 &middot; 跳过抽帧"之类的消息&mdash;&mdash;它检测到了有效的 checkpoint 文件。
+        </div>
+      </section>
+
+      <!-- ────── Section 05 ────── -->
+      <section class="collapsible">
+        <h2><span class="num">05</span>React 内存层：进度 &middot; 日志 &middot; 预算</h2>
+
+        <p>AppContext 维护三个以 <code>projectId</code> 为 key 的 Map，全局只订阅一次 IPC 事件，避免组件 mount/unmount 导致漏事件。</p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>State</th>
+              <th>类型</th>
+              <th>写入来源</th>
+              <th style="width:70px;">上限</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>progressByProject</code></td>
+              <td class="num">Record&lt;string, AnalysisProgressEvent&gt;</td>
+              <td>onAnalysisProgress IPC</td>
+              <td class="num">1 条/project</td>
+            </tr>
+            <tr>
+              <td><code>logsByProject</code></td>
+              <td class="num">Record&lt;string, ProgressLogEntry[]&gt;</td>
+              <td>onAnalysisProgress IPC（去重追加）</td>
+              <td class="num">80 条/project</td>
+            </tr>
+            <tr>
+              <td><code>budgetByProject</code></td>
+              <td class="num">Record&lt;string, AnalysisBudget&gt;</td>
+              <td>onAnalysisBudget IPC</td>
+              <td class="num">1 条/project</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>ProgressLogEntry 结构</h3>
+        <pre><code>{
+  absoluteMs: number,    // Date.now() — 接收到事件的时刻
+  stage: string,         // "本地初筛" | "字幕识别" | "模型分析画面" | ...
+  message: string,       // "已抽 12/20 张 · 第 34.5 秒"
+  tone: "info"|"ok"|"warn",  // 自动检测：含"失败"/"错误" → warn；含"完成" → ok
+  fromCache?: boolean    // 整段命中 LLM 缓存时为 true
+}</code></pre>
+
+        <p><strong>去重逻辑</strong>：追加前比对最后一条的 <code>stage + message + fromCache</code>，完全相同则跳过（心跳消息只更新"已等待"后缀，stage 和 base message 不变时仍可能通过去重）。</p>
+      </section>
+
+      <!-- ────── Section 06 ────── -->
+      <section class="collapsible">
+        <h2><span class="num">06</span>Main 进程：分析句柄生命周期</h2>
+
+        <p>Main 进程用一个 <code>Map&lt;projectId, Handle&gt;</code> 管理所有活跃的分析。同一项目同一时刻只允许一个分析。</p>
+
+        <figure>
+          <svg viewBox="0 0 760 260" xmlns="http://www.w3.org/2000/svg"
+               font-family="ui-monospace, Menlo, monospace" font-size="11">
+            <rect width="760" height="260" fill="#fff"/>
+
+            <!-- timeline -->
+            <line x1="80" y1="200" x2="700" y2="200" stroke="#7a7a7a"/>
+            <g fill="#7a7a7a" font-size="10">
+              <text x="80" y="220" text-anchor="middle">registerAnalysis</text>
+              <text x="250" y="220" text-anchor="middle">send() events</text>
+              <text x="460" y="220" text-anchor="middle">result / error</text>
+              <text x="640" y="220" text-anchor="middle">clearAnalysis</text>
+            </g>
+
+            <!-- phases -->
+            <rect x="80" y="80" width="170" height="28" fill="#eef4f8" stroke="#6f9bb8" stroke-width="1.2" rx="2"/>
+            <text x="165" y="98" text-anchor="middle" fill="#4a4a4a" font-size="10">handle = { abortController, children }</text>
+
+            <rect x="250" y="80" width="210" height="28" fill="#6f9bb8" stroke="#6f9bb8" stroke-width="1.2" rx="2"/>
+            <text x="355" y="98" text-anchor="middle" fill="#fff" font-size="10">pipeline running + heartbeat 2s</text>
+
+            <rect x="460" y="80" width="100" height="28" fill="#f5ecdc" stroke="#b88a4a" stroke-width="1.2" rx="2"/>
+            <text x="510" y="98" text-anchor="middle" fill="#7a6420" font-size="10">finally{} block</text>
+
+            <rect x="560" y="80" width="80" height="28" fill="#ecede5" stroke="#6b7560" stroke-width="1.2" rx="2"/>
+            <text x="600" y="98" text-anchor="middle" fill="#5a5a3a" font-size="10">handle 销毁</text>
+
+            <!-- dots on timeline -->
+            <circle cx="80" cy="200" r="4" fill="#6f9bb8"/>
+            <circle cx="250" cy="200" r="4" fill="#6f9bb8"/>
+            <circle cx="460" cy="200" r="4" fill="#b88a4a"/>
+            <circle cx="640" cy="200" r="4" fill="#6b7560"/>
+
+            <!-- arrows -->
+            <defs>
+              <marker id="arr1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#7a7a7a"/>
+              </marker>
+            </defs>
+            <path d="M 165 108 L 165 196" fill="none" stroke="#d8d8d2" stroke-dasharray="3 3"/>
+            <path d="M 355 108 L 355 196" fill="none" stroke="#d8d8d2" stroke-dasharray="3 3"/>
+            <path d="M 510 108 L 510 196" fill="none" stroke="#d8d8d2" stroke-dasharray="3 3"/>
+            <path d="M 600 108 L 600 196" fill="none" stroke="#d8d8d2" stroke-dasharray="3 3"/>
+
+            <!-- annotation -->
+            <text x="355" y="55" text-anchor="middle" fill="#6f9bb8" font-weight="600" font-size="12">broadcastToWindows("analysis:progress", payload)</text>
+            <text x="640" y="55" text-anchor="middle" fill="#a05050" font-weight="600" font-size="10">clearInterval(heartbeat)</text>
+            <text x="640" y="68" text-anchor="middle" fill="#a05050" font-size="10">activeAnalyses.delete(id)</text>
+
+            <!-- cancel annotation -->
+            <line x1="390" y1="140" x2="390" y2="200" stroke="#a05050" stroke-width="1" stroke-dasharray="3 3"/>
+            <text x="390" y="155" text-anchor="middle" fill="#a05050" font-weight="600" font-size="10">cancel?</text>
+            <text x="390" y="168" text-anchor="middle" fill="#a05050" font-size="9">handle.cancelled = true</text>
+            <text x="390" y="180" text-anchor="middle" fill="#a05050" font-size="9">abortController.abort()</text>
+          </svg>
+          <figcaption><span class="fig-num">FIG 2</span>分析句柄生命周期 &middot; register &rarr; pipeline &rarr; finally &rarr; clear</figcaption>
+        </figure>
+
+        <h3>Handle 内部结构</h3>
+        <pre><code>handle = {
+  abortController: AbortController,  // 用于中断 fetch / 子进程
+  children: Set&lt;ChildProcess&gt;,       // ffmpeg / yt-dlp 等子进程集合
+  cancelled: boolean,                // 用户取消标记
+  lastProgress: { projectId, progress, stage, message },  // 最近一次 send() 的快照
+  lastProgressAt: number,            // Date.now() — 用于心跳检测 idle > 1.5s
+  heartbeat: IntervalID,             // 每 2s 重发 lastProgress，防 UI 看起来卡死
+  budget: { projectId, budget },     // ETA baseline — 开头算一次广播
+  tokenLedger: TokenLedger,          // 各阶段 token 消耗累计
+}</code></pre>
+      </section>
+
+      <!-- ────── Section 07 ────── -->
+      <section class="collapsible">
+        <h2><span class="num">07</span>分析进度的数据流</h2>
+        <p>从管线的一次 <code>send(progress, stage, message)</code> 调用，到用户在 ProgressScreen 上看到日志更新，数据经过以下路径：</p>
+
+        <figure>
+          <svg viewBox="0 0 760 440" xmlns="http://www.w3.org/2000/svg"
+               font-family="ui-monospace, Menlo, monospace" font-size="11">
+            <rect width="760" height="440" fill="#fff"/>
+
+            <defs>
+              <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#6f9bb8"/>
+              </marker>
+            </defs>
+
+            <!-- Node: send() -->
+            <rect x="60" y="30" width="200" height="52" fill="#eef4f8" stroke="#6f9bb8" stroke-width="1.4" rx="3"/>
+            <text x="76" y="50" fill="#6f9bb8" font-weight="600" font-size="10" letter-spacing="0.1em">MAIN PROCESS</text>
+            <text x="76" y="68" fill="#4a4a4a">send(progress, stage, msg)</text>
+
+            <!-- Node: broadcastToWindows -->
+            <rect x="60" y="115" width="200" height="52" fill="#fff" stroke="#6f9bb8" stroke-width="1.2" rx="3"/>
+            <text x="76" y="135" fill="#6f9bb8" font-weight="600" font-size="10" letter-spacing="0.1em">IPC BRIDGE</text>
+            <text x="76" y="153" fill="#4a4a4a">broadcastToWindows()</text>
+
+            <!-- Node: preload.cjs -->
+            <rect x="60" y="200" width="200" height="52" fill="#fff" stroke="#d8d8d2" stroke-width="1.2" rx="3"/>
+            <text x="76" y="220" fill="#7a7a7a" font-weight="600" font-size="10" letter-spacing="0.1em">PRELOAD.CJS</text>
+            <text x="76" y="238" fill="#4a4a4a">ipcRenderer.on()</text>
+
+            <!-- Node: AppContext global subscription -->
+            <rect x="350" y="200" width="200" height="52" fill="#eef4f8" stroke="#6f9bb8" stroke-width="1.4" rx="3"/>
+            <text x="366" y="220" fill="#6f9bb8" font-weight="600" font-size="10" letter-spacing="0.1em">APPCONTEXT</text>
+            <text x="366" y="238" fill="#4a4a4a">全局 onAnalysisProgress</text>
+
+            <!-- Node: progressByProject -->
+            <rect x="350" y="290" width="180" height="40" fill="#f5ecdc" stroke="#b88a4a" stroke-width="1.2" rx="3"/>
+            <text x="366" y="315" fill="#7a6420">progressByProject[id]</text>
+
+            <!-- Node: logsByProject -->
+            <rect x="550" y="290" width="160" height="40" fill="#f5ecdc" stroke="#b88a4a" stroke-width="1.2" rx="3"/>
+            <text x="566" y="315" fill="#7a6420">logsByProject[id]</text>
+
+            <!-- Node: ProgressScreen -->
+            <rect x="350" y="370" width="200" height="52" fill="#ecede5" stroke="#6b7560" stroke-width="1.4" rx="3"/>
+            <text x="366" y="390" fill="#5a5a3a" font-weight="600" font-size="10" letter-spacing="0.1em">PROGRESSSCREEN</text>
+            <text x="366" y="408" fill="#4a4a4a">progress bar + log feed</text>
+
+            <!-- ProgressScreen local subscription -->
+            <rect x="60" y="290" width="200" height="52" fill="#ecede5" stroke="#6b7560" stroke-width="1.2" rx="3"/>
+            <text x="76" y="310" fill="#5a5a3a" font-weight="600" font-size="10" letter-spacing="0.1em">PROGRESSSCREEN LOCAL</text>
+            <text x="76" y="328" fill="#4a4a4a">setProgress / setStageLabel</text>
+
+            <!-- Arrows -->
+            <g fill="none" stroke="#6f9bb8" stroke-width="1.2">
+              <path d="M 160 82 L 160 113" marker-end="url(#arr2)"/>
+              <path d="M 160 167 L 160 198" marker-end="url(#arr2)"/>
+              <path d="M 260 226 L 348 226" marker-end="url(#arr2)"/>
+              <path d="M 440 252 L 420 288" marker-end="url(#arr2)"/>
+              <path d="M 480 252 L 610 288" marker-end="url(#arr2)"/>
+              <path d="M 440 330 L 440 368" marker-end="url(#arr2)"/>
+              <path d="M 630 330 L 530 368" marker-end="url(#arr2)"/>
+              <path d="M 260 226 L 260 262 L 160 262 L 160 288" marker-end="url(#arr2)" stroke-dasharray="4 3"/>
+            </g>
+
+            <!-- Labels -->
+            <text x="170" y="100" fill="#7a7a7a" font-size="9">payload</text>
+            <text x="170" y="185" fill="#7a7a7a" font-size="9">IPC channel</text>
+            <text x="310" y="222" fill="#7a7a7a" font-size="9">callback</text>
+            <text x="350" y="275" fill="#7a7a7a" font-size="9">setProgressByProject</text>
+            <text x="550" y="275" fill="#7a7a7a" font-size="9">setLogsByProject (dedup+append)</text>
+            <text x="200" y="268" fill="#7a7a7a" font-size="9" font-style="italic">也订阅(local state)</text>
+          </svg>
+          <figcaption><span class="fig-num">FIG 3</span>进度事件数据流 &middot; main &rarr; IPC &rarr; AppContext(全局) + ProgressScreen(局部)</figcaption>
+        </figure>
+
+        <div class="callout">
+          <div class="callout-label">DUAL SUBSCRIPTION</div>
+          进度事件被订阅了<strong>两次</strong>：AppContext 的全局订阅写入 <code>progressByProject</code> + <code>logsByProject</code>（任何屏幕都能读）；ProgressScreen 的局部订阅更新组件本地的 <code>progress</code> / <code>stageLabel</code> / <code>detail</code> state（驱动进度条动画）。前者负责持久性（切屏再回来不丢），后者负责即时性。
+        </div>
+      </section>
+
+      <!-- ────── Section 08 ────── -->
+      <section class="collapsible">
+        <h2><span class="num">08</span>点击"重试"发生了什么</h2>
+        <p>无论从 HomeScreen、WorkspaceScreen 还是 ProgressScreen 点击"重新分析"/"重试分析"，都会调用同一个入口：<code>startAnalysisForProject(projectId)</code>。以下是逐步发生的事情：</p>
+
+        <figure>
+          <svg viewBox="0 0 760 560" xmlns="http://www.w3.org/2000/svg"
+               font-family="ui-monospace, Menlo, monospace" font-size="11">
+            <rect width="760" height="560" fill="#fff"/>
+
+            <defs>
+              <marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#6f9bb8"/>
+              </marker>
+            </defs>
+
+            <!-- Step labels on left -->
+            <g fill="#6f9bb8" font-weight="600" font-size="12">
+              <text x="40" y="58" text-anchor="end">1</text>
+              <text x="40" y="128" text-anchor="end">2</text>
+              <text x="40" y="198" text-anchor="end">3</text>
+              <text x="40" y="268" text-anchor="end">4</text>
+              <text x="40" y="338" text-anchor="end">5</text>
+              <text x="40" y="408" text-anchor="end">6</text>
+              <text x="40" y="478" text-anchor="end">7</text>
+            </g>
+
+            <!-- Step boxes -->
+            <rect x="60" y="38" width="660" height="42" fill="#eef4f8" stroke="#6f9bb8" stroke-width="1" rx="2"/>
+            <text x="76" y="55" fill="#6f9bb8" font-weight="600" font-size="10">CLEAR REACT STATE</text>
+            <text x="76" y="70" fill="#4a4a4a" font-size="10">delete nodesByProject[id], reportByProject[id], logsByProject[id], progressByProject[id], budgetByProject[id]</text>
+
+            <rect x="60" y="108" width="660" height="42" fill="#f5ecdc" stroke="#b88a4a" stroke-width="1" rx="2"/>
+            <text x="76" y="125" fill="#7a6420" font-weight="600" font-size="10">IPC: resetAnalysis</text>
+            <text x="76" y="140" fill="#4a4a4a" font-size="10">DELETE FROM analysis_nodes / analysis_reports + unlink analysis-result.json / timings.json (fire-and-forget)</text>
+
+            <rect x="60" y="178" width="660" height="42" fill="#eef4f8" stroke="#6f9bb8" stroke-width="1" rx="2"/>
+            <text x="76" y="195" fill="#6f9bb8" font-weight="600" font-size="10">UPDATE PROJECT</text>
+            <text x="76" y="210" fill="#4a4a4a" font-size="10">status &rarr; "analyzing", analysisStartedAt &rarr; now, lastErrorMessage &rarr; undefined</text>
+
+            <rect x="60" y="248" width="660" height="42" fill="#ecede5" stroke="#6b7560" stroke-width="1" rx="2"/>
+            <text x="76" y="265" fill="#5a5a3a" font-weight="600" font-size="10">NAVIGATE</text>
+            <text x="76" y="280" fill="#4a4a4a" font-size="10">setCurrentLocation({ module: "analysis", screen: "progress" }) &rarr; ProgressScreen mount</text>
+
+            <rect x="60" y="318" width="660" height="42" fill="#eef4f8" stroke="#6f9bb8" stroke-width="1" rx="2"/>
+            <text x="76" y="335" fill="#6f9bb8" font-weight="600" font-size="10">PROGRESSSCREEN INIT EFFECT</text>
+            <text x="76" y="350" fill="#4a4a4a" font-size="10">reset hasStarted / cancelled / attachMode refs &rarr; setProgress(0) &rarr; setStageLabel("读取视频信息")</text>
+
+            <rect x="60" y="388" width="660" height="42" fill="#6f9bb8" stroke="#6f9bb8" stroke-width="1" rx="2"/>
+            <text x="76" y="405" fill="#fff" font-weight="600" font-size="10">KICKOFF EFFECT</text>
+            <text x="76" y="420" fill="#dde8f2" font-size="10">isAnalysisActive(id) &rarr; false &rarr; window.videoAnalyzer.analyzeProject({ project, provider, options })</text>
+
+            <rect x="60" y="458" width="660" height="42" fill="#f5ecdc" stroke="#b88a4a" stroke-width="1" rx="2"/>
+            <text x="76" y="475" fill="#7a6420" font-weight="600" font-size="10">MAIN PROCESS PIPELINE</text>
+            <text x="76" y="490" fill="#4a4a4a" font-size="10">registerAnalysis &rarr; send(2, "读取视频信息") &rarr; checkpoint hit? &rarr; 跳/重跑 &rarr; ... &rarr; send(100, "完成")</text>
+
+            <!-- Arrows between steps -->
+            <g fill="none" stroke="#d8d8d2" stroke-width="1" stroke-dasharray="3 3">
+              <path d="M 390 80 L 390 108"/>
+              <path d="M 390 150 L 390 178"/>
+              <path d="M 390 220 L 390 248"/>
+              <path d="M 390 290 L 390 318"/>
+              <path d="M 390 360 L 390 388"/>
+              <path d="M 390 430 L 390 458"/>
+            </g>
+
+            <!-- Side annotation -->
+            <text x="730" y="60" text-anchor="end" fill="#a05050" font-size="9">React batch</text>
+            <text x="730" y="130" text-anchor="end" fill="#a05050" font-size="9">async IPC</text>
+            <text x="730" y="200" text-anchor="end" fill="#a05050" font-size="9">React batch</text>
+            <text x="730" y="270" text-anchor="end" fill="#a05050" font-size="9">React batch</text>
+            <text x="730" y="340" text-anchor="end" fill="#a05050" font-size="9">useEffect</text>
+            <text x="730" y="410" text-anchor="end" fill="#a05050" font-size="9">useEffect</text>
+            <text x="730" y="480" text-anchor="end" fill="#a05050" font-size="9">IPC invoke</text>
+
+            <!-- Timeline label -->
+            <text x="390" y="540" text-anchor="middle" fill="#7a7a7a" font-size="10">步骤 1-4 在同一个 React batch 里完成，步骤 5-6 是后续 effect，步骤 7 是异步 IPC</text>
+          </svg>
+          <figcaption><span class="fig-num">FIG 4</span>点击"重试"的完整执行序列 &middot; 7 步从 click 到管线启动</figcaption>
+        </figure>
+
+        <h3>关键细节</h3>
+        <ul>
+          <li><strong>步骤 1-4 是一个 React batch。</strong>所有 <code>setState</code> 调用在同一个事件处理函数里，React 18 自动批处理。ProgressScreen 挂载时看到的一定是清空后的状态。</li>
+          <li><strong>步骤 2 是 fire-and-forget。</strong><code>resetAnalysis</code> 的 IPC 调用用 <code>.catch()</code> 忽略错误，不阻塞后续步骤。理论上存在微小的时序窗口，但实际不影响：<code>resetAnalysis</code> 清的是 SQLite 行，而 <code>analyzeProject</code> 检查的是 <code>activeAnalyses</code> Map。</li>
+          <li><strong>步骤 5 依赖 <code>analysisStartedAt</code>。</strong>init effect 的依赖数组包含 <code>project?.analysisStartedAt</code>，确保同一个 projectId 重新分析时也能重置 <code>hasStarted.current</code> 等 ref。</li>
+          <li><strong>步骤 7 的管线会检测 checkpoint。</strong>如果 <code>media-manifest.json</code> 和 <code>frames-checkpoint.json</code> 存在且版本匹配，跳过对应阶段并发送"恢复进度"消息。这是"清缓存后还看到旧日志"的感知来源。</li>
+        </ul>
+      </section>
+
+      <!-- ────── Section 09 ────── -->
+      <section class="collapsible">
+        <h2><span class="num">09</span>缓存层次与"清除"的含义</h2>
+        <p>用户说"清除缓存"可能指 SettingsScreen 里的 LLM 响应缓存清除。但 ClipIQ 实际上有<strong>三层缓存</strong>，每层清除的范围不同：</p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>缓存层</th>
+              <th>存什么</th>
+              <th>清除操作</th>
+              <th>重新分析影响</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>LLM 响应缓存</strong></td>
+              <td>prefilter / shot-merger / summarizer / main-analysis 各阶段的 LLM 调用结果</td>
+              <td>Settings &rarr; "清除缓存"</td>
+              <td>LLM 阶段重跑，但抽帧/字幕仍复用</td>
+            </tr>
+            <tr>
+              <td><strong>Checkpoint 文件</strong></td>
+              <td>media-manifest.json / frames-checkpoint.json</td>
+              <td>无 UI 入口（手动删文件）</td>
+              <td>视频检测 / 抽帧从头跑</td>
+            </tr>
+            <tr>
+              <td><strong>Artifact 文件</strong></td>
+              <td>artifacts/ 目录（帧图 / 音轨 / transcript）</td>
+              <td>删除项目、或手动删 artifacts/</td>
+              <td>所有阶段从头跑</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout warn">
+          <div class="callout-label">用户感知 GAP</div>
+          Settings 里"清除缓存"只清 LLM 层。重新分析时管线检测到 checkpoint + artifacts 仍在，跳过抽帧和字幕，直接从 LLM 分析开始。管线发出的"恢复进度 &middot; 跳过抽帧，复用 20 张已有关键画面"消息虽然是<em>新</em>日志，但用户认为这是"上次留下来的"——因为他们预期"清缓存 = 完全从头来"。
+        </div>
+      </section>
+
+      <!-- ────── Section 10 ────── -->
+      <section class="collapsible">
+        <h2><span class="num">10</span>已知问题与已修复的 Bug</h2>
+
+        <h3>Bug 1: 进度值回退 (已修复)</h3>
+        <p>弹幕情绪聚合的进度序列是 <code>94 &rarr; 95 &rarr; 89 &rarr; 97</code>。第三步的 <code>89</code> 低于前一步的 <code>95</code>，导致进度条从 95% 回退到 89% 再跳到 97%。</p>
+        <p><strong>修复</strong>：<code>electron/main.cjs:5043</code> 的 <code>send(89, ...)</code> 改为 <code>send(96, ...)</code>，确保单调递增。</p>
+
+        <h3>Bug 2: ProgressScreen 重试不重置 ref (已修复)</h3>
+        <p>当用户在 ProgressScreen 内点"重试"时，<code>routeKey</code> 不变（始终是 <code>analysis:progress</code>），ProgressScreen 不卸载重挂。此时 init effect 只依赖 <code>[project?.id]</code>，同一 projectId 不触发重跑，<code>hasStarted.current</code> 残留为 <code>true</code>，kickoff effect 早退。</p>
+        <p><strong>修复</strong>：init effect 依赖数组加入 <code>project?.analysisStartedAt</code>。<code>startAnalysisForProject</code> 每次调用都会更新 <code>analysisStartedAt</code> 为新时间戳，保证 init effect 重跑、所有 ref 重置。</p>
+
+        <h3>感知问题: "旧日志"</h3>
+        <p>这不是代码 bug，而是 checkpoint 复用的正常行为。<code>logsByProject</code> 确实被清空了，但新管线检测到有效的 checkpoint 文件后跳过了抽帧和字幕阶段，发出的"恢复进度"消息看起来像是旧日志。如果需要完全重跑，需要同时删除 checkpoint 文件和 artifacts 目录。</p>
+      </section>
+
+      <!-- ────── Footer ────── -->
+      <footer>
+        <h4>Source Files</h4>
+        <ul>
+          <li><code>electron/main.cjs</code> &mdash; IPC 注册 + 分析管线 + progress send()</li>
+          <li><code>src/AppContext.tsx</code> &mdash; 全局状态 + onAnalysisProgress 订阅 + startAnalysisForProject</li>
+          <li><code>src/screens/ProgressScreen.tsx</code> &mdash; 进度条 + 日志 feed + kickoff effect</li>
+          <li><code>src/types.ts</code> &mdash; AnalysisProgressEvent / ProgressLogEntry / AnalysisBudget 类型</li>
+          <li><code>electron/preload.cjs</code> &mdash; window.videoAnalyzer.* IPC 暴露面</li>
+        </ul>
+      </footer>
+
+    </article>
+
+    <!-- ────── Scripts ────── -->
+    <script>
+      // Section collapse
+      document.querySelectorAll("section.collapsible h2").forEach(h => {
+        h.addEventListener("click", () => h.parentElement.classList.toggle("collapsed"));
+      });
+    </script>
+    <script>
+      // Copy button on code blocks
+      document.querySelectorAll("pre").forEach(pre => {
+        const btn = document.createElement("button");
+        btn.className = "copy-btn";
+        btn.textContent = "copy";
+        btn.onclick = async () => {
+          await navigator.clipboard.writeText(pre.innerText);
+          btn.textContent = "copied";
+          setTimeout(() => (btn.textContent = "copy"), 1500);
+        };
+        pre.appendChild(btn);
+      });
+    </script>
+    <script>
+      // Dark mode toggle
+      (function () {
+        const btn = document.getElementById("theme-toggle");
+        const apply = mode => {
+          document.documentElement.classList.toggle("dark", mode === "dark");
+          btn.textContent = mode === "dark" ? "light" : "dark";
+        };
+        apply(localStorage.getItem("theme") || "light");
+        btn.addEventListener("click", () => {
+          const next = document.documentElement.classList.contains("dark") ? "light" : "dark";
+          localStorage.setItem("theme", next);
+          apply(next);
+        });
+      })();
+    </script>
+    <script>
+      // Reading progress
+      const p = document.getElementById("progress");
+      window.addEventListener("scroll", () => {
+        const h = document.documentElement.scrollHeight - innerHeight;
+        p.style.width = (scrollY / h) * 100 + "%";
+      });
+    </script>
+    <script>
+      // Click-to-zoom figures
+      document.querySelectorAll("figure").forEach(fig => {
+        fig.classList.add("zoomable");
+        fig.addEventListener("click", () => fig.classList.toggle("zoomed"));
+      });
+    </script>
+  </body>
+</html>

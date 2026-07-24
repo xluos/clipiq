@@ -4,8 +4,12 @@
 // 区间内的字幕, 用 medium_text 槽位的模型合并成"这个镜头讲了什么" + 代表帧。
 //
 // 设计要点:
-// - **batched**: 一次 LLM 调用合并多个 shot, 减少 round-trip; 30 个 shot 按 6/批
-//   要 5 次调用而不是 30 次。json_schema strict + structured output 保证每批返回完整。
+// - **batched**: 一次 LLM 调用合并多个 shot, 减少 round-trip; 30 个 shot 按 N/批
+//   要 30/N 次调用而不是 30 次。batch 越小, 单批 prompt 越短, 弱模型出 JSON 截断的
+//   概率越低; batch 越大单批吐越多但容易超 context。
+//   batchSize 不传 → 按 provider.contextSize 和该批 shots 的实际 prompt 长度动态算
+//   (chooseBatchSize), 留 15% 输出 + 600 token 模板成本后能塞下几个就用几个,
+//   范围 [1, 12]; 显式传值则跳过自动算。
 // - 没有图传上去, 输入全是文本 (frame caption + 字幕), 因为 medium_text 槽位
 //   不要求 vision capability。tokens 主要由 prompt 长度决定。
 // - 失败的 shot 给 fallback shotDescription (字幕 + 第一帧 caption 拼一下), 不阻断。
@@ -16,12 +20,74 @@
 //   代理下必须走 responses + SSE 才能拿到 content)。
 
 const { callJsonCompletion } = require("./openai-client.cjs");
+const log = require("./logger.cjs");
 
-const ALLOWED_BATCH_SIZE = { min: 1, max: 12, default: 6 };
+const ALLOWED_BATCH_SIZE = { min: 1, max: 12, default: 3 };
 
 function clampBatchSize(n) {
   if (!Number.isFinite(n)) return ALLOWED_BATCH_SIZE.default;
   return Math.max(ALLOWED_BATCH_SIZE.min, Math.min(ALLOWED_BATCH_SIZE.max, Math.round(n)));
+}
+
+// 估单个 shot 的 prompt token 成本: 时间戳行 + 字幕 + 每帧 caption + 元数据
+// 中文 ~0.5 token/字 (英文略低, 这里用 0.5 保守估)
+function estimateShotPromptTokens(shot) {
+  let chars = 30; // SHOT N [a.bs - c.ds] 时间戳行
+  if (shot.subtitleText) chars += shot.subtitleText.length;
+  if (Array.isArray(shot.frames)) {
+    for (const f of shot.frames) {
+      // caption 长度 + "[Fi] @x.xs salience=N: " 这种元数据 (~25 字)
+      chars += (f.caption?.length || 30) + 25;
+    }
+  }
+  return Math.ceil(chars * 0.5);
+}
+
+// 按 ctx 给"结构化输出能力"经验上限:
+// 单纯 token 预算够 ≠ LLM 真能稳定吐出 N 个 shot 的合法 JSON。本地 2B/4B 即使
+// ctx 塞得下 10 个 shot, 输出端常出 JSON 截断或非合规 markdown。这条曲线粗粒度
+// 把 ctx 当成模型能力的代理变量 (大 ctx 模型通常也大参数), 不让 batch 超过该档。
+function ctxToBatchCap(ctx) {
+  if (ctx <= 2048) return 2;
+  if (ctx <= 4096) return 3;
+  if (ctx <= 8192) return 4;
+  if (ctx <= 16384) return 6;
+  if (ctx <= 32768) return 8;
+  return ALLOWED_BATCH_SIZE.max;
+}
+
+// 按 provider.contextSize + 该批 shots 实际 prompt 长度动态选 batch
+//
+// 算法两条线取 min:
+// (a) token 预算: usable = ctx - outputReserve - systemOverhead, 单 shot 估 prompt+输出
+// (b) ctx 经验上限 ctxToBatchCap, 防止本地小模型输出端崩
+//
+// 预算细项:
+//   ctx                 = provider.contextSize (manifest 标注, 兜底 8192)
+//   outputReserve       = max(800, ctx*15%)             给 JSON 输出留
+//   systemOverhead      = 600                           system + user 模板固定成本
+//   perShotOutput       = 80 token                      每个 shot 输出 30-80 字 + JSON 包装
+//   avgShotPromptTokens = 取 shots 里最长的 5 个的平均  防偶发长字幕段把整批撑爆
+function chooseBatchSize(provider, shots) {
+  if (!Array.isArray(shots) || shots.length === 0) return ALLOWED_BATCH_SIZE.default;
+  const ctx = Number(provider?.contextSize) > 0 ? Number(provider.contextSize) : 8192;
+  const outputReserve = Math.max(800, Math.floor(ctx * 0.15));
+  const systemOverhead = 600;
+  const usable = ctx - outputReserve - systemOverhead;
+  if (usable <= 0) return ALLOWED_BATCH_SIZE.min;
+
+  const sampleCount = Math.min(5, shots.length);
+  const top = shots
+    .map(estimateShotPromptTokens)
+    .sort((a, b) => b - a)
+    .slice(0, sampleCount);
+  const avgShotPromptTokens = Math.max(1, top.reduce((a, b) => a + b, 0) / top.length);
+  const perShotOutput = 80;
+
+  const batchFromBudget = Math.floor(usable / (avgShotPromptTokens + perShotOutput));
+  const batchFromCap = ctxToBatchCap(ctx);
+  const batch = Math.min(batchFromBudget, batchFromCap);
+  return Math.max(ALLOWED_BATCH_SIZE.min, Math.min(ALLOWED_BATCH_SIZE.max, batch));
 }
 
 function formatShotForPrompt(shot, indexInBatch) {
@@ -93,24 +159,26 @@ const MERGE_SCHEMA = {
 
 // 走 openai-client 统一入口, 按 provider.endpointType 自动分流 chat/completions vs responses。
 // medium_text 槽位的 provider 已经被 shapeEffectiveProvider 处理过 baseUrl/apiKeyRef/model/endpointType。
+// 返回 { parsed, usage, model } —— 上游需要按 batch 统计 token 消耗。
 async function callMediumText(provider, systemText, userText, signal) {
   if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
     throw new Error("medium_text provider 配置不全 (baseUrl/apiKeyRef/model 缺失)");
   }
-  const parsed = await callJsonCompletion(provider, {
+  // max_tokens 不再 hardcode 1500, 走 openai-client deriveDefaultMaxTokens (ctx*0.25 clamp [1500,16000])。
+  // settings 里 ctx slider 调大 → output 预算自动跟着大, thinking 模型也能装下 reasoning + content。
+  // 调用方仍可在 provider.maxOutputTokens 显式覆盖。
+  const result = await callJsonCompletion(provider, {
     systemText,
     userText,
     temperature: 0.2,
-    maxTokens: provider.maxOutputTokens ?? 8000,
-    maxOutputTokens: provider.maxOutputTokens ?? 8000,
     signal,
   });
-  if (!parsed) {
+  if (!result.parsed) {
     throw new Error(
       `medium_text 解析失败 (raw text 为空或不是合法 JSON; 走的 endpoint=${provider.endpointType})`,
     );
   }
-  return parsed;
+  return result;
 }
 
 // 生成兜底 shotDescription (LLM 失败 / 单批崩了时, 不让管线断)
@@ -151,99 +219,171 @@ function fillBatchWithFallback(batch, result, baseIndex) {
 }
 
 const GIVE_UP_AFTER_CONSECUTIVE_FAIL = 3;
+const MAX_BATCH_RETRIES = 2;
 
-async function mergeShots({ shots, provider, batchSize, handle, onProgress, cache }) {
-  const size = clampBatchSize(batchSize);
+async function mergeShots({ shots, provider, batchSize, concurrency: concurrencyOpt, handle, onProgress, cache }) {
+  const size = batchSize == null ? chooseBatchSize(provider, shots) : clampBatchSize(batchSize);
+  const concurrency = Math.max(1, Math.min(12, Number(concurrencyOpt) || 1));
+  log.info("shot-merger",
+    `batchSize=${size} concurrency=${concurrency} (${batchSize == null ? "auto" : "explicit"}) · ctx=${provider?.contextSize ?? "?"} · shots=${shots.length}`,
+  );
   const result = new Array(shots.length);
-  let batchIndex = 0;
+  let completedShots = 0;
   let consecutiveFail = 0;
   let cacheHits = 0;
-  let givenUp = false; // 连续失败 N 次 → 视为 provider 不可用, 余下 batch 直接 fallback (节省长视频几分钟空转)
-  for (let i = 0; i < shots.length; i += size) {
-    if (handle?.cancelled) throw new Error("cancelled");
-    batchIndex += 1;
-    const batch = shots.slice(i, i + size);
+  let givenUp = false;
+  const usageAgg = { promptTokens: 0, completionTokens: 0, totalTokens: 0, callCount: 0 };
+  let echoedModel = null;
 
-    // 缓存查询: batch 命中时直接铺到 result, 不调 LLM
+  // 把所有 batch 预切好
+  const batches = [];
+  for (let i = 0; i < shots.length; i += size) {
+    batches.push({ startIdx: i, batch: shots.slice(i, i + size), batchNum: batches.length + 1 });
+  }
+
+  const throwIfCancelled = () => {
+    if (!handle?.cancelled) return;
+    const err = new Error("cancelled");
+    err.name = "AbortError";
+    throw err;
+  };
+
+  // 单 batch 处理逻辑 (含缓存查询 + 重试)
+  const processBatch = async ({ startIdx, batch, batchNum }) => {
+    throwIfCancelled();
+
+    // 缓存查询
     if (cache) {
       try {
         const hit = await cache.lookup(batch);
         if (Array.isArray(hit?.entries) && hit.entries.length === batch.length) {
-          for (let j = 0; j < batch.length; j++) result[i + j] = hit.entries[j];
+          for (let j = 0; j < batch.length; j++) result[startIdx + j] = hit.entries[j];
           cacheHits += batch.length;
-          if (onProgress) onProgress({ done: Math.min(i + size, shots.length), total: shots.length, batchIndex, mode: "cache-hit" });
-          continue;
+          completedShots += batch.length;
+          if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, batchSize: size, mode: "cache-hit" });
+          return;
         }
-      } catch {
-        // 缓存读失败 → 走 LLM 路径
-      }
+      } catch { /* 缓存读失败 → 走 LLM */ }
     }
 
     if (givenUp) {
-      fillBatchWithFallback(batch, result, i);
-      if (onProgress) onProgress({ done: Math.min(i + size, shots.length), total: shots.length, batchIndex, mode: "fallback-shortcut" });
-      continue;
+      fillBatchWithFallback(batch, result, startIdx);
+      completedShots += batch.length;
+      if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, batchSize: size, mode: "fallback-shortcut" });
+      return;
     }
+
     const { system, user } = buildMergePrompt(batch);
-    try {
-      const parsed = await callMediumText(provider, system, user, handle?.abortController?.signal);
-      const out = Array.isArray(parsed?.shots) ? parsed.shots : [];
-      if (out.length === 0) {
-        // parsed 拿到了 JSON 但没 shots 字段, 视为本批次失败
-        throw new Error("parsed JSON 缺少 shots 字段");
-      }
-      consecutiveFail = 0;
-      const batchEntries = [];
-      for (let j = 0; j < batch.length; j++) {
-        const local = batch[j];
-        const match = out.find((s) => Number(s.shotIndex) === j) || out[j];
-        const frameCount = Array.isArray(local.frames) ? local.frames.length : 0;
-        const rawIdxs = Array.isArray(match?.representativeFrameIndex)
-          ? match.representativeFrameIndex
-          : [];
-        const repIdxs = rawIdxs
-          .map((n) => Math.floor(Number(n)))
-          .filter((n) => Number.isFinite(n) && n >= 0 && n < frameCount);
-        const desc =
-          typeof match?.shotDescription === "string" && match.shotDescription.trim()
+    for (let attempt = 0; attempt <= MAX_BATCH_RETRIES; attempt++) {
+      throwIfCancelled();
+      try {
+        const callResult = await callMediumText(provider, system, user, handle?.abortController?.signal);
+        const parsed = callResult.parsed;
+        if (callResult.usage) {
+          usageAgg.promptTokens += callResult.usage.promptTokens;
+          usageAgg.completionTokens += callResult.usage.completionTokens;
+          usageAgg.totalTokens += callResult.usage.totalTokens;
+          usageAgg.callCount += 1;
+        } else {
+          usageAgg.callCount += 1;
+        }
+        if (callResult.model) echoedModel = callResult.model;
+        const out = Array.isArray(parsed?.shots) ? parsed.shots : [];
+        if (out.length === 0) throw new Error("parsed JSON 缺少 shots 字段");
+
+        consecutiveFail = 0;
+        const batchEntries = [];
+        for (let j = 0; j < batch.length; j++) {
+          const local = batch[j];
+          const match = out.find((s) => Number(s.shotIndex) === j) || out[j];
+          const frameCount = Array.isArray(local.frames) ? local.frames.length : 0;
+          const rawIdxs = Array.isArray(match?.representativeFrameIndex) ? match.representativeFrameIndex : [];
+          const repIdxs = rawIdxs.map((n) => Math.floor(Number(n))).filter((n) => Number.isFinite(n) && n >= 0 && n < frameCount);
+          const desc = typeof match?.shotDescription === "string" && match.shotDescription.trim()
             ? match.shotDescription.trim().slice(0, 240)
             : fallbackShotDescription(local);
-        const entry = {
-          shotDescription: desc,
-          representativeFrameIndex: repIdxs.length > 0 ? repIdxs : frameCount > 0 ? [0] : [],
-        };
-        result[i + j] = entry;
-        batchEntries.push(entry);
-      }
-      if (cache) {
-        try { await cache.store(batch, { entries: batchEntries }, { batchIndex }); }
-        catch { /* 写缓存失败不阻塞 */ }
-      }
-    } catch (error) {
-      if (handle?.cancelled) throw error;
-      consecutiveFail += 1;
-      // eslint-disable-next-line no-console
-      console.warn(`[shot-merger] batch ${batchIndex} 失败 (#${consecutiveFail} 连续), 走 fallback:`, error?.message || error);
-      fillBatchWithFallback(batch, result, i);
-      if (consecutiveFail >= GIVE_UP_AFTER_CONSECUTIVE_FAIL) {
-        givenUp = true;
-        // eslint-disable-next-line no-console
-        console.warn(`[shot-merger] 连续 ${consecutiveFail} 个 batch 失败, 放弃 LLM 路径, 后续 batch 直接走 fallback (medium_text 模型可能是 reasoning 类型导致 content 为空)`);
+          const entry = { shotDescription: desc, representativeFrameIndex: repIdxs.length > 0 ? repIdxs : frameCount > 0 ? [0] : [] };
+          result[startIdx + j] = entry;
+          batchEntries.push(entry);
+        }
+        if (cache) {
+          try { await cache.store(batch, { entries: batchEntries }, { batchIndex: batchNum }); }
+          catch { /* 写缓存失败不阻塞 */ }
+        }
+        completedShots += batch.length;
+        if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, batchSize: size, mode: "ok" });
+        return;
+      } catch (error) {
+        if (handle?.cancelled) throw error;
+        if (attempt < MAX_BATCH_RETRIES) {
+          log.warn("shot-merger", `batch ${batchNum} 第 ${attempt + 1} 次失败, 重试:`, error?.message || error);
+          continue;
+        }
+        consecutiveFail += 1;
+        log.warn("shot-merger", `batch ${batchNum} 重试 ${MAX_BATCH_RETRIES} 次仍失败 (#${consecutiveFail} 连续), 走 fallback:`, error?.message || error);
+        fillBatchWithFallback(batch, result, startIdx);
+        completedShots += batch.length;
+        if (onProgress) onProgress({ done: completedShots, total: shots.length, batchIndex: batchNum, batchSize: size, mode: "fallback-batch" });
+        if (consecutiveFail >= GIVE_UP_AFTER_CONSECUTIVE_FAIL) {
+          givenUp = true;
+          log.warn("shot-merger", `连续 ${consecutiveFail} 个 batch 失败, 放弃 LLM 路径, 后续直接 fallback`);
+        }
+        return;
       }
     }
-    if (onProgress) {
-      onProgress({
-        done: Math.min(i + size, shots.length),
-        total: shots.length,
-        batchIndex,
-        mode: givenUp ? "fallback-after-give-up" : consecutiveFail > 0 ? "fallback-batch" : "ok",
-      });
+  };
+
+  // 交错并发池: 维持最多 concurrency 个 batch 同时在飞,
+  // 但每个新请求之间间隔 STAGGER_MS 避免瞬时并发被服务端限流。
+  const STAGGER_MS = 1500;
+  if (concurrency <= 1) {
+    for (const b of batches) await processBatch(b);
+  } else {
+    let cursor = 0;
+    let poolError = null;
+    const inflight = new Set();
+    const launchOne = () => {
+      if (inflight.size >= concurrency || cursor >= batches.length) return false;
+      const b = batches[cursor++];
+      const p = processBatch(b)
+        .catch((err) => { if (!poolError) poolError = err; })
+        .finally(() => { inflight.delete(p); });
+      inflight.add(p);
+      return true;
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    // 交错启动初始批次
+    while (inflight.size < concurrency && cursor < batches.length) {
+      launchOne();
+      if (inflight.size < concurrency && cursor < batches.length) await sleep(STAGGER_MS);
     }
+    // 持续补充: 有请求完成就立即补一个新的; 出错后停止调度新 batch 并等待 inflight 排空
+    while (inflight.size > 0) {
+      await Promise.race(inflight);
+      if (poolError) continue;
+      if (cursor < batches.length) {
+        launchOne();
+      }
+    }
+    if (poolError) throw poolError;
   }
   if (typeof result.cacheHits === "undefined") {
     Object.defineProperty(result, "cacheHits", { value: cacheHits, enumerable: false });
   }
+  // 把 batch 维度的 usage 总和挂在数组上, 主流程按阶段记账 (不影响下标遍历)
+  Object.defineProperty(result, "usage", {
+    value: usageAgg.callCount > 0 ? usageAgg : null,
+    enumerable: false,
+  });
+  Object.defineProperty(result, "echoedModel", { value: echoedModel, enumerable: false });
   return result;
 }
 
-module.exports = { mergeShots };
+module.exports = {
+  mergeShots,
+  // 纯函数,导出仅供单测 (batch 选择逻辑易回归)
+  clampBatchSize,
+  ctxToBatchCap,
+  estimateShotPromptTokens,
+  chooseBatchSize,
+};

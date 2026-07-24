@@ -46,6 +46,9 @@ export type LocalModelEntry = {
   secondaryTags: LocalSecondaryTag[];
   available: boolean;
   contextSize: number;
+  // 权重原生支持的 ctx 上限 (Qwen3.5/3.6 全系 262144 / 256K)。
+  // contextSize 字段是"安全默认值"; nativeContextSize 是 slider 上限, 允许用户手动放开。
+  nativeContextSize?: number;
   quantizations: LocalQuantization[];
   fit?: LocalFitLevel;
   memPercent?: number;
@@ -53,6 +56,10 @@ export type LocalModelEntry = {
   downloaded?: boolean;
   llmBytes?: number;
   mmprojBytes?: number;
+  // 模型是否带 thinking / reasoning 能力 (Qwen3 / DeepSeek-R1 / Kimi-K1.5 / GLM-4-thinking 等)。
+  // 业务侧默认会关 thinking 直出 JSON; SlotAssignment.enableThinking 显式 true 时才放开。
+  // 非 thinking 模型 (普通 instruct) 留空, 行为不变。
+  isThinking?: boolean;
 };
 
 // 通用模型描述 - 远程 /models / 本地 llama manifest / 本地 whisper 都统一映射到这里
@@ -77,7 +84,13 @@ export type ModelDescriptor = {
   capabilitiesSource: "inferred" | "manifest" | "manual";
   availability: ModelAvailability;
   contextSize?: number;
+  // 权重原生支持的 ctx 上限 (本地 manifest 直接读, 远程模型暂不可知留 undefined)
+  nativeContextSize?: number;
   ownedBy?: string;                    // 远程 /models 的 owned_by 兜底展示
+  // 同 LocalModelEntry.isThinking: 模型支持 thinking 时这里也置 true。
+  // 远程 (OpenAI o1/o3 / DeepSeek-R1 / Qwen DashScope qwen3-* / 火山方舟 deepseek-r1 等) 通过 id 正则推断,
+  // 本地从 manifest 直接读, 上层 UI / 任务分配可以基于这个字段决定要不要给"启用思考"开关。
+  isThinking?: boolean;
   local?: {
     fit?: LocalFitLevel;
     memPercent?: number;
@@ -122,6 +135,11 @@ export type ProviderModel = {
   family?: string;
   params?: string;
   contextSize?: number;
+  // 本地模型在 manifest 里的默认 contextSize, 跟 contextSize (effective, 可能被 override) 对比。
+  // 只有 builtin local_llama provider 会填这个字段;远端 provider 留空。
+  defaultContextSize?: number;
+  // 权重原生支持的 ctx 上限 (256K 等)。settings UI 的 ctx slider 用它做上限。
+  nativeContextSize?: number;
   ownedBy?: string;
   maxOutputTokens?: number;
   temperature?: number;
@@ -131,6 +149,9 @@ export type ProviderModel = {
   localWhisperModel?: string;
   localWhisperMirror?: string;
   language?: string;
+  // 同 ModelDescriptor.isThinking: model 是否带 thinking 能力
+  // (local llama 走 manifest, 远端走 inferCapabilitiesFromRemoteId 推断)
+  isThinking?: boolean;
 };
 
 export type ModelProvider = {
@@ -170,9 +191,30 @@ export type TaskSlotKey =
   | "complex_vision"
   | "complex_text";
 
-export type SlotAssignment = { providerId: string; modelId: string } | null;
+// enableThinking: 任务分配维度的"是否启用思考"开关。
+// - undefined / false: 默认行为, 关 thinking 直出 JSON (chat_template_kwargs.enable_thinking=false)
+// - true: 用户在任务分配 UI 上显式打开, 允许模型 thinking (调试 / 复杂推理场景)
+// 模型是否支持 thinking 看 ModelDescriptor.isThinking; 不支持的模型这个开关无意义不显示。
+export type SlotAssignment = { providerId: string; modelId: string; enableThinking?: boolean } | null;
 export type TaskSlots = Record<TaskSlotKey, SlotAssignment>;
 
+export type SlotOverrides = {
+  simple_vision?: SlotAssignment;
+  complex_vision?: SlotAssignment;
+  medium_text?: SlotAssignment;
+  audio?: SlotAssignment;
+};
+
+export type PipelineId = "content" | "pipeline";
+
+export type PipelineSlotConfig = {
+  taskSlots: Partial<TaskSlots>;
+  audioSlot: SlotAssignment;
+};
+
+export type PipelineSlots = Record<PipelineId, PipelineSlotConfig>;
+
+/** @deprecated v3: use Video.sourceType/sourceUrl/platform */
 export type ProjectSource =
   | { type: "local_file"; originalPath: string }
   | {
@@ -181,6 +223,7 @@ export type ProjectSource =
       platform: "douyin" | "xiaohongshu" | "bilibili" | "tiktok" | "unknown";
     };
 
+/** @deprecated v3: use VideoStatus */
 export type ProjectStatus =
   | "not_analyzed"
   | "downloading"
@@ -189,10 +232,31 @@ export type ProjectStatus =
   | "completed"
   | "failed";
 
+export type AnalysisStatus = "analyzing" | "completed" | "failed" | "cancelled" | "interrupted";
+
+/** @deprecated use Analysis */
+export type AnalysisRecord = {
+  id: string;
+  videoId?: string;
+  /** @deprecated use videoId */
+  projectId: string;
+  status: AnalysisStatus;
+  providerId?: string;
+  model?: string;
+  analysisOptions?: AnalysisOptions;
+  startedAt: string;
+  completedAt?: string;
+  totalDurationMs?: number;
+  lastErrorMessage?: string;
+  lastErrorAt?: string;
+  createdAt: string;
+};
+
+/** @deprecated v3: use Video */
 export type Project = {
   id: string;
   source: ProjectSource;
-  localVideoPath: string; // media:// URL in Electron or Object URL for browser demo
+  localVideoPath: string;
   localFilePath?: string;
   videoName: string;
   durationSec: number;
@@ -200,17 +264,15 @@ export type Project = {
   height: number;
   orientation: "landscape" | "portrait" | "square";
   status: ProjectStatus;
-  providerId?: string;
-  model?: string;
-  analysisOptions?: AnalysisOptions;
-  thumbnailUrl?: string; // For recent projects list
-  // 标记: videoName 已被 LLM 自动生成过, 后续分析阶段不要再覆盖。
-  // - URL 拉取: yt-dlp 写完 info.json 后 medium_text 直接生成 → true
-  // - 本地选取: 缺省 false; 分析跑出 globalSummary 后再生成一次, 同时置 true
-  // - 用户手动改名: 也置 true (后续不要 LLM 覆盖人工命名)
+  currentAnalysisId?: string;
+  thumbnailUrl?: string;
   titleAutoGenerated?: boolean;
   createdAt?: string;
   updatedAt?: string;
+  kind?: ProjectKind;
+  shots?: Shot[];
+  assetTags?: string[];
+  accountId?: string;
 };
 
 export type AnalysisNodeType =
@@ -375,6 +437,7 @@ export type DanmakuEmotionWindow = {
   dominantEmotion: DanmakuEmotionAxis | "neutral";
   intensities: DanmakuEmotionScores;
   sampleTexts: string[];                 // 代表性弹幕 (≤5 条)
+  summary?: string;
 };
 
 // 顶层 report.danmaku 块: 仅 bilibili 项目产出
@@ -412,6 +475,7 @@ export type AnalysisReport = {
   generatedAt?: string;
   timings?: AnalysisTiming[];
   totalDurationMs?: number;
+  tokenUsage?: TokenUsageSummary;
   methodologyAudit?: MethodologyAudit;
   // PR2 金字塔管线新增字段
   globalSummary?: string;           // medium_text 在主分析前生成的全局摘要 (优先于 summary 展示)
@@ -426,27 +490,134 @@ export type AnalysisTiming = {
   note?: string;
 };
 
+// 单个阶段 + 模型维度的 token 消耗。同一分析里若一个阶段调用了多个不同
+// provider/model (理论上不会, 但留 schema 余地), 会拆成多条。
+export type StageTokenUsage = {
+  // 机器名: "prefilter" | "shot-merger" | "summarizer" | "detect-genre"
+  //         | "main-analysis" | "danmaku-emotion" | "title-gen"
+  stage: string;
+  providerId: string | null;
+  providerName: string | null;
+  model: string | null;
+  // remote (OpenAI 兼容) / local_llama / local_whisper
+  source: "remote" | "local_llama" | "local_whisper";
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cacheReadTokens?: number;     // API 级 prompt cache 命中的 token 数
+  cacheCreationTokens?: number; // API 级 prompt cache 写入的 token 数
+  callCount: number;   // 真正发起的 LLM 调用次数 (不含缓存命中)
+  cacheHits: number;   // 该阶段命中分析缓存的次数
+};
+
+export type TokenUsageSummary = {
+  stages: StageTokenUsage[];
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+  totalTokens: number;
+};
+
 export type AnalysisOptions = {
   mode: "quick" | "standard" | "detailed";
   density: "sparse" | "standard" | "dense";
   focus: "all" | "narrative" | "rhythm" | "emotion";
-  // Hybrid: 用户可在 PrepareScreen 预指定类型；不指定（"auto"）则让 LLM 识别。
+  // Hybrid: 用户可在主入口 composer 预指定类型；不指定（"auto"）则让 LLM 识别。
   // 分析完成后用户也可在 ReportScreen 改类型并重新分析。
   manualGenre?: VideoGenre | "auto";
 };
 
-// 全局默认分析参数: PrepareScreen 在 project.analysisOptions 缺省时读取
+// 全局默认分析参数
 export type DefaultAnalysisPreset = "quick" | "standard" | "deep";
 export type DefaultAnalysis = {
   preset: DefaultAnalysisPreset;
   manualGenre: VideoGenre | "auto";
 };
 
+// 把全局默认 preset 折算成 AnalysisOptions
+// quick → mode:quick / density:sparse; standard → standard; deep → detailed+dense
+export function defaultPresetToAnalysisOptions(d: DefaultAnalysis): AnalysisOptions {
+  const base: Pick<AnalysisOptions, "mode" | "density" | "focus"> =
+    d.preset === "quick" ? { mode: "quick", density: "sparse", focus: "all" }
+    : d.preset === "deep" ? { mode: "detailed", density: "dense", focus: "all" }
+    : { mode: "standard", density: "standard", focus: "all" };
+  return { ...base, manualGenre: d.manualGenre };
+}
+
 export type AnalysisProgressEvent = {
+  videoId?: string;
+  /** @deprecated use videoId */
   projectId: string;
+  analysisId: string;
   progress: number;
   stage: string;
   message?: string;
+  stageIndex?: number;
+  fromCache?: boolean;
+};
+
+// analyzeProject 起来时 broadcast 一次, 把各 stage 的 baseline 耗时预算发给 renderer。
+// ProgressScreen 用它替代 elapsed/progress 线性外推, 给出更稳定的 ETA。
+// stage 字符串是 main.cjs send(stage) 用的 prefix, renderer 用 stageLabel.startsWith() 关联。
+export type AnalysisBudgetStage = {
+  stage: string;
+  estMs: number;
+  kind: "cpu" | "ffmpeg" | "whisper" | "llm-text" | "llm-vision" | "network";
+  note?: string;
+};
+
+export type AnalysisBudget = {
+  totalMs: number;
+  stages: AnalysisBudgetStage[];
+  inputs?: {
+    durationSec?: number;
+    candidateFrames?: number;
+    shotsCount?: number;
+    chunksCount?: number;
+    framesPerChunk?: number;
+    contextSize?: number | null;
+  };
+};
+
+export type AnalysisBudgetEvent = {
+  videoId?: string;
+  /** @deprecated use videoId */
+  projectId: string;
+  analysisId: string;
+  budget: AnalysisBudget;
+};
+
+export const PIPELINE_STAGE_DEFS = [
+  { key: "download", label: "下载视频" },
+  { key: "read_video", label: "读取视频信息" },
+  { key: "detect_scenes", label: "检测镜头切换" },
+  { key: "extract_frames", label: "挑选关键画面" },
+  { key: "transcribe", label: "识别字幕" },
+  { key: "shot_merge", label: "镜头合并" },
+  { key: "prepare", label: "整理分析素材" },
+  { key: "analyze", label: "模型分析画面" },
+  { key: "finalize", label: "整理结果" },
+  { key: "report", label: "生成最终报告" },
+] as const;
+
+export type PipelineStageStatus = "pending" | "active" | "done" | "failed";
+
+export type PipelineStage = {
+  key: string;
+  label: string;
+  status: PipelineStageStatus;
+  detail?: string;
+  startedAt?: number;
+  completedAt?: number;
+  fromCache?: boolean;
+};
+
+export type PipelineState = {
+  videoId?: string;
+  /** @deprecated use videoId */
+  projectId: string;
+  analysisId: string;
+  progress: number;
+  stages: PipelineStage[];
 };
 
 export type AppConfig = {
@@ -455,15 +626,27 @@ export type AppConfig = {
   audioSlot: SlotAssignment;
   // 上次启动过的本地推理模型(key)。下次应用启动时自动恢复。
   lastLlamaModelKey?: string | null;
-  // 全局默认分析参数; PrepareScreen 在新项目首次进入时读取
+  // 全局默认分析参数; 起分析时若 project.analysisOptions 缺省则用它推导
   defaultAnalysis?: DefaultAnalysis;
   // 本地模型下载镜像选择: hf-mirror (默认) 或 modelscope (魔搭/国内 CDN)
   localModelMirror?: "hf-mirror" | "modelscope";
+  // 本地 llama 模型 ctx 覆盖, 启动 server 时 --ctx-size 用这里的值; 缺省走 manifest。
+  // 调大需要更多内存 (主要是 KV cache), 小机器跑大 ctx 容易 OOM。
+  localModelOverrides?: Record<string, { contextSize?: number }>;
+  // 在线模型 LLM 并发数,控制 shot-merger 等批量阶段同时发几个请求。
+  // 本地模型始终为 1 (单 server 实例)。0/缺省 = 自动 (在线 3, 本地 1)。
+  pipelineConcurrency?: number;
   // 分析阶段结果缓存目录, null/缺省 → userData/cache;
   // 可在设置里改到外部盘 (改路径会触发整目录迁移)。
   cacheDir?: string | null;
   // 缓存总容量上限 (字节), 0 = 无上限, 默认 10 GB。
   cacheMaxBytes?: number;
+  // 缓存策略: enabled 总开关, stages 按阶段细控。缺省 = 全部启用。
+  cachePolicy?: {
+    enabled: boolean;
+    stages?: Record<string, boolean>;
+  };
+  pipelineSlots?: PipelineSlots;
   schemaVersion: 2;
   // v1 残留字段,仅在 migrateConfigV1ToV2 内读取,迁移后写回时不再产生
   /** @deprecated migrated to taskSlots.complex_vision */
@@ -472,11 +655,340 @@ export type AppConfig = {
   activeAudioProviderId?: string | null;
 };
 
-export type ScreenState = 
+// v2: 两层路由结构,替代扁平 ScreenState。
+// 老的 7 屏全部归到 module: "analysis" 下。新模块作为并列入口。
+export type AppModule = "analysis" | "video" | "library" | "account" | "studio" | "settings" | "diagnostics";
+
+export type AppLocation =
+  | { module: "analysis";  screen: "home" | "progress" | "workspace" | "report" | "url_pull" }
+  | { module: "video";     screen: "list" | "detail" }
+  | { module: "library";   screen: "list" | "upload" | "shot-list" | "shot-detail" }
+  | { module: "account";   screen: "hub" | "list" | "detail" | "methodology" | "collection" }
+  | { module: "studio";    screen: "list" | "editor" }
+  | { module: "settings" }
+  | { module: "diagnostics" };
+
+// v1 兼容:老 ScreenState 字符串仍在部分调用点出现,逐步迁移到 AppLocation
+export type ScreenState =
   | "home"
   | "settings"
   | "url_pull"
-  | "prepare"
   | "progress"
   | "workspace"
   | "report";
+
+// 把扁平 ScreenState 转成 AppLocation;迁移期临时用,后续 setCurrentScreen 调用点改完可删
+export function legacyScreenToLocation(s: ScreenState): AppLocation {
+  if (s === "settings") return { module: "settings" };
+  return { module: "analysis", screen: s };
+}
+
+export function locationToLegacyScreen(loc: AppLocation): ScreenState {
+  if (loc.module === "settings") return "settings";
+  if (loc.module === "diagnostics") return "settings";
+  if (loc.module === "analysis") return loc.screen as ScreenState;
+  return "home";
+}
+
+// Project.kind: v2 在共享底座上分类。旧数据默认 'analysis'。
+/** @deprecated v3: videos 表不再区分 kind */
+export type ProjectKind = "analysis" | "asset" | "account_video";
+
+// 单个镜头(Shot)— 素材分镜后的最小单位
+export type Shot = {
+  id: string;
+  videoId?: string;                 // v3: 关联到 videos.id
+  assetProjectId: string;           // v2 兼容
+  shotIndex: number;
+  startSec: number;
+  endSec: number;
+  thumbnailUrl?: string;
+  description: string;             // 自动镜头描述
+  shotType?: "wide" | "medium" | "close" | "extreme-close" | "establishing";
+  cameraMovement?: string;
+  usageTags: string[];             // 用户/LLM 标的用途标签: ["开场","转场","B-roll"]
+  isFavorite?: boolean;
+  subtitleText?: string;
+  createdAt?: string;
+};
+
+// 对标账号 (UP 主)
+export type AccountPlatform = "bilibili" | "douyin" | "xiaohongshu" | "youtube" | "tiktok" | "unknown";
+
+// 首次拉取范围
+export type AccountFetchRange = "top10" | "recent20" | "all";
+
+// 账号下挂的"原始视频"。只存元数据,真正分析时再派生 Project。
+/** @deprecated v3: merged into Video table; kept for compat */
+export type AccountVideo = {
+  id: string;                       // 内部 id: `av-${accountId}-${externalId}`
+  accountId: string;
+  externalId: string;               // 平台视频 id (BV / aweme_id / yt watch id)
+  externalUrl: string;
+  title: string;
+  durationSec: number;
+  thumbnailUrl?: string;
+  uploadDate?: string | null;       // YYYYMMDD or ISO
+  viewCount?: number;
+  likeCount?: number;
+  commentCount?: number;
+  shareCount?: number;
+  collectCount?: number;
+  playUrl?: string;
+  platform: AccountPlatform;
+  addedAt: string;                  // ISO 入库时间
+  // 派生的分析项目 id;有值表示已经"开始分析"过。
+  analysisProjectId?: string;
+  // 轻量内容分析
+  videoSummary?: VideoContentAnalysis;
+  summaryStatus?: "idle" | "summarizing" | "done" | "failed";
+  summaryError?: string;
+  localVideoPath?: string;
+  localPath?: string;
+  sourceUrl?: string;
+};
+
+export type VideoContentAnalysis = {
+  summary: string;
+  topic: string;
+  target: string;
+  tags: string[];
+  frames?: Array<{ url: string; timeSec: number }>;
+  transcript?: {
+    text: string;
+    segments: Array<{ text: string; startSec: number; endSec: number }>;
+  } | null;
+  durationSec?: number;
+};
+
+// 账号当前拉取状态
+export type AccountFetchPhase = "idle" | "fetching" | "ready" | "failed";
+
+export type AccountFetchProgress = {
+  accountId: string;
+  stage: string;
+  progress: number;                 // 0-100
+  message?: string;
+};
+
+// 旧版方法论(偏结构拆解的 4 维)。保留以兼容渲染历史记录。
+export type AccountMethodology = {
+  hooks?: { summary: string; sampleVideoIds?: string[] };
+  pacing?: { summary: string; sampleVideoIds?: string[] };
+  structure?: { summary: string; sampleVideoIds?: string[] };
+  visual?: { summary: string; sampleVideoIds?: string[] };
+  generatedAt?: string;
+  sourceVideoCount?: number;
+};
+
+// 收藏夹/集合维度的方法论 — 抽共性 + 给可复用创作方法,辅助创作。
+// 每条 item 可挂样本视频(sampleVideoIds 从该集合的视频里选)。
+export type MethodologyItem = {
+  title: string;
+  detail: string;
+  sampleVideoIds?: string[];
+};
+
+export type CollectionMethodology = {
+  commonalities?: MethodologyItem[]; // 共性洞察:选题/钩子/结构/节奏/视觉 的反复模式
+  playbook?: MethodologyItem[];      // 创作方法:可照做的公式/模板
+  generatedAt?: string;
+  sourceVideoCount?: number;
+};
+
+// 渲染层会同时遇到新老两种形态(老记录是 AccountMethodology)。
+export type AnyMethodology = CollectionMethodology & Partial<AccountMethodology>;
+
+export type Account = {
+  id: string;
+  name: string;
+  platform: AccountPlatform;
+  externalId?: string;             // UP 主在该平台的 id (如 B 站 UID)
+  externalUrl?: string;            // 账号主页 URL
+  avatarUrl?: string;               // 真实头像 URL (B 站 face / yt-dlp thumbnails 最大尺寸)
+  avatarHint?: string;              // 头像 URL 加载失败时显示的 2-3 字 fallback
+  bio?: string;                     // 账号简介 / sign
+  followers?: string;               // 格式化字符串 "1238万"
+  tags?: string[];                  // ["科技", "影视"]
+  /** @deprecated v3: videos 表按 account_id 查 */
+  videoIds?: string[];
+  totalVideoCount?: number;
+  secUid?: string;
+  /** accounts:list 回填(来自该账号 col-account 收藏夹的 methodology);新老结构兼容 */
+  methodology?: AnyMethodology;
+  /** accounts:list 回填 */
+  methodologyHistory?: AnyMethodology[];
+  // 首次/上次拉取的范围设置;详情页 dropdown 可改
+  fetchRange?: AccountFetchRange;
+  // 后台拉取阶段。fetching → ready/failed,UI 用来挂"拉取中"角标
+  fetchPhase?: AccountFetchPhase;
+  fetchError?: string;              // failed 时的最后错误信息
+  lastFetchedAt?: string;           // 上次成功拉取时间
+  // 账号级内容分析配置（高级设置持久化）
+  analysisConfig?: {
+    slotOverrides?: SlotOverrides;
+    customPrompt?: string;
+  };
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+// 剪辑会话 — 用户输入目标 + 应用方法论 + 引用素材,产出剪辑思路 / 缺失镜头 / 脚本
+export type StudioSessionOutput =
+  | { kind: "draft" }
+  | { kind: "cut-list" }
+  | { kind: "idea" };
+
+export type StudioStep = {
+  index: number;
+  label: string;                // "开场钩子 · 0:00 - 0:30"
+  startSec?: number;
+  endSec?: number;
+  body: string;                 // 文案 / 旁白建议
+  shotRefs: Array<{
+    assetProjectId: string;     // 引用 Project.id (kind=asset)
+    shotId?: string;
+    rangeStart?: number;
+    rangeEnd?: number;
+    note?: string;              // 显示 "IMG_2104.MOV · 主播半身 0:00-0:08"
+  }>;
+  missing?: string;             // 缺失镜头描述
+};
+
+// ==================== v3 数据模型 ====================
+
+export type VideoStatus = "ready" | "downloading" | "download_failed" | "failed" | "cancelled" | "interrupted" | "analyzing" | "not_analyzed" | "completed";
+
+export type Video = {
+  id: string;
+  title: string;
+  sourceType: "url" | "local";
+  sourceUrl?: string;
+  platform?: AccountPlatform;
+  externalId?: string;
+  localPath?: string;
+  durationSec: number;
+  width: number;
+  height: number;
+  orientation: "landscape" | "portrait" | "square";
+  thumbnailUrl?: string;
+  accountId?: string;
+  status: VideoStatus;
+  uploadDate?: string;
+  viewCount?: number;
+  likeCount?: number;
+  commentCount?: number;
+  shareCount?: number;
+  collectCount?: number;
+  tags?: string[];
+  createdAt: string;
+  updatedAt: string;
+  // UI 层用, 不落 DB
+  currentAnalysisId?: string;
+  /** @deprecated v2 compat — use sourceType/sourceUrl */
+  source?: { type: string; url?: string; platform?: string; originalPath?: string };
+  /** @deprecated v2 compat */
+  videoName?: string;
+  /** @deprecated v2 compat */
+  localVideoPath?: string;
+  /** @deprecated v2 compat */
+  localFilePath?: string;
+  /** @deprecated v2 compat */
+  kind?: string;
+  /** @deprecated v2 compat */
+  assetTags?: string[];
+  /** @deprecated v2 compat */
+  shots?: Shot[];
+  /** @deprecated v2 compat */
+  titleAutoGenerated?: boolean;
+};
+
+export type CollectionKind = "manual" | "smart" | "account";
+
+export type Collection = {
+  id: string;
+  name: string;
+  description?: string;
+  kind: CollectionKind;
+  coverUrl?: string;
+  filterRules?: Record<string, unknown>;
+  accountId?: string;
+  createdAt: string;
+  updatedAt: string;
+  // 方法论(创作手册)— collections:list 回填,最新一份 + 历史快照
+  methodology?: AnyMethodology;
+  methodologyHistory?: AnyMethodology[];
+};
+
+export type PipelineStageDefinition = {
+  key: string;
+  label: string;
+  slot: string | null;
+};
+
+export type Pipeline = {
+  id: string;
+  name: string;
+  builtin: boolean;
+  stages: PipelineStageDefinition[];
+  slotConfig?: Record<string, SlotAssignment>;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Analysis = {
+  id: string;
+  videoId: string;
+  pipelineId: string;
+  status: AnalysisStatus;
+  options?: AnalysisOptions;
+  providerSnapshot?: Record<string, unknown>;
+  result?: unknown;
+  tokenUsage?: TokenUsageSummary;
+  durationMs?: number;
+  errorMessage?: string;
+  startedAt: string;
+  completedAt?: string;
+  createdAt: string;
+  // 运行时进度快照(持久化在 analyses 行,供前端纯视图 / 重启恢复读取)
+  progress?: number;
+  stage?: string;
+  stageIndex?: number;
+  message?: string;
+  heartbeatAt?: number;
+  /** @deprecated v2 compat — use options */
+  analysisOptions?: AnalysisOptions;
+  /** @deprecated v2 compat — use providerSnapshot */
+  providerId?: string;
+  /** @deprecated v2 compat */
+  lastErrorMessage?: string;
+};
+
+export type Methodology = {
+  id: string;
+  collectionId: string;   // 主绑定:方法论挂在收藏夹上
+  accountId?: string;     // 冗余:col-account 收藏夹才有,便于按账号查/兼容
+  version: number;
+  data: AnyMethodology;
+  sourceVideoCount: number;
+  createdAt: string;
+};
+
+// ==================== end v3 ====================
+
+export type StudioSession = {
+  id: string;
+  goal: string;
+  targetPlatform?: string;       // "B 站知识区"
+  targetDurationSec?: number;
+  mainShotRatio?: number;        // 0-1
+  appliedMethodologies?: string[]; // Account.id[]
+  usedAssetIds?: string[];        // Project.id (kind=asset)[]
+  steps?: StudioStep[];
+  scriptDraft?: string;
+  missingShots?: string[];
+  output?: StudioSessionOutput;
+  createdAt?: string;
+  updatedAt?: string;
+};

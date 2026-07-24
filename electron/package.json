@@ -1,0 +1,4 @@
+{
+  "//": "根 package.json 是 type:module(给 Vite/renderer 用)。electron/ 子树是 CJS 世界:main/preload/runtime 都是 .cjs,渐进迁移产出的 .ts 经 esbuild 编成 format:cjs 的 .js。这个嵌套 package.json 把本目录的 .js 重新定义为 CommonJS,否则会被根的 type:module 当成 ESM,跟 require()/__dirname 冲突。",
+  "type": "commonjs"
+}

@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -16,9 +17,11 @@ import {
 import {
   ArrowLeft,
   CheckCircle2,
+  Copy,
   DownloadCloud,
   FolderOpen,
   Loader2,
+  Plug,
   Plus,
   RefreshCw,
   Settings2,
@@ -40,12 +43,12 @@ import {
   TaskDifficulty,
   TaskSlotKey,
   VideoGenre,
+  PipelineId,
 } from "../types";
-import type { CacheScopeStats, CacheStats, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
+import type { CachePolicy, CacheScopeStats, CacheStats, ExtensionBridgeStatus, LlamaProgress, LlamaStatus, RuntimeStatus, YtDlpUpdateInfo } from "../electron-api";
 
-type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "cache" | "data";
+type Section = "providers" | "tasks" | "deps" | "local" | "analysis" | "douyin" | "bridge" | "data";
 
-const NONE = "__none__";
 
 const SECTIONS: { key: Section; label: string }[] = [
   { key: "providers", label: "供应商" },
@@ -53,7 +56,8 @@ const SECTIONS: { key: Section; label: string }[] = [
   { key: "local", label: "本地推理" },
   { key: "deps", label: "本地依赖" },
   { key: "analysis", label: "默认分析" },
-  { key: "cache", label: "分析缓存" },
+  { key: "douyin", label: "抖音账号" },
+  { key: "bridge", label: "浏览器插件桥" },
   { key: "data", label: "项目数据" },
 ];
 
@@ -69,27 +73,23 @@ const SCOPE_LABELS_ZH: Record<string, string> = {
 
 function whisperModelHint(modelId?: string) {
   switch (modelId) {
-    case "ggml-tiny":
+    case "whisper-tiny":
       return "~75 MB · 最快,但中文准确率一般,适合英文 / 噪声小的素材。";
-    case "ggml-small":
+    case "whisper-small":
       return "~466 MB · 中文较准,速度适中,常规拉片推荐。";
-    case "ggml-medium":
+    case "whisper-medium":
       return "~1.5 GB · 准确率高,速度慢,长视频耗时较多。";
-    case "ggml-base":
+    case "whisper-large-v3-turbo":
+      return "~1.6 GB · 最高准确率,适合专业字幕场景。";
+    case "whisper-base":
     default:
       return "~142 MB · 默认选项,速度和准确率折中。";
   }
 }
 
 // ModelCapability (provider.models[i].capabilities) 的中文映射,任务分配 dropdown 用
-const CAPABILITY_LABELS_ZH: Record<string, string> = {
-  vision: "视觉",
-  audio_transcription: "音频",
-  reasoning: "推理",
-  fast: "快速",
-  long_context: "长上下文",
-  text: "文本",
-};
+import { PipelineRow, CAPABILITY_LABELS_ZH, type SlotMeta, type PipelineStage } from "../components/PipelineSlotPicker";
+import { useSidecarReadiness } from "../hooks/useSidecarReadiness";
 
 function formatBytes(bytes: number) {
   if (!bytes) return "0 B";
@@ -139,13 +139,14 @@ export function SettingsScreen() {
         </aside>
 
         <div className="flex-1 overflow-y-auto p-8 md:p-12">
-          <div className="max-w-3xl space-y-8">
+          <div className="max-w-4xl space-y-8">
             {section === "providers" && <ProvidersSection />}
             {section === "tasks" && <TaskAssignmentSection />}
             {section === "deps" && <DepsSection />}
             {section === "local" && <LocalInferenceSection />}
             {section === "analysis" && <AnalysisDefaultsSection />}
-            {section === "cache" && <CacheSection />}
+            {section === "douyin" && <DouyinAccountSection />}
+            {section === "bridge" && <ExtensionBridgeSection />}
             {section === "data" && <DataSection />}
           </div>
         </div>
@@ -271,58 +272,80 @@ function ProvidersSection() {
   );
 }
 
-type SlotMeta = {
-  key: TaskSlotKey;
-  label: string;
-  difficulty: TaskDifficulty;
-  axis: TaskAxis;
-  hint: string;
-  used: boolean;
-};
-
 const SLOT_METAS: SlotMeta[] = [
   { key: "simple_vision", label: "简单 · 视觉", difficulty: "simple", axis: "vision", hint: "用于本地视觉初筛打标", used: true },
   { key: "medium_text", label: "中等 · 文本", difficulty: "medium", axis: "text", hint: "用于字幕推断视频类型", used: true },
-  { key: "complex_vision", label: "复杂 · 视觉", difficulty: "complex", axis: "vision", hint: "用于主分析:拉片打标 + 方法论审计", used: true },
+  { key: "complex_vision", label: "复杂 · 视觉", difficulty: "complex", axis: "vision", hint: "用于主分析", used: true },
 ];
 
-const PIPELINE_STAGES: Array<{
-  num: string;
-  title: string;
-  badges: string[];
-  desc: string;
-  slot: TaskSlotKey | "__audio__";
-  isKey?: boolean;
-}> = [
+const CONTENT_STAGES: PipelineStage[] = [
+  { num: "01", title: "字幕识别", badges: ["audio"], desc: "从音轨提取台词。", slot: "__audio__" },
+  { num: "02", title: "内容分析", badges: ["complex · vision"], desc: "基于关键帧和字幕,分析视频内容、选题和受众。", slot: "complex_vision", isKey: true },
+];
+
+const PIPELINE_STAGES: PipelineStage[] = [
   { num: "01", title: "抽帧初筛", badges: ["simple · vision"], desc: "对每秒 1-2 帧的抽帧打标(场景类型、主体、是否空帧),过滤重复与低信息量帧。", slot: "simple_vision" },
   { num: "02", title: "字幕识别", badges: ["audio"], desc: "从音轨提取台词,作为节点字幕来源。", slot: "__audio__" },
   { num: "03", title: "镜头合并 + 全局摘要", badges: ["medium · text"], desc: "把同一镜头的若干帧合并成镜头描述,聚合成全局摘要并推断视频类型。", slot: "medium_text" },
   { num: "04", title: "主分析", badges: ["complex · vision"], desc: "基于镜头描述 + 字幕 + 关键帧,产出节点评审、方法论审计、情绪曲线。", slot: "complex_vision", isKey: true },
 ];
 
-function TaskAssignmentSection() {
-  const { providers, taskSlots, setTaskSlot, audioSlot, setAudioSlot } = useApp();
-  // 本地 llama 已下载且可启动的 model id 集合; 任务分配 dropdown 据此过滤未下载项
-  const [readyLocalIds, setReadyLocalIds] = useState<Set<string>>(new Set());
+function ConcurrencyControl() {
+  const [value, setValue] = useState(0);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    if (!window.videoAnalyzer?.llama) return;
-    let cancelled = false;
-    const refresh = async () => {
-      const r = await window.videoAnalyzer!.llama.listManifest().catch(() => null);
-      if (cancelled || !r) return;
-      const ready = new Set(
-        r.models.filter((m) => m.availability.state === "ready").map((m) => m.id),
-      );
-      setReadyLocalIds(ready);
-    };
-    refresh();
-    const unsub = window.videoAnalyzer.llama.onProgress(() => refresh());
-    return () => {
-      cancelled = true;
-      unsub();
-    };
+    window.videoAnalyzer?.getConfigField?.("pipelineConcurrency").then((v: any) => {
+      setValue(Number(v) || 0);
+      setLoaded(true);
+    }).catch(() => setLoaded(true));
   }, []);
+
+  const handleChange = (next: number) => {
+    setValue(next);
+    window.videoAnalyzer?.saveConfigField?.("pipelineConcurrency", next).catch(() => {});
+  };
+
+  if (!loaded) return null;
+
+  const options = [
+    { value: 0, label: "自动" },
+    { value: 1, label: "1" },
+    { value: 2, label: "2" },
+    { value: 3, label: "3" },
+    { value: 4, label: "4" },
+    { value: 6, label: "6" },
+  ];
+
+  return (
+    <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] px-4 py-3 flex items-center justify-between">
+      <div>
+        <div className="text-[13px] font-medium text-slate-900 dark:text-slate-100">在线模型并发</div>
+        <div className="text-[11.5px] text-slate-500 dark:text-slate-400 mt-0.5">镜头合并等批量阶段同时发几个请求,本地模型始终为 1</div>
+      </div>
+      <div className="flex gap-1 shrink-0">
+        {options.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => handleChange(opt.value)}
+            className={`px-2.5 py-1 text-[11.5px] rounded border transition-colors ${
+              value === opt.value
+                ? "bg-indigo-50 border-indigo-300 text-indigo-700 dark:bg-indigo-500/15 dark:border-indigo-500/40 dark:text-indigo-300 font-medium"
+                : "border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800"
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TaskAssignmentSection() {
+  const { providers, getPipelineSlot, setPipelineSlot } = useApp();
+  const { readyLocalIds, readyWhisperIds } = useSidecarReadiness();
 
   const slotMetaByKey: Record<string, SlotMeta> = SLOT_METAS.reduce((acc, m) => {
     acc[m.key] = m;
@@ -337,183 +360,54 @@ function TaskAssignmentSection() {
     used: true,
   };
 
+  const renderStages = (pipelineId: PipelineId, stages: PipelineStage[]) =>
+    stages.map((stage, idx) => {
+      const isAudio = stage.slot === "__audio__";
+      const slotKey = isAudio ? ("__audio__" as const) : (stage.slot as TaskSlotKey);
+      const meta = isAudio ? audioMeta : slotMetaByKey[stage.slot];
+      const assignment = getPipelineSlot(pipelineId, slotKey);
+      const onChange = (a: SlotAssignment) => setPipelineSlot(pipelineId, slotKey, a);
+      return (
+        <PipelineRow
+          key={stage.slot + stage.num}
+          stage={stage}
+          isFirst={idx === 0}
+          providers={providers}
+          meta={meta}
+          assignment={assignment}
+          onChange={onChange}
+          audioMode={isAudio}
+          readyLocalIds={readyLocalIds}
+          readyWhisperIds={readyWhisperIds}
+        />
+      );
+    });
+
   return (
     <>
-      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">分析管线</h2>
+      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">任务分配</h2>
       <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
-        每一步绑定独立模型。
+        每一步绑定独立模型,分别为两条管线配置默认值。
       </p>
 
+      <ConcurrencyControl />
+
+      <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mt-2">内容分析</h3>
+      <p className="text-[12.5px] text-slate-500 dark:text-slate-400 -mt-4">账号视频的轻量内容分析管线。</p>
       <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] overflow-hidden">
-        {PIPELINE_STAGES.map((stage, idx) => {
-          const isAudio = stage.slot === "__audio__";
-          const meta = isAudio ? audioMeta : slotMetaByKey[stage.slot];
-          const assignment = isAudio ? audioSlot : taskSlots[stage.slot as TaskSlotKey];
-          const onChange = isAudio
-            ? (a: SlotAssignment) => setAudioSlot(a)
-            : (a: SlotAssignment) => setTaskSlot(stage.slot as TaskSlotKey, a);
-          return (
-            <PipelineRow
-              key={stage.slot}
-              stage={stage}
-              isFirst={idx === 0}
-              providers={providers}
-              meta={meta}
-              assignment={assignment}
-              onChange={onChange}
-              audioMode={isAudio}
-              readyLocalIds={readyLocalIds}
-            />
-          );
-        })}
+        {renderStages("content", CONTENT_STAGES)}
+      </div>
+
+      <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mt-4">结构拆解</h3>
+      <p className="text-[12.5px] text-slate-500 dark:text-slate-400 -mt-4">完整的视频结构拆解管线。</p>
+      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] overflow-hidden">
+        {renderStages("pipeline", PIPELINE_STAGES)}
       </div>
     </>
   );
 }
 
-type PipelineRowProps = {
-  stage: { num: string; title: string; badges: string[]; desc: string; isKey?: boolean };
-  isFirst: boolean;
-  providers: ModelProvider[];
-  meta: SlotMeta;
-  assignment: SlotAssignment;
-  onChange: (a: SlotAssignment) => void;
-  audioMode?: boolean;
-  readyLocalIds: Set<string>;
-};
 
-const PipelineRow: FunctionComponent<PipelineRowProps> = ({
-  stage, isFirst, providers, meta, assignment, onChange, audioMode, readyLocalIds,
-}) => {
-  // 本地 llama provider 下未 ready (未下载) 的 model id 一律不出现在 dropdown
-  const isModelEligible = (p: ModelProvider, m: ProviderModel) => {
-    if (p.source === "local_llama" && !readyLocalIds.has(m.id)) return false;
-    return true;
-  };
-
-  const candidateProviders = audioMode
-    ? providers.filter((p) =>
-        p.models.some((m) => isModelEligible(p, m) && m.capabilities.includes("audio_transcription")) ||
-        p.endpointType === "openai_audio_transcriptions" ||
-        p.endpointType === "local_whisper_cpp",
-      )
-    : providers.filter((p) =>
-        meta.axis === "vision"
-          ? p.models.some((m) => isModelEligible(p, m) && m.capabilities.includes("vision"))
-          : p.models.some((m) => isModelEligible(p, m)),
-      );
-  const selectedProvider = assignment ? providers.find((p) => p.id === assignment.providerId) : null;
-  const candidateModels = (() => {
-    if (!selectedProvider) return [];
-    const eligible = selectedProvider.models.filter((m) => isModelEligible(selectedProvider, m));
-    if (audioMode) {
-      return eligible.filter(
-        (m) =>
-          m.capabilities.includes("audio_transcription") ||
-          selectedProvider.endpointType === "openai_audio_transcriptions" ||
-          selectedProvider.endpointType === "local_whisper_cpp",
-      );
-    }
-    if (meta.axis === "vision") {
-      return eligible.filter((m) => m.capabilities.includes("vision"));
-    }
-    return eligible;
-  })();
-
-  const handleProviderChange = (id: string) => {
-    if (id === NONE) {
-      onChange(null);
-      return;
-    }
-    const p = providers.find((x) => x.id === id);
-    const eligibleModels = p?.models.filter((m) => isModelEligible(p, m)) || [];
-    const firstModel = audioMode
-      ? eligibleModels.find((m) => m.capabilities.includes("audio_transcription")) || eligibleModels[0]
-      : meta.axis === "vision"
-      ? eligibleModels.find((m) => m.capabilities.includes("vision")) || eligibleModels[0]
-      : eligibleModels[0];
-    onChange(firstModel ? { providerId: id, modelId: firstModel.id } : null);
-  };
-
-  const handleModelChange = (id: string) => {
-    if (!assignment) return;
-    onChange({ ...assignment, modelId: id });
-  };
-
-  return (
-    <div className={`grid grid-cols-[36px_minmax(0,1fr)_280px] gap-4 items-start px-5 py-4 ${isFirst ? "" : "border-t border-slate-200 dark:border-slate-800"}`}>
-      <div className={`w-7 h-7 grid place-items-center rounded-md font-mono text-[11px] font-medium ${
-        stage.isKey
-          ? "bg-indigo-600 text-white border border-indigo-600"
-          : "bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700"
-      }`}>
-        {stage.num}
-      </div>
-      <div className="min-w-0">
-        <h4 className="text-[13.5px] font-semibold text-slate-900 dark:text-slate-100 mb-1 flex items-center gap-2">
-          {stage.title}
-          {stage.badges.map(b => (
-            <span key={b} className={`inline-flex h-5 px-1.5 rounded font-mono text-[10.5px] uppercase tracking-wider items-center ${
-              stage.isKey
-                ? "bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900"
-                : "bg-transparent text-slate-500 border border-slate-200 dark:border-slate-700"
-            }`}>
-              {b}
-            </span>
-          ))}
-        </h4>
-        <p className="text-[12.5px] text-slate-600 dark:text-slate-400 leading-snug">
-          {stage.desc}
-        </p>
-      </div>
-      <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0e0e10] p-2.5 space-y-2">
-        <div className="font-mono text-[10px] uppercase tracking-wider text-slate-500">当前使用</div>
-        <Select value={assignment?.providerId ?? NONE} onValueChange={handleProviderChange}>
-          <SelectTrigger className="h-7 text-[12px] bg-white dark:bg-[#14151a] border-slate-200 dark:border-slate-800">
-            <SelectValue placeholder="选供应商">
-              {selectedProvider ? selectedProvider.name : "选供应商"}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={NONE}>不启用</SelectItem>
-            {candidateProviders.length === 0 && (
-              <SelectItem value={NONE} disabled>没有符合能力的供应商</SelectItem>
-            )}
-            {candidateProviders.map((p) => (
-              <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select value={assignment?.modelId ?? NONE} onValueChange={handleModelChange} disabled={!selectedProvider}>
-          <SelectTrigger className="h-7 text-[12px] bg-white dark:bg-[#14151a] border-slate-200 dark:border-slate-800 font-mono">
-            <SelectValue placeholder="选模型">
-              {(() => {
-                if (!assignment || !selectedProvider) return "选模型";
-                const m = selectedProvider.models.find((x) => x.id === assignment.modelId);
-                return m?.label || assignment.modelId;
-              })()}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            {candidateModels.length === 0 && (
-              <SelectItem value={NONE} disabled>
-                {meta.axis === "vision" ? "该供应商无视觉能力的 model" : "该供应商没有 model"}
-              </SelectItem>
-            )}
-            {candidateModels.map((m) => (
-              <SelectItem key={m.id} value={m.id}>
-                <span className="flex items-center gap-2">
-                  <span>{m.label}</span>
-                  <span className="text-[10px] text-slate-400">{m.capabilities.map((c) => CAPABILITY_LABELS_ZH[c] || c).join(" · ")}</span>
-                </span>
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-    </div>
-  );
-}
 
 function ProviderGroup({
   kind,
@@ -583,10 +477,11 @@ function ProviderCard({
   onUpdate: (patch: Partial<ModelProvider>) => void;
   kind: ProviderKind;
 }) {
-  const { taskSlots, audioSlot } = useApp();
+  const { taskSlots, audioSlot, pipelineSlots, localModelOverrides, updateLocalModelOverride } = useApp();
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [whisperCache, setWhisperCache] = useState<{ cached: boolean; sizeBytes?: number } | null>(null);
+  const [whisperModelStatus, setWhisperModelStatus] = useState<Map<string, boolean>>(new Map());
   const [draft, setDraft] = useState<ModelProvider>(persisted);
   // 测试连接成功后,/models 返回的 ModelDescriptor 列表; combobox 下拉数据源
   const [fetchedModels, setFetchedModels] = useState<ModelDescriptor[]>([]);
@@ -642,18 +537,20 @@ function ProviderCard({
   const slotUsage = useCallback(
     (modelId: string): string[] => {
       const usage: string[] = [];
-      Object.entries(taskSlots).forEach(([slotKey, raw]) => {
-        const asn = raw as SlotAssignment;
-        if (asn?.providerId === persisted.id && asn.modelId === modelId) {
-          usage.push(slotKey);
+      const pid = persisted.id;
+      for (const [pipelineId, pc] of Object.entries(pipelineSlots) as [string, import("../types").PipelineSlotConfig][]) {
+        if (pc.audioSlot?.providerId === pid && pc.audioSlot.modelId === modelId) {
+          usage.push(`${pipelineId}:audio`);
         }
-      });
-      if (audioSlot?.providerId === persisted.id && audioSlot.modelId === modelId) {
-        usage.push("audio");
+        for (const [slotKey, asn] of Object.entries(pc.taskSlots || {}) as [string, SlotAssignment][]) {
+          if (asn?.providerId === pid && asn.modelId === modelId) {
+            usage.push(`${pipelineId}:${slotKey}`);
+          }
+        }
       }
       return usage;
     },
-    [taskSlots, audioSlot, persisted.id],
+    [pipelineSlots, persisted.id],
   );
 
   const isLocalWhisper = draft.endpointType === "local_whisper_cpp";
@@ -685,6 +582,18 @@ function ProviderCard({
       cancelled = true;
     };
   }, [isLocalWhisper, modelKey]);
+
+  useEffect(() => {
+    if (!isLocalWhisper || !window.videoAnalyzer?.whisperCpp) return;
+    let cancelled = false;
+    window.videoAnalyzer.whisperCpp.listModels().then((models) => {
+      if (cancelled) return;
+      const map = new Map<string, boolean>();
+      models.forEach((m) => map.set(m.id, m.availability.state === "ready"));
+      setWhisperModelStatus(map);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [isLocalWhisper]);
 
   const handleTest = async () => {
     setIsTesting(true);
@@ -802,9 +711,9 @@ function ProviderCard({
                 if (next === "local_whisper_cpp") {
                   onUpdate({
                     endpointType: next,
-                    localWhisperModel: provider.localWhisperModel || "ggml-base",
+                    localWhisperModel: provider.localWhisperModel || "whisper-base",
                     localWhisperMirror: provider.localWhisperMirror || "https://hf-mirror.com",
-                    model: provider.localWhisperModel || "ggml-base",
+                    model: provider.localWhisperModel || "whisper-base",
                   });
                 } else {
                   onUpdate({ endpointType: next });
@@ -969,6 +878,11 @@ function ProviderCard({
         provider={persisted}
         fetched={fetchedModels}
         readOnly={isLocalProvider}
+        isLocalLlama={isLocalLlama}
+        isLocalWhisper={isLocalWhisper}
+        whisperModelStatus={whisperModelStatus}
+        localModelOverrides={localModelOverrides}
+        onLocalContextOverride={updateLocalModelOverride}
         onPersistModels={persistModels}
         slotUsage={slotUsage}
       />
@@ -1004,6 +918,11 @@ function ModelManagerDialog({
   provider,
   fetched,
   readOnly,
+  isLocalLlama,
+  isLocalWhisper,
+  whisperModelStatus,
+  localModelOverrides,
+  onLocalContextOverride,
   onPersistModels,
   slotUsage,
 }: {
@@ -1011,7 +930,14 @@ function ModelManagerDialog({
   onOpenChange: (next: boolean) => void;
   provider: ModelProvider;
   fetched: ModelDescriptor[];
+  // 整体只读 (本地 provider 不能增删模型, 模型清单由 manifest 锁死)
   readOnly: boolean;
+  // 本地 llama provider 标识。即便 readOnly=true, 用户也可单独改 contextSize (走 localModelOverrides)
+  isLocalLlama?: boolean;
+  isLocalWhisper?: boolean;
+  whisperModelStatus?: Map<string, boolean>;
+  localModelOverrides?: Record<string, { contextSize?: number }>;
+  onLocalContextOverride?: (modelKey: string, patch: { contextSize?: number } | null) => void;
   onPersistModels: (next: ProviderModel[]) => void;
   slotUsage: (modelId: string) => string[];
 }) {
@@ -1065,6 +991,15 @@ function ModelManagerDialog({
   };
 
   const handleSaveEdit = (modelId: string, patch: Partial<ProviderModel>) => {
+    // 本地 llama: contextSize 走 localModelOverrides, 不写 provider.models (会被 builtin 重写)。
+    // 其他字段 (label / capabilities) 本地不允许改, 这里走的只可能是 contextSize。
+    if (isLocalLlama && onLocalContextOverride) {
+      if ("contextSize" in patch) {
+        onLocalContextOverride(modelId, { contextSize: patch.contextSize });
+      }
+      setEditingId(null);
+      return;
+    }
     onPersistModels(
       (provider.models || []).map((m) =>
         m.id === modelId ? { ...m, ...patch, capabilitiesSource: "manual" } : m,
@@ -1094,19 +1029,29 @@ function ModelManagerDialog({
               </div>
             ) : (
               <div className="space-y-1.5">
-                {(provider.models || []).map((m) => (
-                  <ModelRow
-                    key={m.id}
-                    model={m}
-                    readOnly={readOnly}
-                    editing={editingId === m.id}
-                    onEdit={() => setEditingId(m.id)}
-                    onCancel={() => setEditingId(null)}
-                    onSave={(patch) => handleSaveEdit(m.id, patch)}
-                    onRemove={() => handleRemove(m.id)}
-                    usage={slotUsage(m.id)}
-                  />
-                ))}
+                {(provider.models || []).map((m) => {
+                  // 本地 llama: 即便整体 readOnly, ctx 也可改。effective ctx 显示 override > 默认。
+                  const localOverrideCtx = isLocalLlama
+                    ? localModelOverrides?.[m.id]?.contextSize
+                    : undefined;
+                  return (
+                    <ModelRow
+                      key={m.id}
+                      model={m}
+                      readOnly={readOnly && !isLocalLlama}
+                      localCtxOnly={!!isLocalLlama}
+                      localCtxOverride={localOverrideCtx}
+                      isLocalWhisper={isLocalWhisper}
+                      whisperDownloaded={isLocalWhisper ? whisperModelStatus?.get(m.id) : undefined}
+                      editing={editingId === m.id}
+                      onEdit={() => setEditingId(m.id)}
+                      onCancel={() => setEditingId(null)}
+                      onSave={(patch) => handleSaveEdit(m.id, patch)}
+                      onRemove={() => handleRemove(m.id)}
+                      usage={slotUsage(m.id)}
+                    />
+                  );
+                })}
               </div>
             )}
           </section>
@@ -1177,9 +1122,107 @@ function ModelManagerDialog({
   );
 }
 
+// 把 token 数格式化成 "32K" / "128K" / "256K" 这样的简短显示。
+// 非整 K 的(用户手动输入 35000)保持原值。
+function formatCtxNumber(n: number): string {
+  if (!n || n < 1024) return String(n);
+  if (n >= 1024 && n % 1024 === 0) return `${n / 1024}K`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)}K`;
+  return String(n);
+}
+
+function formatBytesShort(bytes: number): string {
+  if (!bytes || bytes <= 0) return "0";
+  const gb = bytes / (1024 ** 3);
+  if (gb >= 1) return `${gb.toFixed(1)} GB`;
+  return `${(bytes / (1024 ** 2)).toFixed(0)} MB`;
+}
+
+// ctx slider + 实时 fit 预览。debounce 200ms 调 IPC recomputeFit 减少抖动。
+type CtxSliderProps = {
+  modelKey: string;
+  value: string;       // 受控字符串 (跟 contextDraft 一致, "" 表示删除 override 回默认)
+  onChange: (v: string) => void;
+  min: number;
+  max: number;
+  defaultValue: number; // manifest 默认值 (空 string 时使用)
+};
+
+const CtxSlider: FunctionComponent<CtxSliderProps> = ({ modelKey, value, onChange, min, max, defaultValue }) => {
+  const numeric = (() => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : defaultValue;
+  })();
+  // step 4K, 最小 4K (匹配下限) — slider 滑动颗粒度
+  const step = 4096;
+  // recomputeFit 拿到的本地预览, debounce 后异步更新
+  const [preview, setPreview] = useState<{
+    fit: string; memPercent: number; tps: number;
+    totalMemBytes: number; weightBytes: number; kvBytes: number; memCapBytes: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!window.videoAnalyzer?.llama?.recomputeFit) return;
+    const t = window.setTimeout(() => {
+      window.videoAnalyzer!.llama.recomputeFit(modelKey, numeric).then((res) => {
+        if (res) setPreview(res);
+      }).catch(() => { /* noop */ });
+    }, 200);
+    return () => window.clearTimeout(t);
+  }, [modelKey, numeric]);
+
+  const isDefault = !value.trim();
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-3">
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={numeric}
+          onChange={(e) => onChange(String(Number(e.target.value)))}
+          className="flex-1 accent-indigo-600"
+        />
+        <div className="font-mono text-[12px] w-[110px] text-right">
+          <span className="text-slate-900 dark:text-slate-100">{formatCtxNumber(numeric)}</span>
+          <span className="text-slate-400 ml-1">/ {formatCtxNumber(max)}</span>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 text-[10.5px]">
+        {preview && (
+          <>
+            <FitChip fit={preview.fit} />
+            <span className="font-mono text-slate-500 dark:text-slate-400">
+              占 {preview.memPercent}% · {formatBytesShort(preview.totalMemBytes)} / {formatBytesShort(preview.memCapBytes)}
+            </span>
+            <span className="font-mono text-slate-400 dark:text-slate-500">
+              · 权重 {formatBytesShort(preview.weightBytes)} + KV {formatBytesShort(preview.kvBytes)}
+            </span>
+          </>
+        )}
+        <button
+          type="button"
+          onClick={() => onChange("")}
+          className={`ml-auto text-[10.5px] ${isDefault ? "text-slate-300 cursor-default" : "text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 underline"}`}
+          disabled={isDefault}
+        >
+          {isDefault ? "已是默认" : "回到默认"}
+        </button>
+      </div>
+    </div>
+  );
+};
+
 type ModelRowProps = {
   model: ProviderModel;
   readOnly: boolean;
+  // 本地 llama 模式: label / capabilities 不能改 (manifest 锁死), 但 contextSize 可改 (走 override)
+  localCtxOnly?: boolean;
+  // 当前生效的 override 值; 没有 override 时显 manifest 默认 (model.defaultContextSize)
+  localCtxOverride?: number;
+  isLocalWhisper?: boolean;
+  whisperDownloaded?: boolean;
   editing: boolean;
   onEdit: () => void;
   onCancel: () => void;
@@ -1192,6 +1235,10 @@ type ModelRowProps = {
 const ModelRow: FunctionComponent<ModelRowProps> = ({
   model,
   readOnly,
+  localCtxOnly,
+  localCtxOverride,
+  isLocalWhisper,
+  whisperDownloaded,
   editing,
   onEdit,
   onCancel,
@@ -1202,23 +1249,33 @@ const ModelRow: FunctionComponent<ModelRowProps> = ({
   const [labelDraft, setLabelDraft] = useState(model.label);
   const [capsDraft, setCapsDraft] = useState<Set<ModelCapability>>(new Set(model.capabilities));
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [contextDraft, setContextDraft] = useState(model.contextSize?.toString() || "");
+  // 本地模式默认从 override 读, 没 override 用 model.contextSize (后者已经是 effective)。
+  const initialContextDraft = localCtxOnly
+    ? (localCtxOverride ?? model.contextSize ?? "").toString()
+    : (model.contextSize?.toString() || "");
+  const [contextDraft, setContextDraft] = useState(initialContextDraft);
 
   useEffect(() => {
     if (editing) {
       setLabelDraft(model.label);
       setCapsDraft(new Set(model.capabilities));
-      setContextDraft(model.contextSize?.toString() || "");
-      setShowAdvanced(false);
+      setContextDraft(
+        localCtxOnly
+          ? (localCtxOverride ?? model.contextSize ?? "").toString()
+          : (model.contextSize?.toString() || ""),
+      );
+      setShowAdvanced(localCtxOnly || false);
     }
-  }, [editing, model]);
+  }, [editing, model, localCtxOnly, localCtxOverride]);
 
   if (!editing) {
+    const defaultCtx = model.defaultContextSize;
+    const isCustomCtx = localCtxOnly && defaultCtx != null && model.contextSize !== defaultCtx;
     return (
       <div className="flex items-center gap-3 rounded-lg border border-slate-200 dark:border-slate-800 px-3 py-2 bg-white dark:bg-[#0E0E10]">
         <div className="min-w-0 flex-1">
           <div className="font-mono text-xs text-slate-800 dark:text-slate-100 truncate">{model.id}</div>
-          <div className="text-[10.5px] text-slate-400 dark:text-slate-500 flex items-center gap-1.5 mt-0.5">
+          <div className="text-[10.5px] text-slate-400 dark:text-slate-500 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mt-0.5">
             <span>
               {model.capabilities.length > 0
                 ? model.capabilities.map((c) => CAPABILITY_LABELS_ZH[c] || c).join(" · ")
@@ -1226,24 +1283,37 @@ const ModelRow: FunctionComponent<ModelRowProps> = ({
             </span>
             {model.capabilitiesSource === "manual" && <span className="text-slate-300">· 手动</span>}
             {model.capabilitiesSource === "inferred" && <span className="text-slate-300">· 自动识别</span>}
+            {model.contextSize != null && (
+              <span className={isCustomCtx ? "text-indigo-500 dark:text-indigo-400" : "text-slate-300"}>
+                · ctx={model.contextSize}{isCustomCtx ? "(自定义)" : ""}
+              </span>
+            )}
             {usage.length > 0 && (
               <span className="text-indigo-500 dark:text-indigo-400">· {usage.length} 槽位在用</span>
             )}
+            {isLocalWhisper && whisperDownloaded === true && (
+              <span className="text-emerald-600 dark:text-emerald-400">· 已下载</span>
+            )}
+            {isLocalWhisper && whisperDownloaded === false && (
+              <span className="text-amber-600 dark:text-amber-400">· 未下载</span>
+            )}
           </div>
         </div>
-        {!readOnly && (
+        {(!readOnly || localCtxOnly) && (
           <div className="flex items-center gap-1 shrink-0">
             <Button size="sm" variant="ghost" onClick={onEdit} className="h-7 text-xs">
-              编辑
+              {localCtxOnly ? "改 ctx" : "编辑"}
             </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={onRemove}
-              className="h-7 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </Button>
+            {!readOnly && !localCtxOnly && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={onRemove}
+                className="h-7 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </Button>
+            )}
           </div>
         )}
       </div>
@@ -1254,53 +1324,86 @@ const ModelRow: FunctionComponent<ModelRowProps> = ({
     <div className="rounded-lg border border-indigo-200 dark:border-indigo-500/40 bg-indigo-50/30 dark:bg-indigo-500/5 px-3 py-3 space-y-3">
       <div className="font-mono text-xs text-slate-700 dark:text-slate-200">{model.id}</div>
       <div className="space-y-2">
-        <div>
-          <Label className="text-[11px] text-slate-500 mb-1 block">显示名</Label>
-          <Input value={labelDraft} onChange={(e) => setLabelDraft(e.target.value)} className="h-8 text-sm" />
-        </div>
-        <div>
-          <Label className="text-[11px] text-slate-500 mb-1 block">capabilities</Label>
-          <div className="flex flex-wrap gap-2">
-            {EDITABLE_CAPABILITIES.map((cap) => {
-              const on = capsDraft.has(cap);
-              return (
-                <button
-                  key={cap}
-                  type="button"
-                  onClick={() => {
-                    const next = new Set(capsDraft);
-                    if (on) next.delete(cap);
-                    else next.add(cap);
-                    setCapsDraft(next);
-                  }}
-                  className={
-                    on
-                      ? "px-2 py-1 text-[11px] rounded border border-indigo-300 bg-indigo-100 text-indigo-700 dark:border-indigo-500/50 dark:bg-indigo-500/20 dark:text-indigo-300"
-                      : "px-2 py-1 text-[11px] rounded border border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400"
-                  }
-                >
-                  {CAPABILITY_LABELS_ZH[cap] || cap}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={() => setShowAdvanced((v) => !v)}
-          className="text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
-        >
-          {showAdvanced ? "− 收起高级" : "+ 高级"}
-        </button>
-        {showAdvanced && (
+        {!localCtxOnly && (
+          <>
+            <div>
+              <Label className="text-[11px] text-slate-500 mb-1 block">显示名</Label>
+              <Input value={labelDraft} onChange={(e) => setLabelDraft(e.target.value)} className="h-8 text-sm" />
+            </div>
+            <div>
+              <Label className="text-[11px] text-slate-500 mb-1 block">capabilities</Label>
+              <div className="flex flex-wrap gap-2">
+                {EDITABLE_CAPABILITIES.map((cap) => {
+                  const on = capsDraft.has(cap);
+                  return (
+                    <button
+                      key={cap}
+                      type="button"
+                      onClick={() => {
+                        const next = new Set(capsDraft);
+                        if (on) next.delete(cap);
+                        else next.add(cap);
+                        setCapsDraft(next);
+                      }}
+                      className={
+                        on
+                          ? "px-2 py-1 text-[11px] rounded border border-indigo-300 bg-indigo-100 text-indigo-700 dark:border-indigo-500/50 dark:bg-indigo-500/20 dark:text-indigo-300"
+                          : "px-2 py-1 text-[11px] rounded border border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400"
+                      }
+                    >
+                      {CAPABILITY_LABELS_ZH[cap] || cap}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((v) => !v)}
+              className="text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+            >
+              {showAdvanced ? "− 收起高级" : "+ 高级"}
+            </button>
+          </>
+        )}
+        {(showAdvanced || localCtxOnly) && (
           <div>
-            <Label className="text-[11px] text-slate-500 mb-1 block">上下文长度</Label>
-            <Input
-              value={contextDraft}
-              onChange={(e) => setContextDraft(e.target.value)}
-              placeholder="如 128000"
-              className="h-8 text-sm font-mono w-[180px]"
-            />
+            <Label className="text-[11px] text-slate-500 mb-1 block">
+              上下文长度 (token)
+              {localCtxOnly && model.defaultContextSize != null && (
+                <span className="ml-2 text-slate-400 font-mono">
+                  默认 {formatCtxNumber(model.defaultContextSize)}
+                </span>
+              )}
+              {localCtxOnly && model.nativeContextSize != null && model.nativeContextSize > (model.defaultContextSize || 0) && (
+                <span className="ml-2 text-slate-400 font-mono">
+                  · 原生 {formatCtxNumber(model.nativeContextSize)}
+                </span>
+              )}
+            </Label>
+            {localCtxOnly && model.nativeContextSize != null ? (
+              <CtxSlider
+                modelKey={model.id}
+                value={contextDraft}
+                onChange={setContextDraft}
+                min={4096}
+                max={model.nativeContextSize}
+                defaultValue={model.defaultContextSize ?? model.contextSize ?? 8192}
+              />
+            ) : (
+              <Input
+                value={contextDraft}
+                onChange={(e) => setContextDraft(e.target.value)}
+                placeholder={localCtxOnly ? `留空回到默认 ${model.defaultContextSize ?? ""}` : "如 128000"}
+                className="h-8 text-sm font-mono w-[220px]"
+              />
+            )}
+            {localCtxOnly && (
+              <div className="text-[10.5px] text-slate-400 mt-1.5">
+                改完保存后, 下次启动该模型时 llama-server --ctx-size 用这里的值。
+                ctx 越大占内存越多 (KV cache), 小机器跑大 ctx 容易 OOM。
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1310,13 +1413,20 @@ const ModelRow: FunctionComponent<ModelRowProps> = ({
         </Button>
         <Button
           size="sm"
-          onClick={() =>
+          onClick={() => {
+            if (localCtxOnly) {
+              // 留空 → 删除 override, contextSize 传 undefined; 否则按数字传入。
+              const trimmed = contextDraft.trim();
+              const n = trimmed ? Number(trimmed) : undefined;
+              onSave({ contextSize: n });
+              return;
+            }
             onSave({
               label: labelDraft,
               capabilities: Array.from(capsDraft),
               contextSize: contextDraft ? Number(contextDraft) : undefined,
-            })
-          }
+            });
+          }}
           className="h-7 text-xs bg-indigo-600 hover:bg-indigo-700 text-white"
         >
           保存
@@ -1437,7 +1547,7 @@ function FitChip({ fit }: { fit?: string }) {
     tight: "bg-red-50 border-red-200 text-red-700 dark:bg-red-900/20 dark:border-red-800 dark:text-red-300",
   } as Record<string, string>)[fit] || "border-slate-200 text-slate-600";
   return (
-    <span className={`inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-2 py-0.5 rounded border ${cls}`}>
+    <span className={`inline-flex items-center gap-1.5 text-[11.5px] font-semibold px-2 py-0.5 rounded border whitespace-nowrap shrink-0 ${cls}`}>
       <span className="w-1.5 h-1.5 rounded-full bg-current" />
       {FIT_LABELS[fit] || fit}
     </span>
@@ -1460,9 +1570,13 @@ function LocalInferenceSection() {
   const [status, setStatus] = useState<LlamaStatus | null>(null);
   const [machine, setMachine] = useState<MachineInfo | null>(null);
   const [manifestModels, setManifestModels] = useState<ModelDescriptor[]>([]);
-  const [progress, setProgress] = useState<LlamaProgress | null>(null);
-  const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [busyAction, setBusyAction] = useState<"binary" | "download" | "start" | "stop" | "selftest" | null>(null);
+  const { modelDownloads } = useApp();
+  const [localProgressMap, setLocalProgressMap] = useState<Record<string, LlamaProgress | null>>({});
+  const [busyMap, setBusyMap] = useState<Record<string, "binary" | "download" | "start" | "stop" | "selftest">>({});
+  const setBusyFor = (key: string, action: "binary" | "download" | "start" | "stop" | "selftest") =>
+    setBusyMap((prev) => ({ ...prev, [key]: action }));
+  const clearBusyFor = (key: string) =>
+    setBusyMap((prev) => { const next = { ...prev }; delete next[key]; return next; });
   const [error, setError] = useState<string>("");
   const [mirror, setMirror] = useState<"hf-mirror" | "modelscope">("hf-mirror");
   const [selfTestImage, setSelfTestImage] = useState<{ name: string; dataUrl: string } | null>(null);
@@ -1495,11 +1609,33 @@ function LocalInferenceSection() {
     }
   };
 
+  // 合并全局 modelDownloads (download 阶段) 和本地 progress (binary/start 阶段)
+  const progressMap = useMemo(() => {
+    const merged: Record<string, LlamaProgress | null> = { ...localProgressMap };
+    for (const [key, dl] of Object.entries(modelDownloads) as [string, { label: string; percent: number; receivedBytes: number; totalBytes: number; speed: number }][]) {
+      merged[key] = {
+        scope: "model",
+        modelKey: key,
+        stage: "progress",
+        label: dl.label,
+        percent: dl.percent,
+        receivedBytes: dl.receivedBytes,
+        totalBytes: dl.totalBytes,
+        speed: dl.speed,
+      } as any;
+    }
+    return merged;
+  }, [localProgressMap, modelDownloads]);
+
   useEffect(() => {
     refresh();
     if (!window.videoAnalyzer?.llama) return;
-    const unsub = window.videoAnalyzer.llama.onProgress((event) => {
-      setProgress(event);
+    const unsub = window.videoAnalyzer.llama.onProgress((event: any) => {
+      const key = event.modelKey || "";
+      // download 阶段由全局 modelDownloads 覆盖,本地只存 binary/start 等非下载进度
+      if (key && event.scope !== "model") {
+        setLocalProgressMap((prev) => ({ ...prev, [key]: event }));
+      }
     });
     return unsub;
   }, [refresh]);
@@ -1507,39 +1643,39 @@ function LocalInferenceSection() {
   const handleStart = async (modelKey: string) => {
     if (!window.videoAnalyzer?.llama) return;
     setError("");
-    setProgress(null);
-    setBusyKey(modelKey);
+    setLocalProgressMap((prev) => ({ ...prev, [modelKey]: null }));
+    setBusyFor(modelKey, "download");
     try {
       const currentStatus = await window.videoAnalyzer.llama.getStatus();
       if (!currentStatus.binaryFound) {
-        setBusyAction("binary");
+        setBusyFor(modelKey, "binary");
         await window.videoAnalyzer.llama.ensureBinary();
       }
       const target = manifestModels.find((m) => m.id === modelKey);
       if (target && !target.local?.downloaded) {
-        setBusyAction("download");
+        setBusyFor(modelKey, "download");
         await window.videoAnalyzer.llama.ensureModel(modelKey);
       }
-      setBusyAction("start");
+      setBusyFor(modelKey, "start");
       await window.videoAnalyzer.llama.start(modelKey);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       await refresh();
     } finally {
-      setBusyAction(null);
-      setBusyKey(null);
+      clearBusyFor(modelKey);
     }
   };
 
   const handleStop = async () => {
     if (!window.videoAnalyzer?.llama) return;
-    setBusyAction("stop");
+    const runKey = status?.modelKey;
+    if (runKey) setBusyFor(runKey, "stop");
     try {
       await window.videoAnalyzer.llama.stop();
       await refresh();
     } finally {
-      setBusyAction(null);
+      if (runKey) clearBusyFor(runKey);
     }
   };
 
@@ -1554,13 +1690,23 @@ function LocalInferenceSection() {
     setSelfTestResult(null);
   };
 
+  const handleCancelDownload = async (modelKey: string) => {
+    if (!window.videoAnalyzer?.llama) return;
+    try {
+      await window.videoAnalyzer.llama.cancelDownload(modelKey);
+    } catch { /* daemon may have already finished */ }
+    clearBusyFor(modelKey);
+    setLocalProgressMap((prev) => { const next = { ...prev }; delete next[modelKey]; return next; });
+    await refresh();
+  };
+
   const handleSelfTest = async () => {
     if (!window.videoAnalyzer?.llama) return;
     if (!selfTestImage) {
       setError("请先选择一张图片");
       return;
     }
-    setBusyAction("selftest");
+    setBusyFor("__selftest__", "selftest");
     setError("");
     setSelfTestResult(null);
     try {
@@ -1576,7 +1722,7 @@ function LocalInferenceSection() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusyAction(null);
+      clearBusyFor("__selftest__");
     }
   };
 
@@ -1592,17 +1738,20 @@ function LocalInferenceSection() {
   }
 
   const runningKey = status?.running ? status.modelKey : null;
-  const isAnyBusy = busyAction !== null && busyAction !== "selftest";
+  const busyEntries = Object.entries(busyMap);
+  const isAnyBusy = busyEntries.some(([k, a]) => k !== "__selftest__" && a !== "selftest");
+  const busyAction = busyEntries.length > 0 ? busyEntries[0][1] : null;
 
   const visionModels = manifestModels.filter((m) => m.capabilities.includes("vision"));
   const textModels = manifestModels.filter((m) =>
     !m.capabilities.includes("vision") && m.capabilities.includes("text")
   );
 
-  // model 阶段的进度由各卡片自己的圆环承担; 横条只在 binary 阶段显示, 因为
-  // binary 不挂在任何卡片上, 需要一个全局位置告诉用户"在下推理引擎"。
+  // binary 阶段的横条进度(不属于某个卡片)
+  const binaryBusyKey = busyEntries.find(([, a]) => a === "binary")?.[0];
+  const binaryProgress = binaryBusyKey ? progressMap[binaryBusyKey] : null;
   const showProgress =
-    progress && busyAction === "binary" && progress.percent != null;
+    binaryProgress && binaryProgress.percent != null;
 
   const totalMemoryGB = machine ? machine.totalMemoryBytes / 1024 / 1024 / 1024 : 0;
   const availMemoryGB = machine ? machine.availableMemoryBytes / 1024 / 1024 / 1024 : 0;
@@ -1682,31 +1831,31 @@ function LocalInferenceSection() {
             subtitle="用于 simple_vision / medium_vision / complex_vision · 也可被 text 槽位选"
             models={visionModels}
             runningKey={runningKey}
-            busyKey={busyKey}
-            busyAction={busyAction}
+            busyMap={busyMap}
             isAnyBusy={isAnyBusy}
-            progress={progress}
+            progressMap={progressMap}
             onStart={handleStart}
             onStop={handleStop}
+            onCancelDownload={handleCancelDownload}
           />
           <ModelGroup
             title="纯文本"
             subtitle="仅用于 simple_text / medium_text / complex_text"
             models={textModels}
             runningKey={runningKey}
-            busyKey={busyKey}
-            busyAction={busyAction}
+            busyMap={busyMap}
             isAnyBusy={isAnyBusy}
-            progress={progress}
+            progressMap={progressMap}
             onStart={handleStart}
             onStop={handleStop}
+            onCancelDownload={handleCancelDownload}
           />
         </div>
 
         {showProgress && (
           <div className="border-t border-slate-200 dark:border-slate-800 px-5 py-2.5 bg-slate-50/60 dark:bg-slate-900/20">
-            <Progress value={progress!.percent || 0} className="h-1.5" />
-            <div className="text-[11px] text-slate-500 mt-1.5">{progress!.message}</div>
+            <Progress value={binaryProgress!.percent || 0} className="h-1.5" />
+            <div className="text-[11px] text-slate-500 mt-1.5">{binaryProgress!.message}</div>
           </div>
         )}
 
@@ -1745,11 +1894,11 @@ function LocalInferenceSection() {
           )}
           <Button
             size="sm"
-            disabled={!selfTestImage || !status?.running || busyAction === "selftest"}
+            disabled={!selfTestImage || !status?.running || !!busyMap["__selftest__"]}
             onClick={handleSelfTest}
             className="h-8"
           >
-            {busyAction === "selftest" && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
+            {busyMap["__selftest__"] && <Loader2 className="w-3 h-3 mr-1 animate-spin" />}
             运行自检
           </Button>
         </div>
@@ -1770,25 +1919,29 @@ function LocalInferenceSection() {
           </div>
         )}
       </section>
+
+      <LocalAudioSection mirror={mirror} onMirrorChange={handleMirrorChange} />
     </>
   );
 }
+
+type BusyActionType = "binary" | "download" | "start" | "stop" | "selftest";
 
 type ModelGroupProps = {
   title: string;
   subtitle: string;
   models: ModelDescriptor[];
   runningKey: string | null | undefined;
-  busyKey: string | null;
-  busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
+  busyMap: Record<string, BusyActionType>;
   isAnyBusy: boolean;
-  progress: LlamaProgress | null;
+  progressMap: Record<string, LlamaProgress | null>;
   onStart: (modelKey: string) => void;
   onStop: () => void;
+  onCancelDownload: (modelKey: string) => void;
 };
 
 const ModelGroup: FunctionComponent<ModelGroupProps> = ({
-  title, subtitle, models, runningKey, busyKey, busyAction, isAnyBusy, progress, onStart, onStop,
+  title, subtitle, models, runningKey, busyMap, isAnyBusy, progressMap, onStart, onStop, onCancelDownload,
 }) => {
   if (models.length === 0) return null;
   return (
@@ -1803,12 +1956,12 @@ const ModelGroup: FunctionComponent<ModelGroupProps> = ({
             key={m.id}
             model={m}
             runningKey={runningKey}
-            busyKey={busyKey}
-            busyAction={busyAction}
+            busyAction={busyMap[m.id] || null}
             isAnyBusy={isAnyBusy}
-            progress={progress}
+            progress={progressMap[m.id] || null}
             onStart={onStart}
             onStop={onStop}
+            onCancelDownload={onCancelDownload}
           />
         ))}
       </div>
@@ -1821,35 +1974,6 @@ type ProgressButtonProps = {
   busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
 };
 
-// 用 EMA 平滑两次 progress sample 的瞬时速度, 避免单点 byte 抖动 (网络 chunk 大小不均).
-// reset 条件: receivedBytes 缺失, 或 progress.file 切换 (llm → mmproj, 或 model → binary).
-function useDownloadSpeed(progress: LlamaProgress | null): number {
-  const last = useRef({ ts: 0, bytes: 0, ema: 0, file: "" });
-  const [speed, setSpeed] = useState(0);
-  const recv = progress?.receivedBytes ?? 0;
-  const file = progress?.file ?? "";
-  useEffect(() => {
-    if (!recv) {
-      last.current = { ts: 0, bytes: 0, ema: 0, file };
-      setSpeed(0);
-      return;
-    }
-    const now = Date.now();
-    if (last.current.ts === 0 || last.current.file !== file) {
-      last.current = { ts: now, bytes: recv, ema: 0, file };
-      setSpeed(0);
-      return;
-    }
-    const dt = (now - last.current.ts) / 1000;
-    if (dt < 0.2) return; // 采样太密就跳过, 防止抖
-    const inst = (recv - last.current.bytes) / dt;
-    const alpha = 0.3;
-    const ema = last.current.ema === 0 ? inst : alpha * inst + (1 - alpha) * last.current.ema;
-    last.current = { ts: now, bytes: recv, ema, file };
-    setSpeed(ema);
-  }, [recv, file]);
-  return speed;
-}
 
 function formatSpeed(bps: number): string {
   if (!bps || bps <= 0) return "—";
@@ -1864,20 +1988,24 @@ const ProgressButton: FunctionComponent<ProgressButtonProps> = ({ progress, busy
   const percent = progress?.percent;
   const hasPercent = typeof percent === "number" && percent >= 0;
   const clamped = hasPercent ? Math.min(100, Math.max(0, percent)) : 0;
-  const speed = useDownloadSpeed(progress);
+  const speed = (progress as any)?.speed ?? 0;
 
   const radius = 13;
   const circumference = 2 * Math.PI * radius;
   const dashOffset = circumference * (1 - clamped / 100);
 
-  const mb = (n?: number) => (n ? (n / 1024 / 1024).toFixed(0) : null);
-  const recvMB = mb(progress?.receivedBytes);
-  const totalMB = mb(progress?.totalBytes);
+  const fmtSize = (n?: number) => {
+    if (!n) return null;
+    if (n >= 1024 * 1024 * 1024) return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+    return `${(n / 1024 / 1024).toFixed(0)} MB`;
+  };
+  const recvLabel = fmtSize(progress?.receivedBytes);
+  const totalLabel = fmtSize(progress?.totalBytes);
   const stageLabel = progress?.label
     || (busyAction === "binary" ? "推理引擎" : busyAction === "download" ? "下载中" : "启动中");
   const speedLabel = formatSpeed(speed);
-  const tooltipBody = hasPercent && recvMB && totalMB
-    ? `${stageLabel} · ${recvMB} / ${totalMB} MB · ${speedLabel}`
+  const tooltipBody = hasPercent && recvLabel && totalLabel
+    ? `${stageLabel} · ${recvLabel} / ${totalLabel} · ${speedLabel}`
     : busyAction === "start"
       ? "正在启动模型"
       : `${stageLabel}…`;
@@ -1937,20 +2065,20 @@ const ProgressButton: FunctionComponent<ProgressButtonProps> = ({ progress, busy
 type ModelCardProps = {
   model: ModelDescriptor;
   runningKey: string | null | undefined;
-  busyKey: string | null;
-  busyAction: "binary" | "download" | "start" | "stop" | "selftest" | null;
+  busyAction: BusyActionType | null;
   isAnyBusy: boolean;
   progress: LlamaProgress | null;
   onStart: (modelKey: string) => void;
   onStop: () => void;
+  onCancelDownload: (modelKey: string) => void;
 };
 
 const ModelCard: FunctionComponent<ModelCardProps> = ({
-  model, runningKey, busyKey, busyAction, isAnyBusy, progress, onStart, onStop,
+  model, runningKey, busyAction, isAnyBusy, progress, onStart, onStop, onCancelDownload,
 }) => {
   const isRunning = runningKey === model.id;
   const isDownloaded = !!model.local?.downloaded;
-  const isBusy = busyKey === model.id && isAnyBusy;
+  const isBusy = busyAction !== null;
   const defaultQuant = model.local?.quantizations?.[0];
   const isComingSoon = model.availability.state === "coming_soon";
 
@@ -1995,7 +2123,19 @@ const ModelCard: FunctionComponent<ModelCardProps> = ({
         <span className="flex-1" />
         <FitChip fit={model.local?.fit} />
         {action.kind === "progress" ? (
-          <ProgressButton progress={progress} busyAction={busyAction} />
+          <div className="flex items-center gap-1">
+            {busyAction === "download" && (
+              <button
+                type="button"
+                onClick={() => onCancelDownload(model.id)}
+                className="text-[11px] text-slate-400 hover:text-red-500 transition-colors px-1 whitespace-nowrap shrink-0"
+                title="取消下载"
+              >
+                取消
+              </button>
+            )}
+            <ProgressButton progress={progress} busyAction={busyAction} />
+          </div>
         ) : (
           <button
             type="button"
@@ -2043,6 +2183,253 @@ const ModelCard: FunctionComponent<ModelCardProps> = ({
     </div>
   );
 };
+
+type WhisperModelCardProps = {
+  model: ModelDescriptor;
+  runningKey: string | null | undefined;
+  busyAction: "download" | "start" | "stop" | null;
+  isAnyBusy: boolean;
+  progress: any;
+  onStart: (modelKey: string) => void;
+  onStop: () => void;
+  onCancelDownload: (modelKey: string) => void;
+};
+
+const WhisperModelCard: FunctionComponent<WhisperModelCardProps> = ({
+  model, runningKey, busyAction, isAnyBusy, progress, onStart, onStop, onCancelDownload,
+}) => {
+  const isRunning = runningKey === model.id;
+  const isDownloaded = !!model.local?.downloaded;
+  const isBusy = busyAction !== null;
+  const sizeBytes = model.availability.state === "needs_install"
+    ? (model.availability as any).sizeBytes
+    : model.local?.downloadedBytes;
+
+  type Action =
+    | { kind: "progress" }
+    | { kind: "label"; label: string; variant: "default" | "outline" | "ghost"; onClick?: () => void; disabled?: boolean };
+  let action: Action;
+  if (isBusy) {
+    action = { kind: "progress" };
+  } else if (isRunning) {
+    action = { kind: "label", label: "停止", variant: "outline", onClick: onStop };
+  } else if (!isDownloaded) {
+    action = { kind: "label", label: "下载", variant: "default", onClick: () => onStart(model.id) };
+  } else if (runningKey) {
+    action = { kind: "label", label: "切换", variant: "default", onClick: () => onStart(model.id) };
+  } else {
+    action = { kind: "label", label: "启动", variant: "default", onClick: () => onStart(model.id) };
+  }
+
+  const cardCls = isRunning
+    ? "border-indigo-300 bg-indigo-50/50 dark:border-indigo-500/40 dark:bg-indigo-500/10 shadow-[inset_2px_0_0] shadow-indigo-600"
+    : isDownloaded
+      ? "border-indigo-200 bg-indigo-50/30 dark:border-indigo-500/30 dark:bg-indigo-500/5"
+      : "border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10]";
+
+  const statusPill = isRunning
+    ? <span className="font-mono text-[9.5px] uppercase tracking-wide bg-emerald-100 border border-emerald-200 text-emerald-700 px-1.5 py-0.5 rounded dark:bg-emerald-900/30 dark:border-emerald-700 dark:text-emerald-300">运行中</span>
+    : isDownloaded
+      ? <span className="font-mono text-[9.5px] uppercase tracking-wide bg-indigo-100 border border-indigo-200 text-indigo-700 px-1.5 py-0.5 rounded dark:bg-indigo-900/30 dark:border-indigo-700 dark:text-indigo-300">已安装</span>
+      : null;
+
+  return (
+    <div className={`relative rounded-lg border ${cardCls} p-3 flex flex-col gap-1.5`}>
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="font-semibold text-[13px] text-slate-900 dark:text-slate-100 truncate">{model.label}</span>
+        {statusPill}
+        <span className="flex-1" />
+        {action.kind === "progress" ? (
+          <div className="flex items-center gap-1">
+            {busyAction === "download" && (
+              <button
+                type="button"
+                onClick={() => onCancelDownload(model.id)}
+                className="text-[11px] text-slate-400 hover:text-red-500 transition-colors px-1 whitespace-nowrap shrink-0"
+                title="取消下载"
+              >
+                取消
+              </button>
+            )}
+            <ProgressButton progress={progress} busyAction={busyAction} />
+          </div>
+        ) : (
+          <button
+            type="button"
+            disabled={action.disabled}
+            onClick={action.onClick}
+            className={
+              action.variant === "default"
+                ? "px-2.5 py-1 text-[11.5px] rounded border border-indigo-600 bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium shrink-0"
+                : action.variant === "outline"
+                  ? "px-2.5 py-1 text-[11.5px] rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                  : "px-2.5 py-1 text-[11.5px] rounded text-slate-400 disabled:cursor-not-allowed shrink-0"
+            }
+          >
+            {action.label}
+          </button>
+        )}
+      </div>
+
+      <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
+        {sizeBytes ? <span className="text-slate-700 dark:text-slate-300">{formatBytes(sizeBytes)}</span> : null}
+        {model.description && (
+          <>
+            {sizeBytes ? <span className="text-slate-300">·</span> : null}
+            <span>{model.description}</span>
+          </>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-1">
+        {model.capabilities.map((cap) => (
+          <span key={cap} className="text-[10.5px] px-1.5 py-0.5 rounded border border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-500/10 dark:text-indigo-300">
+            {CAPABILITY_LABELS_ZH[cap] || cap}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+function LocalAudioSection({ mirror, onMirrorChange }: { mirror: "hf-mirror" | "modelscope"; onMirrorChange: (v: "hf-mirror" | "modelscope") => void }) {
+  const [whisperModels, setWhisperModels] = useState<ModelDescriptor[]>([]);
+  const [whisperStatus, setWhisperStatus] = useState<{ running: boolean; modelKey: string | null } | null>(null);
+  const { whisperDownloads } = useApp();
+  const [busyMap, setBusyMap] = useState<Record<string, "download" | "start" | "stop">>({});
+  const setBusyFor = (key: string, action: "download" | "start" | "stop") =>
+    setBusyMap((prev) => ({ ...prev, [key]: action }));
+  const clearBusyFor = (key: string) =>
+    setBusyMap((prev) => { const next = { ...prev }; delete next[key]; return next; });
+  const [error, setError] = useState("");
+
+  const refresh = useCallback(async () => {
+    if (!window.videoAnalyzer?.whisperCpp) return;
+    const [models, status] = await Promise.all([
+      window.videoAnalyzer.whisperCpp.listModels(),
+      window.videoAnalyzer.whisperCpp.getStatus(),
+    ]);
+    setWhisperModels(models);
+    setWhisperStatus({ running: status.running, modelKey: status.modelKey });
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    if (!window.videoAnalyzer?.whisperCpp) return;
+    const unsub = window.videoAnalyzer.whisperCpp.onProgress((evt: any) => {
+      if (evt.stage === "done" || evt.stage === "cancelled" || evt.stage === "skip") {
+        refresh();
+      }
+    });
+    return unsub;
+  }, [refresh]);
+
+  const progressMap = useMemo(() => {
+    const merged: Record<string, any> = {};
+    for (const [key, dl] of Object.entries(whisperDownloads) as [string, { label: string; percent: number; receivedBytes: number; totalBytes: number; speed: number }][]) {
+      merged[key] = {
+        scope: "model",
+        modelKey: key,
+        stage: "progress",
+        label: dl.label,
+        percent: dl.percent,
+        receivedBytes: dl.receivedBytes,
+        totalBytes: dl.totalBytes,
+        speed: dl.speed,
+      };
+    }
+    return merged;
+  }, [whisperDownloads]);
+
+  const handleStart = async (modelKey: string) => {
+    if (!window.videoAnalyzer?.whisperCpp) return;
+    setError("");
+    setBusyFor(modelKey, "download");
+    try {
+      const target = whisperModels.find((m) => m.id === modelKey);
+      if (target && !target.local?.downloaded) {
+        setBusyFor(modelKey, "download");
+        await window.videoAnalyzer.whisperCpp.ensureModel(modelKey);
+      }
+      setBusyFor(modelKey, "start");
+      await window.videoAnalyzer.whisperCpp.start(modelKey);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      await refresh();
+    } finally {
+      clearBusyFor(modelKey);
+    }
+  };
+
+  const handleStop = async () => {
+    if (!window.videoAnalyzer?.whisperCpp) return;
+    const runKey = whisperStatus?.modelKey;
+    if (runKey) setBusyFor(runKey, "stop");
+    try {
+      await window.videoAnalyzer.whisperCpp.stop();
+      await refresh();
+    } finally {
+      if (runKey) clearBusyFor(runKey);
+    }
+  };
+
+  const handleCancelDownload = async (modelKey: string) => {
+    if (!window.videoAnalyzer?.whisperCpp) return;
+    try {
+      await window.videoAnalyzer.whisperCpp.cancelDownload(modelKey);
+    } catch { /* may have already finished */ }
+    clearBusyFor(modelKey);
+    await refresh();
+  };
+
+  if (!window.videoAnalyzer?.whisperCpp) return null;
+
+  const runningKey = whisperStatus?.running ? whisperStatus.modelKey : null;
+  const isAnyBusy = Object.keys(busyMap).length > 0;
+
+  return (
+    <>
+      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">本地音频识别</h2>
+      <p className="text-sm text-slate-500 dark:text-slate-400 -mt-4">
+        Whisper 语音识别模型,用于字幕提取。
+      </p>
+
+      <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0E0E10] overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-4 bg-slate-50/60 dark:bg-slate-900/20">
+          <div className="flex items-baseline gap-3 min-w-0">
+            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">音频模型库</h3>
+            <span className="font-mono text-[10.5px] uppercase tracking-wider text-slate-500">下载源与上方共享</span>
+          </div>
+        </div>
+
+        <div className="p-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {whisperModels.map((m) => (
+              <WhisperModelCard
+                key={m.id}
+                model={m}
+                runningKey={runningKey}
+                busyAction={busyMap[m.id] || null}
+                isAnyBusy={isAnyBusy}
+                progress={progressMap[m.id] || null}
+                onStart={handleStart}
+                onStop={handleStop}
+                onCancelDownload={handleCancelDownload}
+              />
+            ))}
+          </div>
+        </div>
+
+        {error && (
+          <div className="border-t border-red-200 dark:border-red-500/20 bg-red-50 dark:bg-red-500/10 px-5 py-2 text-xs text-red-600 dark:text-red-400">
+            {error}
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
 
 const PRESET_OPTIONS: { key: DefaultAnalysisPreset; title: string; est: string; hint: string }[] = [
   { key: "quick", title: "轻拉片", est: "~ 45s", hint: "5-8 个节点;不跑方法论审计。" },
@@ -2127,6 +2514,8 @@ function AnalysisDefaultsSection() {
   );
 }
 
+const CACHE_STAGE_KEYS = ["transcript", "prefilter", "shot-merger", "summarizer", "detect-genre", "main-analysis", "danmaku-emotion"] as const;
+
 function CacheSection() {
   const confirm = useConfirm();
   const [stats, setStats] = useState<CacheStats | null>(null);
@@ -2134,6 +2523,19 @@ function CacheSection() {
   const [statusMessage, setStatusMessage] = useState("");
   const [maxBytesInput, setMaxBytesInput] = useState<string>("");
   const [maxBytesDirty, setMaxBytesDirty] = useState(false);
+  const [policy, setPolicy] = useState<CachePolicy>({ enabled: true, stages: {} });
+
+  const refreshPolicy = useCallback(async () => {
+    if (!window.videoAnalyzer?.cache?.getPolicy) return;
+    const p = await window.videoAnalyzer.cache.getPolicy().catch(() => null);
+    if (p) setPolicy(p);
+  }, []);
+
+  const updatePolicy = useCallback(async (next: CachePolicy) => {
+    setPolicy(next);
+    if (!window.videoAnalyzer?.cache?.setPolicy) return;
+    await window.videoAnalyzer.cache.setPolicy(next).catch(() => {});
+  }, []);
 
   const refresh = useCallback(async () => {
     if (!window.videoAnalyzer) return;
@@ -2146,7 +2548,8 @@ function CacheSection() {
 
   useEffect(() => {
     refresh();
-  }, [refresh]);
+    refreshPolicy();
+  }, [refresh, refreshPolicy]);
 
   const handleClearScope = async (scope: string) => {
     if (!window.videoAnalyzer) return;
@@ -2242,85 +2645,307 @@ function CacheSection() {
     : [];
 
   return (
-    <>
-      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">分析缓存</h2>
-      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4 text-sm">
-        <Stat label="总占用" value={stats ? `${formatBytes(stats.totalBytes)} · ${stats.totalEntries} 条` : "—"} />
-        <Stat label="容量上限" value={stats ? (stats.maxBytes > 0 ? formatBytes(stats.maxBytes) : "不限") : "—"} />
-        <Stat label="缓存目录" value={stats?.cacheDir ?? "—"} mono />
-
-        <div className="grid grid-cols-[160px_1fr] items-center gap-3 pt-2">
-          <span className="text-slate-500 dark:text-slate-400 text-right">改容量上限 (GB)</span>
-          <div className="flex gap-2">
-            <Input
-              type="number"
-              min={0}
-              step={1}
-              value={maxBytesInput}
-              onChange={(e) => { setMaxBytesInput(e.target.value); setMaxBytesDirty(true); }}
-              className="max-w-[120px] font-mono text-xs"
-            />
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!maxBytesDirty || busy === "__maxBytes__"}
-              onClick={handleApplyMaxBytes}
-              className="border-slate-200 dark:border-slate-800"
-            >
-              应用
-            </Button>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap gap-2 pt-2">
-          <Button variant="outline" size="sm" onClick={handleChangeDir} disabled={busy === "__setDir__"} className="border-slate-200 dark:border-slate-800">
-            <FolderOpen className="w-4 h-4 mr-1.5" />
-            迁移到新目录
-          </Button>
-          <Button variant="outline" size="sm" onClick={handleOpenDir} className="border-slate-200 dark:border-slate-800">
-            <FolderOpen className="w-4 h-4 mr-1.5" />
-            打开缓存目录
-          </Button>
-          <Button variant="ghost" size="sm" onClick={refresh} className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-100">
-            <RefreshCw className="w-4 h-4 mr-1.5" />
-            刷新
-          </Button>
-          <Button
-            variant="ghost"
+    <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4 text-sm">
+      <div className="flex items-center justify-between">
+        <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">分析缓存</h3>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-500">{policy.enabled ? "已启用" : "已禁用"}</span>
+          <Switch
             size="sm"
-            disabled={busy === "__all__" || !stats?.totalEntries}
-            onClick={handleClearAll}
-            className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+            checked={policy.enabled}
+            onCheckedChange={(checked: boolean) => updatePolicy({ ...policy, enabled: checked })}
+          />
+        </div>
+      </div>
+      <Stat label="总占用" value={stats ? `${formatBytes(stats.totalBytes)} · ${stats.totalEntries} 条` : "—"} />
+      <Stat label="容量上限" value={stats ? (stats.maxBytes > 0 ? formatBytes(stats.maxBytes) : "不限") : "—"} />
+      <Stat label="缓存目录" value={stats?.cacheDir ?? "—"} mono />
+
+      <div className="grid grid-cols-[160px_1fr] items-center gap-3 pt-2">
+        <span className="text-slate-500 dark:text-slate-400 text-right">改容量上限 (GB)</span>
+        <div className="flex gap-2">
+          <Input
+            type="number"
+            min={0}
+            step={1}
+            value={maxBytesInput}
+            onChange={(e) => { setMaxBytesInput(e.target.value); setMaxBytesDirty(true); }}
+            className="max-w-[120px] font-mono text-xs"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!maxBytesDirty || busy === "__maxBytes__"}
+            onClick={handleApplyMaxBytes}
+            className="border-slate-200 dark:border-slate-800"
           >
-            <Trash2 className="w-4 h-4 mr-1.5" />
-            清除全部
+            应用
           </Button>
         </div>
+      </div>
 
+      <div className="flex flex-wrap gap-2 pt-2">
+        <Button variant="outline" size="sm" onClick={handleChangeDir} disabled={busy === "__setDir__"} className="border-slate-200 dark:border-slate-800">
+          <FolderOpen className="w-4 h-4 mr-1.5" />
+          迁移到新目录
+        </Button>
+        <Button variant="outline" size="sm" onClick={handleOpenDir} className="border-slate-200 dark:border-slate-800">
+          <FolderOpen className="w-4 h-4 mr-1.5" />
+          打开缓存目录
+        </Button>
+        <Button variant="ghost" size="sm" onClick={refresh} className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-100">
+          <RefreshCw className="w-4 h-4 mr-1.5" />
+          刷新
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy === "__all__" || !stats?.totalEntries}
+          onClick={handleClearAll}
+          className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+        >
+          <Trash2 className="w-4 h-4 mr-1.5" />
+          清除全部
+        </Button>
+      </div>
+
+      <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
+        <div className="text-xs text-slate-500 dark:text-slate-400 pt-2 mb-2">按阶段</div>
+        <div className="flex flex-wrap gap-2">
+          {CACHE_STAGE_KEYS.map((scope) => {
+            const info = stats?.byScope?.[scope];
+            const stageEnabled = policy.stages?.[scope] !== false;
+            const active = policy.enabled && stageEnabled;
+            return (
+              <button
+                key={scope}
+                type="button"
+                disabled={!policy.enabled}
+                onClick={() => updatePolicy({ ...policy, stages: { ...policy.stages, [scope]: !stageEnabled } })}
+                className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border text-xs transition-colors ${
+                  active
+                    ? "border-slate-300 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                    : "border-slate-200 bg-slate-50 text-slate-400 dark:border-slate-800 dark:bg-[#0A0A0B] dark:text-slate-600"
+                } ${!policy.enabled ? "opacity-50 cursor-not-allowed" : "hover:border-slate-400 dark:hover:border-slate-600"}`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${active ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-700"}`} />
+                {SCOPE_LABELS_ZH[scope] || scope}
+                {info && info.count > 0 && (
+                  <span className="font-mono text-[10px] text-slate-400 dark:text-slate-600">{info.count}</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
         {scopeEntries.length > 0 && (
-          <div className="pt-2 space-y-2 border-t border-slate-200 dark:border-slate-800">
-            <div className="text-xs text-slate-500 dark:text-slate-400 pt-2">按阶段</div>
+          <div className="mt-3 space-y-1">
             {scopeEntries.map(([scope, info]) => (
-              <div key={scope} className="grid grid-cols-[160px_1fr_auto] items-center gap-3">
-                <span className="text-slate-700 dark:text-slate-300">{SCOPE_LABELS_ZH[scope] || scope}</span>
-                <span className="font-mono text-xs text-slate-500">{formatBytes(info.bytes)} · {info.count} 条</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={busy === scope}
-                  onClick={() => handleClearScope(scope)}
-                  className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
-                >
-                  清除
-                </Button>
+              <div key={scope} className="flex items-center justify-between gap-3">
+                <span className="text-xs text-slate-500">{SCOPE_LABELS_ZH[scope] || scope}</span>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[11px] text-slate-400">{formatBytes(info.bytes)} · {info.count} 条</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy === scope}
+                    onClick={() => handleClearScope(scope)}
+                    className="h-6 px-2 text-[11px] text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-500/10"
+                  >
+                    清除
+                  </Button>
+                </div>
               </div>
             ))}
           </div>
         )}
-        {scopeEntries.length === 0 && stats && (
-          <p className="text-xs text-slate-500">还没有缓存数据。下次跑分析时会自动写入。</p>
+      </div>
+      {statusMessage && <p className="text-xs text-slate-500">{statusMessage}</p>}
+    </section>
+  );
+}
+
+function DouyinAccountSection() {
+  const [status, setStatus] = useState<{ loggedIn: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(() => {
+    window.videoAnalyzer?.douyinGetLoginStatus?.().then(setStatus).catch(() => setStatus({ loggedIn: false }));
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const handleLogin = async () => {
+    setBusy(true);
+    try {
+      const r = await window.videoAnalyzer?.douyinOpenLogin?.();
+      if (r?.ok) refresh();
+    } finally { setBusy(false); }
+  };
+
+  const handleLogout = async () => {
+    if (!window.confirm("确认退出抖音登录？退出后拉取视频数量可能受限。")) return;
+    setBusy(true);
+    try {
+      await window.videoAnalyzer?.douyinLogout?.();
+      refresh();
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div>
+      <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-1">抖音账号</h2>
+      <p className="text-[12.5px] text-slate-500 dark:text-slate-400 mb-4">
+        登录抖音后可拉取全部视频。未登录时受匿名限制，每次仅能拉取约 10 条。
+      </p>
+      <div className="flex items-center gap-3">
+        {status?.loggedIn ? (
+          <>
+            <span className="inline-flex items-center gap-1.5 text-[12.5px] font-medium text-emerald-700 dark:text-emerald-400">
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
+              已登录
+            </span>
+            <button
+              onClick={handleLogout}
+              disabled={busy}
+              className="h-7 px-3 rounded-md text-[12px] text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 disabled:opacity-50"
+            >
+              退出登录
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="inline-flex items-center gap-1.5 text-[12.5px] text-slate-500 dark:text-slate-400">
+              <span className="w-2 h-2 rounded-full bg-slate-400" />
+              未登录
+            </span>
+            <button
+              onClick={handleLogin}
+              disabled={busy}
+              className="h-7 px-3 rounded-md text-[12px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50"
+            >
+              {busy ? "等待登录…" : "扫码登录"}
+            </button>
+          </>
         )}
-        {statusMessage && <p className="text-xs text-slate-500">{statusMessage}</p>}
+      </div>
+    </div>
+  );
+}
+
+function ExtensionBridgeSection() {
+  const [status, setStatus] = useState<ExtensionBridgeStatus | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [rotating, setRotating] = useState(false);
+
+  const refresh = useCallback(() => {
+    if (!window.videoAnalyzer?.extensionBridge) return;
+    window.videoAnalyzer.extensionBridge.getStatus().then(setStatus).catch(() => setStatus(null));
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    if (!window.videoAnalyzer?.extensionBridge?.onStatus) return;
+    const off = window.videoAnalyzer.extensionBridge.onStatus(setStatus);
+    return off;
+  }, [refresh]);
+
+  const handleCopy = async () => {
+    if (!status?.token) return;
+    try {
+      await navigator.clipboard.writeText(status.token);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard 不可用时静默 */ }
+  };
+
+  const handleRotate = async () => {
+    if (!window.videoAnalyzer?.extensionBridge) return;
+    setRotating(true);
+    try {
+      await window.videoAnalyzer.extensionBridge.rotateToken();
+      refresh();
+    } finally {
+      setRotating(false);
+    }
+  };
+
+  const indicatorColor =
+    status?.connected ? "bg-emerald-500" :
+    status ? "bg-slate-300 dark:bg-slate-700" :
+    "bg-amber-400";
+
+  return (
+    <>
+      <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100 flex items-center gap-2">
+        <Plug className="w-5 h-5 text-slate-500" strokeWidth={1.5} />
+        浏览器插件桥
+      </h2>
+      <p className="text-[13px] text-slate-500 dark:text-slate-400 leading-relaxed -mt-4">
+        装上 Chrome 插件后,桌面端会借用浏览器登录态调 B 站 / 抖音 API,绕开 wbi 风控 (412 / -352)。
+      </p>
+
+      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4 text-sm">
+        <div className="flex items-center gap-3">
+          <span className={`w-2.5 h-2.5 rounded-full ${indicatorColor}`} />
+          <div className="flex-1">
+            <div className="font-medium text-slate-900 dark:text-slate-100">
+              {status?.connected ? "插件已连接" : "插件未连接"}
+            </div>
+            <div className="text-[11.5px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
+              ws://{status?.host ?? "127.0.0.1"}:{status?.port ?? "58713-58723"}/agent
+            </div>
+          </div>
+          {status?.connected && status.connectedAt && (
+            <span className="text-[11px] font-mono text-slate-500">
+              {new Date(status.connectedAt).toLocaleTimeString()}
+            </span>
+          )}
+        </div>
+
+        <p className="text-[12px] text-slate-500 dark:text-slate-400 leading-relaxed">
+          装好插件后会自动配对,无需手动复制 token。桌面端按浏览器 Origin 识别出连进来的是插件(网页伪造不了),首次连接自动认证。
+          {status?.pairedOrigin && (
+            <> 已配对:<code className="font-mono text-[11px] text-slate-600 dark:text-slate-300 break-all">{status.pairedOrigin}</code></>
+          )}
+        </p>
+
+        <div className="flex items-center justify-between gap-3 pt-1">
+          <Button variant="ghost" size="sm" onClick={handleRotate} disabled={rotating} className="text-slate-500 hover:text-slate-800 dark:hover:text-slate-100">
+            <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${rotating ? "animate-spin" : ""}`} />
+            重新配对
+          </Button>
+          <span className="text-[11px] text-slate-400">换连别的浏览器 / 误配对到其他扩展时用</span>
+        </div>
+
+        <details className="text-[12px] text-slate-500 dark:text-slate-400">
+          <summary className="cursor-pointer select-none hover:text-slate-700 dark:hover:text-slate-200">手动 token(自动配对失败时兜底)</summary>
+          <div className="flex gap-2 mt-2">
+            <input
+              readOnly
+              value={status?.token ?? "—"}
+              className="flex-1 h-9 px-3 rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 font-mono text-[11.5px] text-slate-700 dark:text-slate-300"
+            />
+            <Button variant="outline" size="sm" onClick={handleCopy} disabled={!status?.token} className="border-slate-200 dark:border-slate-800">
+              <Copy className="w-3.5 h-3.5 mr-1.5" />
+              {copied ? "已复制" : "复制"}
+            </Button>
+          </div>
+          <p className="text-[11.5px] text-slate-500 mt-1.5">
+            在插件 popup 展开「手动填 Token」粘贴。
+          </p>
+        </details>
+      </section>
+
+      <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-3">
+        <h3 className="font-medium text-slate-900 dark:text-slate-100">安装步骤</h3>
+        <ol className="text-[13px] text-slate-600 dark:text-slate-400 leading-relaxed space-y-1.5 list-decimal pl-5">
+          <li>
+            从 GitHub Release 下载 <code className="font-mono text-[11.5px] text-indigo-600 dark:text-indigo-400">clipiq-bridge-v{"<version>"}.zip</code> 并解压(开发者也可以直接用仓库下 <code className="font-mono text-[11.5px]">chrome-extension/</code>)
+          </li>
+          <li>Chrome 打开 <code className="font-mono text-[11.5px] text-indigo-600 dark:text-indigo-400">chrome://extensions</code>,右上角开「开发者模式」</li>
+          <li>点「加载已解压的扩展程序」,选解压后的目录</li>
+          <li>回到这里,状态指示灯自动变绿(无需复制 token)→ 即可拉账号视频列表</li>
+        </ol>
       </section>
     </>
   );
@@ -2357,7 +2982,7 @@ function DataSection() {
   };
   const handleOpenProjects = async () => {
     if (!window.videoAnalyzer) return;
-    await window.videoAnalyzer.openDataFolder("projects");
+    await window.videoAnalyzer.openDataFolder("videos");
   };
   const handlePurge = async () => {
     if (!window.videoAnalyzer) return;
@@ -2371,7 +2996,7 @@ function DataSection() {
     setPurging(true);
     setStatusMessage("");
     try {
-      const result = await window.videoAnalyzer.purgeProjects();
+      const result = await window.videoAnalyzer.purgeAllData();
       setStatusMessage(result.ok ? "已清空项目本地文件。" : `清空失败：${result.message}`);
       refresh();
     } finally {
@@ -2383,6 +3008,7 @@ function DataSection() {
     <>
       <h2 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">项目数据</h2>
       <section className="bg-white dark:bg-[#0E0E10] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-sm space-y-4 text-sm">
+        <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">项目文件</h3>
         <Stat label="项目数量（应用内）" value={`${projects.length} 个`} />
         <Stat label="项目数量（SQLite）" value={info ? `${info.dbProjectCount} 个` : "—"} />
         <Stat label="项目数量（磁盘目录）" value={info ? `${info.projectCount} 个` : "—"} />
@@ -2419,6 +3045,7 @@ function DataSection() {
         </div>
         {statusMessage && <p className="text-xs text-slate-500">{statusMessage}</p>}
       </section>
+      <CacheSection />
     </>
   );
 }

@@ -1,13 +1,41 @@
 const { app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, protocol, session, shell } = require("electron");
-const { execFile } = require("node:child_process");
+// 渐进式 TS:非打包(dev / electron:preview)时挂 tsx 的 require-hook,
+// 让 require("./foo")(无后缀)能解析到 foo.ts。打包后 isPackaged 为 true,
+// 走的是 build 阶段 esbuild 预编译出的同名 foo.js,不依赖 tsx(devDep 已被剥离)。
+if (!app.isPackaged) {
+  require("tsx/cjs");
+}
+// IPC 契约 fail-fast:包一层 ipcMain.handle 记录已注册的 invoke channel,
+// whenReady 末尾比对 ipc-contract.cjs 的 manifest —— 缺 handler 直接在启动时报,
+// 而不是等用户点到那个功能才发现静默坏掉。
+const { INVOKE_CHANNELS: _CONTRACT_INVOKE_CHANNELS } = require("./ipc-contract.cjs");
+const _registeredInvokeChannels = new Set();
+const _origIpcHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, listener) => {
+  _registeredInvokeChannels.add(channel);
+  return _origIpcHandle(channel, listener);
+};
+function assertIpcContract() {
+  const missing = _CONTRACT_INVOKE_CHANNELS.filter((c) => !_registeredInvokeChannels.has(c));
+  if (missing.length) {
+    throw new Error(`[ipc-contract] 这些 invoke channel 在 manifest 里声明了但没注册 ipcMain.handle: ${missing.join(", ")}`);
+  }
+}
+const { execFile, spawn } = require("node:child_process");
+const { promisify } = require("node:util");
+const execFileAsync = promisify(execFile);
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const zlib = require("node:zlib");
 const { DatabaseSync } = require("node:sqlite");
 const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
+const archiver = require("archiver");
 const llamaRuntime = require("./llama-runtime.cjs");
-const whisperCppRuntime = require("./whisper-cpp-runtime.cjs");
+const llamaManager = require("./llama-manager.cjs");
+// whisper 运行时由 ai-model-daemon 管理,不再本地 require
 const prefilter = require("./prefilter.cjs");
 const shotMerger = require("./shot-merger.cjs");
 const summarizer = require("./summarizer.cjs");
@@ -15,10 +43,30 @@ const danmakuFetcher = require("./danmaku-fetcher.cjs");
 const danmakuEmotion = require("./danmaku-emotion.cjs");
 const danmakuWordcloud = require("./danmaku-wordcloud.cjs");
 const openaiClient = require("./openai-client.cjs");
+const etaEstimator = require("./eta-estimator.cjs");
+const etaLearner = require("./eta-learner.cjs");
 const cacheStore = require("./cache-store.cjs");
+const extensionBridge = require("./extension-bridge.cjs");
+const douyinSpider = require("./douyin-spider-sidecar.cjs");
+const log = require("./logger.cjs");
+const { createTaskScheduler } = require("./task-queue");
+const ElectronStore = require("electron-store");
+
+let _cfgStore = null;
+function cfgStore() {
+  if (!_cfgStore) _cfgStore = new ElectronStore({ name: "config" });
+  return _cfgStore;
+}
+function readConfig() {
+  return cfgStore().store;
+}
+function writeConfig(data) {
+  cfgStore().store = data;
+}
 const { getTranscriber } = require("./transcribe/index.cjs");
 const OpenCC = require("opencc-js");
 
+let contextResolver = null;
 const DEFAULT_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB
 // 每个阶段一份 prompt/输入格式 VERSION 常量, 改 prompt 时手动 bump → 旧 cache 自动失效。
 const CACHE_VERSIONS = {
@@ -27,7 +75,12 @@ const CACHE_VERSIONS = {
   shotMerger: "v1",
   summarizer: "v1",
   detectGenre: "v1",
-  mainAnalysis: "v1",
+  // v1 → v2: buildAnalysisPrompt + buildChunkPrompt 加了"节点划分规则"section
+  // (引导小模型把多个 shot 合并成 4-7 个逻辑节点, 不要 1:1 映射)。旧 cache 输出仍是
+  // 1 shot=1 node 的退化结果, 必须失效让新 prompt 生效。
+  mainAnalysis: "v2",
+  // 分段拉片的单段缓存:让中途取消/重启续跑时只补没跑完的 chunk(跟 mainAnalysis 同 prompt 版本对齐)。
+  mainAnalysisChunk: "v2",
   danmakuEmotion: "v1",
 };
 
@@ -46,15 +99,26 @@ function resolveCacheConfig(config) {
 }
 
 async function initializeCacheStore() {
-  const raw = await readJson(getConfigPath(), null);
+  const raw = readConfig();
   const { dir, maxBytes } = resolveCacheConfig(raw);
   cacheStore.configure({ dir, maxBytes });
+}
+
+// 当前管线运行期间生效的 cachePolicy 快照, analyzeProject 入口设置, 结束清除。
+let _activeCachePolicy = null;
+
+function isCacheEnabledForScope(scope) {
+  if (!_activeCachePolicy) return true;
+  if (!_activeCachePolicy.enabled) return false;
+  const stages = _activeCachePolicy.stages;
+  if (stages && typeof stages[scope] === "boolean") return stages[scope];
+  return true;
 }
 
 // 包一个"输入 → output"的纯函数 LLM 调用为 cache-aware 版本。
 // scope/key 由 main.cjs 各调用点构造, run 是命中失败时实际跑的副作用函数。
 async function runWithCache(scope, key, run, meta = {}) {
-  if (!cacheStore.isConfigured() || !key) return run();
+  if (!cacheStore.isConfigured() || !key || !isCacheEnabledForScope(scope)) return run();
   try {
     const hit = await cacheStore.get(scope, key);
     if (hit) return hit.payload;
@@ -67,9 +131,97 @@ async function runWithCache(scope, key, run, meta = {}) {
   return output;
 }
 
+// runWithCache 的"带缓存标记"变体: 返回 { payload, fromCache }, 让上游分支记账时
+// 区分"本次 LLM 真的跑了 → 记 tokens" 与 "缓存命中 → 只记一次 cacheHit"。
+async function runWithCacheTraced(scope, key, run, meta = {}) {
+  let invoked = false;
+  const payload = await runWithCache(scope, key, async () => {
+    invoked = true;
+    return run();
+  }, meta);
+  return { payload, fromCache: !invoked };
+}
+
+// Token 账本: 按 (stage, providerId, model) 维度聚合每次分析消耗的 LLM token。
+// - record: 单次调用 / 单 batch 调用完成后投递 usage
+// - snapshot: 持久化前快照, 写进 report.tokenUsage 和 token-usage.json
+// cache 命中只 +cacheHits, 不加 token; 累计调用次数走 callCount。
+function createTokenLedger(priorStages) {
+  const buckets = new Map();
+  const keyOf = (stage, providerId, model) => `${stage}|${providerId || ""}|${model || ""}`;
+  const ensureBucket = (stage, providerId, providerName, model, source) => {
+    const k = keyOf(stage, providerId, model);
+    let b = buckets.get(k);
+    if (!b) {
+      b = {
+        stage,
+        providerId: providerId || null,
+        providerName: providerName || null,
+        model: model || null,
+        source: source || "remote",
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        callCount: 0,
+        cacheHits: 0,
+      };
+      buckets.set(k, b);
+    }
+    return b;
+  };
+  return {
+    record({ stage, provider, model, source, usage, callCount = 1 }) {
+      if (!stage) return;
+      const m = model || provider?.model || null;
+      const src = source || (provider?.source ?? "remote");
+      const b = ensureBucket(stage, provider?.id, provider?.name, m, src);
+      if (usage) {
+        b.promptTokens += Number(usage.promptTokens) || 0;
+        b.completionTokens += Number(usage.completionTokens) || 0;
+        b.totalTokens += Number(usage.totalTokens) || 0;
+        b.cacheReadTokens += Number(usage.cacheReadTokens) || 0;
+        b.cacheCreationTokens += Number(usage.cacheCreationTokens) || 0;
+      }
+      b.callCount += callCount;
+    },
+    cacheHit({ stage, provider, model, source }) {
+      if (!stage) return;
+      const m = model || provider?.model || null;
+      const src = source || (provider?.source ?? "remote");
+      const b = ensureBucket(stage, provider?.id, provider?.name, m, src);
+      b.cacheHits += 1;
+      if (b.totalTokens === 0 && priorStages) {
+        const match = priorStages.find((s) => s.stage === stage && s.model === m);
+        if (match && match.totalTokens > 0) {
+          b.promptTokens = match.promptTokens || 0;
+          b.completionTokens = match.completionTokens || 0;
+          b.totalTokens = match.totalTokens || 0;
+          b.callCount = match.callCount || 0;
+          b.fromPriorRun = true;
+        }
+      }
+    },
+    snapshot() {
+      const stages = [...buckets.values()];
+      const totals = stages.reduce(
+        (acc, s) => {
+          acc.totalPromptTokens += s.promptTokens;
+          acc.totalCompletionTokens += s.completionTokens;
+          acc.totalTokens += s.totalTokens;
+          return acc;
+        },
+        { totalPromptTokens: 0, totalCompletionTokens: 0, totalTokens: 0 },
+      );
+      return { stages, ...totals };
+    },
+  };
+}
+
 // 给 prefilter.tagFrames 用的逐帧 cache injector
 function makePrefilterCache(modelKey) {
-  if (!cacheStore.isConfigured()) return null;
+  if (!cacheStore.isConfigured() || !isCacheEnabledForScope("prefilter")) return null;
   return {
     lookup: async (frame) => {
       try {
@@ -108,7 +260,7 @@ function normalizeShotMergerBatch(batch) {
 }
 
 function makeShotMergerCache(provider) {
-  if (!cacheStore.isConfigured() || !provider?.model) return null;
+  if (!cacheStore.isConfigured() || !provider?.model || !isCacheEnabledForScope("shot-merger")) return null;
   return {
     lookup: async (batch) => {
       try {
@@ -146,7 +298,7 @@ function normalizeDanmakuBatch(batch) {
 }
 
 function makeDanmakuEmotionCache(provider) {
-  if (!cacheStore.isConfigured() || !provider?.model) return null;
+  if (!cacheStore.isConfigured() || !provider?.model || !isCacheEnabledForScope("danmaku-emotion")) return null;
   return {
     lookup: async (batch) => {
       try {
@@ -327,6 +479,42 @@ function getBinDir() {
   return path.join(app.getPath("userData"), "bin");
 }
 
+async function ensureCompressedBundledTool(filePath, command) {
+  if (!filePath) return null;
+  if (fsSync.existsSync(filePath)) return filePath;
+
+  const gzPath = `${filePath}.gz`;
+  if (!fsSync.existsSync(gzPath)) return null;
+
+  const targetDir = path.join(getBinDir(), "bundled-tools", `${process.platform}-${process.arch}`);
+  const targetPath = path.join(targetDir, path.basename(filePath));
+  if (fsSync.existsSync(targetPath)) return targetPath;
+
+  await fs.mkdir(targetDir, { recursive: true });
+  const tempPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
+  await pipeline(
+    fsSync.createReadStream(gzPath),
+    zlib.createGunzip(),
+    fsSync.createWriteStream(tempPath, { mode: 0o755 }),
+  );
+  await fs.chmod(tempPath, 0o755);
+  await fs.rename(tempPath, targetPath);
+  log.info("clipiq", `已解压内置 ${command}: ${targetPath}`);
+  return targetPath;
+}
+
+function isBundledToolPath(actualPath, packagedPath) {
+  if (!actualPath || !packagedPath) return false;
+  if (actualPath === packagedPath) return true;
+  const extractedPath = path.join(
+    getBinDir(),
+    "bundled-tools",
+    `${process.platform}-${process.arch}`,
+    path.basename(packagedPath),
+  );
+  return actualPath === extractedPath;
+}
+
 function ytDlpAssetName() {
   if (process.platform === "win32") return "yt-dlp.exe";
   if (process.platform === "darwin") return "yt-dlp_macos";
@@ -343,48 +531,296 @@ async function resolveYtDlp() {
   return await commandPath("yt-dlp");
 }
 
-const activeAnalyses = new Map();
+// ── 统一任务管理器 ──
+// activeTasks: analysisId → TaskHandle。替代旧的 activeAnalyses + summaryInFlight。
+const activeTasks = new Map();
+// 兼容别名：旧代码里 activeAnalyses.has(projectId) 的地方仍在用
+const activeAnalyses = {
+  has(videoId) { return [...activeTasks.values()].some((h) => h.videoId === videoId && !h.cancelled); },
+  get(videoId) { return [...activeTasks.values()].find((h) => h.videoId === videoId && !h.cancelled); },
+};
+
+// ── 通用后台任务调度器(electron/task-queue.ts)──
+// 在 whenReady 里实例化(需要 db + runAnalysisStart / summarizeAccountVideo 都已定义)。
+// 各 IPC handler 通过这个 module-level 引用调度。activeTasks 退化成 runner 内部的
+// 运行态/取消机制,排队 / 并发 / 持久化 / 统一 task 记录都在调度器这层。
+let taskScheduler = null;
+// 每个 kind 的并发上限(可调)。analysis / summary 串行排队 —— 即用户要的"只能同时跑
+// 一个,其余排队";本地 llama 单例 + ai-model 服务自身也有并发队列,这里不必放开。
+// 以后想让云端分析并行,把对应值调大即可。
+const TASK_CONCURRENCY = { analysis: 1, summary: 1, "account-fetch": 2, methodology: 1 };
+
+let learnedBaselines = { providers: {} };
 
 class AnalysisCancelledError extends Error {
-  constructor() {
-    super("分析已取消");
-    this.name = "AnalysisCancelledError";
-  }
+  constructor() { super("分析已取消"); this.name = "AnalysisCancelledError"; }
 }
 
-function registerAnalysis(projectId) {
+function registerTask(analysisId, videoId, pipelineId) {
   const handle = {
+    analysisId,
+    videoId,
+    pipelineId,
     abortController: new AbortController(),
     children: new Set(),
     cancelled: false,
+    startedAt: Date.now(),
+    lastProgress: null,
+    budget: null,
+    tokenLedger: null,
+    timings: [],
+    heartbeat: null,
   };
-  activeAnalyses.set(projectId, handle);
+  activeTasks.set(analysisId, handle);
   return handle;
 }
 
-function clearAnalysis(projectId) {
-  const handle = activeAnalyses.get(projectId);
-  if (handle?.heartbeat) clearInterval(handle.heartbeat);
-  activeAnalyses.delete(projectId);
+// 兼容别名
+function registerAnalysis(videoId) {
+  const fakeId = `legacy-${videoId}-${Date.now()}`;
+  return registerTask(fakeId, videoId, "builtin-pipeline");
 }
 
-function cancelAnalysis(projectId) {
-  const handle = activeAnalyses.get(projectId);
+function clearTask(analysisId) {
+  const handle = activeTasks.get(analysisId);
+  if (handle?.heartbeat) clearInterval(handle.heartbeat);
+  activeTasks.delete(analysisId);
+  _activeCachePolicy = null;
+}
+
+function clearAnalysis(videoId, expectedHandle) {
+  // 兼容: 按 videoId 找并清除
+  for (const [aid, h] of activeTasks) {
+    if (h.videoId === videoId) {
+      if (expectedHandle && h !== expectedHandle) continue;
+      clearTask(aid);
+      return;
+    }
+  }
+}
+
+function cancelTask(analysisId) {
+  const handle = activeTasks.get(analysisId);
   if (!handle) return false;
   handle.cancelled = true;
+  handle.cancelledAt = Date.now();
   handle.abortController.abort();
   for (const child of handle.children) {
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // already dead
-    }
+    try { child.kill("SIGTERM"); } catch { /* already dead */ }
   }
   return true;
 }
 
+function cancelAnalysis(videoId) {
+  // 兼容: 按 videoId 取消
+  for (const [aid, h] of activeTasks) {
+    if (h.videoId === videoId && !h.cancelled) return cancelTask(aid);
+  }
+  return false;
+}
+
+function emitTaskProgress(analysisId, { progress, stage, message }) {
+  const handle = activeTasks.get(analysisId);
+  if (!handle) return;
+  const payload = {
+    analysisId,
+    videoId: handle.videoId,
+    pipelineId: handle.pipelineId,
+    // 兼容旧字段名
+    projectId: handle.videoId,
+    progress,
+    stage,
+    message: message || "",
+  };
+  handle.lastProgress = payload;
+  broadcastToWindows("task:progress", payload);
+  // 兼容: 旧的 analysis:progress 通道也发一份，让 ProgressScreen 不崩
+  broadcastToWindows("analysis:progress", payload);
+}
+
+function isTaskActiveForVideo(videoId, pipelineId) {
+  for (const h of activeTasks.values()) {
+    if (h.videoId === videoId && !h.cancelled) {
+      if (!pipelineId || h.pipelineId === pipelineId) return true;
+    }
+  }
+  return false;
+}
+
+function getTaskForVideo(videoId) {
+  for (const h of activeTasks.values()) {
+    if (h.videoId === videoId && !h.cancelled) return h;
+  }
+  return null;
+}
+
 function ensureNotCancelled(handle) {
   if (handle?.cancelled) throw new AnalysisCancelledError();
+}
+
+// macOS 内存采样: vm_stat 给页数, sysctl 给 swap。
+// usedBytes 对齐活动监视器 "Memory Used" = App(Anonymous-Purgeable) + Wired + Compressed,
+// 不含 File-backed / Speculative,因为这些是 OS 缓存,有压力时会自动让出。
+async function sampleDarwinMemory(totalMemBytes) {
+  try {
+    const [vmRes, swapRes] = await Promise.all([
+      execFileAsync("vm_stat", [], { windowsHide: true }),
+      execFileAsync("sysctl", ["-n", "vm.swapusage"], { windowsHide: true }).catch(() => ({ stdout: "" })),
+    ]);
+    const vmOut = vmRes.stdout || "";
+    const pageSize = Number(vmOut.match(/page size of (\d+) bytes/)?.[1]) || 4096;
+    const pages = (label) => {
+      const re = new RegExp(`${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s+(\\d+)\\.`);
+      return Number(vmOut.match(re)?.[1]) || 0;
+    };
+    const wired = pages("Pages wired down");
+    const compressed = pages("Pages occupied by compressor");
+    const purgeable = pages("Pages purgeable");
+    const anonymous = pages("Anonymous pages");
+
+    const appBytes = Math.max(0, anonymous - purgeable) * pageSize;
+    const wiredBytes = wired * pageSize;
+    const compressedBytes = compressed * pageSize;
+    const usedBytes = appBytes + wiredBytes + compressedBytes;
+
+    let swapUsedBytes = 0;
+    const swapMatch = (swapRes.stdout || "").match(/used\s*=\s*([\d.]+)([KMGT])/);
+    if (swapMatch) {
+      const n = Number(swapMatch[1]);
+      const mult = { K: 1024, M: 1024 ** 2, G: 1024 ** 3, T: 1024 ** 4 }[swapMatch[2]] || 1;
+      swapUsedBytes = Math.round(n * mult);
+    }
+
+    // 真正的 memory pressure 在内核里 (MEMORYSTATUS_VM_PRESSURE),CLI 拿不到实时值。
+    // 这里用 swap + compressed 占比做启发: 出现 swap 就是已经在挤了, compressed 占比高
+    // 说明系统开始大量压缩冷页。两个信号都不算"已经卡",所以阈值取得保守一点。
+    const compressedRatio = totalMemBytes > 0 ? compressedBytes / totalMemBytes : 0;
+    const swapGB = swapUsedBytes / (1024 ** 3);
+    let pressure = "normal";
+    if (swapGB >= 4 || compressedRatio >= 0.4) pressure = "critical";
+    else if (swapGB >= 1 || compressedRatio >= 0.2) pressure = "warn";
+
+    return { usedBytes, compressedBytes, swapUsedBytes, pressure };
+  } catch {
+    return null;
+  }
+}
+
+// 解析 macOS top 的 MEM 字段 (形如 "506M" / "1.2G" / "8192K" / 裸数字默认 KB)
+function parseTopMemToken(token) {
+  if (!token) return 0;
+  const m = String(token).match(/^([\d.]+)([KMGT])?\+?$/i);
+  if (!m) return 0;
+  const num = Number(m[1]);
+  const unit = (m[2] || "K").toUpperCase();
+  const mul = { K: 1024, M: 1024 * 1024, G: 1024 ** 3, T: 1024 ** 4 }[unit] || 1024;
+  return Math.round(num * mul);
+}
+
+// 单进程 phys_footprint (macOS), 跟 Activity Monitor / vmmap 同口径.
+// Electron 的 getAppMetrics().memory.workingSetSize ≈ ps rss, 含共享内存重复计算,
+// 跟 sidecar (top mem) 口径不一致; 用这个统一拿 top MEM 让两边对齐.
+// 不算 CPU (Electron 进程 CPU 用 getAppMetrics percentCPUUsage 更准).
+async function sampleTopMemByPid(pid) {
+  try {
+    const { stdout } = await execFileAsync(
+      "top",
+      ["-l", "1", "-pid", String(pid), "-stats", "pid,mem", "-ncols", "2"],
+      { windowsHide: true },
+    );
+    const memLine = stdout.split("\n").reverse().find((l) => /^\s*\d+\s+\S+\s*$/.test(l));
+    const memToken = memLine ? memLine.trim().split(/\s+/)[1] : "";
+    const bytes = parseTopMemToken(memToken);
+    return bytes > 0 ? bytes : null;
+  } catch {
+    return null;
+  }
+}
+
+// 单进程 RSS + CPU 快照。
+// pcpu 在 ps 里是进程生命周期均值, 不是瞬时, 但 sidecar 跑起来后基本稳定看量级够用.
+//
+// 内存:
+//   - macOS 上 ps rss 对 mmap 文件 (llama.cpp 用 mmap 加载 GGUF) 统计不准, 只算已 touched
+//     的 dirty 页; 同一进程 Activity Monitor 显示 500MB 时 ps rss 可能只有 8MB.
+//     用 top 拿 MEM 字段 (= phys_footprint, 跟 Activity Monitor 同口径).
+//   - Linux 上 ps rss 已是准的, 保留.
+async function samplePsByPid(pid) {
+  try {
+    if (process.platform === "darwin") {
+      const [psResult, topResult] = await Promise.all([
+        execFileAsync("ps", ["-p", String(pid), "-o", "pcpu="], { windowsHide: true }),
+        execFileAsync(
+          "top",
+          ["-l", "1", "-pid", String(pid), "-stats", "pid,mem", "-ncols", "2"],
+          { windowsHide: true },
+        ),
+      ]);
+      const pcpu = Number(psResult.stdout.trim());
+      // top 输出形如:
+      //   PID    MEM
+      //   23610  506M
+      // 倒序找第一条 "<pid> <mem>" 模式的行
+      const memLine = topResult.stdout
+        .split("\n")
+        .reverse()
+        .find((l) => /^\s*\d+\s+\S+\s*$/.test(l));
+      const memToken = memLine ? memLine.trim().split(/\s+/)[1] : "";
+      return {
+        cpuPercent: Number.isFinite(pcpu) ? Math.round(pcpu * 10) / 10 : 0,
+        memoryBytes: parseTopMemToken(memToken),
+      };
+    }
+
+    // Linux / 其他 unix: ps rss 够准
+    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "pcpu=,rss="], {
+      windowsHide: true,
+    });
+    const parts = stdout.trim().split(/\s+/);
+    const pcpu = Number(parts[0]);
+    const rssKB = Number(parts[1]);
+    return {
+      cpuPercent: Number.isFinite(pcpu) ? Math.round(pcpu * 10) / 10 : 0,
+      memoryBytes: Number.isFinite(rssKB) ? rssKB * 1024 : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function mapElectronProcKind(type) {
+  if (type === "Browser") return "main";
+  if (type === "Tab") return "renderer";
+  if (type === "GPU") return "gpu";
+  return "utility";
+}
+
+function electronProcLabel(m) {
+  if (m.type === "Browser") return "主进程";
+  if (m.type === "Tab") return m.name || "渲染进程";
+  if (m.type === "GPU") return "GPU";
+  if (m.type === "Utility") {
+    const svc = m.serviceName || "";
+    if (svc.includes("network")) return "网络服务";
+    if (svc.includes("storage")) return "存储服务";
+    if (svc.includes("audio")) return "音频服务";
+    if (svc.includes("video")) return "视频服务";
+    if (svc.includes("utility")) return "工具服务";
+    return m.name || "工具进程";
+  }
+  if (m.type === "Zygote") return "Zygote";
+  if (m.type === "Sandbox helper") return "沙盒辅助";
+  return m.type || "未知";
+}
+
+function electronProcDetail(m) {
+  if (m.type === "Utility" && m.serviceName) {
+    // chromium service name 形如 "network.mojom.NetworkService", 取最后一段简化展示
+    const segs = m.serviceName.split(".");
+    return segs[segs.length - 1];
+  }
+  if (m.name && m.type !== "Browser" && m.type !== "Tab") return m.name;
+  return undefined;
 }
 
 function run(command, args, options = {}, handle = null) {
@@ -408,11 +844,13 @@ function run(command, args, options = {}, handle = null) {
 async function commandPath(command) {
   if (command === "ffmpeg") {
     const bundled = bundledFfmpegPath();
-    if (bundled && fsSync.existsSync(bundled)) return bundled;
+    const ready = await ensureCompressedBundledTool(bundled, "ffmpeg");
+    if (ready) return ready;
   }
   if (command === "ffprobe") {
     const bundled = bundledFfprobePath();
-    if (bundled && fsSync.existsSync(bundled)) return bundled;
+    const ready = await ensureCompressedBundledTool(bundled, "ffprobe");
+    if (ready) return ready;
   }
   if (command === "yt-dlp") {
     const local = ytDlpLocalPath();
@@ -441,8 +879,8 @@ function createExternalMediaUrl(absPath) {
   return `media://external/${encodeURIComponent(absPath)}`;
 }
 
-function createProjectMediaUrl(projectId, framePath) {
-  const projectDir = getProjectDir(projectId);
+function createVideoMediaUrl(projectId, framePath) {
+  const projectDir = getVideoDir(projectId);
   const rel = path.isAbsolute(framePath) ? path.relative(projectDir, framePath) : framePath;
   const encoded = rel.split(path.sep).map(encodeURIComponent).join("/");
   return `media://project/${encodeURIComponent(projectId)}/${encoded}`;
@@ -599,16 +1037,162 @@ async function directorySize(dirPath) {
   return total;
 }
 
-function getConfigPath() {
-  return path.join(app.getPath("userData"), "config.json");
-}
-
 function getDbPath() {
   return path.join(app.getPath("userData"), "data.db");
 }
 
-function getProjectDir(projectId) {
-  return path.join(app.getPath("userData"), "projects", projectId);
+function getVideoDir(videoId) {
+  return path.join(app.getPath("userData"), "videos", videoId);
+}
+
+function getAnalysisDir(videoId, analysisId) {
+  return path.join(getVideoDir(videoId), "analyses", analysisId);
+}
+
+// --- row → object 转换 (SQLite 列 → JS 对象) ---
+
+function rowToVideo(r) {
+  return {
+    id: r.id,
+    title: r.title || "",
+    sourceType: r.source_type || "local",
+    sourceUrl: r.source_url || undefined,
+    playUrl: r.play_url || undefined,
+    platform: r.platform || undefined,
+    externalId: r.external_id || undefined,
+    localPath: r.local_path || undefined,
+    durationSec: r.duration_sec || 0,
+    width: r.width || 0,
+    height: r.height || 0,
+    orientation: r.orientation || "landscape",
+    thumbnailUrl: r.thumbnail_url || undefined,
+    accountId: r.account_id || undefined,
+    status: r.status || "ready",
+    uploadDate: r.upload_date || undefined,
+    viewCount: r.view_count ?? undefined,
+    likeCount: r.like_count ?? undefined,
+    commentCount: r.comment_count ?? undefined,
+    shareCount: r.share_count ?? undefined,
+    collectCount: r.collect_count ?? undefined,
+    tags: r.tags ? JSON.parse(r.tags) : undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+    // v2 兼容字段 (旧 UI 代码用)
+    videoName: r.title || "",
+    localVideoPath: r.local_path ? `media://local/${encodeURIComponent(r.local_path)}` : undefined,
+    localFilePath: r.local_path || undefined,
+    source: r.source_type === "url"
+      ? { type: "url", url: r.source_url || "", platform: r.platform || "unknown" }
+      : { type: "local_file", originalPath: r.local_path || "" },
+    kind: r.account_id ? "account_video" : "analysis",
+    assetTags: r.tags ? JSON.parse(r.tags) : [],
+  };
+}
+
+function rowToAnalysis(r) {
+  return {
+    id: r.id,
+    videoId: r.video_id,
+    pipelineId: r.pipeline_id,
+    status: r.status || "analyzing",
+    options: r.options ? JSON.parse(r.options) : undefined,
+    providerSnapshot: r.provider_snapshot ? JSON.parse(r.provider_snapshot) : undefined,
+    result: r.result ? JSON.parse(r.result) : undefined,
+    tokenUsage: r.token_usage ? JSON.parse(r.token_usage) : undefined,
+    durationMs: r.duration_ms || undefined,
+    errorMessage: r.error_message || undefined,
+    progress: r.progress ?? undefined,
+    stage: r.stage || undefined,
+    stageIndex: r.stage_index ?? undefined,
+    message: r.message || undefined,
+    heartbeatAt: r.heartbeat_at || undefined,
+    startedAt: new Date(r.started_at).toISOString(),
+    completedAt: r.completed_at ? new Date(r.completed_at).toISOString() : undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+  };
+}
+
+function rowToCollection(r) {
+  return {
+    id: r.id,
+    name: r.name || "",
+    description: r.description || undefined,
+    kind: r.kind || "manual",
+    coverUrl: r.cover_url || undefined,
+    filterRules: r.filter_rules ? JSON.parse(r.filter_rules) : undefined,
+    accountId: r.account_id || undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  };
+}
+
+function rowToPipeline(r) {
+  return {
+    id: r.id,
+    name: r.name || "",
+    builtin: !!r.builtin,
+    stages: r.stages ? JSON.parse(r.stages) : [],
+    slotConfig: r.slot_config ? JSON.parse(r.slot_config) : undefined,
+    description: r.description || undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  };
+}
+
+function rowToAccount(r) {
+  return {
+    id: r.id,
+    name: r.name || "",
+    platform: r.platform || "unknown",
+    externalId: r.external_id || undefined,
+    externalUrl: r.external_url || undefined,
+    avatarUrl: r.avatar_url || undefined,
+    bio: r.bio || undefined,
+    followers: r.followers || undefined,
+    tags: r.tags ? JSON.parse(r.tags) : undefined,
+    fetchRange: r.fetch_range || undefined,
+    fetchPhase: r.fetch_phase || "idle",
+    fetchError: r.fetch_error || undefined,
+    lastFetchedAt: r.last_fetched_at ? new Date(r.last_fetched_at).toISOString() : undefined,
+    totalVideoCount: r.total_video_count > 0 ? r.total_video_count : undefined,
+    secUid: r.sec_uid || undefined,
+    analysisConfig: r.analysis_config ? JSON.parse(r.analysis_config) : undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  };
+}
+
+function rowToStudioSession(r) {
+  return {
+    id: r.id,
+    goal: r.goal || undefined,
+    targetPlatform: r.target_platform || undefined,
+    targetDurationSec: r.target_duration || undefined,
+    steps: r.steps ? JSON.parse(r.steps) : undefined,
+    scriptDraft: r.script_draft || undefined,
+    output: r.output ? JSON.parse(r.output) : undefined,
+    createdAt: new Date(r.created_at).toISOString(),
+    updatedAt: new Date(r.updated_at).toISOString(),
+  };
+}
+
+function rowToShot(r) {
+  return {
+    id: r.id,
+    assetProjectId: r.video_id,
+    videoId: r.video_id,
+    shotIndex: r.shot_index || 0,
+    startSec: r.start_sec || 0,
+    endSec: r.end_sec || 0,
+    thumbnailUrl: r.thumbnail_url || undefined,
+    description: r.description || undefined,
+    shotType: r.shot_type || undefined,
+    cameraMovement: r.camera_movement || undefined,
+    usageTags: r.usage_tags ? JSON.parse(r.usage_tags) : [],
+    isFavorite: !!r.is_favorite,
+    subtitleText: r.subtitle_text || undefined,
+    createdAt: r.created_at ? new Date(r.created_at).toISOString() : undefined,
+  };
 }
 
 let _db = null;
@@ -619,23 +1203,310 @@ function getDb() {
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA journal_mode=WAL");
   db.exec("PRAGMA foreign_keys=ON");
+
+  // 清除 v2 旧表（只删不再使用的表，不动 v3 新表）
   db.exec(`
-    CREATE TABLE IF NOT EXISTS projects (
+    DROP TABLE IF EXISTS account_videos;
+    DROP TABLE IF EXISTS projects;
+    DROP TABLE IF EXISTS analysis_nodes;
+    DROP TABLE IF EXISTS analysis_reports;
+  `);
+
+  // methodologies:旧 schema(account_id NOT NULL、无 collection_id)直接弃掉旧数据重建,不迁移。
+  // 必须在下方建表/建索引前跑,否则给旧表的 collection_id 列建索引会抛 no such column。
+  try {
+    const mc = db.prepare("PRAGMA table_info(methodologies)").all();
+    if (mc.length > 0 && !mc.some((c) => c.name === "collection_id")) {
+      db.exec("DROP TABLE methodologies");
+      log.info("db-migrate", "methodologies 旧表已弃(老方法论数据不保留),将以新 schema 重建");
+    }
+  } catch { /* 表不存在,忽略 */ }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS accounts (
       id TEXT PRIMARY KEY,
-      data TEXT NOT NULL,
+      name TEXT NOT NULL DEFAULT '',
+      platform TEXT NOT NULL DEFAULT 'unknown',
+      external_id TEXT,
+      external_url TEXT,
+      avatar_url TEXT,
+      bio TEXT,
+      followers TEXT,
+      tags TEXT,
+      fetch_range TEXT,
+      fetch_phase TEXT DEFAULT 'idle',
+      fetch_error TEXT,
+      last_fetched_at INTEGER,
+      analysis_config TEXT,
+      created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS analysis_nodes (
-      project_id TEXT PRIMARY KEY,
-      data TEXT NOT NULL
+
+    CREATE TABLE IF NOT EXISTS videos (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL DEFAULT '',
+      source_type TEXT NOT NULL DEFAULT 'local',
+      source_url TEXT,
+      play_url TEXT,
+      platform TEXT,
+      external_id TEXT,
+      local_path TEXT,
+      duration_sec REAL DEFAULT 0,
+      width INTEGER DEFAULT 0,
+      height INTEGER DEFAULT 0,
+      orientation TEXT DEFAULT 'landscape',
+      thumbnail_url TEXT,
+      account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+      status TEXT NOT NULL DEFAULT 'ready',
+      upload_date TEXT,
+      view_count INTEGER,
+      like_count INTEGER,
+      comment_count INTEGER,
+      share_count INTEGER,
+      collect_count INTEGER,
+      tags TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS analysis_reports (
-      project_id TEXT PRIMARY KEY,
-      data TEXT NOT NULL
+    CREATE INDEX IF NOT EXISTS idx_videos_account ON videos(account_id);
+    CREATE INDEX IF NOT EXISTS idx_videos_platform ON videos(platform);
+
+    CREATE TABLE IF NOT EXISTS analyses (
+      id TEXT PRIMARY KEY,
+      video_id TEXT NOT NULL,
+      pipeline_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'analyzing',
+      options TEXT,
+      provider_snapshot TEXT,
+      result TEXT,
+      token_usage TEXT,
+      duration_ms INTEGER,
+      error_message TEXT,
+      started_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
     );
+    CREATE INDEX IF NOT EXISTS idx_analyses_video ON analyses(video_id);
+
+    CREATE TABLE IF NOT EXISTS pipelines (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      builtin INTEGER NOT NULL DEFAULT 0,
+      stages TEXT NOT NULL,
+      slot_config TEXT,
+      description TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS collections (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      kind TEXT NOT NULL DEFAULT 'manual',
+      cover_url TEXT,
+      filter_rules TEXT,
+      account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS collection_videos (
+      collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+      video_id TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+      position INTEGER NOT NULL DEFAULT 0,
+      added_at INTEGER NOT NULL,
+      PRIMARY KEY (collection_id, video_id)
+    );
+
+    -- 方法论挂在收藏夹上(account 走它的 col-account 收藏夹)。collection_id 为主绑定,
+    -- account_id 冗余(可空)。老库是 account_id NOT NULL 的旧 schema,迁移见下方重建块。
+    CREATE TABLE IF NOT EXISTS methodologies (
+      id TEXT PRIMARY KEY,
+      collection_id TEXT NOT NULL,
+      account_id TEXT,
+      version INTEGER NOT NULL DEFAULT 1,
+      data TEXT NOT NULL,
+      source_video_count INTEGER DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_methodologies_collection ON methodologies(collection_id);
+    CREATE INDEX IF NOT EXISTS idx_methodologies_account ON methodologies(account_id);
+
+    CREATE TABLE IF NOT EXISTS shots (
+      id TEXT PRIMARY KEY,
+      video_id TEXT NOT NULL,
+      shot_index INTEGER NOT NULL,
+      start_sec REAL DEFAULT 0,
+      end_sec REAL DEFAULT 0,
+      thumbnail_url TEXT,
+      description TEXT,
+      shot_type TEXT,
+      camera_movement TEXT,
+      usage_tags TEXT,
+      is_favorite INTEGER DEFAULT 0,
+      subtitle_text TEXT,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_shots_video ON shots(video_id);
+
+    CREATE TABLE IF NOT EXISTS studio_sessions (
+      id TEXT PRIMARY KEY,
+      goal TEXT,
+      target_platform TEXT,
+      target_duration INTEGER,
+      steps TEXT,
+      script_draft TEXT,
+      output TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    -- 通用后台任务队列(electron/task-queue.ts 的 Task 模型落库)。
+    -- payload 是 kind 专属参数的 JSON;status 见 TaskStatus;进度不随每个 tick 落库,
+    -- 只在状态迁移时 upsert。重启时 running → interrupted、queued 重新调度。
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued',
+      title TEXT NOT NULL DEFAULT '',
+      payload TEXT,
+      ref_id TEXT,
+      dedupe_key TEXT,
+      progress INTEGER DEFAULT 0,
+      stage TEXT,
+      message TEXT,
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      started_at INTEGER,
+      finished_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+    CREATE INDEX IF NOT EXISTS idx_tasks_kind ON tasks(kind);
   `);
+
+  // 增量迁移: analyses 加运行时进度快照列(老 DB 没有这些列)。
+  // 这些列让进度成为持久化状态,前端纯视图读它、app 重启也能恢复到上次停的地方。
+  for (const col of [
+    "progress INTEGER DEFAULT 0",
+    "stage TEXT",
+    "stage_index INTEGER",
+    "message TEXT",
+    "heartbeat_at INTEGER",
+  ]) {
+    try { db.exec(`ALTER TABLE analyses ADD COLUMN ${col}`); } catch { /* 列已存在 */ }
+  }
+
+  // 增量迁移: videos 加 play_url(抖音 play_addr 直链)。老库没这列会导致拉取时抓到的
+  // 直链落库即丢,抖音视频下载只能走 yt-dlp(现需 cookie)而失败。
+  try { db.exec("ALTER TABLE videos ADD COLUMN play_url TEXT"); } catch { /* 列已存在 */ }
+  try { db.exec("ALTER TABLE accounts ADD COLUMN total_video_count INTEGER DEFAULT 0"); } catch { /* 列已存在 */ }
+  try { db.exec("ALTER TABLE accounts ADD COLUMN sec_uid TEXT"); } catch { /* 列已存在 */ }
+
+  // (methodologies 旧 schema 已在上方建表前弃掉重建,不再做数据迁移)
+
+  // 插入内置管线
+  const now = Date.now();
+  const insertPipeline = db.prepare(
+    "INSERT OR IGNORE INTO pipelines (id, name, builtin, stages, slot_config, created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?, ?)",
+  );
+  insertPipeline.run(
+    "builtin-pipeline",
+    "结构拆解",
+    JSON.stringify([
+      { key: "prefilter", label: "抽帧初筛", slot: "simple_vision" },
+      { key: "transcript", label: "字幕识别", slot: "__audio__" },
+      { key: "shot-merger", label: "镜头合并", slot: "medium_text" },
+      { key: "main", label: "主分析", slot: "complex_vision" },
+    ]),
+    null,
+    now,
+    now,
+  );
+  insertPipeline.run(
+    "builtin-content",
+    "内容分析",
+    JSON.stringify([
+      { key: "transcript", label: "字幕识别", slot: "__audio__" },
+      { key: "summarize", label: "内容分析", slot: "complex_vision" },
+    ]),
+    null,
+    now,
+    now,
+  );
+
+  // 启动时清理：上次退出时停在 fetching 的账号 → idle
+  try {
+    db.prepare("UPDATE accounts SET fetch_phase = 'idle' WHERE fetch_phase = 'fetching'").run();
+  } catch { /* noop */ }
+
+  // 启动时 reconcile：进程退出会带走内存里的编排循环,DB 里残留的"进行中"状态都是孤儿。
+  // - 分析停在 analyzing → interrupted(磁盘 checkpoint 还在,可由用户点"继续"续跑)
+  // - 视频停在 analyzing → interrupted(跟随其分析)
+  // - 视频停在 downloading → download_failed(下载不可续,需重新发起)
+  try {
+    db.prepare("UPDATE analyses SET status = 'interrupted' WHERE status = 'analyzing'").run();
+    db.prepare("UPDATE videos SET status = 'interrupted' WHERE status = 'analyzing'").run();
+    db.prepare("UPDATE videos SET status = 'download_failed' WHERE status = 'downloading'").run();
+    // 存量修正:已完成结构拆解但状态还停在旧的 'ready' 的视频 → 'completed'(否则 UI 显示"待开始")。
+    db.prepare("UPDATE videos SET status = 'completed' WHERE status = 'ready' AND id IN (SELECT video_id FROM analyses WHERE pipeline_id = 'builtin-pipeline' AND status = 'completed')").run();
+  } catch { /* noop */ }
+
   _db = db;
   return db;
+}
+
+// ── tasks 表读写(task-queue 调度器的持久层)──
+// 列↔字段映射只此一份。进度不随 tick 落库,只在状态迁移时 upsert。
+function rowToTask(r) {
+  return {
+    id: r.id,
+    kind: r.kind,
+    status: r.status,
+    title: r.title || "",
+    payload: r.payload ? JSON.parse(r.payload) : {},
+    refId: r.ref_id ?? null,
+    dedupeKey: r.dedupe_key ?? null,
+    progress: r.progress ?? 0,
+    stage: r.stage || "",
+    message: r.message || "",
+    error: r.error ?? null,
+    createdAt: r.created_at,
+    startedAt: r.started_at ?? null,
+    finishedAt: r.finished_at ?? null,
+  };
+}
+
+function createTasksRepo(db) {
+  // 启动时清掉历史终态行(hydrate 只恢复 queued/running,终态行不再被读),防表无限增长。
+  try { db.prepare("DELETE FROM tasks WHERE status NOT IN ('queued','running')").run(); } catch { /* noop */ }
+  const upsertStmt = db.prepare(`
+    INSERT INTO tasks (id, kind, status, title, payload, ref_id, dedupe_key, progress, stage, message, error, created_at, started_at, finished_at)
+    VALUES (@id, @kind, @status, @title, @payload, @ref_id, @dedupe_key, @progress, @stage, @message, @error, @created_at, @started_at, @finished_at)
+    ON CONFLICT(id) DO UPDATE SET
+      status=excluded.status, title=excluded.title, payload=excluded.payload, ref_id=excluded.ref_id,
+      dedupe_key=excluded.dedupe_key, progress=excluded.progress, stage=excluded.stage,
+      message=excluded.message, error=excluded.error, started_at=excluded.started_at, finished_at=excluded.finished_at
+  `);
+  const removeStmt = db.prepare("DELETE FROM tasks WHERE id = ?");
+  // 只恢复未结束的 —— 终态任务是历史,不重新进调度器。
+  const listStmt = db.prepare("SELECT * FROM tasks WHERE status IN ('queued','running') ORDER BY created_at ASC");
+  return {
+    upsert(t) {
+      upsertStmt.run({
+        id: t.id, kind: t.kind, status: t.status, title: t.title || "",
+        payload: JSON.stringify(t.payload || {}),
+        ref_id: t.refId ?? null, dedupe_key: t.dedupeKey ?? null,
+        progress: t.progress ?? 0, stage: t.stage ?? null, message: t.message ?? null,
+        error: t.error ?? null, created_at: t.createdAt,
+        started_at: t.startedAt ?? null, finished_at: t.finishedAt ?? null,
+      });
+    },
+    remove(id) { removeStmt.run(id); },
+    list() { return listStmt.all().map(rowToTask); },
+  };
 }
 
 async function readJson(filePath, fallback) {
@@ -649,8 +1520,70 @@ async function readJson(filePath, fallback) {
 async function writeJson(filePath, payload) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(payload, null, 2), "utf8");
-  await fs.rename(tmp, filePath);
+  const text = JSON.stringify(payload, null, 2);
+  try {
+    await fs.writeFile(tmp, text, "utf8");
+    await fs.rename(tmp, filePath);
+  } catch (err) {
+    // rename ENOENT = tmp 在 writeFile 之后被外部移走了 (并发 writeJson 抢同一路径 /
+    // 系统 cleanup / 用户取消触发的 reset 等)。不用 atomic 保证, 直接覆写 final 文件让
+    // 流程往下走。artifacts JSON 不是关键数据 (内存里 transcript 还在用), 半残文件下次
+    // 跑会自愈, 容错优先于 atomicity。
+    if (err?.code === "ENOENT") {
+      await fs.writeFile(filePath, text, "utf8");
+      // 顺手清理可能残留的 tmp (rename 抛 ENOENT 说明大概率 tmp 已经没了, 但 best-effort)
+      await fs.unlink(tmp).catch(() => { /* noop */ });
+      return;
+    }
+    throw err;
+  }
+}
+
+// 主分析失败 catch 里立刻落一次盘。
+// 目的:分析后续阶段如果再 crash / Mac sleep 杀掉进程 / 用户关 app,
+// 至少 SQLite 和 JSON 都有这次跑的 failed report, 不会停在上次跑的旧数据上。
+// 不写 projects 表(让最终成功路径决定 status); 不更新 timings(timings 是 mutable 数组, 最终路径会再写一遍)。
+async function persistEarlySnapshot(project, analysisId, nodes, report, timings, analysisStartedAt) {
+  const snapshotReport = {
+    ...report,
+    timings: [...timings],
+    totalDurationMs: Date.now() - analysisStartedAt,
+  };
+  try {
+    const analysisDir = getAnalysisDir(project.id, analysisId);
+    await fs.mkdir(analysisDir, { recursive: true });
+    await writeJson(path.join(analysisDir, "analysis-result.json"), {
+      analysisId,
+      project,
+      nodes,
+      report: snapshotReport,
+    });
+  } catch (err) {
+    await appendPersistErrorLog(project.id, "persistEarlySnapshot writeJson", err);
+  }
+  try {
+    const db = getDb();
+    db.prepare("UPDATE analyses SET result = ? WHERE id = ?")
+      .run(JSON.stringify({ nodes, report: snapshotReport }), analysisId);
+  } catch (err) {
+    await appendPersistErrorLog(project.id, "persistEarlySnapshot SQLite", err);
+  }
+}
+
+// 落盘错误日志(SQLite 持久化失败 / fallback 自愈失败 等)。
+// console 在 packaged app 里没 stdout 落盘, 这里直接 append 到项目目录, 出问题能事后查。
+async function appendPersistErrorLog(projectId, where, err) {
+  try {
+    const dir = getVideoDir(projectId);
+    await fs.mkdir(dir, { recursive: true });
+    const msg = err?.stack || err?.message || String(err);
+    await fs.appendFile(
+      path.join(dir, "persist-error.log"),
+      `[${new Date().toISOString()}] [${where}] ${msg}\n\n`,
+    );
+  } catch {
+    // best-effort, 不影响业务
+  }
 }
 
 // 把单个 v1 provider 转新 schema (含 source/models/[]/builtin)。幂等。
@@ -707,24 +1640,30 @@ function migrateProviderV1(raw) {
   };
 }
 
-// 远程 model id → capabilities 推断,规则表与辅助函数都在 model-detection-rules.cjs.
+// 远程 model id → capabilities 推断,规则表与辅助函数都在 model-detection-rules.ts.
 // 规则集对齐 cherry-studio main 分支 config/models/{vision,reasoning,embedding}.ts,
 // 覆盖 GPT-4/5 / Claude 3-4 / Gemini 1.5-3 / Qwen-VL / GLM / Doubao / Kimi 等主流家族.
-const { inferCapabilitiesFromRemoteId } = require("./model-detection-rules.cjs");
+// 无后缀 require:dev 经 tsx hook 命中 .ts,prod 命中 esbuild 预编译的 .js。
+const { inferCapabilitiesFromRemoteId } = require("./model-detection-rules");
 
 // 把远程 /models 里的一条原始 entry map 成 ModelDescriptor
 function remoteEntryToDescriptor(entry) {
   const id = String(entry?.id || "").trim();
   if (!id) return null;
+  const capabilities = inferCapabilitiesFromRemoteId(id);
+  // 远程 thinking 模型推断: cherry-studio 的规则表已经把 OpenAI o1/o3、DeepSeek-R1、Qwen3-*、
+  // GLM-4-thinking 等映成 capabilities=["reasoning",...], 直接复用。后续如果发现 capabilities
+  // 标得不对(例如 R1-distill 系列其实不走 reasoning_content), 在 model-detection-rules.ts 修。
   return {
     source: "remote",
     id,
     label: id,
     family: id.split(/[-_/]/)[0] || undefined,
-    capabilities: inferCapabilitiesFromRemoteId(id),
+    capabilities,
     capabilitiesSource: "inferred",
     availability: { state: "ready" },
     ownedBy: entry?.owned_by || undefined,
+    isThinking: capabilities.includes("reasoning"),
   };
 }
 
@@ -767,6 +1706,8 @@ function localLlamaEntryToDescriptor(entry) {
     capabilitiesSource: "manifest",
     availability,
     contextSize: entry.contextSize,
+    nativeContextSize: entry.nativeContextSize || entry.contextSize,
+    isThinking: !!entry.isThinking,
     local: {
       fit: entry.fit,
       memPercent: entry.memPercent,
@@ -779,10 +1720,34 @@ function localLlamaEntryToDescriptor(entry) {
   };
 }
 
-// 本地 whisper 模型 (whisperCppRuntime.MODELS / listModels) → ModelDescriptor
+// daemon recommendedModel → localLlamaEntryToDescriptor 输入格式
+function daemonModelToLlamaEntry(dm) {
+  return {
+    key: dm.id,
+    family: dm.family,
+    params: dm.params,
+    name: dm.name,
+    description: dm.desc,
+    primaryCapabilities: dm.primaryCapabilities || [],
+    secondaryTags: dm.secondaryTags || [],
+    available: dm.available !== false,
+    contextSize: dm.contextSize,
+    nativeContextSize: dm.nativeContextSize,
+    quantizations: dm.quantizations || [],
+    fit: dm.fit,
+    memPercent: dm.memPercent,
+    tps: dm.tps,
+    downloaded: !!dm.ready,
+    isThinking: !!dm.isThinking,
+    llmBytes: 0,
+    mmprojBytes: 0,
+  };
+}
+
+// daemon whisper 模型 → ModelDescriptor
 function localWhisperEntryToDescriptor(entry) {
   if (!entry) return null;
-  const fastKeys = new Set(["ggml-tiny", "ggml-base"]);
+  const fastKeys = new Set(["whisper-tiny", "whisper-base"]);
   const caps = ["audio_transcription"];
   if (fastKeys.has(entry.key)) caps.push("fast");
   return {
@@ -806,21 +1771,30 @@ function localWhisperEntryToDescriptor(entry) {
 // builtin local_llama: 内置本地推理 provider,覆盖 manifest 里所有可用模型。
 // 每次 loadConfig 强制重写这个 entry,避免用户的旧配置把它覆盖。
 // capabilities 派生统一走 localLlamaEntryToDescriptor,跟 listManifest 输出对齐。
-function buildBuiltinLocalLlamaProvider() {
+//
+// contextSize 解析: manifest 默认 > localModelOverrides[modelKey].contextSize (用户覆盖)。
+// UI 拿到的 model.contextSize 是 effective 值, 跟 llama-server 启动时实际 --ctx-size 一致。
+function buildBuiltinLocalLlamaProvider(localModelOverrides = {}) {
   const llamaRuntime = require("./llama-runtime.cjs");
   const models = Object.values(llamaRuntime.MODELS)
     .filter((meta) => meta._manifest && meta._manifest.available !== false)
     .map((meta) => {
       const descriptor = localLlamaEntryToDescriptor(meta._manifest);
       if (!descriptor) return null;
+      const override = Number(localModelOverrides?.[descriptor.id]?.contextSize);
+      const effectiveCtx = override > 0 ? override : descriptor.contextSize;
       return {
         id: descriptor.id,
         label: descriptor.label,
         capabilities: descriptor.capabilities,
         capabilitiesSource: descriptor.capabilitiesSource,
         family: descriptor.family,
-        contextSize: descriptor.contextSize,
+        contextSize: effectiveCtx,
+        defaultContextSize: descriptor.contextSize, // UI 显示"默认 ctx"对比用
+        nativeContextSize: descriptor.nativeContextSize, // ctx slider 上限
         localKey: descriptor.id,
+        // isThinking 从 manifest 透传到 model 列表, 上层 UI / 任务分配能基于此决定要不要给"启用思考"开关
+        isThinking: !!meta._manifest.isThinking,
       };
     })
     .filter(Boolean);
@@ -840,14 +1814,21 @@ function buildBuiltinLocalLlamaProvider() {
   };
 }
 
-// builtin local_whisper: 内置 whisper.cpp + ggml 模型 provider。
-// 每次 loadConfig 都强制重写,把旧 transformers.js (Xenova/whisper-*) 配置自然替换掉。
+// builtin local_whisper: 内置 whisper 模型 provider (由 ai-model-daemon 管理)。
+// 每次 loadConfig 都强制重写,把旧 transformers.js (Xenova/whisper-*) / ggml-* 配置替换。
+const WHISPER_MODELS_BUILTIN = [
+  { id: "whisper-tiny", label: "Whisper Tiny", fast: true },
+  { id: "whisper-base", label: "Whisper Base", fast: true },
+  { id: "whisper-small", label: "Whisper Small", fast: false },
+  { id: "whisper-medium", label: "Whisper Medium", fast: false },
+  { id: "whisper-large-v3-turbo", label: "Whisper Large V3 Turbo", fast: false },
+];
+
 function buildBuiltinLocalWhisperProvider() {
-  const FAST_KEYS = new Set(["ggml-tiny", "ggml-base"]);
-  const models = Object.values(whisperCppRuntime.MODELS).map((meta) => ({
-    id: meta.key,
-    label: meta.name,
-    capabilities: FAST_KEYS.has(meta.key)
+  const models = WHISPER_MODELS_BUILTIN.map((m) => ({
+    id: m.id,
+    label: m.label,
+    capabilities: m.fast
       ? ["audio_transcription", "fast"]
       : ["audio_transcription"],
     language: "zh",
@@ -862,8 +1843,7 @@ function buildBuiltinLocalWhisperProvider() {
     endpointType: "local_whisper_cpp",
     inputMode: "keyframe_sequence",
     models,
-    // 保留 deprecated 字段供旧 audio 路径读取
-    model: "ggml-base",
+    model: "whisper-base",
     kind: "audio",
     language: "zh",
   };
@@ -887,7 +1867,7 @@ function resolveSlotProvider(config, slotKey) {
   const provider = config.providers?.find((p) => p.id === slot.providerId);
   const model = provider?.models?.find((m) => m.id === slot.modelId);
   if (!provider || !model) return null;
-  return shapeEffectiveProvider(provider, model);
+  return shapeEffectiveProvider(provider, model, slot);
 }
 
 function resolveAudioProvider(config) {
@@ -896,35 +1876,115 @@ function resolveAudioProvider(config) {
   const provider = config.providers?.find((p) => p.id === slot.providerId);
   const model = provider?.models?.find((m) => m.id === slot.modelId);
   if (!provider || !model) return null;
-  return shapeEffectiveProvider(provider, model);
+  return shapeEffectiveProvider(provider, model, slot);
 }
 
-function shapeEffectiveProvider(provider, model) {
-  let baseUrl = provider.baseUrl;
-  let apiKeyRef = provider.apiKeyRef;
-  if (provider.source === "local_llama") {
-    const llamaRuntime = require("./llama-runtime.cjs");
-    const status = llamaRuntime.getStatus();
-    if (status?.running && status?.port) {
-      baseUrl = `http://127.0.0.1:${status.port}/v1`;
-      apiKeyRef = "local"; // llama-server 不验证 key
+function applySlotOverrides(config, overrides) {
+  if (!overrides) return config;
+  const patched = { ...config, taskSlots: { ...config.taskSlots } };
+  if (overrides.simple_vision !== undefined) patched.taskSlots.simple_vision = overrides.simple_vision;
+  if (overrides.complex_vision !== undefined) patched.taskSlots.complex_vision = overrides.complex_vision;
+  if (overrides.medium_text !== undefined) patched.taskSlots.medium_text = overrides.medium_text;
+  if (overrides.audio !== undefined) patched.audioSlot = overrides.audio;
+  return patched;
+}
+
+async function isSlotAssignmentAvailable(config, assignment, scope) {
+  if (!assignment?.providerId || !assignment?.modelId) return false;
+  const provider = config.providers?.find((p) => p.id === assignment.providerId);
+  const model = provider?.models?.find((m) => m.id === assignment.modelId);
+  if (!provider || !model) return false;
+  if (provider.source === "remote") {
+    return !!provider.baseUrl && !!provider.apiKeyRef;
+  }
+  if (provider.source === "local_whisper") {
+    const modelId = normalizeWhisperModelId(model.localWhisperModel || model.id);
+    try {
+      const daemonClient = require("./daemon-client.cjs");
+      const status = await daemonClient.getModelStatus(modelId);
+      return !!status?.ready;
+    } catch (err) {
+      log.warn("slot-overrides", `${scope}: 检查本地音频模型失败 ${modelId}: ${err?.message || err}`);
+      return false;
     }
   }
+  if (provider.source === "local_llama") {
+    const modelId = model.localKey || model.id;
+    try {
+      const daemonClient = require("./daemon-client.cjs");
+      const status = await daemonClient.getModelStatus(modelId);
+      return !!status?.ready;
+    } catch (err) {
+      log.warn("slot-overrides", `${scope}: 检查本地视觉模型失败 ${modelId}: ${err?.message || err}`);
+      return false;
+    }
+  }
+  return true;
+}
+
+async function applyAvailableSlotOverrides(config, overrides, scope = "slot-overrides") {
+  if (!overrides) return config;
+  const usable = {};
+  const checks = [
+    ["simple_vision", overrides.simple_vision],
+    ["complex_vision", overrides.complex_vision],
+    ["medium_text", overrides.medium_text],
+    ["audio", overrides.audio],
+  ];
+  for (const [key, assignment] of checks) {
+    if (assignment === undefined) continue;
+    const ok = await isSlotAssignmentAvailable(config, assignment, `${scope}.${key}`);
+    if (ok) {
+      usable[key] = assignment;
+    } else {
+      const label = assignment?.providerId && assignment?.modelId
+        ? `${assignment.providerId}/${assignment.modelId}`
+        : "(空)";
+      log.warn("slot-overrides", `${scope}: 忽略不可用账号级配置 ${key}=${label}, 回退全局配置`);
+    }
+  }
+  return Object.keys(usable).length > 0 ? applySlotOverrides(config, usable) : config;
+}
+
+function shapeEffectiveProvider(provider, model, slot) {
+  // local_llama 的 baseUrl / apiKeyRef 由 llama-manager 在请求时动态注入,
+  // 这里只占位; openai-client 看到 provider.source === "local_llama" 会自动 acquire slot。
+  // 不在这里读 runtime.getStatus(): 那样拿到的 port 是"当前 server", 但当前 server
+  // 跑的不一定就是 model.id; 真正切换在 acquire 内做。
+  const baseUrl = provider.source === "local_llama" ? "http://127.0.0.1:0/v1" : provider.baseUrl;
+  const apiKeyRef = provider.source === "local_llama" ? "local" : provider.apiKeyRef;
   return {
     ...provider,
     baseUrl,
     apiKeyRef,
     model: model.id,
+    contextSize: model.contextSize ?? provider.contextSize,
     maxOutputTokens: model.maxOutputTokens ?? provider.maxOutputTokens,
     temperature: model.temperature ?? provider.temperature,
     localWhisperModel: model.localWhisperModel || provider.localWhisperModel,
     localWhisperMirror: model.localWhisperMirror || provider.localWhisperMirror,
     language: model.language || provider.language,
+    // thinking 模型挂在 model 上, "是否启用思考"挂在 slot 上 (任务分配维度的运行时开关)。
+    // 下游 openai-client 用 effectiveProvider.enableThinking 决定要不要传
+    // chat_template_kwargs.enable_thinking=true。slot.enableThinking 不为 true 时 = 默认关。
+    isThinking: !!model.isThinking,
+    enableThinking: slot?.enableThinking === true,
   };
 }
 
 function emptyTaskSlots() {
   return TASK_SLOT_KEYS.reduce((acc, k) => ({ ...acc, [k]: null }), {});
+}
+
+function resolvePipelineConfig(config, pipelineId) {
+  const globalSlots = config?.taskSlots || emptyTaskSlots();
+  const globalAudio = config?.audioSlot || null;
+  const pc = config?.pipelineSlots?.[pipelineId];
+  if (!pc) return { taskSlots: globalSlots, audioSlot: globalAudio };
+  return {
+    taskSlots: { ...globalSlots, ...pc.taskSlots },
+    audioSlot: pc.audioSlot !== undefined ? pc.audioSlot : globalAudio,
+  };
 }
 
 // v1 → v2 迁移。幂等。
@@ -939,8 +1999,11 @@ function migrateConfigV1ToV2(raw) {
     .map(migrateProviderV1)
     .filter(Boolean);
 
+  const localModelOverrides = cfg.localModelOverrides && typeof cfg.localModelOverrides === "object"
+    ? cfg.localModelOverrides
+    : {};
   const providers = [
-    buildBuiltinLocalLlamaProvider(),
+    buildBuiltinLocalLlamaProvider(localModelOverrides),
     buildBuiltinLocalWhisperProvider(),
     ...userProviders,
   ];
@@ -956,20 +2019,23 @@ function migrateConfigV1ToV2(raw) {
     audioSlot = cfg.audioSlot || null;
 
     // builtin provider 重新注入后, audioSlot.modelId 可能指向已下线的 model id
-    // (典型: 从 transformers.js 时代的 Xenova/whisper-* 升到 whisper.cpp 的 ggml-*)。
-    // 兜底: 优先做 Xenova → ggml 映射, 否则落到 provider.models[0]。
+    // (Xenova/whisper-* → ggml-* → whisper-* 两代迁移)。
     if (audioSlot?.providerId && audioSlot?.modelId) {
       const audioProv = providers.find((p) => p.id === audioSlot.providerId);
       if (audioProv) {
         const modelOk = audioProv.models.some((m) => m.id === audioSlot.modelId);
         if (!modelOk) {
-          const xenovaToGgml = {
-            "Xenova/whisper-tiny": "ggml-tiny",
-            "Xenova/whisper-base": "ggml-base",
-            "Xenova/whisper-small": "ggml-small",
-            "Xenova/whisper-medium": "ggml-medium",
+          const legacyToNew = {
+            "Xenova/whisper-tiny": "whisper-tiny",
+            "Xenova/whisper-base": "whisper-base",
+            "Xenova/whisper-small": "whisper-small",
+            "Xenova/whisper-medium": "whisper-medium",
+            "ggml-tiny": "whisper-tiny",
+            "ggml-base": "whisper-base",
+            "ggml-small": "whisper-small",
+            "ggml-medium": "whisper-medium",
           };
-          const mapped = xenovaToGgml[audioSlot.modelId];
+          const mapped = legacyToNew[audioSlot.modelId];
           const fallback =
             (mapped && audioProv.models.find((m) => m.id === mapped)?.id) ||
             audioProv.models[0]?.id ||
@@ -1008,32 +2074,54 @@ function migrateConfigV1ToV2(raw) {
     taskSlots.complex_text = complexVisionSlot;
 
     if (audioProvider) {
-      // 优先用旧 provider 的 model id 在新 provider.models 里匹配。
-      // transformers.js 时代的 Xenova/whisper-* → whisper.cpp 时代的 ggml-* 映射。
       const oldModelId = rawAudioProvider?.localWhisperModel || rawAudioProvider?.model || null;
-      const xenovaToGgml = {
-        "Xenova/whisper-tiny": "ggml-tiny",
-        "Xenova/whisper-base": "ggml-base",
-        "Xenova/whisper-small": "ggml-small",
-        "Xenova/whisper-medium": "ggml-medium",
+      const legacyToNew = {
+        "Xenova/whisper-tiny": "whisper-tiny",
+        "Xenova/whisper-base": "whisper-base",
+        "Xenova/whisper-small": "whisper-small",
+        "Xenova/whisper-medium": "whisper-medium",
+        "ggml-tiny": "whisper-tiny",
+        "ggml-base": "whisper-base",
+        "ggml-small": "whisper-small",
+        "ggml-medium": "whisper-medium",
       };
-      const mapped = oldModelId ? xenovaToGgml[oldModelId] || oldModelId : null;
+      const mapped = oldModelId ? legacyToNew[oldModelId] || oldModelId : null;
       const match = mapped && audioProvider.models.find((m) => m.id === mapped);
       audioSlot = {
         providerId: audioProvider.id,
         modelId: match?.id || audioProvider.models[0]?.id,
       };
     } else {
-      audioSlot = { providerId: "builtin-local-whisper", modelId: "ggml-base" };
+      audioSlot = { providerId: "builtin-local-whisper", modelId: "whisper-base" };
     }
   }
 
+  // pipelineSlots: 首次加载旧配置时从全局 taskSlots/audioSlot 初始化两套一样的值
+  let pipelineSlots = cfg.pipelineSlots || null;
+  if (!pipelineSlots) {
+    pipelineSlots = {
+      content: {
+        taskSlots: { complex_vision: taskSlots.complex_vision || null },
+        audioSlot: audioSlot,
+      },
+      pipeline: {
+        taskSlots: {
+          simple_vision: taskSlots.simple_vision || null,
+          medium_text: taskSlots.medium_text || null,
+          complex_vision: taskSlots.complex_vision || null,
+        },
+        audioSlot: audioSlot,
+      },
+    };
+  }
+
   return {
+    ...cfg,
     providers,
     taskSlots,
     audioSlot,
-    lastLlamaModelKey: cfg.lastLlamaModelKey || null,
-    defaultAnalysis: cfg.defaultAnalysis || null,
+    pipelineSlots,
+    localModelOverrides,
     schemaVersion: 2,
   };
 }
@@ -1075,7 +2163,7 @@ async function writeUrlCache(cache) {
   try {
     await fs.writeFile(getUrlCachePath(), JSON.stringify(cache, null, 2), "utf8");
   } catch (err) {
-    console.warn("[url-cache] write failed", err);
+    log.warn("url-cache", "write failed", err);
   }
 }
 
@@ -1084,14 +2172,25 @@ async function writeUrlCache(cache) {
 //   - ytdlpInfo:  yt-dlp --write-info-json 拿到的平台 metadata (title/description/uploader)
 //   - summary:    分析阶段产出的 globalSummary (本地视频场景, 没有外部文案时的兜底)
 // 失败 / 信息都缺 / provider 未配置 都返回 null, 让调用方 fallback。
-async function generateProjectTitle(provider, sources = {}) {
-  if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) return null;
+async function generateProjectTitle(provider, sources = {}, handle = null) {
+  if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) {
+    log.warn("title-gen",
+      `short-circuit: provider 不完整 apiKeyRef=${!!provider?.apiKeyRef} ` +
+      `baseUrl=${!!provider?.baseUrl} model=${!!provider?.model}`,
+    );
+    return null;
+  }
   const { rawInput, url, ytdlpInfo, summary } = sources;
-  // 各 source 的总信息量, 太少就别浪费 LLM call
   const rawTextOnly = String(rawInput || "").replace(url || "", "").trim();
   const haveYtdlp = !!(ytdlpInfo && (ytdlpInfo.title || ytdlpInfo.description));
   const haveSummary = !!(summary && summary.length >= 10);
-  if (rawTextOnly.length < 5 && !haveYtdlp && !haveSummary) return null;
+  if (rawTextOnly.length < 5 && !haveYtdlp && !haveSummary) {
+    log.warn("title-gen",
+      `short-circuit: 信息源都不够 rawTextLen=${rawTextOnly.length} ` +
+      `haveYtdlp=${haveYtdlp} haveSummary=${haveSummary} summaryLen=${summary?.length || 0}`,
+    );
+    return null;
+  }
 
   const lines = [];
   if (rawInput) lines.push("# 用户分享文案", rawInput, "");
@@ -1108,7 +2207,7 @@ async function generateProjectTitle(provider, sources = {}) {
   lines.push("请综合上面信息, 输出 JSON: { \"title\": \"...\" }");
 
   try {
-    const parsed = await openaiClient.callJsonCompletion(provider, {
+    const result = await openaiClient.callJsonCompletion(provider, {
       systemText:
         "你是视频拉片助理。我会给你一段视频的若干信息来源 (用户粘贴的分享文案 / 平台 metadata / 分析阶段总结), " +
         "请提炼一个 6-14 个汉字的简洁标题, 用作项目卡片显示。\n" +
@@ -1120,25 +2219,793 @@ async function generateProjectTitle(provider, sources = {}) {
         "- 直接返回 JSON, 不要 markdown 围栏, 不要思考过程",
       userText: lines.join("\n"),
       temperature: 0.3,
-      maxTokens: 300,
-      maxOutputTokens: 300,
+      signal: handle?.abortController?.signal,
     });
-    const t = String(parsed?.title || "").trim();
-    if (!t || t.length > 30) return null;
-    return t;
+    const t = String(result.parsed?.title || "").trim();
+    const diagnostic = {
+      rawLen: (result.raw || "").length,
+      reasoningLen: (result.reasoning || "").length,
+      parsedSource: result.parsedSource,
+      rawHead: (result.raw || "").slice(0, 200),
+      reasoningHead: (result.reasoning || "").slice(0, 200),
+      parsedTitle: t,
+      parsedTitleLen: t.length,
+    };
+    if (!t || t.length > 30) {
+      log.warn("title-gen",
+        `模型返回 title 不合规: title=${JSON.stringify(t)} len=${t.length} ` +
+        `rawLen=${diagnostic.rawLen} reasoningLen=${diagnostic.reasoningLen} ` +
+        `parsedSource=${result.parsedSource} raw=${JSON.stringify(diagnostic.rawHead)}`,
+      );
+      // 失败也返回带诊断信息的对象 (title 为 null), 让上层能落到 analysis-error.log
+      return { title: null, usage: result.usage, echoedModel: result.model, _diagnostic: diagnostic };
+    }
+    return { title: t, usage: result.usage, echoedModel: result.model, _diagnostic: diagnostic };
   } catch (err) {
-    console.warn("[title-gen] 失败:", err.message || err);
+    log.warn("title-gen", "失败:", err.message || err);
     return null;
   }
 }
 
 async function loadMediumTextProvider() {
   try {
-    const cfg = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
+    const cfg = migrateConfigV1ToV2(readConfig());
     return resolveSlotProvider(cfg, "medium_text");
   } catch {
     return null;
   }
+}
+
+async function loadComplexTextProvider() {
+  try {
+    const cfg = migrateConfigV1ToV2(readConfig());
+    // v2 任务槽位: complex_text 用于复杂文本(方法论汇总 / Studio steps);
+    // 没配的话 fallback 到 medium_text
+    return resolveSlotProvider(cfg, "complex_text") || resolveSlotProvider(cfg, "medium_text");
+  } catch {
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 账号 (UP 主) 信息抓取工具
+// 平台 native API 优先拿头像/粉丝/简介 (yt-dlp 的 flat-playlist 输出在不少
+// 平台缺这些字段或被反爬拦截), 视频列表用 yt-dlp (它内置 wbi 签名等反爬绕过).
+
+function detectAccountPlatform(url) {
+  const u = String(url || "").toLowerCase();
+  if (u.includes("bilibili.com") || u.includes("b23.tv")) return "bilibili";
+  if (u.includes("douyin.com")) return "douyin";
+  if (u.includes("xiaohongshu.com") || u.includes("xhslink.com")) return "xiaohongshu";
+  if (u.includes("youtube.com") || u.includes("youtu.be")) return "youtube";
+  if (u.includes("tiktok.com")) return "tiktok";
+  return "unknown";
+}
+
+// 从 https://space.bilibili.com/123456/... 提取 mid
+function parseBilibiliMid(url) {
+  const m = String(url || "").match(/space\.bilibili\.com\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+// 从抖音用户 URL 提取 sec_uid。支持两种:
+//   - 主页    https://www.douyin.com/user/MS4w...
+//   - PC 分享短链 https://www.iesdouyin.com/share/user/MS4w...?from_ssr=1&...
+// (query 串里也可能带 sec_uid,但路径段是首选)
+function parseDouyinSecUid(url) {
+  const s = String(url || "");
+  const m = s.match(/(?:ies)?douyin\.com\/(?:share\/)?user\/([A-Za-z0-9_-]+)/);
+  if (m) return m[1];
+  // 兜底:有些分享链把 sec_uid 放在 query(sec_user_id / sec_uid)
+  const q = s.match(/[?&]sec_(?:user_)?id=([A-Za-z0-9_-]+)/);
+  return q ? q[1] : null;
+}
+
+// 从分享文本中提取 v.douyin.com 短链,跟随重定向拿到 sec_uid
+async function resolveDouyinShortLink(text) {
+  const urlMatch = String(text || "").match(/https?:\/\/v\.douyin\.com\/[A-Za-z0-9_-]+\/?/);
+  if (!urlMatch) return null;
+  try {
+    const resp = await fetch(urlMatch[0], {
+      redirect: "manual",
+      headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)" },
+    });
+    const location = resp.headers.get("location") || "";
+    return parseDouyinSecUid(location);
+  } catch {
+    return null;
+  }
+}
+
+// 中文/英文格式化粉丝数
+function formatFollowersCount(num) {
+  const n = Number(num);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (n >= 100_000_000) return `${(n / 100_000_000).toFixed(1).replace(/\.0$/, "")}亿`;
+  if (n >= 10_000) return `${(n / 10_000).toFixed(1).replace(/\.0$/, "")}万`;
+  return String(n);
+}
+
+// 从 yt-dlp thumbnails 列表里选最大尺寸
+function pickBestThumbnail(thumbnails) {
+  if (!Array.isArray(thumbnails) || thumbnails.length === 0) return null;
+  let best = null;
+  let bestSize = -1;
+  for (const t of thumbnails) {
+    const size = (Number(t?.width) || 0) + (Number(t?.height) || 0);
+    if (size > bestSize) { bestSize = size; best = t; }
+  }
+  return best?.url || null;
+}
+
+// B 站访客 cookie — 不带就是风控-352. 完整流程:
+//   1) GET bilibili.com 拿 b_lsid / _uuid 等基础 cookie
+//   2) GET /x/frontend/finger/spi 拿 b_3 (buvid3) / b_4 (buvid4) — 关键, 否则 -352
+//   3) 拼成完整 Cookie 字符串
+const BILI_BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
+const _bilibiliCookieCache = { value: null, fetchedAt: 0 };
+
+function parseSetCookies(res) {
+  let arr = [];
+  if (typeof res.headers.getSetCookie === "function") {
+    arr = res.headers.getSetCookie();
+  } else {
+    const raw = res.headers.get("set-cookie") || "";
+    arr = raw.split(/,(?=\s?[A-Za-z_]+=)/);
+  }
+  return arr
+    .map((c) => String(c).split(";")[0].trim())
+    .filter((c) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(c));
+}
+
+async function getBilibiliVisitorCookie() {
+  if (_bilibiliCookieCache.value && Date.now() - _bilibiliCookieCache.fetchedAt < 60 * 60_000) {
+    return _bilibiliCookieCache.value;
+  }
+  try {
+    // step 1: 主站拿基础 cookie
+    const homeRes = await fetch("https://www.bilibili.com/", {
+      method: "GET",
+      headers: {
+        "User-Agent": BILI_BROWSER_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+      },
+    });
+    const baseCookies = parseSetCookies(homeRes);
+
+    // step 2: /x/frontend/finger/spi 拿 b_3/b_4 = buvid3/buvid4
+    let buvid3 = "";
+    let buvid4 = "";
+    try {
+      const spiRes = await fetch("https://api.bilibili.com/x/frontend/finger/spi", {
+        method: "GET",
+        headers: {
+          "User-Agent": BILI_BROWSER_UA,
+          "Referer": "https://www.bilibili.com/",
+          "Accept": "application/json, text/plain, */*",
+          "Cookie": baseCookies.join("; "),
+        },
+      });
+      if (spiRes.ok) {
+        const spiData = await spiRes.json();
+        buvid3 = spiData?.data?.b_3 || "";
+        buvid4 = spiData?.data?.b_4 || "";
+      }
+    } catch { /* spi 拿不到也继续, 用 baseCookies 兜底 */ }
+
+    const merged = [...baseCookies];
+    if (buvid3) merged.push(`buvid3=${buvid3}`);
+    if (buvid4) merged.push(`buvid4=${buvid4}`);
+    const cookieStr = merged.join("; ");
+    if (cookieStr) {
+      _bilibiliCookieCache.value = cookieStr;
+      _bilibiliCookieCache.fetchedAt = Date.now();
+    }
+    return cookieStr;
+  } catch {
+    return "";
+  }
+}
+
+// B 站 wbi 签名 — Web 端从 2023-03 起所有受保护 API 都要带 wts + w_rid 否则 -403/412
+// 算法源: bilibili-API-collect/docs/misc/sign/wbi.md
+const WBI_MIXIN_KEY_ENC_TAB = [
+  46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+  27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+  37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
+  22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
+];
+const _wbiKeyCache = { mixinKey: null, fetchedAt: 0 };
+const _crypto = require("node:crypto");
+
+async function getBilibiliWbiMixinKey() {
+  // wbi keys 每天会换, 30 分钟 cache
+  if (_wbiKeyCache.mixinKey && Date.now() - _wbiKeyCache.fetchedAt < 30 * 60_000) {
+    return _wbiKeyCache.mixinKey;
+  }
+  const res = await fetch("https://api.bilibili.com/x/web-interface/nav", {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+      "Referer": "https://www.bilibili.com/",
+    },
+  });
+  if (!res.ok) throw new Error(`wbi nav HTTP ${res.status}`);
+  const data = await res.json();
+  const imgUrl = data?.data?.wbi_img?.img_url || "";
+  const subUrl = data?.data?.wbi_img?.sub_url || "";
+  const extractKey = (u) => {
+    const m = String(u).match(/\/([0-9a-f]+)\.png$/i);
+    return m ? m[1] : "";
+  };
+  const imgKey = extractKey(imgUrl);
+  const subKey = extractKey(subUrl);
+  if (!imgKey || !subKey) throw new Error("解析 wbi keys 失败");
+  const orig = imgKey + subKey;
+  const mixinKey = WBI_MIXIN_KEY_ENC_TAB.map((n) => orig[n] || "").join("").slice(0, 32);
+  _wbiKeyCache.mixinKey = mixinKey;
+  _wbiKeyCache.fetchedAt = Date.now();
+  return mixinKey;
+}
+
+function signWbiQuery(params, mixinKey) {
+  const cleaned = { ...params, wts: Math.round(Date.now() / 1000) };
+  const chrFilter = /[!'()*]/g;
+  const query = Object.keys(cleaned).sort().map((key) => {
+    const value = String(cleaned[key]).replace(chrFilter, "");
+    return `${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+  }).join("&");
+  const w_rid = _crypto.createHash("md5").update(query + mixinKey).digest("hex");
+  return `${query}&w_rid=${w_rid}`;
+}
+
+// "12:34" / "1:02:34" → 秒
+function parseBilibiliLengthToSec(len) {
+  if (!len || typeof len !== "string") return 0;
+  const parts = len.split(":").map(Number);
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return 0;
+}
+
+// 单条视频元数据 — /x/web-interface/view?bvid=BVxxx 对匿名访客开放
+// space/arc/search 在匿名模式下只返 bvid 不返 title/length, 所以用 view 单独补全
+async function fetchBilibiliVideoView(bvid, cookie) {
+  const url = `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`;
+  const data = await biliFetchJson(url, {
+    referer: `https://www.bilibili.com/video/${bvid}`,
+    cookie,
+  });
+  if (data?.code !== 0) throw new Error(`view code=${data?.code} ${data?.message || ""}`);
+  const v = data?.data || {};
+  // B 站封面有时返 http:// , renderer 阻止 mixed content, 强制 https
+  const pic = v.pic ? String(v.pic).replace(/^http:\/\//, "https://") : null;
+  return {
+    bvid: v.bvid || bvid,
+    title: v.title || "",
+    durationSec: Number(v.duration) || 0,
+    uploadDate: v.pubdate
+      ? new Date(Number(v.pubdate) * 1000).toISOString().slice(0, 10).replace(/-/g, "")
+      : null,
+    viewCount: Number(v.stat?.view) || 0,
+    thumbnailUrl: pic,
+  };
+}
+
+// 统一 B 站 fetch — 优先借 Chrome 插件桥 (浏览器登录态 + 真实 buvid, 绕 412/-352),
+// 桥未连时回落到 node fetch (带 main 进程的 visitor cookie + UA)
+async function biliFetchJson(url, { referer, cookie } = {}) {
+  const baseHeaders = {
+    "User-Agent": BILI_BROWSER_UA,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Origin": "https://space.bilibili.com",
+  };
+  if (referer) baseHeaders["Referer"] = referer;
+
+  if (extensionBridge.isConnected()) {
+    // 走插件代理: 不传 Cookie header, 让 Chrome 自动带 (含 buvid3 / SESSDATA / b_nut)
+    const result = await extensionBridge.request("fetch", {
+      url,
+      method: "GET",
+      headers: baseHeaders,
+      parse: "json",
+    });
+    if (!result || typeof result !== "object") throw new Error("插件返回格式错误");
+    if (!result.ok) throw new Error(`HTTP ${result.status}`);
+    if (result.body?.__parseError) throw new Error(`JSON 解析失败: ${result.body.raw?.slice(0, 200)}`);
+    return result.body;
+  }
+
+  // 兜底: node fetch (带 visitor cookie)
+  const headers = { ...baseHeaders };
+  if (cookie) headers["Cookie"] = cookie;
+  const res = await fetch(url, { headers });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.json();
+}
+
+// 投稿视频列表 — wbi 签名调 /x/space/wbi/arc/search, 带访客 cookie + dm fingerprint
+async function fetchBilibiliSpaceVideos(mid, limit = 20) {
+  const [mixinKey, cookie] = await Promise.all([
+    getBilibiliWbiMixinKey(),
+    getBilibiliVisitorCookie(),
+  ]);
+  const ps = Math.max(1, Math.min(50, limit));
+  // dm_img_* 是 B 站 web 端的 webgl/canvas 指纹参数, 不传会触发 -352.
+  // 用固定值容易被 B 站签名指纹库拉黑, 参考 yt-dlp BilibiliSpaceVideoIE 每次随机.
+  const randAlnum = (len) => {
+    const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let out = "";
+    for (let i = 0; i < len; i++) out += charset[Math.floor(Math.random() * charset.length)];
+    return out;
+  };
+  const dmImgStr = randAlnum(16 + Math.floor(Math.random() * 48));
+  const dmCoverImgStr = randAlnum(32 + Math.floor(Math.random() * 96));
+  const dmImgInter = JSON.stringify({
+    ds: [],
+    wh: [
+      5000 + Math.floor(Math.random() * 4000),
+      5000 + Math.floor(Math.random() * 4000),
+      30 + Math.floor(Math.random() * 10),
+    ],
+    of: [
+      200 + Math.floor(Math.random() * 200),
+      400 + Math.floor(Math.random() * 400),
+      200 + Math.floor(Math.random() * 200),
+    ],
+  });
+  const qs = signWbiQuery({
+    mid: String(mid),
+    ps: String(ps),
+    tid: "0",
+    pn: "1",
+    order: "pubdate",
+    platform: "web",
+    web_location: "1550101",
+    order_avoided: "true",
+    dm_img_list: "[]",
+    dm_img_str: dmImgStr,
+    dm_cover_img_str: dmCoverImgStr,
+    dm_img_inter: dmImgInter,
+  }, mixinKey);
+  const url = `https://api.bilibili.com/x/space/wbi/arc/search?${qs}`;
+  const data = await biliFetchJson(url, {
+    referer: `https://space.bilibili.com/${mid}/video`,
+    cookie,
+  });
+  if (data?.code !== 0) throw new Error(`code=${data?.code} ${data?.message || ""}`);
+  const vlist = data?.data?.list?.vlist || [];
+  const total = Number(data?.data?.page?.count) || vlist.length;
+  let videos = vlist.map((v) => ({
+    id: v.bvid || "",
+    title: v.title || "",
+    durationSec: parseBilibiliLengthToSec(v.length),
+    uploadDate: v.created
+      ? new Date(Number(v.created) * 1000).toISOString().slice(0, 10).replace(/-/g, "")
+      : null,
+    viewCount: Number(v.play) || 0,
+    externalUrl: v.bvid ? `https://www.bilibili.com/video/${v.bvid}` : "",
+    thumbnailUrl: v.pic ? String(v.pic).replace(/^http:\/\//, "https://") : null,
+  })).filter((v) => v.id);
+
+  // B 站匿名访客的 arc/search 只返 bvid 不返 title/duration. 用 view API 并发补全.
+  const incomplete = videos.filter((v) => !v.title || !v.durationSec);
+  if (incomplete.length > 0) {
+    const enriched = await Promise.all(
+      incomplete.map((v) => fetchBilibiliVideoView(v.id, cookie).catch((err) => {
+        log.warn("bili-view", `${v.id} failed:`, err?.message || String(err));
+        return null;
+      }))
+    );
+    const byBvid = new Map();
+    for (const e of enriched) {
+      if (e) byBvid.set(e.bvid, e);
+    }
+    videos = videos.map((v) => {
+      const e = byBvid.get(v.id);
+      if (!e) return v;
+      return {
+        ...v,
+        title: v.title || e.title || "(未命名视频)",
+        durationSec: v.durationSec || e.durationSec,
+        uploadDate: v.uploadDate || e.uploadDate,
+        viewCount: v.viewCount || e.viewCount,
+        thumbnailUrl: v.thumbnailUrl || e.thumbnailUrl,
+      };
+    });
+  }
+  // 保底 title
+  videos = videos.map((v) => ({ ...v, title: v.title || "(未命名视频)" }));
+  return { videos, total };
+}
+
+// B 站公开 card API — 不需要登录/签名, 但要 UA + Referer 否则容易 412
+// 文档: github.com/SocialSisterYi/bilibili-API-collect /docs/user/info.md
+async function fetchBilibiliCard(mid) {
+  if (!mid) throw new Error("missing mid");
+  const url = `https://api.bilibili.com/x/web-interface/card?mid=${mid}&photo=false`;
+  const data = await biliFetchJson(url, { referer: "https://www.bilibili.com/" });
+  if (data?.code !== 0) throw new Error(`code=${data?.code} ${data?.message || ""}`);
+  const card = data?.data?.card || {};
+  return {
+    mid: String(card.mid || mid),
+    name: card.name || null,
+    face: card.face ? String(card.face).replace(/^http:\/\//, "https://") : null,
+    sign: card.sign || null,
+    fansFormatted: formatFollowersCount(card.fans),
+    archiveCount: Number(data?.data?.archive_count) || 0,
+  };
+}
+
+// 抖音 aweme 原始数据 → 标准 video 对象 (含互动数据 + play_url 直链)
+function normalizeDouyinAweme(a) {
+  const id = String(a?.aweme_id || "");
+  const cover =
+    a?.video?.cover?.url_list?.[0] ||
+    a?.video?.origin_cover?.url_list?.[0] ||
+    null;
+  const playUrls = a?.video?.play_addr?.url_list || [];
+  const dur = Number(a?.video?.duration) || 0; // 抖音 duration 单位是 ms
+  const createTs = Number(a?.create_time) || 0; // 秒
+  const stats = a?.statistics || {};
+  return {
+    id,
+    title: a?.desc || "(未命名视频)",
+    durationSec: Math.round(dur / 1000),
+    uploadDate: createTs
+      ? new Date(createTs * 1000).toISOString().slice(0, 10).replace(/-/g, "")
+      : null,
+    viewCount: Number(stats.play_count) || 0,
+    likeCount: Number(stats.digg_count) || 0,
+    commentCount: Number(stats.comment_count) || 0,
+    shareCount: Number(stats.share_count) || 0,
+    collectCount: Number(stats.collect_count) || 0,
+    externalUrl: id ? `https://www.douyin.com/video/${id}` : "",
+    thumbnailUrl: cover ? String(cover).replace(/^http:\/\//, "https://") : null,
+    playUrl: playUrls[0] || null,
+  };
+}
+
+// 解析抖音 extensionBridge 单页响应, 返回 { list, hasMore, maxCursor }
+function parseDouyinBridgeResponse(result) {
+  if (!result || !result.ok) throw new Error(`HTTP ${result?.status ?? "?"}`);
+  const body = result.body;
+  if (body?.__parseError) throw new Error(`JSON 解析失败: ${body.raw?.slice(0, 200)}`);
+  if (body?.__error) throw new Error(body.__error);
+  if (Number(body?.status_code) !== 0 && body?.status_code != null) {
+    throw new Error(`status_code=${body.status_code} ${body?.status_msg || ""}`);
+  }
+  const list = Array.isArray(body?.aweme_list) ? body.aweme_list : [];
+  return {
+    list,
+    hasMore: Boolean(body?.has_more) && list.length > 0,
+    maxCursor: String(body?.max_cursor ?? ""),
+  };
+}
+
+const DOUYIN_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
+
+function pickAvatarUrl(u) {
+  const url =
+    u?.avatar_larger?.url_list?.[0] ||
+    u?.avatar_medium?.url_list?.[0] ||
+    u?.avatar_thumb?.url_list?.[0] ||
+    "";
+  return url.replace(/^http:\/\//, "https://") || null;
+}
+
+// 分享域 user/info 接口 — PC 端分享链(v.douyin.com → iesdouyin.com/share/user/...)的账号信息
+// 纯 HTTP 即可拿到 (普通浏览器 UA),不需要签名 / cookie / BrowserWindow。
+// 注意: 账号信息能纯 HTTP 拿, 视频列表不一定 (那条接口常返回 200 + 空 body, 仍需 BrowserWindow)。
+async function fetchDouyinUserProfileViaShareApi(secUid) {
+  // 该接口偶发 200 + 空 body(风控抖动),重试几次再判失败。
+  let text = "";
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(
+        `https://www.iesdouyin.com/web/api/v2/user/info/?sec_uid=${encodeURIComponent(secUid)}`,
+        {
+          headers: {
+            "user-agent": DOUYIN_UA,
+            referer: `https://www.iesdouyin.com/share/user/${encodeURIComponent(secUid)}`,
+            accept: "application/json, text/plain, */*",
+          },
+        },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      text = (await res.text()).trim();
+      if (text) break;
+      lastErr = new Error("空响应");
+    } catch (e) {
+      lastErr = e;
+    }
+    if (attempt < 3) await new Promise((r) => setTimeout(r, 500 * attempt));
+  }
+  if (!text) throw lastErr || new Error("空响应");
+  const data = JSON.parse(text);
+  const u = data?.user_info || data?.user;
+  if (!u) throw new Error("API 未返回 user_info 字段");
+  return {
+    nickname: u.nickname || null,
+    avatarUrl: pickAvatarUrl(u),
+    signature: u.signature || null,
+    followerCount: Number(u.follower_count ?? u.fans_count) || 0,
+    followingCount: Number(u.following_count) || 0,
+    awemeCount: Number(u.aweme_count) || 0,
+    uid: u.uid || u.short_id || null,
+    secUid: u.sec_uid || secUid,
+  };
+}
+
+// 抖音用户资料 — 先走分享域 user/info(纯 HTTP, 对 PC 分享链最稳),失败再退 www.douyin.com
+// 的 user/profile/other(需签名/cookie, 普通 fetch 常空)。两条都 Node.js fetch, 不用 BrowserWindow。
+async function fetchDouyinUserProfile(secUid) {
+  try {
+    const profile = await fetchDouyinUserProfileViaShareApi(secUid);
+    if (profile?.nickname) return profile;
+  } catch (e) {
+    log.warn("douyin:profile", `分享域 user/info 失败, 回退 profile/other: ${e?.message || e}`);
+  }
+  const params = new URLSearchParams({ sec_user_id: secUid, aid: "6383" });
+  const res = await fetch(`https://www.douyin.com/aweme/v1/web/user/profile/other/?${params}`, {
+    headers: {
+      "user-agent": DOUYIN_UA,
+      referer: `https://www.douyin.com/user/${encodeURIComponent(secUid)}`,
+      accept: "application/json, text/plain, */*",
+    },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (data.status_code !== 0) throw new Error(`status_code=${data.status_code} ${data.status_msg || ""}`);
+  const u = data.user;
+  if (!u) throw new Error("API 未返回 user 字段");
+  return {
+    nickname: u.nickname || null,
+    avatarUrl: pickAvatarUrl(u),
+    signature: u.signature || null,
+    followerCount: Number(u.follower_count) || 0,
+    followingCount: Number(u.following_count) || 0,
+    awemeCount: Number(u.aweme_count) || 0,
+    uid: u.uid || u.short_id || null,
+    secUid: u.sec_uid || null,
+  };
+}
+
+// 抖音用户投稿 — 纯 Node.js fetch (不需要 BrowserWindow / 插件桥).
+// 和 douyin-crawler-demo 一样的方案, 直接调 aweme/post API.
+async function fetchDouyinUserPostsViaApi(secUid, limit = 18) {
+  const DEFAULT_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
+  log.info("douyin:api", `开始 API 拉取, secUid=${secUid.slice(0, 20)}... limit=${limit}`);
+  const videos = [];
+  let maxCursor = "0";
+  let hasMore = true;
+  let pageNum = 0;
+  while (hasMore && videos.length < limit) {
+    pageNum++;
+    const count = Math.min(20, limit - videos.length);
+    log.info("douyin:api", `第 ${pageNum} 页, count=${count} maxCursor=${maxCursor.slice(0, 20)}`);
+    const params = new URLSearchParams({
+      sec_user_id: secUid,
+      max_cursor: maxCursor,
+      count: String(count),
+      aid: "6383",
+    });
+    const res = await fetch(`https://www.douyin.com/aweme/v1/web/aweme/post/?${params}`, {
+      headers: {
+        "user-agent": DEFAULT_UA,
+        referer: `https://www.douyin.com/user/${encodeURIComponent(secUid)}`,
+        accept: "application/json, text/plain, */*",
+      },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    log.info("douyin:api", `第 ${pageNum} 页响应 status_code=${data?.status_code} aweme_list.length=${data?.aweme_list?.length ?? 0} has_more=${data?.has_more}`);
+    if (data.status_code !== 0 && data.status_code != null) {
+      throw new Error(`status_code=${data.status_code} ${data.status_msg || ""}`);
+    }
+    const list = Array.isArray(data?.aweme_list) ? data.aweme_list : [];
+    const batch = list.map(normalizeDouyinAweme).filter((v) => v.id);
+    log.info("douyin:api", `第 ${pageNum} 页有效 ${batch.length} 条`);
+    videos.push(...batch);
+    hasMore = Boolean(data.has_more) && list.length > 0;
+    maxCursor = String(data.max_cursor ?? "");
+    if (hasMore && videos.length < limit) {
+      await new Promise((r) => setTimeout(r, 800));
+    }
+  }
+  log.info("douyin:api", `API 拉取完成, 共 ${videos.length} 条`);
+  return { videos: videos.slice(0, limit), total: videos.length };
+}
+
+// 抖音用户投稿 — Electron 生成浏览器 cookie,本地 Python sidecar 复用 DouYin_Spider
+// 的 a_bogus 签名和接口封装。它不是外部 HTTP 服务,由主进程按需托管。
+async function fetchDouyinUserPostsViaSpider(userUrl, limit = 18) {
+  log.info("douyin:spider", `开始 DouYin_Spider 拉取, limit=${limit} url=${String(userUrl).slice(0, 80)}`);
+  const result = await douyinSpider.crawlUser({ userUrl, limit, maxCommentsPerVideo: 0, includeReplies: false });
+  const videos = Array.isArray(result?.videos) ? result.videos.filter((v) => v.id) : [];
+  if (videos.length === 0) throw new Error("DouYin_Spider 未返回视频");
+  log.info("douyin:spider", `DouYin_Spider 拉取完成, 共 ${videos.length} 条`);
+  return {
+    videos: videos.slice(0, limit),
+    total: Number(result?.raw?.summary?.video_count) || videos.length,
+    profile: result.profile || null,
+  };
+}
+
+// 抖音用户投稿 — 经 Chrome 插件桥 (在 douyin.com tab 里调 fetch, 借 webmssdk 自动签 a_bogus).
+// 支持分页拉取, limit 为最终目标数量.
+async function fetchDouyinUserPosts(secUid, limit = 18) {
+  if (!extensionBridge.isConnected()) {
+    log.info("douyin:bridge", `插件桥未连接, 跳过 bridge 路径`);
+    return null;
+  }
+  log.info("douyin:bridge", `开始 bridge 拉取, secUid=${secUid.slice(0, 20)}... limit=${limit}`);
+  const videos = [];
+  let maxCursor = "0";
+  let hasMore = true;
+  let pageNum = 0;
+  while (hasMore && videos.length < limit) {
+    pageNum++;
+    const count = Math.min(20, limit - videos.length);
+    log.info("douyin:bridge", `第 ${pageNum} 页, count=${count} maxCursor=${maxCursor.slice(0, 20)}`);
+    const result = await extensionBridge.request(
+      "douyin.userPosts",
+      { secUid, count, maxCursor },
+      { timeoutMs: 25_000 },
+    );
+    const page = parseDouyinBridgeResponse(result);
+    const batch = page.list.map(normalizeDouyinAweme).filter((v) => v.id);
+    log.info("douyin:bridge", `第 ${pageNum} 页返回 ${page.list.length} 条原始, 有效 ${batch.length} 条, hasMore=${page.hasMore}`);
+    videos.push(...batch);
+    hasMore = page.hasMore;
+    maxCursor = page.maxCursor;
+    if (hasMore && videos.length < limit) {
+      await new Promise((r) => setTimeout(r, 800));
+    }
+  }
+  log.info("douyin:bridge", `bridge 拉取完成, 共 ${videos.length} 条`);
+  return { videos: videos.slice(0, limit), total: videos.length };
+}
+
+// 抖音用户投稿 — BrowserWindow 兜底 (不需要插件桥, 用 Electron Chromium 在 douyin.com 页面上下文执行 fetch).
+async function fetchDouyinUserPostsViaWindow(secUid, limit = 18) {
+  log.info("douyin:window", `开始 BrowserWindow 拉取, secUid=${secUid.slice(0, 20)}... limit=${limit}`);
+  const win = new BrowserWindow({
+    show: false,
+    width: 800,
+    height: 600,
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
+  });
+  try {
+    const targetUrl = `https://www.douyin.com/user/${encodeURIComponent(secUid)}`;
+    log.info("douyin:window", `导航到 ${targetUrl}`);
+    await win.loadURL(targetUrl, { timeout: 45_000 });
+    log.info("douyin:window", "页面加载完成, 等待 2s webmssdk + 页面渲染");
+    await new Promise((r) => setTimeout(r, 2000));
+
+    const videos = [];
+    let maxCursor = "0";
+    let hasMore = true;
+    let pageNum = 0;
+    while (hasMore && videos.length < limit) {
+      pageNum++;
+      const count = Math.min(20, limit - videos.length);
+      log.info("douyin:window", `第 ${pageNum} 页, count=${count} maxCursor=${maxCursor.slice(0, 20)}`);
+      const pageData = await win.webContents.executeJavaScript(`
+        (async () => {
+          const params = new URLSearchParams({
+            sec_user_id: ${JSON.stringify(secUid)},
+            max_cursor: ${JSON.stringify(maxCursor)},
+            count: String(${count}),
+            aid: '6383',
+          });
+          const res = await fetch(
+            'https://www.douyin.com/aweme/v1/web/aweme/post/?' + params,
+            { method: 'GET', credentials: 'include', headers: { 'content-type': 'application/json' }, referrer: 'https://www.douyin.com/' }
+          );
+          return res.json();
+        })()
+      `);
+      log.info("douyin:window", `第 ${pageNum} 页响应 status_code=${pageData?.status_code} aweme_list.length=${pageData?.aweme_list?.length ?? 0} has_more=${pageData?.has_more}`);
+      if (Number(pageData?.status_code) !== 0 && pageData?.status_code != null) {
+        throw new Error(`status_code=${pageData.status_code} ${pageData?.status_msg || ""}`);
+      }
+      const list = Array.isArray(pageData?.aweme_list) ? pageData.aweme_list : [];
+      const batch = list.map(normalizeDouyinAweme).filter((v) => v.id);
+      log.info("douyin:window", `第 ${pageNum} 页有效 ${batch.length} 条`);
+      videos.push(...batch);
+      hasMore = Boolean(pageData?.has_more) && list.length > 0;
+      maxCursor = String(pageData?.max_cursor ?? "");
+      if (hasMore && videos.length < limit) {
+        await new Promise((r) => setTimeout(r, 800));
+      }
+    }
+    log.info("douyin:window", `BrowserWindow 拉取完成, 共 ${videos.length} 条`);
+    return { videos: videos.slice(0, limit), total: videos.length };
+  } finally {
+    log.info("douyin:window", "销毁 BrowserWindow");
+    win.destroy();
+  }
+}
+
+// 从分享文案/URL 中提取第一个 URL
+function extractFirstUrl(input) {
+  const text = String(input || "");
+  const match = text.match(/https?:\/\/[^\s，。)）\]】'"]+/i);
+  return match ? match[0].replace(/[.,;)]+$/, "") : null;
+}
+
+// 解析抖音短链 (v.douyin.com) → 完整 URL
+// 如果短链指向视频页面 (/video/xxx), 会尝试通过 BrowserWindow 抓取 author 的 sec_uid 并转为用户页 URL
+async function resolveDouyinShortUrl(url) {
+  const DEFAULT_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
+  if (!/v\.douyin\.com/i.test(url)) {
+    log.info("douyin:resolve", `非短链, 原样返回: ${url.slice(0, 80)}`);
+    return url;
+  }
+  log.info("douyin:resolve", `检测到短链, 尝试解析: ${url.slice(0, 80)}`);
+  let resolved = url;
+  try {
+    const res = await fetch(url, {
+      redirect: "follow",
+      headers: { "user-agent": DEFAULT_UA, referer: "https://www.douyin.com/" },
+    });
+    resolved = res.url || url;
+    log.info("douyin:resolve", `短链解析结果: ${resolved.slice(0, 120)}`);
+  } catch (e) {
+    log.warn("douyin:resolve", `短链 redirect 失败: ${e?.message || e}`);
+    return url;
+  }
+  // 如果解析到了视频页面, 通过 aweme/detail API 获取 author sec_uid
+  const videoMatch = resolved.match(/douyin\.com\/video\/(\d+)/);
+  if (videoMatch) {
+    const awemeId = videoMatch[1];
+    log.info("douyin:resolve", `短链指向视频页面 (aweme_id=${awemeId}), 调 detail API 提取 author`);
+    try {
+      const params = new URLSearchParams({ aweme_id: awemeId, aid: "6383" });
+      const detailRes = await fetch(`https://www.douyin.com/aweme/v1/web/aweme/detail/?${params}`, {
+        headers: {
+          "user-agent": DEFAULT_UA,
+          referer: `https://www.douyin.com/video/${awemeId}`,
+          accept: "application/json, text/plain, */*",
+        },
+      });
+      if (detailRes.ok) {
+        const detailData = await detailRes.json();
+        const authorSecUid = detailData?.aweme_detail?.author?.sec_uid;
+        if (authorSecUid) {
+          const userUrl = `https://www.douyin.com/user/${authorSecUid}`;
+          log.info("douyin:resolve", `从 detail API 提取到 author sec_uid, 转为用户页: ${userUrl.slice(0, 80)}`);
+          return userUrl;
+        }
+        log.warn("douyin:resolve", `detail API 未返回 author sec_uid`);
+      }
+    } catch (e) {
+      log.warn("douyin:resolve", `detail API 调用失败: ${e?.message || e}`);
+    }
+  }
+  return resolved;
+}
+
+// yt-dlp 跑一次 flat-playlist + dump-single-json, 抽出账号元数据 + 视频列表
+async function fetchYtDlpAccountJson(url, safeLimit) {
+  const ytDlp = await commandPath("yt-dlp");
+  if (!ytDlp) throw new Error("未安装 yt-dlp");
+  const { stdout } = await new Promise((resolve, reject) => {
+    execFile(ytDlp, [
+      "--flat-playlist",
+      "--dump-single-json",
+      "--no-warnings",
+      "-I", `1:${safeLimit}`,
+      url,
+    ], { windowsHide: true, maxBuffer: 32 * 1024 * 1024 }, (err, stdoutBuf, stderrBuf) => {
+      if (err) return reject(new Error(stderrBuf?.toString().slice(0, 400) || err.message));
+      resolve({ stdout: stdoutBuf?.toString() || "" });
+    });
+  });
+  return JSON.parse(stdout);
 }
 
 function getRotation(videoStream) {
@@ -1199,17 +3066,17 @@ async function inspectVideo(filePath, handle = null) {
   };
 }
 
-// 用户接受的本地初筛 (prefilter) 时间预算 (秒), 按 density 档分级。
-// candidateCount 由此推回, 而不是写死的帧数 —— 长视频自然扩张, 短视频不变,
-// prefilter 时间被 budget 而非帧数硬顶。
-const PREFILTER_BUDGET_SEC = {
-  sparse: 30,
-  standard: 60,
-  dense: 120,
-};
 // 本地初筛单帧推理时间 (Qwen3.5-0.8B @ Apple Silicon Metal 实测 ~1.1s)。
-// 后续可以改成基于 prefilterStats 滚动 EMA, 自适应不同模型 / 机器。
 const PREFILTER_PER_FRAME_MS = 1100;
+
+// 预筛选时间预算: 按视频时长动态计算, 保证每秒至少 1 帧被预处理。
+// density 只影响倍率 (稀疏档可以少看点, 密集档多看点), 不再是固定秒数。
+function prefilterBudgetSec(durationSec, options) {
+  const density = options?.density || "standard";
+  const multiplier = density === "dense" ? 1.5 : density === "sparse" ? 0.5 : 1.0;
+  const framesToCover = Math.ceil(durationSec * multiplier);
+  return Math.max(15, framesToCover * PREFILTER_PER_FRAME_MS / 1000);
+}
 
 // 精筛后(送时间轴 + 主分析)的目标帧/节点数。
 // 旧版死 cap 32, 长视频节点密度 ≤ 1/min 体感跳; 改成跟时长线性,
@@ -1226,16 +3093,16 @@ function targetFrameCount(durationSec, options) {
   return Math.max(6, Math.min(upper, target));
 }
 
-// 候选抽帧数。本地初筛 ready 时多抽, 给初筛更多选材。
-// 旧版死 cap 30 长视频被压扁; 改成 budget driven, 仍保 ≥ finalCount + 8 留去重空间。
-function candidateFrameCount(durationSec, options, hasLocalPrefilter) {
+// 候选抽帧数。抽帧很便宜 (~50ms/帧), 后面有 dHash 去重兜底, 所以宁可多抽。
+// 下限 = max(时长公式, 镜头数, 每秒 1 帧), prefilter 预算约束在标注阶段而非抽帧阶段。
+// 无 prefilter 时仍走时长公式 (全部帧直接送主分析, 抽太多会超 token 预算)。
+function candidateFrameCount(durationSec, options, hasLocalPrefilter, scenesCount) {
   const finalCount = targetFrameCount(durationSec, options);
   if (!hasLocalPrefilter) return finalCount;
-  const density = options?.density || "standard";
-  const budgetSec = PREFILTER_BUDGET_SEC[density] ?? PREFILTER_BUDGET_SEC.standard;
-  const capByBudget = Math.floor((budgetSec * 1000) / PREFILTER_PER_FRAME_MS);
-  const desired = Math.max(Math.round(finalCount * 2.5), finalCount + 8);
-  return Math.max(finalCount, Math.min(desired, capByBudget));
+  const perSecFloor = Math.ceil(durationSec);
+  const floor = Math.max(finalCount, scenesCount || 0, perSecFloor);
+  const desired = Math.max(Math.round(floor * 1.5), floor + 8);
+  return Math.max(floor, desired);
 }
 
 function sceneThresholdFor(options) {
@@ -1273,10 +3140,9 @@ async function detectScenes(ffmpeg, inputPath, threshold, handle) {
 
 // 根据 scene 时间戳 + 目标帧数，分配最终抽帧时刻。
 // 策略:
-//   1. 每个 shot 先分 1 张(锚帧,中点)
-//   2. 剩余配额按 "duration/(count+1)" 最大的 shot 不断加点(长镜头多分)
+//   1. 每个 shot 至少 1 张(锚帧,中点), 不丢弃任何镜头
+//   2. 配额 > 镜头数时, 剩余按 "duration/(count+1)" 最大的 shot 不断加点(长镜头多分)
 //   3. shot 内多张时按等距均分
-//   4. shot 数本身 > target 时,挑 duration 最长的 target 个
 function planFramePlan(scenes, durationSec, targetCount) {
   const safeDuration = Math.max(durationSec, 1);
   const sorted = [...new Set(scenes)].filter((t) => t < safeDuration).sort((a, b) => a - b);
@@ -1289,32 +3155,18 @@ function planFramePlan(scenes, durationSec, targetCount) {
     })
     .filter((s) => s.duration >= 0.4);
 
-  // 兜底:没有合理 shot,均匀分布
   if (shots.length === 0) {
-    return Array.from({ length: targetCount }, (_, i) => {
-      const sec = (safeDuration * (i + 1)) / (targetCount + 1);
+    const count = Math.max(1, targetCount);
+    return Array.from({ length: count }, (_, i) => {
+      const sec = (safeDuration * (i + 1)) / (count + 1);
       return { index: i, startSec: sec, endSec: sec, midSec: Math.min(safeDuration - 0.1, sec) };
     });
   }
 
-  // shot 数已 >= target,挑 duration 最长的
-  if (shots.length >= targetCount) {
-    const chosen = [...shots]
-      .sort((a, b) => b.duration - a.duration)
-      .slice(0, targetCount)
-      .map((shot) => ({ shot, sec: shot.start + shot.duration / 2 }));
-    chosen.sort((a, b) => a.sec - b.sec);
-    return chosen.map((p, index) => ({
-      index,
-      startSec: p.shot.start,
-      endSec: p.shot.end,
-      midSec: Math.min(safeDuration - 0.1, Math.max(0, p.sec)),
-    }));
-  }
-
-  // 每 shot 分配采样数: 先各 1,剩余按 "duration / (count+1)" 贪心
+  // 每个 shot 至少 1 帧; 实际配额 = max(targetCount, shots.length)
+  const effectiveTarget = Math.max(targetCount, shots.length);
   const counts = shots.map(() => 1);
-  let remaining = targetCount - shots.length;
+  let remaining = effectiveTarget - shots.length;
   while (remaining > 0) {
     let bestIdx = 0;
     let bestScore = shots[0].duration / (counts[0] + 1);
@@ -1456,6 +3308,38 @@ async function extractFrame(ffmpeg, inputPath, outputPath, second, width = 420, 
   ], {}, handle);
 }
 
+// 把远程封面下载到 videos/<videoId>/cover.<ext>,返回可离线播放的 media:// URL;失败返回 null。
+// 远程封面(尤其抖音 p*-pc-sign 签名 URL)会过期,落到本地后封面就不会再"破"。
+async function downloadCoverImage(remoteUrl, videoId) {
+  if (!remoteUrl || !/^https?:\/\//i.test(remoteUrl)) return null;
+  try {
+    const res = await fetch(remoteUrl);
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (!buf.length) return null;
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    const ext = ct.includes("png") ? "png" : ct.includes("webp") ? "webp" : "jpg";
+    const dir = getVideoDir(videoId);
+    await fs.mkdir(dir, { recursive: true });
+    const dest = path.join(dir, `cover.${ext}`);
+    await fs.writeFile(dest, buf);
+    return createExternalMediaUrl(dest);
+  } catch { return null; }
+}
+
+// 没有远程封面时,用 ffmpeg 抽视频第一帧当封面。返回 media:// URL;失败返回 null。
+async function extractFirstFrameCover(videoPath, videoId) {
+  if (!videoPath || !fsSync.existsSync(videoPath)) return null;
+  try {
+    const ffmpeg = bundledFfmpegPath() || await commandPath("ffmpeg");
+    if (!ffmpeg) return null;
+    const dest = path.join(getVideoDir(videoId), "cover-frame.jpg");
+    await extractFrame(ffmpeg, videoPath, dest, 0, 520);
+    if (fsSync.existsSync(dest)) return createExternalMediaUrl(dest);
+    return null;
+  } catch { return null; }
+}
+
 // PR2 金字塔管线: 把 shots 里的 representativeFrameIndex / frames / subtitleSegments
 // 按时间区间 overlap 匹配, 挂到大模型出的 nodes 上, 让 UI 能渲染镜头级 evidence。
 function attachShotEvidenceToNodes(nodes, shots, projectId) {
@@ -1477,7 +3361,7 @@ function attachShotEvidenceToNodes(nodes, shots, projectId) {
     if (!best) continue;
 
     const toFrameCtx = (f) => ({
-      thumbnailUrl: createProjectMediaUrl(projectId, f.framePath),
+      thumbnailUrl: createVideoMediaUrl(projectId, f.framePath),
       framePath: f.framePath,
       midSec: f.midSec,
       caption: f.prefilterTag?.caption,
@@ -1578,6 +3462,54 @@ function localNodeForSegment(segment, project, frameUrl, transcriptSegments) {
     isHighlight: false,
     thumbnailUrl: frameUrl,
     prefilterTag: segment.prefilterTag || undefined,
+  };
+}
+
+// 主分析 throw 后, 把场景骨架节点重写成"分析失败"形态: 时间区间 / 字幕 / 缩略图 / prefilterTag 这些
+// 是切镜头阶段的真实产物, 保留; 但 title / shotDescription / editIntent / cameraMovement / emotionLabel /
+// narrativeFunction 这些需要模型才能填的字段, 一律改为"—"。避免让人误以为 "等待模型生成镜头描述。"
+// 是还在跑的中间态。
+function markFallbackNodesAsFailed(fallbackNodes) {
+  return fallbackNodes.map((n) => {
+    const idStr = String(n.id || "").replace(/^node-/, "");
+    return {
+      ...n,
+      title: idStr ? `节点 ${idStr}` : (n.title || "未分析节点"),
+      shotDescription: "—",
+      editIntent: "—",
+      cameraMovement: "—",
+      emotionLabel: "—",
+      narrativeFunction: "—",
+      confidence: 0,
+    };
+  });
+}
+
+// 主分析 throw 后, 覆盖 fallbackReport 里那些"等待模型分析"占位文案, 改写明确的失败原因。
+// report.analysisError 是新加字段, UI 可以根据它显示一个明确的失败 banner。
+function markFallbackReportAsFailed(fallbackReport, errorMessage, provider) {
+  const reason = String(errorMessage || "未知错误").slice(0, 500);
+  return {
+    ...fallbackReport,
+    analysisError: {
+      stage: "main-analysis",
+      message: reason,
+      providerId: provider?.id || null,
+      model: provider?.model || null,
+      occurredAt: new Date().toISOString(),
+    },
+    summary: `主模型分析失败：${reason}。下面的节点只是镜头切分骨架,没有模型语义分析。`,
+    structure: {
+      hook: "—",
+      development: "—",
+      turn: "—",
+      climax: "—",
+      ending: "—",
+    },
+    pacing: "—",
+    editingStyle: "—",
+    composition: "—",
+    takeaways: [`主模型分析失败：${reason}`],
   };
 }
 
@@ -1925,6 +3857,11 @@ async function buildAnalysisPrompt(project, frames, transcript, scenes, options)
     return lines.length > 0 ? lines.join("\n") : "";
   })();
 
+  // 目标节点数 = 时长 / 18s 上下浮动, 钉死 2-10 的硬区间。
+  // 短视频 (<30s) 不要超过 4 个; 中等 (60-120s) 4-7 个; 长 (>180s) 不超过 12 个。
+  const targetNodeMin = Math.max(2, Math.round(project.durationSec / 25));
+  const targetNodeMax = Math.min(12, Math.max(targetNodeMin + 2, Math.round(project.durationSec / 15)));
+
   const userText = [
     `请分析视频《${project.videoName}》。`,
     `时长 ${Math.round(project.durationSec)}s（lengthBucket=${methodology.lengthBucket}）, 画幅 ${project.width}x${project.height} (${project.orientation === "portrait" ? "竖屏" : project.orientation === "square" ? "方形" : "横屏"})。`,
@@ -1932,6 +3869,16 @@ async function buildAnalysisPrompt(project, frames, transcript, scenes, options)
     "",
     pyramidBlock,
     pyramidBlock ? "" : null,
+    "# 节点划分规则（本规则优先级最高，违反此规则的输出会被驳回）",
+    "逻辑节点 ≠ 镜头(shot)。一个逻辑节点表达「同一个目的 / 同一个信息块 / 同一段叙事意图」，通常会跨越多个连续 shot。",
+    `本视频时长 ${Math.round(project.durationSec)}s, 目标节点数 ${targetNodeMin}-${targetNodeMax} 个。**禁止**给每个 shot 都建一个 node (那是镜头列表, 不是逻辑节点)。`,
+    "切分规则:",
+    "- 把「演示同一个参数 / 同一段示范 / 同一个情绪段 / 同一个信息点」的连续 shot 合并成 1 个 node",
+    "- 每个 node 的 startSec = 该 node 覆盖的第一个 shot 的 startSec; endSec = 该 node 覆盖的最后一个 shot 的 endSec",
+    "- nodeTypes 不要全部用 shot_change。按节点真实功能选: info_point (信息点/科普) / edit_intent (剪辑意图段) / emotion_turn (情绪转折) / shot_change (单纯镜头切换, 谨慎使用) / audio_change",
+    "- title 写「这一段在做什么」, 不是单镜头描述。例如「参数设置详解 (ISO + 快门 + 光圈联调)」, 不是「特写相机屏幕」",
+    `自检: 输出的 nodes 数组长度必须在 [${targetNodeMin}, ${targetNodeMax}] 区间内, 否则重新合并。`,
+    "",
     "# 关键帧时间表（与下面图片顺序一一对应）",
     "(图片是 镜头描述/字幕 之外的视觉补充, 重点用来确认主体细节和画面构图; 数量受 token 预算限制, 不代表全部画面信息)",
     frameDescriptions,
@@ -1955,24 +3902,34 @@ async function buildAnalysisPrompt(project, frames, transcript, scenes, options)
     {
       "id":"node-1",
       "startSec":0,
-      "endSec":3,
-      "title":"...",
-      "nodeTypes":["shot_change"],
-      "shotDescription":"...",
+      "endSec":8,
+      "title":"开场 hook: 抛出问题钩子",
+      "nodeTypes":["info_point"],
+      "shotDescription":"(本节点覆盖多个连续 shot 的画面要点)",
       "shotType":"近景",
       "cameraMovement":"固定",
       "visualElements":[],
       "audioElements":[],
-      "editIntent":"...",
-      "emotionLabel":"...",
+      "editIntent":"建立期待 + 锁定观看意图",
+      "emotionLabel":"好奇",
       "emotionIntensity":7,
       "narrativeFunction":"Hook",
       "confidence":0.9,
       "isHighlight":true,
       "methodologyTags":[
-        {"ruleId":"R-HOOK-001","ruleName":"黄金 3 秒钩子","category":"hook","status":"hit","evidence":"开头特写 + 字幕 'XX' + 旁白 'YY'","confidence":0.9},
-        {"ruleId":"R-HOOK-002","ruleName":"钩子三层同步","category":"hook","status":"violation","evidence":"画面拍 A、字幕讲 B、旁白讲 C","confidence":0.8,"fixSuggestion":"统一首屏字幕和旁白都聚焦同一钩子"}
+        {"ruleId":"R-HOOK-001","ruleName":"黄金 3 秒钩子","category":"hook","status":"hit","evidence":"开头特写 + 字幕 'XX' + 旁白 'YY'","confidence":0.9}
       ]
+    },
+    {
+      "id":"node-2",
+      "startSec":8,
+      "endSec":33,
+      "title":"参数设置详解",
+      "nodeTypes":["info_point","edit_intent"],
+      "shotDescription":"(本节点合并了 4 个连续 shot, 都在讲同一个参数演示)",
+      "narrativeFunction":"Development",
+      "isHighlight":false,
+      "methodologyTags":[]
     }
   ],
   "report":{
@@ -2011,25 +3968,479 @@ async function buildAnalysisPrompt(project, frames, transcript, scenes, options)
   return { userText, methodology };
 }
 
-async function callOpenAICompatible(provider, project, frames, transcript, scenes, fallbackNodes, fallbackReport, options, handle = null) {
-  if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
-    return { nodes: fallbackNodes, report: fallbackReport, usedModel: false };
+// 每帧 vision token 估算: 本地 llama.cpp mmproj 520px 实测 ~250 tok/帧,
+// 云端模型 (GPT-4o / Gemini / Claude) tile 编码 ~600-1200, 取 800 保守估算。
+const VISION_TOKENS_PER_FRAME_LOCAL = 280;
+const VISION_TOKENS_PER_FRAME_REMOTE = 800;
+let VISION_TOKENS_PER_FRAME = VISION_TOKENS_PER_FRAME_REMOTE;
+const HARD_FRAME_CAP_FALLBACK = 12;
+const HARD_FRAME_MIN = 1;
+
+const CHUNK_SYSTEM_PROMPT =
+  "你是一名视频拉片分析师, 当前正在处理整段视频的某一片段。基于本片段的镜头描述 / 关键帧 / 字幕产出本片段的节点列表。" +
+  "**只产 nodes, 不要做方法论打标 (后续步骤会单独做)**。所有回答必须是合法 JSON, 不要 markdown 围栏, 不要解释。";
+
+const AUDIT_SYSTEM_PROMPT =
+  "你是一名剪辑方法论审计师。已经有完整的节点列表 + 全局摘要, 你的工作是: " +
+  "(1) 对照规则集为每个节点打方法论标签 (命中 / 违反, 缺失放在 report 里), " +
+  "(2) 产出全局剪辑报告 (summary / structure / pacing / takeaways / methodologyAudit)。" +
+  "所有回答必须是合法 JSON, 不要 markdown 围栏, 不要解释。";
+
+// 给 chat/completions response_format 用的宽松 schema。strict:false 让云端 OpenAI 不强制
+// additionalProperties:false 等约束 (那是 strict 模式特有), llama.cpp 端编出 GBNF 强制
+// 顶层结构 — probe 实测 0.8B 自由 JSON 1/3 invalid, 上 json_schema strict:false 后 4/4 valid。
+// 字段内部不约束, 模型自由发挥, 后续 normalizeModelResult 兜底。
+const SINGLE_PASS_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: { nodes: { type: "array" }, report: { type: "object" } },
+  required: ["nodes"],
+};
+const CHUNK_PASS_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: { nodes: { type: "array" } },
+  required: ["nodes"],
+};
+const AUDIT_PASS_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: { nodeTags: { type: "array" }, report: { type: "object" } },
+};
+
+function buildGlobalContextBlock(project, methodology, globalContext) {
+  const lines = [];
+  lines.push("# 整体上下文 (帮助你理解本片段在全片中的位置)");
+  lines.push(
+    `视频《${project.videoName}》总时长 ${Math.round(project.durationSec)}s (lengthBucket=${methodology.lengthBucket}), 画幅 ${project.width}x${project.height} (${project.orientation === "portrait" ? "竖屏" : project.orientation === "square" ? "方形" : "横屏"})。`,
+  );
+  if (methodology.forcedGenre) lines.push(`类型: ${methodology.forcedGenre} (用户/前序识别已锁定)`);
+  if (globalContext?.detectedGenre) lines.push(`类型: ${globalContext.detectedGenre} (置信度 ${(globalContext.genreConfidence || 0).toFixed(2)})`);
+  if (globalContext?.globalSummary) {
+    lines.push("");
+    lines.push("全局摘要:");
+    lines.push(globalContext.globalSummary);
+  }
+  if (globalContext?.structureHint) {
+    const sh = globalContext.structureHint;
+    lines.push("");
+    lines.push("结构线索 (供参考, 不一定准):");
+    if (sh.hook) lines.push(`  开场 hook: ${sh.hook}`);
+    if (sh.climax) lines.push(`  高潮: ${sh.climax}`);
+    if (sh.ending) lines.push(`  结尾: ${sh.ending}`);
+  }
+  return lines.join("\n");
+}
+
+function buildChunkShotsBlock(chunkShots) {
+  if (!Array.isArray(chunkShots) || chunkShots.length === 0) return "";
+  const lines = ["# 本片段镜头 (主 evidence; 已综合画面+字幕)"];
+  chunkShots.forEach((sc, i) => {
+    lines.push(`S${i + 1} [${sc.startSec.toFixed(1)}-${sc.endSec.toFixed(1)}s] 帧数=${sc.framesInShot || (sc.frames?.length || 0)}`);
+    lines.push(`  画面: ${sc.shotDescription || "(空)"}`);
+    if (sc.subtitleText) lines.push(`  字幕: ${sc.subtitleText}`);
+  });
+  return lines.join("\n");
+}
+
+function buildChunkFramesBlock(chunkFrames) {
+  if (!Array.isArray(chunkFrames) || chunkFrames.length === 0) {
+    return "# 本片段关键帧\n(无)";
+  }
+  const lines = ["# 本片段关键帧 (与下方图片顺序一一对应)"];
+  chunkFrames.forEach((f, i) => {
+    const cap = f.prefilterTag?.caption?.trim();
+    const tag = f.prefilterTag?.signature?.trim();
+    const meta = cap ? `\n  画面: ${cap}` : tag ? `\n  签名: ${tag}` : "";
+    lines.push(`#${i + 1}  t=${(f.midSec || 0).toFixed(1)}s  范围 ${(f.startSec || 0).toFixed(1)}-${(f.endSec || 0).toFixed(1)}s${meta}`);
+  });
+  return lines.join("\n");
+}
+
+function buildChunkTranscriptBlock(segs) {
+  if (!Array.isArray(segs) || segs.length === 0) {
+    return "# 本片段字幕\n(无)";
+  }
+  const lines = segs.map((s) =>
+    `[${Number(s.start || 0).toFixed(1)}-${Number(s.end || 0).toFixed(1)}] ${String(s.text || "").trim()}`,
+  );
+  return `# 本片段字幕 (带时间戳, 共 ${segs.length} 段)\n${lines.join("\n")}`;
+}
+
+function buildChunkPrompt(project, methodology, globalContext, chunk, totalChunks, options) {
+  const focusHint =
+    options?.focus === "rhythm" ? "重点关注剪辑节奏、镜头切换密度、停顿停滞。" :
+    options?.focus === "emotion" ? "重点关注情绪曲线、表达强度和观众共鸣点。" :
+    options?.focus === "narrative" ? "重点关注叙事结构、信息递进、转折设置。" :
+    "综合关注叙事结构、剪辑节奏、情绪曲线和画面信息。";
+  const modeHint = options?.mode === "detailed" ? "拆解到尽可能细的镜头级。" : options?.mode === "quick" ? "只覆盖关键节点, 不要面面俱到。" : "覆盖主要剪辑节点。";
+
+  // chunk 本段时长 → 该段内建议节点数 (大致 1 node / 20s, 2-5 区间)
+  const chunkDur = Math.max(1, chunk.endSec - chunk.startSec);
+  const chunkNodeMin = Math.max(1, Math.round(chunkDur / 25));
+  const chunkNodeMax = Math.min(5, Math.max(chunkNodeMin + 1, Math.round(chunkDur / 12)));
+  const chunkShotCount = Array.isArray(chunk.shots) ? chunk.shots.length : 0;
+
+  const parts = [
+    `请分析视频的第 ${chunk.index + 1}/${totalChunks} 片段, 时间区间 [${chunk.startSec.toFixed(1)}, ${chunk.endSec.toFixed(1)}]s。`,
+    `${focusHint} ${modeHint}`,
+    "",
+    buildGlobalContextBlock(project, methodology, globalContext),
+    "",
+    buildChunkShotsBlock(chunk.shots),
+    "",
+    buildChunkFramesBlock(chunk.frames),
+    "",
+    buildChunkTranscriptBlock(chunk.transcriptSegments),
+    "",
+    "# 节点划分规则（本规则优先级最高）",
+    "逻辑节点 ≠ 镜头(shot)。一个逻辑节点表达「同一个目的 / 同一个信息块」, 通常跨越多个连续 shot。",
+    `本片段 ${chunkDur.toFixed(0)}s 含 ${chunkShotCount} 个 shot, 目标输出 ${chunkNodeMin}-${chunkNodeMax} 个 node。**禁止**每个 shot 都建一个 node。`,
+    "- 把演示同一参数 / 同一情绪段 / 同一信息点的连续 shot 合并成 1 个 node",
+    "- nodeTypes 优先用 info_point / edit_intent / emotion_turn, 不要全用 shot_change",
+    "",
+    "# 输出格式 (必须严格遵守)",
+    "只返回 JSON (不要 markdown 围栏), 结构:",
+    `{
+  "nodes":[
+    {
+      "id":"chunk-${chunk.index + 1}-node-1",
+      "startSec":${chunk.startSec.toFixed(1)},
+      "endSec":${(chunk.startSec + Math.min(chunkDur, 15)).toFixed(1)},
+      "title":"该段在做什么 (跨多个 shot)",
+      "nodeTypes":["info_point"],
+      "shotDescription":"(覆盖该 node 范围内多个 shot 的画面要点)",
+      "shotType":"近景",
+      "cameraMovement":"固定",
+      "visualElements":[],
+      "audioElements":[],
+      "editIntent":"...",
+      "emotionLabel":"...",
+      "emotionIntensity":7,
+      "narrativeFunction":"Hook|Setup|Development|Turn|Climax|Ending|Other",
+      "confidence":0.9,
+      "isHighlight":true
+    }
+  ]
+}`,
+    "",
+    "硬性要求:",
+    `- nodes 数组长度必须在 [${chunkNodeMin}, ${chunkNodeMax}] 区间内 (不是 shot 数!)。`,
+    `- nodes 时间戳 startSec/endSec 必须严格落在本片段 [${chunk.startSec.toFixed(1)}, ${chunk.endSec.toFixed(1)}]s 内, 不要跨段。`,
+    "- nodes 按时间升序。",
+    "- 不要返回 methodologyTags 字段 (后续步骤做)。",
+    "- 不要返回 report 字段 (后续步骤做)。",
+    "- evidence 要引用具体画面/字幕/时间, 不要写「看起来」「可能」等含糊词。",
+  ];
+
+  return parts.filter((x) => x !== null && x !== undefined).join("\n");
+}
+
+// audit pass 需要把每个 node 序列化成一行精简描述喂给模型
+function serializeNodeForAudit(node, compact = false) {
+  const parts = [
+    `${node.id || ""} [${(node.startSec || 0).toFixed(1)}-${(node.endSec || 0).toFixed(1)}s]`,
+    node.title ? `「${node.title}」` : "",
+    node.narrativeFunction ? `narrative=${node.narrativeFunction}` : "",
+    node.emotionLabel ? `emotion=${node.emotionLabel}/${node.emotionIntensity || 0}` : "",
+  ];
+  if (!compact) {
+    if (node.shotType) parts.push(`shot=${node.shotType}`);
+    if (node.editIntent) parts.push(`editIntent=${node.editIntent}`);
+  }
+  if (node.shotDescription) {
+    const desc = compact && node.shotDescription.length > 60
+      ? node.shotDescription.slice(0, 60) + "…"
+      : node.shotDescription;
+    parts.push(`画面=${desc}`);
+  }
+  return parts.filter(Boolean).join(" ");
+}
+
+function buildAuditPrompt(project, methodology, globalContext, nodes, transcript, options, { compactNodes = false } = {}) {
+  const nodeLines = nodes.map((n) => serializeNodeForAudit(n, compactNodes)).join("\n");
+  const transcriptBlock = formatTranscriptBlock(transcript);
+  const focusHint =
+    options?.focus === "rhythm" ? "重点关注剪辑节奏、镜头切换密度、停顿停滞。" :
+    options?.focus === "emotion" ? "重点关注情绪曲线、表达强度和观众共鸣点。" :
+    options?.focus === "narrative" ? "重点关注叙事结构、信息递进、转折设置。" :
+    "综合关注叙事结构、剪辑节奏、情绪曲线和画面信息。";
+
+  return [
+    `请对视频《${project.videoName}》做剪辑方法论审计。`,
+    `总时长 ${Math.round(project.durationSec)}s (lengthBucket=${methodology.lengthBucket})。`,
+    focusHint,
+    "",
+    buildGlobalContextBlock(project, methodology, globalContext),
+    "",
+    "# 全部节点 (来自前序分段拉片)",
+    nodeLines || "(无节点)",
+    "",
+    transcriptBlock,
+    "",
+    "# 剪辑方法论规则集 (必读, 严格对照)",
+    "下面是当前视频所属的时长档位 + 类型对应的剪辑方法论。每条规则有唯一 ruleId, 例如 R-HOOK-001。",
+    "你要做的事: ",
+    "- 对每个 node, 给出它命中 (hit) 或违反 (violation) 的规则, 写到 nodeTags 数组里。",
+    "- 视频里完全缺失的规则 (应有未有) 写到 report.methodologyAudit.misses 数组。",
+    "- 同时产出全局报告 (summary/structure/pacing/editingStyle/composition/takeaways/methodologyAudit)。",
+    "",
+    methodology.text,
+    "",
+    "# 输出格式 (必须严格遵守)",
+    "只返回 JSON (不要 markdown 围栏), 结构:",
+    `{
+  "nodeTags":[
+    {
+      "id":"node-1",
+      "methodologyTags":[
+        {"ruleId":"R-HOOK-001","ruleName":"...","category":"hook","status":"hit","evidence":"开头特写 + 字幕 'XX'","confidence":0.9},
+        {"ruleId":"R-HOOK-002","ruleName":"...","category":"hook","status":"violation","evidence":"...","confidence":0.8,"fixSuggestion":"..."}
+      ]
+    }
+  ],
+  "report":{
+    "summary":"...",
+    "structure":{"hook":"...","development":"...","turn":"...","climax":"...","ending":"..."},
+    "pacing":"...",
+    "editingStyle":"...",
+    "composition":"...",
+    "takeaways":[],
+    "methodologyAudit":{
+      "detectedGenre":"vlog | review | travel | tutorial | knowledge | documentary | short-drama | other",
+      "genreConfidence":0.9,
+      "misses":[
+        {"ruleId":"R-STRUCT-001","ruleName":"...","category":"structure","expectedAt":"视频中后段","reason":"...","fixSuggestion":"..."}
+      ],
+      "overallScore":78
+    }
+  }
+}`,
+    "",
+    "硬性要求:",
+    "- nodeTags 数组里的 id 必须来自上面的节点列表; 不要新增/删除/重命名节点。",
+    "- methodologyTags 的 ruleId 必须来自上述方法论规则集, 不要编造。",
+    "- 每条 violation 必须给 fixSuggestion; 每条 miss 必须给 fixSuggestion + reason。",
+    "- evidence 必须引用具体节点 id 或时间区间。",
+    "- detectedGenre 必须从清单中选一个。",
+    "- overallScore 0-100。",
+    "",
+    "软约束 (避免误报):",
+    "- 如果一条规则的 when 触发条件在本视频里前提不成立 (例如规则只适用 8 分钟以上但本视频只有 6 分钟), 跳过这条规则。",
+    "- 如果规则需要听到 BGM beat sync 等你无法判断的信号, 不要硬给 miss; 在 takeaways 里温和提示。",
+  ].filter(Boolean).join("\n");
+}
+
+// 估算 token: 中文 ~0.5 token/字, 英文 ~0.25 token/字。粗估按 0.4 平均偏保守。
+// 偏保守 (估高) → 提前触发裁剪, 避免实际请求超 ctx; 这是安全方向。
+function estimatePromptTokens(text) {
+  if (!text) return 0;
+  return Math.ceil(text.length * 0.4);
+}
+
+// 估算单个 shotContext 在 prompt 里占多少 token
+function estimateShotContextTokens(sc) {
+  if (!sc) return 0;
+  const desc = sc.shotDescription || "";
+  const sub = sc.subtitleText || (Array.isArray(sc.subtitleSegments)
+    ? sc.subtitleSegments.map((s) => s.text || "").join(" ")
+    : "");
+  // 元信息 (时间/帧数) 大约 30 char + 描述 + 字幕
+  return estimatePromptTokens(`${desc} ${sub}`) + 20;
+}
+
+function estimateTranscriptSegmentTokens(segs) {
+  if (!Array.isArray(segs) || segs.length === 0) return 0;
+  const text = segs.map((s) => `[${(s.start || 0).toFixed(1)}-${(s.end || 0).toFixed(1)}] ${s.text || ""}`).join("\n");
+  return estimatePromptTokens(text);
+}
+
+// 取落在 [start, end] 内的 frames / transcript segments
+function pickFramesInRange(frames, startSec, endSec) {
+  if (!Array.isArray(frames)) return [];
+  return frames.filter((f) => {
+    const mid = Number(f.midSec) || 0;
+    return mid >= startSec && mid < endSec;
+  });
+}
+
+function pickTranscriptSegmentsInRange(transcript, startSec, endSec) {
+  if (!transcript || !Array.isArray(transcript.segments)) return [];
+  return transcript.segments.filter((s) => {
+    const segStart = Number(s.start) || 0;
+    const segEnd = Number(s.end) || segStart;
+    // 段与 chunk 时间区间有交集即算
+    return segEnd >= startSec && segStart <= endSec;
+  });
+}
+
+// 按 ctx 预算把 shotContexts 切成 N 段, 每段附带其时间区间内的 frames + transcript segments。
+//
+// 输入:
+//   ctxSize, reserveOutput, overheadTokens (每段固定占用: system + 全局上下文 + schema 模板)
+//   shotContexts (有序), frames (按 midSec 升序), transcript
+//
+// 输出:
+//   [{ index, startSec, endSec, shots, frames, transcriptSegments, estTokens }]
+//
+// 算法:
+//   逐 shot 累加, 加上该 shot 范围内的 frames(*800) 和 transcript segments(估算字符)。
+//   超 budgetPerChunk 就把当前累计切出去, 开新段。
+//   边界: 单个 shot 已超 budget 时, 单独占一段并降级 (砍其 frames 数)。
+function planAnalysisChunks({
+  ctxSize,
+  reserveOutput,
+  overheadTokens,
+  safetyMargin,
+  shotContexts,
+  frames,
+  transcript,
+  durationSec,
+}) {
+  const budget = ctxSize - reserveOutput - overheadTokens - safetyMargin;
+  if (budget <= 0) {
+    throw new Error(`模型 ctx ${ctxSize} 太小, 扣掉输出 reserve / 全局上下文 / safety margin 后预算 ${budget} token, 无法分段。`);
   }
 
-  // Token budget: 估计开销 + 截 transcript
-  const maxBudget = 8000;
-  let visibleTranscript = transcript;
-  if (transcript?.text) {
-    const trimmed = trimTranscriptForBudget(transcript.text, transcript.segments, 4000);
-    visibleTranscript = { ...transcript, text: trimmed.text, segments: trimmed.segments };
+  // 每段帧数上限: 用 budget 的 70% 留给图片 (剩余给字幕+shot 描述), 至少 HARD_FRAME_CAP_FALLBACK
+  const frameCapByBudget = Math.max(HARD_FRAME_CAP_FALLBACK, Math.floor((budget * 0.7) / VISION_TOKENS_PER_FRAME));
+
+  const chunks = [];
+  // 没有 shotContexts: 退化按时间等分。先估总 token, 算需要多少段。
+  if (!Array.isArray(shotContexts) || shotContexts.length === 0) {
+    const totalFrameTokens = frames.length * VISION_TOKENS_PER_FRAME;
+    const totalTranscriptTokens = estimateTranscriptSegmentTokens(transcript?.segments || []);
+    const total = totalFrameTokens + totalTranscriptTokens;
+    const numChunks = Math.max(1, Math.ceil(total / budget));
+    const chunkDuration = (durationSec || 0) / numChunks;
+    for (let i = 0; i < numChunks; i++) {
+      const start = i * chunkDuration;
+      const end = i === numChunks - 1 ? (durationSec || start + chunkDuration) : (i + 1) * chunkDuration;
+      const chunkFrames = pickFramesInRange(frames, start, end);
+      const chunkSegs = pickTranscriptSegmentsInRange(transcript, start, end);
+      const est = chunkFrames.length * VISION_TOKENS_PER_FRAME + estimateTranscriptSegmentTokens(chunkSegs);
+      chunks.push({
+        index: i,
+        startSec: start,
+        endSec: end,
+        shots: [],
+        frames: chunkFrames.slice(0, frameCapByBudget),
+        transcriptSegments: chunkSegs,
+        estTokens: est,
+      });
+    }
+    return chunks;
   }
-  const estimated = estimateTokenCost(Math.min(frames.length, 12), visibleTranscript?.text || "");
-  if (estimated > maxBudget) {
-    const maxImages = Math.max(4, Math.floor((maxBudget - (visibleTranscript?.text || "").length * 0.5) / 250));
-    frames = frames.slice(0, maxImages);
-  } else {
-    frames = frames.slice(0, 12);
+
+  // 有 shotContexts: 逐 shot 累加
+  let current = null;
+  const flush = () => {
+    if (current && current.shots.length > 0) chunks.push(current);
+    current = null;
+  };
+  for (const sc of shotContexts) {
+    const scTokens = estimateShotContextTokens(sc);
+    const scFrames = pickFramesInRange(frames, sc.startSec, sc.endSec);
+    const scSegs = pickTranscriptSegmentsInRange(transcript, sc.startSec, sc.endSec);
+    const scFrameTokens = scFrames.length * VISION_TOKENS_PER_FRAME;
+    const scSegTokens = estimateTranscriptSegmentTokens(scSegs);
+    const scTotal = scTokens + scFrameTokens + scSegTokens;
+
+    // 单 shot 就超 budget → 单独成段, 降级砍 frames
+    if (scTotal > budget) {
+      flush();
+      const maxFrames = Math.max(HARD_FRAME_MIN, Math.floor((budget - scTokens - scSegTokens) / VISION_TOKENS_PER_FRAME));
+      const trimmedFrames = scFrames.slice(0, Math.max(HARD_FRAME_MIN, maxFrames));
+      chunks.push({
+        index: chunks.length,
+        startSec: sc.startSec,
+        endSec: sc.endSec,
+        shots: [sc],
+        frames: trimmedFrames,
+        transcriptSegments: scSegs,
+        estTokens: scTokens + trimmedFrames.length * VISION_TOKENS_PER_FRAME + scSegTokens,
+        degraded: true,
+      });
+      continue;
+    }
+
+    if (!current) {
+      current = {
+        index: chunks.length,
+        startSec: sc.startSec,
+        endSec: sc.endSec,
+        shots: [],
+        frames: [],
+        transcriptSegments: [],
+        estTokens: 0,
+      };
+    }
+
+    // 加上该 shot 后超 budget → 先 flush 当前, 开新段
+    if (current.estTokens + scTotal > budget && current.shots.length > 0) {
+      flush();
+      current = {
+        index: chunks.length,
+        startSec: sc.startSec,
+        endSec: sc.endSec,
+        shots: [],
+        frames: [],
+        transcriptSegments: [],
+        estTokens: 0,
+      };
+    }
+
+    current.shots.push(sc);
+    current.frames.push(...scFrames);
+    // transcript segments 可能跨 shot 边界, 用 Set 去重
+    for (const seg of scSegs) {
+      if (!current.transcriptSegments.some((x) => x.start === seg.start && x.end === seg.end)) {
+        current.transcriptSegments.push(seg);
+      }
+    }
+    current.endSec = sc.endSec;
+    current.estTokens += scTotal;
   }
+  flush();
+
+  for (const c of chunks) {
+    if (c.frames.length > frameCapByBudget) {
+      c.frames = c.frames.slice(0, frameCapByBudget);
+    }
+  }
+
+  return chunks;
+}
+
+// 估算"每段固定 overhead"。chunk pass 每段都要带:
+//   - system prompt
+//   - 全局上下文 (类型/lengthBucket/globalSummary/structureHint)
+//   - 输出 schema 模板
+//   - hard 要求 + 软约束文本
+// 不带 methodology, 不带帧描述/字幕(那部分按 chunk 数据动态算)
+function estimateChunkOverheadTokens(globalContext) {
+  // 系统 prompt + schema 模板 + 硬性要求 文本约 800 token
+  const FIXED_PROMPT_FOOTPRINT = 800;
+  let dynamic = 0;
+  if (globalContext) {
+    if (globalContext.globalSummary) dynamic += estimatePromptTokens(globalContext.globalSummary);
+    if (globalContext.structureHint) {
+      const sh = globalContext.structureHint;
+      dynamic += estimatePromptTokens([sh.hook, sh.climax, sh.ending].filter(Boolean).join(" "));
+    }
+    if (globalContext.detectedGenre) dynamic += 20;
+  }
+  return FIXED_PROMPT_FOOTPRINT + dynamic;
+}
+
+// 一次性 pass: 把所有内容(含 methodology + frames + transcript + shotContexts)
+// 塞进单个 chat/completions 请求, 模型一次出 { nodes, report }。
+// 适合短视频 / 信息量小、能装进 ctx 的场景。
+async function runSinglePassAnalysis({
+  effectiveProvider, project, frames, transcript, scenes, options, methodology,
+  reserveOutput,
+  handle, fallbackNodes, fallbackReport,
+}) {
+  const { userText } = await buildAnalysisPrompt(project, frames, transcript, scenes, options);
+  const systemText =
+    "你是一名严谨的视频拉片分析师。你既要描述视频内容，又要严格按照提供的剪辑方法论规则集对视频打标（命中 / 违反 / 缺失）。所有回答必须是合法 JSON，不要使用 Markdown 围栏，不要解释。";
 
   const imageDataUrls = [];
   for (const frame of frames) {
@@ -2037,16 +4448,434 @@ async function callOpenAICompatible(provider, project, frames, transcript, scene
     imageDataUrls.push(`data:image/jpeg;base64,${base64}`);
   }
 
-  const { userText, methodology } = await buildAnalysisPrompt(project, frames, visibleTranscript, scenes, options);
-  const systemText =
-    "你是一名严谨的视频拉片分析师。你既要描述视频内容，又要严格按照提供的剪辑方法论规则集对视频打标（命中 / 违反 / 缺失）。所有回答必须是合法 JSON，不要使用 Markdown 围栏，不要解释。";
+  const useResponses = effectiveProvider.endpointType === "openai_responses";
+  // probe 实测: json_object 不足以让 llama.cpp 编 grammar (它只对 json_schema 生效);
+  // 走宽松 json_schema strict:false, 0.8B 8 帧 chunk-pass 从 2/3 valid 提升到 4/4。
+  const responseFormat = {
+    type: "json_schema",
+    json_schema: { name: "single_pass_output", strict: false, schema: SINGLE_PASS_OUTPUT_SCHEMA },
+  };
+  // single-pass 输出量 = 14 shots × shotDescription + nodes + report ≈ 5K+ tok,
+  // 远超 openai-client default 2500。用 callOpenAICompatible 已经算好的 reserveOutput,
+  // 让"留给 output 的 ctx 预算"和"实际 max_tokens"对齐,避免输出被截断成残 JSON。
+  const callOpts = {
+    responseFormat,
+    maxTokens: reserveOutput,
+    maxOutputTokens: reserveOutput,
+    enableThinking: effectiveProvider.enableThinking === true,
+  };
+  const callResult = useResponses
+    ? await callOpenAIResponses(effectiveProvider, systemText, userText, imageDataUrls, handle, callOpts)
+    : await callOpenAIChatCompletions(effectiveProvider, systemText, userText, imageDataUrls, handle, callOpts);
+  const parsed = callResult.parsed;
+  // Layer 3 reasoning fallback 命中时这里能看到, 顺便记入 token-usage 让用户察觉异常
+  if (callResult.parsedSource === "reasoning") {
+    log.warn("main-analysis",
+      `Layer 3 fallback: content 没出 JSON, 已从 reasoning 末尾兜底提到 (reasoningLen=${callResult.reasoning?.length || 0})。` +
+      `检查 model.isThinking / slot.enableThinking 配置, 或 server 不接受 chat_template_kwargs.enable_thinking=false。`,
+    );
+  }
 
-  const useResponses = provider.endpointType === "openai_responses";
-  const parsed = useResponses
-    ? await callOpenAIResponses(provider, systemText, userText, imageDataUrls, handle)
-    : await callOpenAIChatCompletions(provider, systemText, userText, imageDataUrls, handle);
+  if (!parsed || (!Array.isArray(parsed.nodes) && !parsed.report)) {
+    // 诊断: 把模型真实吐出的内容 + thinking 长度 + usage 全打出来 ——
+    // (a) raw 空 + reasoning 长 = thinking 模型把内容全塞 reasoning_content (chat_template_kwargs 没生效)
+    // (b) raw 空 + reasoning 空 = stream 完全没出 (grammar 编译失败 / mmproj 没加载 / ctx 满)
+    // (c) raw 看着像 JSON 但被截断 = 输出超过 max_tokens
+    // (d) raw 非空但不是 JSON = markdown 围栏 / 自由文字
+    const raw = typeof callResult.raw === "string" ? callResult.raw : "";
+    const reasoning = typeof callResult.reasoning === "string" ? callResult.reasoning : "";
+    const usage = callResult.usage || null;
+    log.error("main-analysis",
+      `parse 失败诊断: rawLen=${raw.length} reasoningLen=${reasoning.length} ` +
+      `usage=${usage ? JSON.stringify(usage) : "n/a"} model=${callResult.model || effectiveProvider.model}`,
+    );
+    if (raw.length > 0) {
+      log.error("main-analysis", `raw head: ${JSON.stringify(raw.slice(0, 200))}`);
+      log.error("main-analysis", `raw tail: ${JSON.stringify(raw.slice(-200))}`);
+    }
+    if (reasoning.length > 0) {
+      log.error("main-analysis", `reasoning head: ${JSON.stringify(reasoning.slice(0, 200))}`);
+    }
+    const completionTokens = usage?.completionTokens ?? 0;
+    const hint =
+      raw.length === 0 && reasoning.length > 0
+        ? `模型在 thinking 模式没出 content (reasoning ${reasoning.length} 字符) — chat_template_kwargs.enable_thinking=false 可能没被 server 接受,需要换 server 版本或关 reasoning 模型`
+        : raw.length === 0
+          ? "模型 stream 0 字节 (grammar 编译失败 / mmproj 未加载 / ctx 满 / max_tokens=0)"
+          : completionTokens >= reserveOutput - 50
+            ? `输出被 max_tokens=${reserveOutput} 截断 (completion=${completionTokens})`
+            : "模型吐了内容但不是合法 JSON (markdown 围栏 / 自由文字)";
+    const sample = raw.length > 0
+      ? ` head=${JSON.stringify(raw.slice(0, 120))} tail=${JSON.stringify(raw.slice(-120))}`
+      : "";
+    throw new Error(
+      `模型未返回可解析的 JSON。${hint} ` +
+      `(rawLen=${raw.length} reasoningLen=${reasoning.length} completion=${completionTokens} max=${reserveOutput})${sample}`,
+    );
+  }
+  return {
+    ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, effectiveProvider, methodology),
+    usedModel: true,
+    usage: callResult.usage,
+    echoedModel: callResult.model,
+  };
+}
 
-  return { ...normalizeModelResult(parsed, fallbackNodes, fallbackReport, project, provider, methodology), usedModel: true };
+// 跑单个 chunk: 只产 nodes, 不带 methodology
+async function runChunkPass({ effectiveProvider, project, methodology, globalContext, chunk, totalChunks, options, reserveOutput, handle }) {
+  const userText = buildChunkPrompt(project, methodology, globalContext, chunk, totalChunks, options);
+  const imageDataUrls = [];
+  for (const frame of chunk.frames) {
+    const base64 = await fs.readFile(frame.framePath, "base64");
+    imageDataUrls.push(`data:image/jpeg;base64,${base64}`);
+  }
+  const useResponses = effectiveProvider.endpointType === "openai_responses";
+  // 见 runSinglePassAnalysis 同位置注释: json_schema strict:false 让 llama.cpp 编 GBNF
+  // 强制顶层 nodes 数组结构, 字段内部不约束。
+  const responseFormat = {
+    type: "json_schema",
+    json_schema: { name: "chunk_pass_output", strict: false, schema: CHUNK_PASS_OUTPUT_SCHEMA },
+  };
+  // 同 runSinglePassAnalysis: 预算和 max_tokens 对齐,避免大节点数 chunk 输出被截断。
+  const callOpts = {
+    responseFormat,
+    maxTokens: reserveOutput,
+    maxOutputTokens: reserveOutput,
+    enableThinking: effectiveProvider.enableThinking === true,
+  };
+  const callResult = useResponses
+    ? await callOpenAIResponses(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle, callOpts)
+    : await callOpenAIChatCompletions(effectiveProvider, CHUNK_SYSTEM_PROMPT, userText, imageDataUrls, handle, callOpts);
+  const parsed = callResult.parsed;
+  if (!parsed || !Array.isArray(parsed.nodes)) {
+    throw new Error(`chunk ${chunk.index + 1} 返回不是合法 JSON 或缺少 nodes 字段`);
+  }
+  return parsed.nodes;
+}
+
+// 跑 audit pass: 不带 frames, 只读 nodes + methodology + transcript + 全局
+async function runAuditPass({ effectiveProvider, project, methodology, globalContext, nodes, transcript, options, ctxSize, reserveOutput, safetyMargin, handle }) {
+  const auditSystemTokens = estimatePromptTokens(AUDIT_SYSTEM_PROMPT);
+  const budget = ctxSize - reserveOutput - auditSystemTokens - safetyMargin;
+  if (budget <= 0) {
+    throw new Error(`audit pass: 模型 ctx ${ctxSize} 不够装 audit prompt`);
+  }
+
+  // 先尝试完整 nodes; 装不下就 compactNodes (砍冗余字段); 还不下就截短 shotDescription
+  let compactNodes = false;
+  let workingTranscript = transcript;
+  let userText;
+  let promptTokens;
+  let attempt = 0;
+  let lastDecision = "";
+  while (true) {
+    attempt += 1;
+    if (attempt > 20) {
+      throw new Error(`audit pass 裁剪 ${attempt - 1} 轮仍无法装入 ctx=${ctxSize}; 最后: ${lastDecision}`);
+    }
+    userText = buildAuditPrompt(project, methodology, globalContext, nodes, workingTranscript, options, { compactNodes });
+    promptTokens = estimatePromptTokens(userText);
+    lastDecision = `prompt=${promptTokens}tok budget=${budget} compactNodes=${compactNodes} transcript=${workingTranscript?.text?.length || 0}字`;
+    if (promptTokens <= budget) break;
+
+    // 1) 先 compactNodes
+    if (!compactNodes) {
+      compactNodes = true;
+      continue;
+    }
+    // 2) 再砍 transcript
+    if (workingTranscript?.text && workingTranscript.text.length > 200) {
+      const next = Math.max(0, Math.floor(workingTranscript.text.length / 2));
+      const trimmed = trimTranscriptForBudget(
+        workingTranscript.text, workingTranscript.segments, Math.ceil(next),
+      );
+      workingTranscript = { ...workingTranscript, text: trimmed.text, segments: trimmed.segments };
+      continue;
+    }
+    throw new Error(`audit pass 无法装入 ctx=${ctxSize}: ${lastDecision}`);
+  }
+
+  log.info("analyze:main", `audit pass prompt=${promptTokens}tok budget=${budget} compactNodes=${compactNodes} attempts=${attempt}`);
+
+  const useResponses = effectiveProvider.endpointType === "openai_responses";
+  // 同 chunk-pass: json_schema strict:false。audit 输出 { nodeTags, report } 两个 optional 顶层字段。
+  const responseFormat = {
+    type: "json_schema",
+    json_schema: { name: "audit_pass_output", strict: false, schema: AUDIT_PASS_OUTPUT_SCHEMA },
+  };
+  // 同 runSinglePassAnalysis: 预算和 max_tokens 对齐;audit 输出 nodeTags + report,
+  // 节点多时同样会超 openai-client default 2500。
+  const callOpts = {
+    responseFormat,
+    maxTokens: reserveOutput,
+    maxOutputTokens: reserveOutput,
+    enableThinking: effectiveProvider.enableThinking === true,
+  };
+  const callResult = useResponses
+    ? await callOpenAIResponses(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle, callOpts)
+    : await callOpenAIChatCompletions(effectiveProvider, AUDIT_SYSTEM_PROMPT, userText, [], handle, callOpts);
+  const parsed = callResult.parsed;
+  if (!parsed) {
+    throw new Error("audit pass 返回不是合法 JSON");
+  }
+  // audit usage / echoedModel 一并带回, 给 mergeChunkedResult 拼到最终 result 里
+  return { parsed, usage: callResult.usage, echoedModel: callResult.model };
+}
+
+// 把 chunk pass 出来的 nodes + audit pass 的 nodeTags 和 report 合并成最终 result。
+// auditResult 是 runAuditPass 返回的 { parsed, usage, echoedModel }
+function mergeChunkedResult({ chunkNodes, auditResult, project, effectiveProvider, methodology, fallbackNodes, fallbackReport }) {
+  const auditParsed = auditResult?.parsed || null;
+  // 1) chunkNodes 已经按时间排序, 重新编号 id
+  const allNodes = [...chunkNodes].sort((a, b) => (a.startSec || 0) - (b.startSec || 0));
+  allNodes.forEach((n, i) => {
+    n.id = `node-${i + 1}`;
+  });
+
+  // 2) 把 audit 的 methodologyTags 按"原 chunk-level id 或时间近邻" 合回去
+  const tagsByOriginalId = new Map();
+  const tagsByTime = []; // fallback: 时间最近匹配
+  if (Array.isArray(auditParsed?.nodeTags)) {
+    for (const nt of auditParsed.nodeTags) {
+      if (!nt?.id) continue;
+      tagsByOriginalId.set(nt.id, nt.methodologyTags || []);
+      tagsByTime.push(nt);
+    }
+  }
+
+  // 3) audit 用的是重编号后的 id (node-1..N), 也可能用 chunk 原 id (chunk-1-node-1)
+  //    优先 node-1..N 匹配, 否则尝试原 id
+  allNodes.forEach((n, i) => {
+    const finalId = `node-${i + 1}`;
+    const tagsFromFinalId = tagsByOriginalId.get(finalId);
+    const tagsFromOriginal = n._originalId ? tagsByOriginalId.get(n._originalId) : null;
+    n.methodologyTags = tagsFromFinalId || tagsFromOriginal || [];
+    delete n._originalId;
+  });
+
+  // 4) 拼最终 payload, 跑现有的 normalizeModelResult 把字段规整
+  const payload = {
+    nodes: allNodes,
+    report: auditParsed?.report || {},
+  };
+  return {
+    ...normalizeModelResult(payload, fallbackNodes, fallbackReport, project, effectiveProvider, methodology),
+    usedModel: true,
+    // chunked 模式 usage 只反映 audit 阶段(chunk 阶段每段 usage 独立, 调用方暂不需要逐段)
+    usage: auditResult?.usage || null,
+    echoedModel: auditResult?.echoedModel || null,
+  };
+}
+
+// 分段拉片: chunk pass × N + audit pass × 1。
+async function runChunkedAnalysis({
+  effectiveProvider, project, frames, transcript, scenes, options, methodology, globalContext,
+  ctxSize, reserveOutput, safetyMargin,
+  handle, fallbackNodes, fallbackReport, sendProgress,
+}) {
+  const overheadTokens = estimateChunkOverheadTokens(globalContext);
+  const chunks = planAnalysisChunks({
+    ctxSize,
+    reserveOutput,
+    overheadTokens,
+    safetyMargin,
+    shotContexts: options?.shotContexts,
+    frames,
+    transcript,
+    durationSec: project.durationSec,
+  });
+  if (chunks.length === 0) {
+    throw new Error("planAnalysisChunks 切出 0 段, 检查 shotContexts/frames 是否为空。");
+  }
+
+  log.info("analyze:main",
+    `chunked: ctx=${ctxSize} overhead=${overheadTokens}tok 切 ${chunks.length} 段; ` +
+    chunks.map((c, i) => `#${i + 1}[${c.startSec.toFixed(0)}-${c.endSec.toFixed(0)}s shots=${c.shots.length} frames=${c.frames.length} ~${c.estTokens}tok]`).join(" "),
+  );
+
+  const CHUNK_MAX_RETRIES = 2;
+  const allChunkNodes = [];
+  for (let i = 0; i < chunks.length; i++) {
+    if (handle?.cancelled) throw new AnalysisCancelledError();
+    const chunk = chunks[i];
+    sendProgress?.(i, chunks.length, "chunk", chunk);
+    // 单段缓存 key:本段帧内容 + shots + 时间区间 + 全局上下文 + 模型。命中则跳过这段 LLM 调用,
+    // 这样取消/重启续跑时已跑完的 chunk 不重跑(outer main-analysis 缓存只在整段跑完才写,救不了中途)。
+    let chunkCacheKey = null;
+    if (cacheStore.isConfigured() && effectiveProvider?.model) {
+      try {
+        const frameShas = await Promise.all((chunk.frames || []).map((f) => cacheStore.sha256File(f.framePath).catch(() => null)));
+        if (frameShas.every(Boolean)) {
+          chunkCacheKey = cacheStore.makeKey({
+            scope: "main-analysis-chunk",
+            frames: frameShas,
+            shots: (chunk.shots || []).map((s) => ({ s: Math.round((s.startSec ?? 0) * 1000), e: Math.round((s.endSec ?? 0) * 1000) })),
+            startSec: Math.round((chunk.startSec ?? 0) * 1000),
+            endSec: Math.round((chunk.endSec ?? 0) * 1000),
+            totalChunks: chunks.length,
+            globalSummary: (globalContext?.globalSummary || "").slice(0, 2000),
+            options: { detectedGenre: options?.detectedGenre, manualGenre: options?.manualGenre, preset: options?.preset },
+            model: effectiveProvider.model,
+            baseUrl: effectiveProvider.baseUrl,
+            version: CACHE_VERSIONS.mainAnalysisChunk,
+          });
+        }
+      } catch { /* 算 key 失败 → 不缓存这段 */ }
+    }
+    let chunkOk = false;
+    for (let attempt = 0; attempt <= CHUNK_MAX_RETRIES; attempt++) {
+      if (handle?.cancelled) throw new AnalysisCancelledError();
+      try {
+        const nodes = await runWithCache("main-analysis-chunk", chunkCacheKey, () => runChunkPass({
+          effectiveProvider, project, methodology, globalContext, chunk,
+          totalChunks: chunks.length, options, reserveOutput, handle,
+        }));
+        nodes.forEach((n, j) => {
+          n._originalId = n.id || `chunk-${i + 1}-node-${j + 1}`;
+        });
+        allChunkNodes.push(...nodes);
+        chunkOk = true;
+        break;
+      } catch (err) {
+        if (err instanceof AnalysisCancelledError || err?.name === "AbortError") throw new AnalysisCancelledError();
+        if (attempt < CHUNK_MAX_RETRIES) {
+          log.warn("analyze:main", `chunk ${i + 1}/${chunks.length} 第 ${attempt + 1} 次失败, 重试: ${err?.message || err}`);
+          continue;
+        }
+        log.warn("analyze:main", `chunk ${i + 1}/${chunks.length} 重试 ${CHUNK_MAX_RETRIES} 次仍失败: ${err?.message || err}`);
+        allChunkNodes.push({
+          _originalId: `chunk-${i + 1}-failed`,
+          startSec: chunk.startSec,
+          endSec: chunk.endSec,
+          title: `第 ${i + 1} 段分析失败`,
+          nodeTypes: ["shot_change"],
+          shotDescription: `本段分析失败: ${err?.message || err}`,
+          narrativeFunction: "Other",
+        });
+      }
+    }
+  }
+
+  sendProgress?.(chunks.length, chunks.length, "audit", null);
+
+  // audit pass — 最多重试 2 次,全部失败则降级为不带审计的结果
+  const AUDIT_MAX_RETRIES = 2;
+  let auditResult = null;
+  for (let attempt = 0; attempt <= AUDIT_MAX_RETRIES; attempt++) {
+    if (handle?.cancelled) throw new AnalysisCancelledError();
+    try {
+      auditResult = await runAuditPass({
+        effectiveProvider, project, methodology, globalContext,
+        nodes: allChunkNodes, transcript, options,
+        ctxSize, reserveOutput, safetyMargin,
+        handle,
+      });
+      break;
+    } catch (auditErr) {
+      if (auditErr instanceof AnalysisCancelledError || auditErr?.name === "AbortError") throw new AnalysisCancelledError();
+      if (attempt < AUDIT_MAX_RETRIES) {
+        log.warn("analyze:main", `audit pass 第 ${attempt + 1} 次失败, 重试: ${auditErr?.message || auditErr}`);
+        continue;
+      }
+      log.warn("analyze:main", `audit pass 重试 ${AUDIT_MAX_RETRIES} 次仍失败, 降级为不带审计的结果: ${auditErr?.message || auditErr}`);
+    }
+  }
+
+  return mergeChunkedResult({
+    chunkNodes: allChunkNodes, auditResult,
+    project, effectiveProvider, methodology, fallbackNodes, fallbackReport,
+  });
+}
+
+async function callOpenAICompatible(provider, project, frames, transcript, scenes, fallbackNodes, fallbackReport, options, handle = null, sendProgress = null) {
+  if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
+    return { nodes: fallbackNodes, report: fallbackReport, usedModel: false };
+  }
+  log.info("analyze:main", `[analysis:${handle?.analysisId || "?"}] 主分析开始, provider=${provider.id} model=${provider.model} frames=${frames.length}`);
+
+  // 本地 llama: 显式 acquire 拿到 slot, 这样能读到 server 实际启动时的 --ctx-size,
+  // 用真实 ctx 做预算才准。同时给 provider 打 _preacquired 标记, 让 openai-client 不再二次 acquire。
+  let preacquiredSlot = null;
+  let effectiveProvider = provider;
+  if (provider.source === "local_llama") {
+    preacquiredSlot = await llamaManager.acquire(provider.model, {
+      signal: handle?.abortController?.signal,
+    });
+    effectiveProvider = {
+      ...provider,
+      baseUrl: preacquiredSlot.baseUrl,
+      apiKeyRef: preacquiredSlot.apiKey,
+      contextSize: preacquiredSlot.contextSize,
+      _preacquired: true,
+    };
+  }
+
+  try {
+    VISION_TOKENS_PER_FRAME = effectiveProvider.source === "local_llama"
+      ? VISION_TOKENS_PER_FRAME_LOCAL
+      : VISION_TOKENS_PER_FRAME_REMOTE;
+
+    const ctxSize = Number(effectiveProvider?.contextSize) > 0 ? Number(effectiveProvider.contextSize) : 8192;
+    // reserveForOutput 跟 ctx 走 (×0.25, 下限 1500, **无上限**):settings 里 ctx slider 调多大就给多大 output 预算。
+    // 在线大模型 (Claude 200K / Gemini 1M / Qwen3.5 256K) 和本地大 ctx 模型都按比例伸缩,
+    // thinking 模型也有足够空间 (thinking 占一半 content 占一半的极端 case)。
+    const reserveForOutput = Math.max(1500, Math.floor(ctxSize * 0.25));
+    const safetyMargin = Math.max(256, Math.floor(ctxSize * 0.05));
+    const globalContext = {
+      globalSummary: options?.globalSummary || null,
+      structureHint: options?.structureHint || null,
+      detectedGenre: options?.detectedGenre || options?.manualGenre || null,
+      genreConfidence: options?.genreConfidence || 0,
+    };
+
+    // 先估算"一次性 pass"需要多少 token (含 methodology), 看 ctx 是否能装下。
+    const { userText: singleUserText, methodology } = await buildAnalysisPrompt(
+      project, frames, transcript, scenes, options,
+    );
+    const singleSystemText =
+      "你是一名严谨的视频拉片分析师。你既要描述视频内容，又要严格按照提供的剪辑方法论规则集对视频打标（命中 / 违反 / 缺失）。所有回答必须是合法 JSON，不要使用 Markdown 围栏，不要解释。";
+    const singleSystemTokens = estimatePromptTokens(singleSystemText);
+    const singlePromptTokens = estimatePromptTokens(singleUserText);
+    const singleImageTokens = frames.length * VISION_TOKENS_PER_FRAME;
+    const singleTotal = singleSystemTokens + singlePromptTokens + singleImageTokens;
+    const singleBudget = ctxSize - reserveForOutput - safetyMargin;
+
+    log.info("analyze:main",
+      `provider=${effectiveProvider.id} model=${effectiveProvider.model} ctx=${ctxSize} ` +
+      `single-pass=${singleTotal}tok (sys=${singleSystemTokens} user=${singlePromptTokens} images=${frames.length}*${VISION_TOKENS_PER_FRAME}=${singleImageTokens}) ` +
+      `budget=${singleBudget} → ${singleTotal <= singleBudget ? "走单次" : "走分段"}`,
+    );
+
+    if (singleTotal <= singleBudget) {
+      const SINGLE_MAX_RETRIES = 2;
+      for (let attempt = 0; attempt <= SINGLE_MAX_RETRIES; attempt++) {
+        if (handle?.cancelled) throw new AnalysisCancelledError();
+        try {
+          return await runSinglePassAnalysis({
+            effectiveProvider, project, frames, transcript, scenes, options, methodology,
+            reserveOutput: reserveForOutput,
+            handle, fallbackNodes, fallbackReport,
+          });
+        } catch (err) {
+          if (err instanceof AnalysisCancelledError || err?.name === "AbortError") throw new AnalysisCancelledError();
+          if (attempt < SINGLE_MAX_RETRIES) {
+            log.warn("analyze:main", `single-pass 第 ${attempt + 1} 次失败, 重试: ${err?.message?.slice(0, 200) || err}`);
+            continue;
+          }
+          throw err;
+        }
+      }
+    }
+
+    // 装不下 → 分段
+    return await runChunkedAnalysis({
+      effectiveProvider, project, frames, transcript, scenes, options, methodology, globalContext,
+      ctxSize, reserveOutput: reserveForOutput, safetyMargin,
+      handle, fallbackNodes, fallbackReport, sendProgress,
+    });
+  } finally {
+    preacquiredSlot?.release();
+  }
 }
 
 // Pass 1（轻量、无图）：仅靠字幕分段 + 镜头列表识别 genre。失败时返回 null。
@@ -2082,9 +4911,10 @@ async function detectGenreLightweight(provider, project, scenes, transcript, han
 
   try {
     const useResponses = provider.endpointType === "openai_responses";
-    const parsed = useResponses
+    const callResult = useResponses
       ? await callOpenAIResponses(provider, systemText, userText, [], handle)
       : await callOpenAIChatCompletions(provider, systemText, userText, [], handle);
+    const parsed = callResult.parsed;
     const genre = String(parsed?.detectedGenre || "").trim();
     if (!ALLOWED_GENRES.has(genre)) return null;
     const conf = Number(parsed?.genreConfidence);
@@ -2092,6 +4922,8 @@ async function detectGenreLightweight(provider, project, scenes, transcript, han
       detectedGenre: genre,
       genreConfidence: Number.isFinite(conf) ? Math.max(0, Math.min(1, conf)) : 0.5,
       reasoning: String(parsed?.reasoning || "").slice(0, 500),
+      usage: callResult.usage,
+      echoedModel: callResult.model,
     };
   } catch (error) {
     if (handle?.cancelled) throw error;
@@ -2164,111 +4996,341 @@ async function transcribeAudio(audioProvider, wavPath, handle, onProgress) {
   };
 }
 
-// 把任意旧/新 modelId 规范化成 whisper.cpp 的 ggml-* key。
-// 老 Xenova/whisper-* 配置在 migrate 时已经被改写, 这里是双保险。
-function normalizeWhisperCppModelId(rawId) {
-  if (!rawId) return "ggml-base";
-  const xenovaMap = {
-    "Xenova/whisper-tiny": "ggml-tiny",
-    "Xenova/whisper-base": "ggml-base",
-    "Xenova/whisper-small": "ggml-small",
-    "Xenova/whisper-medium": "ggml-medium",
+// 把任意旧 modelId 规范化成 daemon 的 whisper-* key。
+function normalizeWhisperModelId(rawId) {
+  if (!rawId) return "whisper-base";
+  const legacyMap = {
+    "Xenova/whisper-tiny": "whisper-tiny",
+    "Xenova/whisper-base": "whisper-base",
+    "Xenova/whisper-small": "whisper-small",
+    "Xenova/whisper-medium": "whisper-medium",
+    "ggml-tiny": "whisper-tiny",
+    "ggml-base": "whisper-base",
+    "ggml-small": "whisper-small",
+    "ggml-medium": "whisper-medium",
   };
-  return xenovaMap[rawId] || rawId;
+  return legacyMap[rawId] || rawId;
 }
 
 async function transcribeLocalWhisperCpp(audioProvider, wavPath, handle, onProgress) {
-  const modelId = normalizeWhisperCppModelId(
+  const daemonClient = require("./daemon-client.cjs");
+  const modelId = normalizeWhisperModelId(
     audioProvider.localWhisperModel || audioProvider.model,
   );
-  // 没下过模型就先下
-  const status = await whisperCppRuntime.listModels();
-  const target = status.find((m) => m.key === modelId);
-  if (!target) throw new Error(`未知 whisper.cpp 模型: ${modelId}`);
-  if (!target.downloaded) {
-    if (onProgress) onProgress({ stage: "download", message: `${target.name} 首次使用,下载模型中` });
-    const mirror = await getLocalModelMirror();
-    await whisperCppRuntime.ensureModel(modelId, (p) => {
-      if (p.percent != null && onProgress) {
-        onProgress({ stage: "download", message: p.message });
+  // 确保模型已下载
+  const ms = await daemonClient.getModelStatus(modelId);
+  if (!ms) throw new Error(`未知 whisper 模型: ${modelId}`);
+  if (!ms.ready) {
+    if (onProgress) onProgress({ stage: "download", message: `${ms.name || modelId} 首次使用,下载模型中` });
+    await daemonClient.downloadModel(modelId, (p) => {
+      if (p.pct != null && onProgress) {
+        onProgress({ stage: "download", message: `${modelId} ${p.pct}%` });
       }
-    }, { mirror });
+    });
   }
-  const transcriber = getTranscriber("whisper_cpp");
-  return transcriber.transcribe({
-    wavPath,
-    modelId,
-    language: audioProvider.language || null,
-    onProgress,
-    handle,
+
+  if (onProgress) onProgress({ stage: "load", message: "正在准备本地语音引擎" });
+
+  // 通过 daemon 的 OpenAI 兼容转写接口,自动管理 whisper-server 生命周期
+  const language = audioProvider.language || null;
+  const isZh = isChineseLangMain(language);
+
+  if (onProgress) onProgress({ stage: "infer", message: "本地语音引擎推理中" });
+  const fileBytes = await fs.readFile(wavPath);
+  const data = await daemonClient.transcribe(fileBytes, {
+    model: modelId,
+    response_format: "verbose_json",
+    language: language || undefined,
+    temperature: "0",
+    prompt: isZh ? SIMPLIFIED_PROMPT_ZH : undefined,
   });
+
+  // OpenCC 简繁转换后处理
+  const detectedLang = data?.language || language || null;
+  const shouldSimplify = isChineseLangMain(detectedLang) || isZh;
+  const normalize = (s) => {
+    const t = String(s || "").trim();
+    return shouldSimplify && t ? t2sConverterMain(t) : t;
+  };
+  const segments = Array.isArray(data?.segments)
+    ? data.segments.map((s) => ({ start: Number(s.start) || 0, end: Number(s.end) || 0, text: normalize(s.text) }))
+    : [];
+  const fullText = typeof data?.text === "string" ? normalize(data.text) : segments.map((s) => s.text).join(" ").trim();
+  return {
+    language: detectedLang,
+    text: fullText,
+    segments,
+    duration: Number(data?.duration) || 0,
+  };
 }
 
 async function warmupLocalWhisperCpp(audioProvider) {
-  const modelId = normalizeWhisperCppModelId(
+  const daemonClient = require("./daemon-client.cjs");
+  const modelId = normalizeWhisperModelId(
     audioProvider.localWhisperModel || audioProvider.model,
   );
   const t0 = Date.now();
-  // ensureBinary 不存在 → 提示开发者跑 build script
-  if (!whisperCppRuntime.resolveBinaryPath()) {
-    throw new Error(
-      "找不到 whisper-server 可执行文件,请先运行 scripts/build-whisper-cpp.sh 编译。",
-    );
+  // 确保二进制就绪
+  const bins = await daemonClient.getBinariesStatus();
+  if (!bins?.whisperServer?.available) {
+    await daemonClient.downloadBinary("whisper-server", () => {});
   }
-  const models = await whisperCppRuntime.listModels();
-  const target = models.find((m) => m.key === modelId);
-  if (!target) throw new Error(`未知 whisper.cpp 模型: ${modelId}`);
-  if (!target.downloaded) {
-    const mirror = await getLocalModelMirror();
-    await whisperCppRuntime.ensureModel(modelId, undefined, { mirror });
+  // 确保模型已下载
+  const ms = await daemonClient.getModelStatus(modelId);
+  if (!ms) throw new Error(`未知 whisper 模型: ${modelId}`);
+  if (!ms.ready) {
+    await daemonClient.downloadModel(modelId, () => {});
   }
-  await whisperCppRuntime.start(modelId);
+  await daemonClient.startWhisper(modelId);
   return { modelId, elapsedMs: Date.now() - t0 };
 }
 
-async function analyzeProject(event, { project, provider: _legacyProvider, audioProvider: _legacyAudio, options }) {
-  if (activeAnalyses.has(project.id)) {
-    throw new Error("该项目已有分析任务在运行。");
+async function analyzeProject(event, { project, provider: _legacyProvider, audioProvider: _legacyAudio, options, slotOverrides, resumeAnalysisId }) {
+  // 只拦截同管线类型的重复分析，不同管线可以并行
+  if (isTaskActiveForVideo(project.id, "builtin-pipeline")) {
+    const stale = getTaskForVideo(project.id);
+    if (stale?.cancelled) {
+      log.info("analyze:lifecycle", `analyzeProject: 发现已取消的旧 handle project=${project.id} analysisId=${stale.analysisId || "?"}`);
+      clearTask(stale.analysisId);
+    } else {
+      log.warn("analyze:lifecycle", `analyzeProject: 拒绝启动 — 已有同类型分析在运行 project=${project.id} analysisId=${stale?.analysisId || "?"}`);
+      throw new Error("该视频已有结构拆解在运行。");
+    }
   }
+  // resumeAnalysisId 非空 = 续跑一个被中断的分析:复用同一 analysisId + 磁盘 checkpoint,不新建记录。
+  const isResume = !!resumeAnalysisId;
+  const analysisId = resumeAnalysisId || _crypto.randomUUID();
+  const handle = registerTask(analysisId, project.id, "builtin-pipeline");
+  handle.analysisId = analysisId;
+  const analysisStartedAt = Date.now();
+  log.info("analyze", `[analysis:${analysisId}] ${isResume ? "续跑(复用 checkpoint)" : "开始"}分析 project=${project.id} title="${project.videoName || project.title || ""}"`);
+
   // 在管线开始时一次性快照 config + 从 taskSlots/audioSlot 解析各任务的 effective provider,
   // 避免运行中用户改设置导致竞争。renderer 传入的 provider/audioProvider 入参作废。
-  const cfgSnapshot = migrateConfigV1ToV2(await readJson(getConfigPath(), null));
-  const complexVisionProvider = resolveSlotProvider(cfgSnapshot, "complex_vision");
-  const mediumTextProvider = resolveSlotProvider(cfgSnapshot, "medium_text");
-  const audioProvider = resolveAudioProvider(cfgSnapshot);
-  // 兼容旧主流程变量名
-  const provider = complexVisionProvider;
-  const handle = registerAnalysis(project.id);
-  const analysisStartedAt = Date.now();
+  let cfgSnapshot, complexVisionProvider, mediumTextProvider, audioProvider, provider;
+  try {
+    cfgSnapshot = migrateConfigV1ToV2(readConfig());
+    const pipelineCfg = resolvePipelineConfig(cfgSnapshot, "pipeline");
+    cfgSnapshot = { ...cfgSnapshot, taskSlots: pipelineCfg.taskSlots, audioSlot: pipelineCfg.audioSlot };
+    if (slotOverrides) cfgSnapshot = await applyAvailableSlotOverrides(cfgSnapshot, slotOverrides, "pipeline");
+    _activeCachePolicy = cfgSnapshot?.cachePolicy || null;
+    complexVisionProvider = resolveSlotProvider(cfgSnapshot, "complex_vision");
+    mediumTextProvider = resolveSlotProvider(cfgSnapshot, "medium_text");
+    audioProvider = resolveAudioProvider(cfgSnapshot);
+    provider = complexVisionProvider;
+
+    // 前置校验: 本地模型 provider 必须引擎已装 + 模型已下载,否则直接拦截
+    const localProviders = [complexVisionProvider, mediumTextProvider].filter(
+      (p) => p?.source === "local_llama",
+    );
+    if (localProviders.length > 0) {
+      const daemonClient = require("./daemon-client.cjs");
+      const bins = await daemonClient.getBinariesStatus();
+      if (!bins?.llamaServer?.available) {
+        const err = new Error("当前选择了本地模型,但推理引擎还没安装,需要先到设置页安装。");
+        err.code = "LOCAL_SETUP_REQUIRED";
+        throw err;
+      }
+      for (const lp of localProviders) {
+        const ms = await daemonClient.getModelStatus(lp.model);
+        if (!ms || !ms.ready) {
+          const displayName = ms?.name || lp.model;
+          const err = new Error(`当前选择的本地模型「${displayName}」还没下载完成,需要先到设置页下载。`);
+          err.code = "LOCAL_SETUP_REQUIRED";
+          throw err;
+        }
+      }
+    }
+  } catch (setupErr) {
+    clearTask(analysisId);
+    throw setupErr;
+  }
+
+  // 创建分析记录骨架
+  const analysisRecord = {
+    id: analysisId,
+    projectId: project.id,
+    status: "analyzing",
+    providerId: complexVisionProvider?.id,
+    model: complexVisionProvider?.model,
+    analysisOptions: options,
+    startedAt: new Date(analysisStartedAt).toISOString(),
+    createdAt: new Date(analysisStartedAt).toISOString(),
+  };
+  {
+    const db = getDb();
+    if (isResume) {
+      // 续跑:行已存在,只把状态切回 analyzing、清掉上次的结束态。
+      db.prepare("UPDATE analyses SET status = 'analyzing', completed_at = NULL, error_message = NULL WHERE id = ?")
+        .run(analysisId);
+    } else {
+      db.prepare(
+        "INSERT INTO analyses (id, video_id, pipeline_id, status, options, started_at, created_at) VALUES (?, ?, ?, 'analyzing', ?, ?, ?)"
+      ).run(analysisId, project.id, "builtin-pipeline", JSON.stringify(analysisRecord.analysisOptions || null), analysisStartedAt, analysisStartedAt);
+    }
+    db.prepare("UPDATE videos SET status = 'analyzing', updated_at = ? WHERE id = ?")
+      .run(Date.now(), project.id);
+  }
 
   // 阶段耗时记录:每次 send 检测 stage 字符串变化,把上一个 stage 的 duration 推入
+  // stage 内可通过 handle.attachStageMeta({...}) 注入额外元数据 (frames 数、shots 数、
+  // model 名、tok/s 之类), 关 stage 时跟 durationMs 一起持久化, 用于 ETA 标定。
   const timings = [];
   let currentStage = null;
   let currentStageStartedAt = analysisStartedAt;
+  let currentStageMeta = {};
+  // tokenLedger 是累加全程的, 关 stage 时跟上一次快照算 delta 挂到 timings, 让 eta-learner
+  // 能 join (stage durationMs, completion tokens) 出 effective TPS, 不需要专门记 wall time。
+  const lastBucketSnapshot = new Map(); // key = `${stage}|${providerId}|${model}`
+  const collectTokenDelta = () => {
+    if (!handle.tokenLedger) return null;
+    const snap = handle.tokenLedger.snapshot();
+    const delta = [];
+    for (const bucket of snap.stages) {
+      const k = `${bucket.stage}|${bucket.providerId || ""}|${bucket.model || ""}`;
+      const last = lastBucketSnapshot.get(k) || { promptTokens: 0, completionTokens: 0, totalTokens: 0, callCount: 0 };
+      const d = {
+        stage: bucket.stage,
+        providerId: bucket.providerId,
+        model: bucket.model,
+        source: bucket.source,
+        promptTokens: bucket.promptTokens - last.promptTokens,
+        completionTokens: bucket.completionTokens - last.completionTokens,
+        totalTokens: bucket.totalTokens - last.totalTokens,
+        callCount: bucket.callCount - last.callCount,
+      };
+      if (d.completionTokens > 0 || d.callCount > 0) delta.push(d);
+      lastBucketSnapshot.set(k, {
+        promptTokens: bucket.promptTokens,
+        completionTokens: bucket.completionTokens,
+        totalTokens: bucket.totalTokens,
+        callCount: bucket.callCount,
+      });
+    }
+    return delta.length > 0 ? delta : null;
+  };
   const closeCurrentStage = (note) => {
     if (currentStage) {
+      const tokenDelta = collectTokenDelta();
       timings.push({
         stage: currentStage,
         durationMs: Date.now() - currentStageStartedAt,
+        ...(Object.keys(currentStageMeta).length ? { meta: currentStageMeta } : {}),
+        ...(tokenDelta ? { tokenDelta } : {}),
         ...(note ? { note } : {}),
       });
+      currentStage = null; // 幂等: finally 路径会再 close 一次, 避免重复 push
+      try {
+        const db = getDb();
+        // stageSnapshot 不再存 analyses 表，只落磁盘 timings.json
+      } catch { /* best-effort */ }
     }
+    currentStageMeta = {};
   };
   handle.timings = timings;
+  handle.attachStageMeta = (partial) => {
+    if (!partial || typeof partial !== "object") return;
+    currentStageMeta = { ...currentStageMeta, ...partial };
+  };
 
-  const send = (progress, stage, message) => {
-    if (handle.cancelled) return;
+  // Token 账本: 每个 LLM 阶段调用完后 record(usage), cache 命中走 cacheHit(); 收尾时
+  // snapshot 进 report.tokenUsage 持久化。缓存命中时从上一次成功分析的 token-usage
+  // 里回填对应 stage 的消耗量，让 UI 上能看到"这段如果不走缓存要花多少 token"。
+  let priorTokenStages = null;
+  try {
+    const db = getDb();
+    const priorRow = db.prepare(
+      "SELECT id FROM analyses WHERE video_id = ? AND id != ? ORDER BY created_at DESC LIMIT 1"
+    ).get(project.id, analysisId);
+    if (priorRow?.id) {
+      const priorUsage = await readJson(
+        path.join(getAnalysisDir(project.id, priorRow.id), "token-usage.json"), null
+      );
+      if (priorUsage?.stages?.length) priorTokenStages = priorUsage.stages;
+    }
+  } catch { /* best-effort */ }
+  const tokenLedger = createTokenLedger(priorTokenStages);
+  handle.tokenLedger = tokenLedger;
+
+  // stageIndex 映射: stage 中文名 → 流水线 UI 阶段索引 (0-8), 与 renderer PIPELINE_STAGE_DEFS 对齐。
+  // timing 系统仍用细粒度的 stage 字符串做 key (eta-samples / DiagnosticsScreen 依赖它)。
+  const STAGE_INDEX_MAP = {
+    "下载视频": 0, "下载完成": 0,
+    "读取视频信息": 1, "校验视频": 1,
+    "检测镜头切换": 2,
+    "挑选关键画面": 3, "抽取关键画面": 3, "画面去重": 3,
+    "本地推理预检": 3, "本地初筛": 3, "本地初筛失败": 3, "精挑画面": 3,
+    "提取音轨": 4, "字幕识别": 4, "字幕识别完成": 4, "字幕识别失败": 4, "字幕识别跳过": 4,
+    "镜头合并": 5, "镜头缩略图": 5, "镜头缩略图就绪": 5, "镜头合并完成": 5, "镜头合并失败": 5,
+    "全局聚合": 6, "全局聚合完成": 6, "全局聚合跳过": 6, "全局聚合失败": 6,
+    "准备分析素材": 6, "识别视频类型": 6, "识别视频类型完成": 6, "类型识别跳过": 6, "类型识别完成": 6,
+    "模型分析画面": 7, "主分析(分段)": 7, "主分析(审计)": 7, "分析失败": 7,
+    "拉取弹幕": 7, "弹幕情绪聚合": 7, "弹幕情绪聚合完成": 7, "弹幕分析完成": 7, "弹幕分析失败": 7,
+    "整理结果": 8, "保存失败快照": 8,
+    "完成": 9, "已结束": 9, "生成最终报告": 9,
+  };
+
+  const send = (progress, stage, message, meta = {}) => {
+    if (handle.cancelled) {
+      if (!handle._cancelSkipLogged) {
+        handle._cancelSkipLogged = true;
+        log.info("analyze:lifecycle", `[analysis:${analysisId}] send() 首次跳过: 已取消, stage="${stage}" progress=${progress} (后续跳过不再打印)`);
+      }
+      return;
+    }
     if (stage !== currentStage) {
       closeCurrentStage();
       currentStage = stage;
       currentStageStartedAt = Date.now();
     }
-    const payload = { projectId: project.id, progress, stage, message };
+    const payload = { projectId: project.id, analysisId, progress, stage, message };
+    const si = STAGE_INDEX_MAP[stage];
+    if (si != null) payload.stageIndex = si;
+    if (meta && meta.fromCache) payload.fromCache = true;
     handle.lastProgress = payload;
     handle.lastProgressAt = Date.now();
-    // 广播到所有窗口,允许关窗后重开的新 renderer 继续接收进度。
     broadcastToWindows("analysis:progress", payload);
+
+    // 持久化进度快照到 analyses 行(节流:换 stage 立即写,否则 ≥1s 写一次)。
+    // 这是"后端有状态"的核心:任意时刻 DB 里都有最新进度,前端纯视图读它,重启也能回灌。
+    const persistNow = Date.now();
+    if (stage !== handle._lastPersistStage || persistNow - (handle._lastPersistAt || 0) >= 1000) {
+      handle._lastPersistStage = stage;
+      handle._lastPersistAt = persistNow;
+      try {
+        getDb().prepare(
+          "UPDATE analyses SET progress = ?, stage = ?, stage_index = ?, message = ?, heartbeat_at = ? WHERE id = ?"
+        ).run(Math.round(progress), stage, si != null ? si : null, message || "", persistNow, analysisId);
+      } catch { /* best-effort, 不阻塞分析 */ }
+    }
   };
+
+  // ETA baseline: 根据 project.durationSec + providers + machine baseline 算出各 stage 预算,
+  // 立刻广播一次。ProgressScreen 用它替换 "elapsed/progress 线性外推" 的粗算法。
+  // 实际跑到某 stage 时 baseline 偏低 / 偏高都由 renderer 端的 已完成 stage 实测时长去校准。
+  try {
+    const prefilterModelKey = cfgSnapshot?.lastLlamaModelKey || null;
+    const budget = etaEstimator.computeBudget({
+      durationSec: project.durationSec,
+      hasAudio: project.hasAudio !== false,
+      platform: project.source?.platform,
+      complexVisionProvider,
+      mediumTextProvider,
+      audioProvider,
+      prefilterEnabled: !!prefilterModelKey,
+      prefilterModelKey,
+      contextSize: complexVisionProvider?.contextSize,
+      options,
+      // 学习器拟合的云端 TPS — 覆盖 hardcoded fallback。本地模型不受影响。
+      learnedBaselines,
+    });
+    if (budget.totalMs > 0) {
+      handle.budget = { projectId: project.id, analysisId, budget };
+      broadcastToWindows("analysis:budget", handle.budget);
+    }
+  } catch (err) {
+    log.warn("analyze:budget", "计算 ETA budget 失败:", err?.message || err);
+  }
 
   // 心跳:某些阶段(本地 whisper 加载/推理)单次任务 30s+,
   // 中间没有事件 UI 看起来卡死。每 2s 重发最近一次 progress 并附累计等待时长。
@@ -2276,20 +5338,49 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     if (handle.cancelled || !handle.lastProgress) return;
     const idle = Date.now() - (handle.lastProgressAt || 0);
     if (idle < 1500) return;
-    const elapsed = Math.floor(idle / 1000);
+    const elapsed = formatDuration(idle);
     const base = handle.lastProgress;
     const baseMsg = base.message || "";
-    // 已经带过 "已等待 Ns" 后缀,只更新数字
-    const stripped = baseMsg.replace(/\s*·?\s*已等待 \d+s$/, "");
-    const msg = stripped ? `${stripped} · 已等待 ${elapsed}s` : `已等待 ${elapsed}s`;
+    // 已经带过 "已等待 ..." 后缀,只更新时长 (匹配 23s / 23.6s / 3分05秒 三种格式)
+    const stripped = baseMsg.replace(/\s*·?\s*已等待 (?:\d+(?:\.\d+)?s|\d+ms|\d+分\d+秒)$/, "");
+    const msg = stripped ? `${stripped} · 已等待 ${elapsed}` : `已等待 ${elapsed}`;
     broadcastToWindows("analysis:progress", { ...base, message: msg });
   }, 2000);
   handle.heartbeat = heartbeat;
 
+  // ETA 埋点: 在分析全部生命周期里记录 ok / cancelled / failed, 结束时 append 一行到
+  // userData/eta-samples.jsonl, 用于离线推算各阶段耗时模型 (视频时长/帧数/shot数/tok-s)。
+  let analysisOutcome = "failed";
+  let analysisFailureMsg = null;
+
   try {
-    const inputPath = resolveProjectVideoPath(project);
+    let inputPath = resolveProjectVideoPath(project);
     if (!inputPath || !fsSync.existsSync(inputPath)) {
-      throw new Error("找不到本地视频文件，无法开始分析。");
+      const sourceUrl = project?.source?.type === "url" ? project.source.url : null;
+      if (!sourceUrl) {
+        throw new Error("找不到本地视频文件，无法开始分析。");
+      }
+      send(1, "下载视频", "视频文件缺失,正在重新下载…");
+      const projectDir = getVideoDir(project.id);
+      const mediaDir = path.join(projectDir, "media");
+      await fs.mkdir(mediaDir, { recursive: true });
+      const video = await performUrlDownloadFlow(sourceUrl, {
+        projectId: project.id,
+        mediaDir,
+        handle,
+        onProgress: (pct, stage, msg) => send(Math.min(9, Math.round(pct * 0.09)), stage, msg),
+      });
+      inputPath = video.filePath;
+      if (!inputPath || !fsSync.existsSync(inputPath)) {
+        throw new Error("视频重新下载后仍找不到文件。");
+      }
+      project.localFilePath = inputPath;
+      project.localVideoPath = video.mediaUrl;
+      project.durationSec = video.durationSec;
+      project.width = video.width;
+      project.height = video.height;
+      project.orientation = video.orientation;
+      if (video.title || video.filename) project.videoName = video.title || video.filename;
     }
 
     const ffmpeg = await commandPath("ffmpeg");
@@ -2298,127 +5389,336 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       throw new Error("未检测到 ffmpeg/ffprobe，无法生成关键帧和媒体清单。");
     }
 
-    send(5, "读取视频信息", "正在校验视频时长、分辨率、音轨。");
-    ensureNotCancelled(handle);
-    const inspected = await inspectVideo(inputPath, handle);
-    const projectDir = getProjectDir(project.id);
+    const projectDir = getVideoDir(project.id);
     const artifactDir = path.join(projectDir, "artifacts");
     await fs.mkdir(artifactDir, { recursive: true });
-    const projectMeta = { ...project, ...inspected, hasAudio: inspected.hasAudio };
 
-    send(12, "检测镜头切换", "扫描视频中的镜头切换点。");
-    ensureNotCancelled(handle);
-    const sceneThreshold = sceneThresholdFor(options);
-    const scenes = await detectScenes(ffmpeg, inputPath, sceneThreshold, handle);
-    // 本地初筛预检: 用户希望用(lastLlamaModelKey 存在) → 主动确认/启动 server,
-    // 失败一律降级为"跳过初筛但继续分析",绝不阻断主流程。
-    let localStatus = llamaRuntime.getStatus();
-    let localPrefilterReady = !!(localStatus.running && localStatus.port);
-    if (!localPrefilterReady) {
-      const cfg = await readJson(getConfigPath(), null).catch(() => null);
+    // 本地初筛预检(始终重新评估,不从 checkpoint 恢复)
+    let localPrefilterReady = false;
+    let prefilterModelKey = null;
+    {
+      let cfg = null;
+      try { cfg = readConfig(); } catch { /* noop */ }
       const preferredModel = cfg?.lastLlamaModelKey;
       if (preferredModel) {
-        if (!localStatus.binaryFound) {
-          send(10, "本地推理预检", "推理引擎未安装,本次跳过初筛(去设置 → 本地推理可安装)。");
-        } else {
-          const models = await llamaRuntime.listModels();
-          const target = models.find((m) => m.key === preferredModel);
-          if (!target || !target.downloaded) {
-            send(10, "本地推理预检", `模型 ${preferredModel} 未下载完成,本次跳过初筛。`);
-          } else if (localStatus.status === "starting") {
-            send(10, "本地推理预检", "本地模型启动中,等待就绪(最多 15 秒)。");
-            const deadline = Date.now() + 15_000;
-            while (Date.now() < deadline) {
-              await new Promise((r) => setTimeout(r, 500));
-              localStatus = llamaRuntime.getStatus();
-              if (localStatus.running) break;
-              ensureNotCancelled(handle);
-            }
-            localPrefilterReady = !!(localStatus.running && localStatus.port);
-            if (!localPrefilterReady) {
-              send(10, "本地推理预检", "本地模型 15 秒内未就绪,本次跳过初筛。");
-            }
+        const daemonClient = require("./daemon-client.cjs");
+        try {
+          const bins = await daemonClient.getBinariesStatus();
+          if (!bins?.llamaServer?.available) {
+            send(7, "本地推理预检", "推理引擎未安装,本次跳过初筛(去设置 → 本地推理可安装)。");
           } else {
-            send(10, "本地推理预检", `本地模型未启动,正在自动拉起 ${preferredModel}…`);
-            try {
-              await llamaRuntime.start(preferredModel);
-              localStatus = llamaRuntime.getStatus();
-              localPrefilterReady = !!(localStatus.running && localStatus.port);
-            } catch (error) {
-              send(10, "本地推理预检", `本地模型启动失败: ${error?.message || error}。本次跳过初筛。`);
+            const ms = await daemonClient.getModelStatus(preferredModel);
+            if (!ms || !ms.ready) {
+              send(8, "本地推理预检", `模型 ${preferredModel} 未下载完成,本次跳过初筛。`);
+            } else {
+              localPrefilterReady = true;
+              prefilterModelKey = preferredModel;
             }
           }
+        } catch (err) {
+          send(7, "本地推理预检", `daemon 不可用,跳过初筛: ${err.message}`);
         }
       }
     }
-    const finalCount = targetFrameCount(inspected.durationSec || project.durationSec || 1, options);
-    const candidateCount = candidateFrameCount(
-      inspected.durationSec || project.durationSec || 1,
-      options,
-      localPrefilterReady,
-    );
-    const plan = planFramePlan(scenes, inspected.durationSec || project.durationSec || 1, candidateCount);
+
+    // --- Checkpoint Phase 1: 视频检测 + 场景分析 + 帧计划 ---
+    const manifestPath = path.join(projectDir, "media-manifest.json");
+    const savedManifest = await readJson(manifestPath, null).catch(() => null);
+    const manifestValid = savedManifest
+      && savedManifest.pipelineVersion === PIPELINE_VERSION
+      && savedManifest.scenes?.length > 0
+      && savedManifest.plan?.length > 0;
+
+    let inspected, scenes, plan, finalCount, candidateCount, inputFileSize;
+    if (manifestValid) {
+      send(3, "读取视频信息", "已有可复用的检测结果，跳过。", { fromCache: true });
+      send(5, "检测镜头切换", `${savedManifest.scenes.length} 个镜头 · 计划抽 ${savedManifest.candidateFrameCount || savedManifest.plan.length} 帧，复用缓存。`, { fromCache: true });
+      inspected = {
+        durationSec: savedManifest.durationSec,
+        width: savedManifest.width,
+        height: savedManifest.height,
+        orientation: savedManifest.orientation,
+        hasAudio: savedManifest.hasAudio,
+      };
+      scenes = savedManifest.scenes;
+      inputFileSize = await fs.stat(inputPath).then((s) => s.size).catch(() => 0);
+      handle.attachStageMeta({ fileSizeBytes: inputFileSize, durationSec: inspected.durationSec, width: inspected.width, height: inspected.height, resumed: true });
+      // prefilter 状态可能变了,重新算帧数和计划
+      finalCount = targetFrameCount(inspected.durationSec || project.durationSec || 1, options);
+      candidateCount = candidateFrameCount(inspected.durationSec || project.durationSec || 1, options, localPrefilterReady, scenes.length);
+      if (savedManifest.localPrefilterReady === localPrefilterReady && savedManifest.candidateFrameCount === candidateCount) {
+        plan = savedManifest.plan;
+      } else {
+        plan = planFramePlan(scenes, inspected.durationSec || project.durationSec || 1, candidateCount);
+      }
+      // 用实际 sceneCount + candidateCount 重算 budget，ETA 更准
+      try {
+        const recomputed = etaEstimator.computeBudget({
+          durationSec: inspected.durationSec || project.durationSec,
+          hasAudio: inspected.hasAudio !== false,
+          platform: project.source?.platform,
+          complexVisionProvider, mediumTextProvider, audioProvider,
+          prefilterEnabled: !!prefilterModelKey, prefilterModelKey,
+          contextSize: complexVisionProvider?.contextSize,
+          options, learnedBaselines,
+          actualScenesCount: scenes.length,
+          actualCandidateFrames: candidateCount,
+        });
+        if (recomputed.totalMs > 0) {
+          handle.budget = { projectId: project.id, analysisId, budget: recomputed };
+          broadcastToWindows("analysis:budget", handle.budget);
+        }
+      } catch (err) {
+        log.warn("analyze:budget-recompute", "场景检测后重算 budget 失败:", err?.message || err);
+      }
+    } else {
+      send(3, "读取视频信息", "正在校验视频时长、分辨率、音轨。");
+      ensureNotCancelled(handle);
+      inputFileSize = await fs.stat(inputPath).then((s) => s.size).catch(() => 0);
+      inspected = await inspectVideo(inputPath, handle);
+      handle.attachStageMeta({ fileSizeBytes: inputFileSize, durationSec: inspected.durationSec, width: inspected.width, height: inspected.height });
+
+      if (inspected.width === 0 && inspected.height === 0) {
+        throw new Error("该文件无视频流（纯音频），无法进行视频拉片分析。如需分析内容，请使用内容分析。");
+      }
+      send(5, "检测镜头切换", "扫描视频中的镜头切换点。");
+      ensureNotCancelled(handle);
+      const sceneThreshold = sceneThresholdFor(options);
+      scenes = await detectScenes(ffmpeg, inputPath, sceneThreshold, handle);
+      handle.attachStageMeta({ scenesCount: scenes.length, durationSec: inspected.durationSec });
+
+      finalCount = targetFrameCount(inspected.durationSec || project.durationSec || 1, options);
+      candidateCount = candidateFrameCount(inspected.durationSec || project.durationSec || 1, options, localPrefilterReady, scenes.length);
+      plan = planFramePlan(scenes, inspected.durationSec || project.durationSec || 1, candidateCount);
+
+      try {
+        const recomputed = etaEstimator.computeBudget({
+          durationSec: inspected.durationSec || project.durationSec,
+          hasAudio: inspected.hasAudio !== false,
+          platform: project.source?.platform,
+          complexVisionProvider, mediumTextProvider, audioProvider,
+          prefilterEnabled: !!prefilterModelKey, prefilterModelKey,
+          contextSize: complexVisionProvider?.contextSize,
+          options, learnedBaselines,
+          actualScenesCount: scenes.length,
+          actualCandidateFrames: candidateCount,
+        });
+        if (recomputed.totalMs > 0) {
+          handle.budget = { projectId: project.id, analysisId, budget: recomputed };
+          broadcastToWindows("analysis:budget", handle.budget);
+        }
+      } catch (err) {
+        log.warn("analyze:budget-recompute", "场景检测后重算 budget 失败:", err?.message || err);
+      }
+
+      await writeJson(manifestPath, {
+        source: project.source,
+        filePath: inputPath,
+        durationSec: inspected.durationSec,
+        width: inspected.width,
+        height: inspected.height,
+        orientation: inspected.orientation,
+        hasAudio: inspected.hasAudio,
+        scenes,
+        plan,
+        sceneThreshold,
+        finalFrameCount: finalCount,
+        candidateFrameCount: candidateCount,
+        localPrefilterReady,
+        pipelineVersion: PIPELINE_VERSION,
+        schemaVersion: SCHEMA_VERSION,
+        generatedAt: new Date().toISOString(),
+      });
+    }
+    const projectMeta = { ...project, ...inspected, hasAudio: inspected.hasAudio };
     send(
-      20,
+      8,
       "挑选关键画面",
       localPrefilterReady
         ? `本地初筛已就绪,从 ${scenes.length} 个镜头里先抽 ${plan.length} 张候选。`
         : `从 ${scenes.length} 个镜头里挑出 ${plan.length} 张关键画面。`,
     );
 
-    await writeJson(path.join(projectDir, "media-manifest.json"), {
-      source: project.source,
-      filePath: inputPath,
-      durationSec: inspected.durationSec,
-      width: inspected.width,
-      height: inspected.height,
-      orientation: inspected.orientation,
-      hasAudio: inspected.hasAudio,
-      scenes,
-      plan,
-      sceneThreshold,
-      finalFrameCount: finalCount,
-      candidateFrameCount: candidateCount,
-      localPrefilterReady,
-      pipelineVersion: PIPELINE_VERSION,
-      schemaVersion: SCHEMA_VERSION,
-      generatedAt: new Date().toISOString(),
-    });
-
-    send(24, "抽取关键画面", `准备抽取 ${plan.length} 张关键画面,会自动去掉相似画面。`);
-    const { frames: candidateFrames, skipped } = await buildFrames(
-      ffmpeg,
-      inputPath,
-      plan,
-      artifactDir,
-      handle,
-      (i, total, sec) => {
-        send(24 + Math.round((i / total) * 22), "抽取关键画面", `已抽 ${i + 1} / ${total} 张 · 第 ${sec.toFixed(1)} 秒`);
-      },
-      { withPrefilterFrame: localPrefilterReady },
-    );
+    // --- Checkpoint Phase 2: 抽帧 ---
+    const framesCheckpointPath = path.join(projectDir, "frames-checkpoint.json");
+    const savedFrames = await readJson(framesCheckpointPath, null).catch(() => null);
+    const framesValid = savedFrames?.frames?.length > 0
+      && savedFrames.pipelineVersion === PIPELINE_VERSION
+      && savedFrames.frames.every((f) => fsSync.existsSync(f.framePath));
+    let candidateFrames, skipped;
+    if (framesValid) {
+      send(9, "挑选关键画面", `复用 ${savedFrames.frames.length} 张关键画面，跳过抽帧。`, { fromCache: true });
+      candidateFrames = savedFrames.frames;
+      skipped = savedFrames.skipped || 0;
+    } else {
+      send(9, "抽取关键画面", `准备抽取 ${plan.length} 张关键画面,会自动去掉相似画面。`);
+      handle.attachStageMeta({ planned: plan.length, durationSec: inspected.durationSec });
+      ({ frames: candidateFrames, skipped } = await buildFrames(
+        ffmpeg,
+        inputPath,
+        plan,
+        artifactDir,
+        handle,
+        (i, total, sec) => {
+          send(9 + Math.round((i / total) * 5), "抽取关键画面", `已抽 ${i + 1} / ${total} 张 · 第 ${sec.toFixed(1)} 秒`);
+        },
+        { withPrefilterFrame: localPrefilterReady },
+      ));
+      await writeJson(framesCheckpointPath, { frames: candidateFrames, skipped, pipelineVersion: PIPELINE_VERSION });
+    }
+    handle.attachStageMeta({ candidateFrames: candidateFrames.length, skipped });
     if (skipped > 0) {
-      send(46, "画面去重", `去掉 ${skipped} 张相似画面,保留 ${candidateFrames.length} 张。`);
+      send(15, "画面去重", `去掉 ${skipped} 张相似画面,保留 ${candidateFrames.length} 张。`);
+    }
+
+    // ---- PIVOT: 固定段结束 (0-15%), 用 budget 给后续 LLM 阶段分配 15-98% ----
+    const PIVOT_PCT = 15;
+    const END_PCT = 98;
+    let stageRanges = null;
+    let lastBudgetPct = PIVOT_PCT;
+    try {
+      const pivotBudget = etaEstimator.computeBudget({
+        durationSec: inspected.durationSec || project.durationSec,
+        hasAudio: inspected.hasAudio !== false,
+        platform: project.source?.platform,
+        complexVisionProvider, mediumTextProvider, audioProvider,
+        prefilterEnabled: !!prefilterModelKey, prefilterModelKey,
+        contextSize: complexVisionProvider?.contextSize,
+        options, learnedBaselines,
+        actualScenesCount: scenes.length,
+        actualCandidateFrames: candidateFrames.length,
+      });
+      const FIXED_STAGES = new Set([
+        "读取视频信息", "检测镜头切换", "本地推理预检", "挑选关键画面", "抽取关键画面",
+      ]);
+      const lateStages = pivotBudget.stages.filter(s => !FIXED_STAGES.has(s.stage));
+      const lateTotalMs = lateStages.reduce((sum, s) => sum + s.estMs, 0);
+      if (lateTotalMs > 0) {
+        stageRanges = {};
+        let cumMs = 0;
+        for (const s of lateStages) {
+          stageRanges[s.stage] = {
+            start: PIVOT_PCT + (cumMs / lateTotalMs) * (END_PCT - PIVOT_PCT),
+            end: PIVOT_PCT + ((cumMs + s.estMs) / lateTotalMs) * (END_PCT - PIVOT_PCT),
+          };
+          cumMs += s.estMs;
+        }
+      }
+      handle.budget = { projectId: project.id, analysisId, budget: pivotBudget };
+      broadcastToWindows("analysis:budget", handle.budget);
+    } catch (err) {
+      log.warn("analyze:pivot-budget", "计算后续阶段进度分配失败:", err?.message || err);
+    }
+
+    const STAGE_BUDGET_ALIAS = {
+      "主分析(分段)": "模型分析画面",
+      "分析失败": "模型分析画面",
+      "镜头缩略图": "镜头合并",
+      "镜头缩略图就绪": "镜头合并",
+      "类型识别跳过": "识别视频类型",
+      "类型识别完成": "识别视频类型",
+      "弹幕分析完成": "弹幕情绪聚合",
+      "弹幕分析失败": "弹幕情绪聚合",
+      "保存失败快照": "整理结果",
+    };
+
+    function pct(stage, fraction) {
+      if (!stageRanges) return lastBudgetPct;
+      const resolved = STAGE_BUDGET_ALIAS[stage] || stage;
+      let match = null, matchLen = 0;
+      for (const key of Object.keys(stageRanges)) {
+        if (resolved.startsWith(key) && key.length > matchLen) {
+          match = stageRanges[key]; matchLen = key.length;
+        }
+      }
+      if (!match) return lastBudgetPct;
+      const f = Math.max(0, Math.min(1, fraction));
+      const p = Math.round(match.start + (match.end - match.start) * f);
+      lastBudgetPct = Math.max(lastBudgetPct, p);
+      return lastBudgetPct;
     }
 
     // 本地初筛 + 精筛:让 Qwen3.5-0.8B 给每帧打标,据此 dedup / 删空镜 / cap 总数。
-    // 本地模型未启动时直接走老路径,行为与之前一致。
+    // 候选帧数可能远超 prefilter 时间预算 (每个镜头至少 1 帧, 高密度视频帧很多),
+    // 预算内均匀覆盖镜头: 优先每镜头 1 帧, 剩余预算给长镜头多帧。
     let frames = candidateFrames;
     let prefilterStats = null;
     if (localPrefilterReady && candidateFrames.length > 0) {
       try {
-        send(48, "本地初筛", `让本地模型给 ${candidateFrames.length} 张候选画面快速打标。`);
+        const pfBudgetSec = prefilterBudgetSec(inspected.durationSec || project.durationSec || 1, options);
+        const prefilterCap = Math.floor((pfBudgetSec * 1000) / PREFILTER_PER_FRAME_MS);
+
+        let framesToTag = candidateFrames;
+        if (candidateFrames.length > prefilterCap) {
+          // 按镜头分组 (startSec-endSec 唯一标识一个镜头)
+          const shotGroups = new Map();
+          for (const f of candidateFrames) {
+            const key = `${f.startSec}-${f.endSec}`;
+            if (!shotGroups.has(key)) shotGroups.set(key, []);
+            shotGroups.get(key).push(f);
+          }
+          const shotKeys = [...shotGroups.keys()];
+          const selected = [];
+          const selectedSet = new Set();
+
+          if (shotKeys.length <= prefilterCap) {
+            // 预算够覆盖所有镜头: 每镜头取中点帧, 剩余给长镜头
+            for (const key of shotKeys) {
+              const group = shotGroups.get(key);
+              const mid = (group[0].startSec + group[0].endSec) / 2;
+              const best = group.reduce((a, b) =>
+                Math.abs(a.midSec - mid) < Math.abs(b.midSec - mid) ? a : b
+              );
+              selected.push(best);
+              selectedSet.add(best.index);
+            }
+            // 剩余预算给长镜头的额外帧
+            const extras = candidateFrames
+              .filter((f) => !selectedSet.has(f.index))
+              .sort((a, b) => (b.endSec - b.startSec) - (a.endSec - a.startSec));
+            for (const f of extras) {
+              if (selected.length >= prefilterCap) break;
+              selected.push(f);
+              selectedSet.add(f.index);
+            }
+          } else {
+            // 预算不够覆盖所有镜头: 均匀间隔采样镜头
+            const stride = shotKeys.length / prefilterCap;
+            for (let i = 0; i < prefilterCap; i++) {
+              const shotIdx = Math.min(shotKeys.length - 1, Math.floor(i * stride));
+              const group = shotGroups.get(shotKeys[shotIdx]);
+              const mid = (group[0].startSec + group[0].endSec) / 2;
+              const best = group.reduce((a, b) =>
+                Math.abs(a.midSec - mid) < Math.abs(b.midSec - mid) ? a : b
+              );
+              if (!selectedSet.has(best.index)) {
+                selected.push(best);
+                selectedSet.add(best.index);
+              }
+            }
+          }
+          selected.sort((a, b) => (a.midSec ?? 0) - (b.midSec ?? 0));
+          framesToTag = selected;
+        }
+
+        send(pct("本地初筛", 0), "本地初筛", framesToTag.length < candidateFrames.length
+          ? `让本地模型给 ${framesToTag.length} / ${candidateFrames.length} 张候选画面快速打标 (预算覆盖)。`
+          : `让本地模型给 ${candidateFrames.length} 张候选画面快速打标。`
+        );
+        handle.attachStageMeta({ candidateFrames: candidateFrames.length, framesToTag: framesToTag.length, modelKey: prefilterModelKey });
         const prefilterStartedAt = Date.now();
-        const tagResult = await prefilter.tagFrames(candidateFrames, {
-          port: localStatus.port,
-          modelKey: localStatus.modelKey,
+        const tagResult = await prefilter.tagFrames(framesToTag, {
+          modelKey: prefilterModelKey,
+          acquireSlot: (mk, opts) => llamaManager.acquire(mk, opts),
           perFrameTimeoutMs: 30_000,
-          cache: makePrefilterCache(localStatus.modelKey),
+          cache: makePrefilterCache(prefilterModelKey),
+          analysisId,
+          abortSignal: handle.abortController?.signal,
           onProgress: (i, total, _tag, _elapsedMs, fromCache) => {
             ensureNotCancelled(handle);
             const avgMs = Math.round((Date.now() - prefilterStartedAt) / (i + 1));
             send(
-              48 + Math.round(((i + 1) / total) * 6),
+              pct("本地初筛", (i + 1) / total),
               "本地初筛",
               `已打标 ${i + 1} / ${total} 张 · 平均 ${avgMs} ms/帧${fromCache ? " · 命中缓存" : ""}`,
             );
@@ -2426,7 +5726,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         });
         const refined = prefilter.refineByTags(tagResult.frames, {
           maxKeep: finalCount,
-          minKeep: Math.min(4, candidateFrames.length),
+          minKeep: Math.min(4, framesToTag.length),
           similarityThreshold: 0.7,
         });
         frames = refined.kept;
@@ -2434,37 +5734,107 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           totalElapsedMs: tagResult.totalElapsedMs,
           totalTokens: tagResult.totalTokens,
           candidate: candidateFrames.length,
+          tagged: framesToTag.length,
           kept: refined.kept.length,
           dropped: refined.dropped.length,
         };
-        send(
-          54,
-          "精挑画面",
-          `从 ${candidateFrames.length} 张候选里精选 ${refined.kept.length} 张送给视觉模型 · 本地初筛用时 ${(tagResult.totalElapsedMs / 1000).toFixed(1)}s`,
-        );
+        const droppedDetails = refined.dropped.map((f) => ({
+          index: f.index,
+          midSec: f.midSec,
+          reason: refined.reasons[f.index] || "未知",
+          salience: f.prefilterTag?.salience ?? null,
+          sceneType: f.prefilterTag?.sceneType ?? null,
+          caption: f.prefilterTag?.caption ?? null,
+        }));
+        const callCount = Math.max(0, framesToTag.length - tagResult.cacheHits);
+        if (callCount > 0) {
+          tokenLedger.record({
+            stage: "prefilter",
+            provider: {
+              id: "local-llama",
+              name: "本地推理",
+              source: "local_llama",
+            },
+            model: prefilterModelKey,
+            source: "local_llama",
+            usage: tagResult.totalTokens > 0
+              ? {
+                  promptTokens: tagResult.totalPromptTokens || 0,
+                  completionTokens: tagResult.totalCompletionTokens || 0,
+                  totalTokens: tagResult.totalTokens,
+                }
+              : null,
+            callCount,
+          });
+        }
+        for (let h = 0; h < tagResult.cacheHits; h++) {
+          tokenLedger.cacheHit({
+            stage: "prefilter",
+            provider: { id: "local-llama", name: "本地推理", source: "local_llama" },
+            model: prefilterModelKey,
+            source: "local_llama",
+          });
+        }
+        handle.attachStageMeta({ tagged: framesToTag.length, kept: refined.kept.length, dropped: refined.dropped.length, totalElapsedMs: tagResult.totalElapsedMs, totalTokens: tagResult.totalTokens, droppedDetails });
+        {
+          const allCached = (tagResult.cacheHits || 0) >= framesToTag.length && framesToTag.length > 0;
+          send(
+            pct("本地初筛", 1),
+            "精挑画面",
+            `从 ${framesToTag.length} 张标注帧里精选 ${refined.kept.length} 张送给视觉模型 · 本地初筛用时 ${(tagResult.totalElapsedMs / 1000).toFixed(1)}s`,
+            { fromCache: allCached },
+          );
+        }
       } catch (error) {
         if (error instanceof AnalysisCancelledError) throw error;
         const msg = error instanceof Error ? error.message : String(error);
-        send(54, "本地初筛失败", `${msg}（已回退到全部候选画面）`);
+        send(pct("本地初筛", 1), "本地初筛失败", `${msg}（已回退到全部候选画面）`);
         frames = candidateFrames;
       }
     }
 
-    // 音频转录（可选）
+    // --- Checkpoint Phase 3: 音频转录 ---
     let transcript = null;
     let transcriptError = null;
-    const audioReady = audioProvider && inspected.hasAudio && (
+    const transcriptPath = path.join(artifactDir, "transcript.json");
+    const savedTranscript = await readJson(transcriptPath, null).catch(() => null);
+    if (savedTranscript?.segments?.length > 0) {
+      transcript = savedTranscript;
+      send(pct("字幕识别", 1), "字幕识别", `命中缓存，复用 ${transcript.segments.length} 段已有字幕。`, { fromCache: true });
+    }
+    const audioReady = !transcript && audioProvider && inspected.hasAudio && (
       audioProvider.source === "local_whisper" ||
       audioProvider.endpointType === "local_whisper_cpp" ||
       audioProvider.endpointType === "local_whisper_wasm" ||
       audioProvider.apiKeyRef
     );
+    if (!audioReady && !transcript) {
+      const skipReasons = [];
+      if (!audioProvider) skipReasons.push("未配置语音识别供应商");
+      else if (!inspected.hasAudio) skipReasons.push("视频无音轨");
+      else {
+        const src = audioProvider.source || audioProvider.endpointType;
+        if (src !== "local_whisper" && src !== "local_whisper_cpp" && src !== "local_whisper_wasm" && !audioProvider.apiKeyRef) {
+          skipReasons.push(`供应商 ${audioProvider.name || src} 无 API Key 且非本地 whisper`);
+        }
+      }
+      const reason = skipReasons.length > 0 ? skipReasons.join("; ") : "未知原因";
+      send(50, "字幕识别跳过", reason);
+      handle.attachStageMeta({ transcriptSkipped: true, transcriptSkipReason: reason });
+      log.info("clipiq", `转录跳过: ${reason} (audioProvider=${audioProvider ? audioProvider.name : "null"}, hasAudio=${inspected.hasAudio})`);
+    }
     if (audioReady) {
       try {
-        send(55, "提取音轨", "从视频里分离出音频,准备识别字幕。");
+        send(pct("提取音轨", 0), "提取音轨", "从视频里分离出音频,准备识别字幕。");
         const wavPath = path.join(artifactDir, "audio.wav");
         await extractAudioWav(ffmpeg, inputPath, wavPath, handle);
-        send(60, "字幕识别", `${audioProvider.name} 准备就绪`);
+        send(pct("字幕识别", 0), "字幕识别", `${audioProvider.name} 准备就绪`);
+        handle.attachStageMeta({
+          audioSec: inspected.durationSec,
+          providerName: audioProvider.name,
+          model: audioProvider.localWhisperModel || audioProvider.model,
+          source: audioProvider.source || audioProvider.endpointType,
+        });
         ensureNotCancelled(handle);
 
         // 缓存 key: 音频文件 sha + 模型 + 语言 + 后端来源 + prompt 版本
@@ -2487,18 +5857,19 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         };
         transcript = await runWithCache("transcript", transcriptCacheKey, async () => {
           return await transcribeAudio(audioProvider, wavPath, handle, (p) => {
-            send(62, "字幕识别", p.message);
+            send(pct("字幕识别", 0.5), "字幕识别", p.message);
           });
         }, transcribeMeta);
 
         if (transcript) {
           await writeJson(path.join(artifactDir, "transcript.json"), transcript);
-          send(66, "字幕识别完成", `共 ${transcript.segments.length} 段字幕、${transcript.text.length} 个字。`);
+          handle.attachStageMeta({ transcriptSegments: transcript.segments.length, transcriptChars: transcript.text.length });
+          send(pct("字幕识别", 1), "字幕识别完成", `共 ${transcript.segments.length} 段字幕、${transcript.text.length} 个字。`);
         }
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
         transcriptError = error?.message || String(error);
-        send(66, "字幕识别失败", `${transcriptError}（不影响后续画面分析）`);
+        send(pct("字幕识别", 1), "字幕识别失败", `${transcriptError}（不影响后续画面分析）`);
       }
     }
 
@@ -2506,7 +5877,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       localNodeForSegment(
         frame,
         projectMeta,
-        createProjectMediaUrl(project.id, frame.framePath),
+        createVideoMediaUrl(project.id, frame.framePath),
         transcript?.segments
       )
     );
@@ -2532,7 +5903,14 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     if (canUseMedium) {
       try {
         ensureNotCancelled(handle);
-        send(67, "镜头合并", `让 ${mediumTextProvider.name} 把 ${shots.length} 个镜头合成可读描述。`);
+        send(pct("镜头合并", 0), "镜头合并", `让 ${mediumTextProvider.name} 把 ${shots.length} 个镜头合成可读描述。`);
+        handle.attachStageMeta({
+          shots: shots.length,
+          providerName: mediumTextProvider.name,
+          model: mediumTextProvider.model,
+          endpointType: mediumTextProvider.endpointType,
+          contextSize: mediumTextProvider.contextSize,
+        });
         const mergeStart = Date.now();
         const mergeInputs = shots.map((s) => ({
           startSec: s.startSec,
@@ -2546,24 +5924,54 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             midSec: f.midSec,
           })),
         }));
+        // 并发数: 在线模型用 config 配置(默认 3),本地模型强制 1
+        const isLocalMedium = mediumTextProvider.source === "local_llama";
+        const cfgConcurrency = Number(cfgSnapshot?.pipelineConcurrency) || 0;
+        const mergeConcurrency = isLocalMedium ? 1 : (cfgConcurrency > 0 ? cfgConcurrency : 3);
+        log.info("shot-merger", `[analysis:${analysisId}] 开始合并 ${mergeInputs.length} 个镜头, concurrency=${mergeConcurrency}`);
         const mergeResults = await shotMerger.mergeShots({
           shots: mergeInputs,
           provider: mediumTextProvider,
-          batchSize: 6,
+          concurrency: mergeConcurrency,
           handle,
           cache: makeShotMergerCache(mediumTextProvider),
-          onProgress: ({ done, total, batchIndex, mode }) => {
+          onProgress: ({ done, total, batchIndex, batchSize, mode }) => {
             ensureNotCancelled(handle);
-            const pct = 67 + Math.round((done / total) * 4);
+            const p = pct("镜头合并", done / total);
             const tail = mode === "cache-hit" ? " · 命中缓存" : "";
-            send(pct, "镜头合并", `已合并 ${done}/${total} (batch ${batchIndex}, 平均 ${Math.round((Date.now()-mergeStart)/done)}ms/镜头)${tail}`);
+            send(p, "镜头合并", `已合并 ${done}/${total} (第 ${batchIndex} 轮 · 每轮 ${batchSize} 个, 平均 ${formatDuration((Date.now()-mergeStart)/done)}/镜头)${tail}`);
           },
         });
+        if (mergeResults.usage && mergeResults.usage.callCount > 0) {
+          tokenLedger.record({
+            stage: "shot-merger",
+            provider: mediumTextProvider,
+            model: mergeResults.echoedModel || mediumTextProvider.model,
+            usage: {
+              promptTokens: mergeResults.usage.promptTokens,
+              completionTokens: mergeResults.usage.completionTokens,
+              totalTokens: mergeResults.usage.totalTokens,
+            },
+            callCount: mergeResults.usage.callCount,
+          });
+        }
+        for (let h = 0; h < (mergeResults.cacheHits || 0); h++) {
+          tokenLedger.cacheHit({
+            stage: "shot-merger",
+            provider: mediumTextProvider,
+            model: mediumTextProvider.model,
+          });
+        }
         // 写回 shots: shotDescription + representativeFrameIndex
         for (let i = 0; i < shots.length; i++) {
           shots[i].shotDescription = mergeResults[i]?.shotDescription || "";
           shots[i].representativeFrameIndex = mergeResults[i]?.representativeFrameIndex || [];
         }
+        handle.attachStageMeta({
+          cacheHits: mergeResults.cacheHits || 0,
+          mergeElapsedMs: Date.now() - mergeStart,
+          avgMsPerShot: Math.round((Date.now() - mergeStart) / Math.max(shots.length, 1)),
+        });
         // 兜底: scene detector 切出的镜头数 >> prefilter 保留的关键帧数时,
         // 大多数镜头会 frames=[]; 在镜头中点抽一张轻量缩略图, 让 UI 镜头时间线每个 card
         // 都有图, 也让 attachShotEvidenceToNodes 在帧稀疏时不至于完全失配。
@@ -2595,13 +6003,13 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             );
             thumbDone += batch.length;
             send(
-              71,
+              pct("镜头缩略图", thumbDone / shotsNeedingThumb.length),
               "镜头缩略图",
               `已为 ${thumbDone}/${shotsNeedingThumb.length} 个无关键帧镜头抽兜底缩略图`
             );
           }
           send(
-            71,
+            pct("镜头缩略图就绪", 1),
             "镜头缩略图就绪",
             `${shotsNeedingThumb.length} 张兜底缩略图 · ${((Date.now() - thumbStart) / 1000).toFixed(1)}s`
           );
@@ -2609,7 +6017,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         // shotContexts 完整形态: 带帧 URL + 字幕分段, 供 UI 镜头时间线渲染
         // (旧 report 里只存了 framesInShot 数量和 subtitleText 字符串, 现在保留向后兼容字段)
         const toFrameCtx = (f) => ({
-          thumbnailUrl: createProjectMediaUrl(project.id, f.framePath),
+          thumbnailUrl: createVideoMediaUrl(project.id, f.framePath),
           framePath: f.framePath,
           midSec: Number(f.midSec) || 0,
           caption: f.prefilterTag?.caption,
@@ -2640,24 +6048,38 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             framesInShot: framesCtx.length,
           };
         });
-        send(71, "镜头合并完成", `${shots.length} 个镜头描述就绪 · ${((Date.now()-mergeStart)/1000).toFixed(1)}s`);
+        {
+          const cacheHits = mergeResults.cacheHits || 0;
+          const allCached = cacheHits >= shots.length && shots.length > 0;
+          const cacheTail = cacheHits > 0 ? ` · 命中缓存 ${cacheHits}/${shots.length}` : "";
+          send(
+            pct("镜头合并", 1),
+            "镜头合并完成",
+            `${shots.length} 个镜头描述就绪 · ${formatDuration(Date.now()-mergeStart)}${cacheTail}`,
+            { fromCache: allCached },
+          );
+        }
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
-        send(71, "镜头合并失败", `${error.message || error}。降级到旧的逐帧路径。`);
+        send(pct("镜头合并", 1), "镜头合并失败", `${error.message || error}。降级到旧的逐帧路径。`);
         shotContexts = null;
       }
 
-      // 全局聚合 (genre + summary): shotContexts 在手时做, 否则跳过让 detectGenreLightweight 兜底
+      // 全局聚合 (genre + summary + 叙事结构): 优先用大模型以提高叙事结构线索的准确度,
+      // 大模型不可用时 fallback 到中等文本模型。
       if (shotContexts && shotContexts.length > 0) {
+        const summarizerProvider = (complexVisionProvider?.apiKeyRef && complexVisionProvider?.baseUrl && complexVisionProvider?.model)
+          ? complexVisionProvider
+          : mediumTextProvider;
         try {
           ensureNotCancelled(handle);
-          send(72, "全局聚合", `综合 ${shotContexts.length} 个镜头描述 + 字幕推断视频类型和摘要。`);
+          send(pct("全局聚合", 0), "全局聚合", `综合 ${shotContexts.length} 个镜头描述 + 字幕推断视频类型和摘要 (${summarizerProvider.name})。`);
           const sumStart = Date.now();
           const stats = computeShotStats(
             buildShotListFromScenes(scenes, projectMeta.durationSec, []),
             projectMeta.durationSec,
           );
-          const summarizerCacheKey = cacheStore.isConfigured() && mediumTextProvider?.model
+          const summarizerCacheKey = cacheStore.isConfigured() && summarizerProvider?.model
             ? cacheStore.makeKey({
                 shots: shotContexts.map((c) => ({
                   idx: c.shotIndex,
@@ -2668,29 +6090,49 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
                 transcriptText: (transcript?.text || "").slice(0, 4000),
                 stats,
                 allowedGenres: [...ALLOWED_GENRES],
-                model: mediumTextProvider.model,
-                baseUrl: mediumTextProvider.baseUrl,
+                model: summarizerProvider.model,
+                baseUrl: summarizerProvider.baseUrl,
                 version: CACHE_VERSIONS.summarizer,
               })
             : null;
-          globalContext = await runWithCache("summarizer", summarizerCacheKey, () => summarizer.summarizeVideo({
+          const summarizerTraced = await runWithCacheTraced("summarizer", summarizerCacheKey, () => summarizer.summarizeVideo({
             shotContexts,
             transcript,
             shotStats: stats,
             project: projectMeta,
-            provider: mediumTextProvider,
+            provider: summarizerProvider,
             genreCatalog: GENRE_CATALOG,
             allowedGenres: [...ALLOWED_GENRES],
             handle,
-          }), { model: mediumTextProvider?.model });
+          }), { model: summarizerProvider?.model });
+          globalContext = summarizerTraced.payload;
+          if (summarizerTraced.fromCache) {
+            tokenLedger.cacheHit({
+              stage: "summarizer",
+              provider: summarizerProvider,
+              model: summarizerProvider.model,
+            });
+          } else if (globalContext?.usage) {
+            tokenLedger.record({
+              stage: "summarizer",
+              provider: summarizerProvider,
+              model: globalContext.echoedModel || summarizerProvider.model,
+              usage: globalContext.usage,
+            });
+          }
           if (globalContext?.detectedGenre) {
-            send(74, "全局聚合完成", `判定 ${globalContext.detectedGenre} (${Math.round((globalContext.genreConfidence||0)*100)}%) · 摘要 ${globalContext.globalSummary?.length || 0} 字 · ${((Date.now()-sumStart)/1000).toFixed(1)}s`);
+            send(
+              pct("全局聚合", 1),
+              "全局聚合完成",
+              `判定 ${globalContext.detectedGenre} (${Math.round((globalContext.genreConfidence||0)*100)}%) · 摘要 ${globalContext.globalSummary?.length || 0} 字 · ${((Date.now()-sumStart)/1000).toFixed(1)}s`,
+              { fromCache: summarizerTraced.fromCache },
+            );
           } else {
-            send(74, "全局聚合跳过", "未能从镜头描述推断, 让主分析自行识别。");
+            send(pct("全局聚合", 1), "全局聚合跳过", "未能从镜头描述推断, 让主分析自行识别。", { fromCache: summarizerTraced.fromCache });
           }
         } catch (error) {
           if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
-          send(74, "全局聚合失败", `${error.message || error}。降级到 detectGenreLightweight。`);
+          send(pct("全局聚合", 1), "全局聚合失败", `${error.message || error}。降级到 detectGenreLightweight。`);
           globalContext = null;
         }
       }
@@ -2698,8 +6140,12 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
 
     let nodes = fallbackNodes;
     let report = fallbackReport;
+    // 主分析(callOpenAICompatible)失败时置 true, 后续耗时的 best-effort stage (弹幕情绪聚合 /
+    // 标题生成) 一律 skip 直接进收尾。failed nodes/report 已经在 catch 里 persistEarlySnapshot
+    // 写盘, renderer 拿到的 result 是 failed 标记的骨架, Workspace 屏能正常展示 failed 状态。
+    let mainAnalysisFailed = false;
     ensureNotCancelled(handle);
-    send(76, "准备分析素材", provider?.apiKeyRef ? `已整理好 ${frames.length} 张关键画面${transcript ? " + 字幕" : ""}${shotContexts ? ` + ${shotContexts.length} 个镜头描述` : ""},准备送给模型。` : "未配置视觉模型,本次只生成时间线骨架。");
+    send(pct("准备分析素材", 0), "准备分析素材", provider?.apiKeyRef ? `已整理好 ${frames.length} 张关键画面${transcript ? " + 字幕" : ""}${shotContexts ? ` + ${shotContexts.length} 个镜头描述` : ""},准备送给模型。` : "未配置视觉模型,本次只生成时间线骨架。");
 
     if (provider?.apiKeyRef && provider.inputMode !== "direct_video") {
       try {
@@ -2713,7 +6159,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           effectiveOptions = { ...options, detectedGenre: globalContext.detectedGenre };
         } else if (isAutoGenre && (transcript || scenes?.length)) {
           const genreProvider = mediumTextProvider || provider;
-          send(77, "识别视频类型", `根据字幕和镜头切换让 ${genreProvider.name} 推断视频类型。`);
+          send(pct("识别视频类型", 0), "识别视频类型", `根据字幕和镜头切换让 ${genreProvider.name} 推断视频类型。`);
           const detectStartedAt = Date.now();
           const detectGenreCacheKey = cacheStore.isConfigured() && genreProvider?.model
             ? cacheStore.makeKey({
@@ -2727,14 +6173,34 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
                 version: CACHE_VERSIONS.detectGenre,
               })
             : null;
-          const detected = await runWithCache("detect-genre", detectGenreCacheKey,
+          const detectTraced = await runWithCacheTraced("detect-genre", detectGenreCacheKey,
             () => detectGenreLightweight(genreProvider, projectMeta, scenes, transcript, handle),
             { model: genreProvider?.model });
+          const detected = detectTraced.payload;
+          if (detectTraced.fromCache) {
+            tokenLedger.cacheHit({
+              stage: "detect-genre",
+              provider: genreProvider,
+              model: genreProvider?.model,
+            });
+          } else if (detected?.usage) {
+            tokenLedger.record({
+              stage: "detect-genre",
+              provider: genreProvider,
+              model: detected.echoedModel || genreProvider?.model,
+              usage: detected.usage,
+            });
+          }
           if (detected?.detectedGenre) {
             effectiveOptions = { ...options, detectedGenre: detected.detectedGenre };
-            send(77, "识别视频类型完成", `判定为 ${detected.detectedGenre}（置信度 ${(detected.genreConfidence * 100).toFixed(0)}%，耗时 ${Math.round((Date.now() - detectStartedAt) / 1000)}s）。`);
+            send(
+              pct("类型识别完成", 1),
+              "识别视频类型完成",
+              `判定为 ${detected.detectedGenre}（置信度 ${(detected.genreConfidence * 100).toFixed(0)}%，耗时 ${Math.round((Date.now() - detectStartedAt) / 1000)}s）。`,
+              { fromCache: detectTraced.fromCache },
+            );
           } else {
-            send(77, "类型识别跳过", "未能从字幕推断类型，将让主分析在 catalog 中识别。");
+            send(pct("类型识别跳过", 1), "类型识别跳过", "未能从字幕推断类型，将让主分析在 catalog 中识别。");
           }
         }
 
@@ -2748,7 +6214,16 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           };
         }
 
-        send(78, "模型分析画面", `正在请 ${provider.name} 分析这段视频。`);
+        send(pct("模型分析画面", 0), "模型分析画面", `正在请 ${provider.name} 分析这段视频。`);
+        handle.attachStageMeta({
+          frames: frames.length,
+          transcriptChars: transcript?.text?.length || 0,
+          shots: Array.isArray(shots) ? shots.length : 0,
+          providerName: provider.name,
+          model: provider.model,
+          endpointType: provider.endpointType,
+          contextSize: provider.contextSize,
+        });
         let mainAnalysisCacheKey = null;
         if (cacheStore.isConfigured() && provider?.model) {
           try {
@@ -2776,9 +6251,42 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             }
           } catch { /* 算 key 失败 → 不缓存 */ }
         }
-        const modelResult = await runWithCache("main-analysis", mainAnalysisCacheKey,
-          () => callOpenAICompatible(provider, projectMeta, frames, transcript, scenes, fallbackNodes, fallbackReport, effectiveOptions, handle),
+        const mainAnalysisTraced = await runWithCacheTraced("main-analysis", mainAnalysisCacheKey,
+          () => callOpenAICompatible(
+            provider, projectMeta, frames, transcript, scenes, fallbackNodes, fallbackReport,
+            effectiveOptions, handle,
+            // 分段进度回调: chunk 阶段用 78-83 进度区间, audit 用 84
+            (done, total, phase, chunk) => {
+              if (phase === "chunk") {
+                const frac = total > 0 ? done / total : 0;
+                send(
+                  pct("主分析(分段)", frac),
+                  "主分析(分段)",
+                  `第 ${done + 1}/${total} 段 · [${(chunk?.startSec || 0).toFixed(0)}-${(chunk?.endSec || 0).toFixed(0)}s] · shots=${chunk?.shots?.length || 0} frames=${chunk?.frames?.length || 0}`,
+                );
+              } else if (phase === "audit") {
+                send(pct("主分析(审计)", 0), "主分析(审计)", "全部分段拉片完成, 跑方法论审计与全局报告…");
+              }
+            },
+          ),
           { model: provider?.model });
+        const modelResult = mainAnalysisTraced.payload;
+        if (mainAnalysisTraced.fromCache) {
+          tokenLedger.cacheHit({
+            stage: "main-analysis",
+            provider,
+            model: provider?.model,
+          });
+          // 让 log 上有一行 "(缓存)" 标记 — 避免用户误以为模型这次真跑了 5 分钟
+          send(pct("模型分析画面", 1), "模型分析画面", `命中缓存,跳过 LLM 调用。`, { fromCache: true });
+        } else if (modelResult?.usage) {
+          tokenLedger.record({
+            stage: "main-analysis",
+            provider,
+            model: modelResult.echoedModel || provider?.model,
+            usage: modelResult.usage,
+          });
+        }
         nodes = modelResult.nodes;
         // 把金字塔中间产物 (代表帧 / 帧 captions / 字幕段) 挂到节点上, 让 UI 能渲染镜头级 evidence
         if (Array.isArray(shots) && shots.length > 0) {
@@ -2793,7 +6301,29 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         if (shotContexts) report.shotContexts = shotContexts;
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
-        send(85, "分析失败", `${error.message || error}。已回退到本地基础结果。`);
+        const stackOrMsg = error?.stack || error?.message || String(error);
+        const shortMsg = error?.message || String(error);
+        log.error("analyze:main", `provider=${provider?.id} model=${provider?.model} 主分析失败:\n${stackOrMsg}`);
+        try {
+          await fs.appendFile(
+            path.join(projectDir, "analysis-error.log"),
+            `[${new Date().toISOString()}] [main-analysis] provider=${provider?.id} model=${provider?.model}\n${stackOrMsg}\n\n`,
+          );
+        } catch (writeErr) {
+          log.warn("analyze:main", "写 analysis-error.log 失败:", writeErr?.message || writeErr);
+        }
+        nodes = markFallbackNodesAsFailed(fallbackNodes);
+        report = markFallbackReportAsFailed(fallbackReport, shortMsg, provider);
+        mainAnalysisFailed = true;
+        // failureMsg 同步给 outer finally 写 eta-samples 用 (现在没 throw, finally 里
+        // 拿不到 err.message), outcome 也提前置 failed 让 learner 跳过这次样本。
+        analysisOutcome = "failed";
+        analysisFailureMsg = shortMsg;
+        send(pct("分析失败", 1), "分析失败", `${shortMsg}。已保留镜头骨架,节点字段标记为分析失败,跳过后续弹幕/标题阶段。`);
+        // 立刻把 failed 快照写到 JSON + SQLite。
+        // 后续弹幕情绪聚合 / 整理结果如果跑到一半 crash 或被 Mac sleep 杀进程,
+        // 至少 ReportScreen 加载到的是这次的 failed report, 而不是上次跑的脏数据。
+        await persistEarlySnapshot(project, analysisId, nodes, report, timings, analysisStartedAt);
       }
     } else if (globalContext || shotContexts) {
       // 视觉主分析未配置, 但中间层有产物, 让 fallback report 至少能带上 globalSummary
@@ -2804,14 +6334,16 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     // ----- B 站弹幕 → 时间轴情绪 + 词云 ----------------------------------
     // 触发条件: project.source 是 URL 且 platform=bilibili。其他平台不进。
     // 失败一律降级 (拉取/解析/LLM 任一阶段错都跳过, 不阻断主流程)。
+    // 主分析已失败时跳过 —— 弹幕情绪挂到 failed nodes 上没意义, 且 LLM 聚合可能再花 1-2 分钟。
     if (
+      !mainAnalysisFailed &&
       project.source?.type === "url" &&
       project.source.platform === "bilibili" &&
       project.source.url
     ) {
       try {
         ensureNotCancelled(handle);
-        send(86, "拉取弹幕", "向 B 站请求弹幕分段…");
+        send(pct("拉取弹幕", 0), "拉取弹幕", "向 B 站请求弹幕分段…");
         const danmakuStart = Date.now();
         const danmakuRaw = await danmakuFetcher.fetchDanmakuWithCache({
           url: project.source.url,
@@ -2820,10 +6352,9 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
           onProgress: ({ segment, total, count, fromCache }) => {
             if (handle.cancelled) return;
             if (fromCache) {
-              send(87, "拉取弹幕", `命中缓存,直接使用 ${count} 条历史弹幕。`);
+              send(pct("拉取弹幕", 1), "拉取弹幕", `已有 ${count} 条可复用的历史弹幕，跳过拉取。`);
             } else {
-              const pct = 86 + Math.min(1, Math.round((segment / Math.max(total, 1)) * 1));
-              send(pct, "拉取弹幕", `已拉 ${segment}/${total} 段 · 累计 ${count} 条`);
+              send(pct("拉取弹幕", segment / Math.max(total, 1)), "拉取弹幕", `已拉 ${segment}/${total} 段 · 累计 ${count} 条`);
             }
           },
         });
@@ -2833,7 +6364,7 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         let danmakuSummary = "";
         if (mediumTextProvider?.apiKeyRef && danmakuRaw.messages.length > 0) {
           ensureNotCancelled(handle);
-          send(88, "弹幕情绪聚合", `让 ${mediumTextProvider.name} 给 ${danmakuRaw.totalCount} 条弹幕分段评分。`);
+          send(pct("弹幕情绪聚合", 0), "弹幕情绪聚合", `让 ${mediumTextProvider.name} 给 ${danmakuRaw.totalCount} 条弹幕分段评分。`);
           const aggStart = Date.now();
           const agg = await danmakuEmotion.aggregateEmotions({
             messages: danmakuRaw.messages,
@@ -2844,12 +6375,25 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
             cache: makeDanmakuEmotionCache(mediumTextProvider),
             onProgress: ({ done, total }) => {
               if (handle.cancelled) return;
-              send(88, "弹幕情绪聚合", `已评 ${done}/${total} 个时间桶`);
+              send(pct("弹幕情绪聚合", done / total), "弹幕情绪聚合", `已评 ${done}/${total} 个时间桶`);
             },
           });
           windows = agg.windows;
           danmakuSummary = agg.summary;
-          send(89, "弹幕情绪聚合完成", `${windows.filter((w) => w.danmakuCount > 0).length} 个时间桶 · ${((Date.now() - aggStart) / 1000).toFixed(1)}s`);
+          if (agg.usage && agg.usage.callCount > 0) {
+            tokenLedger.record({
+              stage: "danmaku-emotion",
+              provider: mediumTextProvider,
+              model: agg.echoedModel || mediumTextProvider.model,
+              usage: {
+                promptTokens: agg.usage.promptTokens,
+                completionTokens: agg.usage.completionTokens,
+                totalTokens: agg.usage.totalTokens,
+              },
+              callCount: agg.usage.callCount,
+            });
+          }
+          send(pct("弹幕情绪聚合", 1), "弹幕情绪聚合完成", `${windows.filter((w) => w.danmakuCount > 0).length} 个时间桶 · ${((Date.now() - aggStart) / 1000).toFixed(1)}s`);
         }
 
         // 词云 (LLM 不可用也能跑, 纯本地启发式)
@@ -2884,32 +6428,84 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         };
 
         send(
-          89,
+          pct("弹幕分析完成", 1),
           "弹幕分析完成",
           `${danmakuRaw.totalCount} 条弹幕 · 词云 ${wordCloud.length} 词 · ${((Date.now() - danmakuStart) / 1000).toFixed(1)}s`,
         );
       } catch (error) {
         if (error instanceof AnalysisCancelledError || error?.name === "AbortError") throw new AnalysisCancelledError();
-        send(89, "弹幕分析失败", `${error?.message || error}（不影响主分析结果）`);
+        send(pct("弹幕分析失败", 1), "弹幕分析失败", `${error?.message || error}（不影响主分析结果）`);
       }
     }
 
     ensureNotCancelled(handle);
-    send(90, "整理结果", "正在保存分析结果。");
+    send(pct("整理结果", 0), mainAnalysisFailed ? "保存失败快照" : "整理结果", "正在保存分析结果。");
 
     // 本地选取的视频 (没经过 URL 拉取那条路, videoName 是磁盘文件名) 在这里补标题。
     // URL 拉取场景在 downloadVideo handler 里已经生成过 → titleAutoGenerated:true → 跳过。
+    // 主分析失败时不再补标题: globalContext 可能没有 / 标题用 LLM 又要 5-10s, 用户已经知道失败了
     let generatedTitle = null;
-    if (!project.titleAutoGenerated && globalContext?.globalSummary && mediumTextProvider?.apiKeyRef) {
+    const titleCanRun =
+      !mainAnalysisFailed &&
+      !project.titleAutoGenerated &&
+      !!globalContext?.globalSummary &&
+      !!mediumTextProvider?.apiKeyRef;
+    // 诊断: 把 gate + result 也写到 projectDir/analysis-error.log, 这样开发期能直接 Read 文件查看,
+    // 不依赖 main 进程 stdout (那个只在 electron:dev 终端窗口里, 调试断了之后看不到)。
+    const titleGenLogPath = path.join(projectDir, "analysis-error.log");
+    const appendTitleGenLog = async (line) => {
       try {
-        generatedTitle = await generateProjectTitle(mediumTextProvider, {
+        await fs.appendFile(titleGenLogPath, `[${new Date().toISOString()}] [title-gen] ${line}\n`);
+      } catch { /* noop */ }
+    };
+    const gateLine =
+      `gate: mainFailed=${mainAnalysisFailed} ` +
+      `alreadyGenerated=${!!project.titleAutoGenerated} ` +
+      `hasSummary=${!!globalContext?.globalSummary} summaryLen=${globalContext?.globalSummary?.length || 0} ` +
+      `hasProvider=${!!mediumTextProvider?.apiKeyRef} providerModel=${mediumTextProvider?.model || "n/a"} ` +
+      `→ canRun=${titleCanRun}`;
+    log.info("analyze:title-gen", gateLine);
+    await appendTitleGenLog(gateLine);
+    if (titleCanRun) {
+      try {
+        const titleResult = await generateProjectTitle(mediumTextProvider, {
           summary: globalContext.globalSummary,
-        });
+        }, handle);
+        const resultLine =
+          `result: title=${JSON.stringify(titleResult?.title)} ` +
+          `usage=${titleResult?.usage ? JSON.stringify(titleResult.usage) : "n/a"} ` +
+          `rawLen=${(titleResult?._diagnostic?.rawLen) ?? "n/a"} ` +
+          `reasoningLen=${(titleResult?._diagnostic?.reasoningLen) ?? "n/a"} ` +
+          `parsedSource=${titleResult?._diagnostic?.parsedSource ?? "n/a"} ` +
+          `rawHead=${JSON.stringify(titleResult?._diagnostic?.rawHead || "")}`;
+        log.info("analyze:title-gen", resultLine);
+        await appendTitleGenLog(resultLine);
+        generatedTitle = titleResult?.title || null;
+        if (titleResult?.usage) {
+          tokenLedger.record({
+            stage: "title-gen",
+            provider: mediumTextProvider,
+            model: titleResult.echoedModel || mediumTextProvider.model,
+            usage: titleResult.usage,
+          });
+        }
       } catch (err) {
-        console.warn("[analyze] 标题生成失败:", err?.message || err);
+        if (err instanceof AnalysisCancelledError || err?.name === "AbortError") throw new AnalysisCancelledError();
+        const errLine = `失败: ${err?.message || err}`;
+        log.warn("analyze:title-gen", errLine);
+        await appendTitleGenLog(errLine);
       }
     }
 
+    // 封面优先级:已有封面 > 视频第一帧。不再用分析关键帧。
+    // 已有封面若是会过期的远程 URL,顺手下到本地;都没有则抽视频第一帧。
+    let coverUrl = project.thumbnailUrl || null;
+    if (coverUrl && /^https?:\/\//i.test(coverUrl)) {
+      coverUrl = (await downloadCoverImage(coverUrl, project.id)) || coverUrl;
+    }
+    if (!coverUrl) {
+      coverUrl = await extractFirstFrameCover(inputPath, project.id);
+    }
     const updatedProject = {
       ...project,
       localFilePath: inputPath,
@@ -2918,18 +6514,16 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       width: inspected.width || project.width,
       height: inspected.height || project.height,
       orientation: inspected.orientation || project.orientation,
-      status: "completed",
-      providerId: provider?.id,
-      model: provider?.model,
-      thumbnailUrl: frames[0]?.framePath ? createProjectMediaUrl(project.id, frames[0].framePath) : project.thumbnailUrl,
+      status: mainAnalysisFailed ? "failed" : "completed",
+      currentAnalysisId: analysisId,
+      thumbnailUrl: coverUrl || project.thumbnailUrl,
       ...(generatedTitle ? { videoName: generatedTitle, titleAutoGenerated: true } : {}),
       updatedAt: new Date().toISOString(),
     };
-    send(100, "完成", "分析结果已生成。");
+    send(100, mainAnalysisFailed ? "已结束" : "完成", mainAnalysisFailed ? "主分析失败, 已跳过弹幕/标题, 保留镜头骨架。" : "分析结果已生成。");
     closeCurrentStage();
     const totalDurationMs = Date.now() - analysisStartedAt;
     const finalTimings = [...timings];
-    // 找出耗时 top 1 阶段(剔除 0ms 边界)
     const top = finalTimings
       .filter((t) => t.durationMs > 0 && t.stage !== "完成")
       .sort((a, b) => b.durationMs - a.durationMs)[0];
@@ -2937,35 +6531,139 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     if (!handle.cancelled) {
       broadcastToWindows("analysis:progress", {
         projectId: project.id,
+        analysisId,
         progress: 100,
-        stage: "完成",
-        message: `总耗时 ${(totalDurationMs / 1000).toFixed(1)}s${topLabel}`,
+        stage: mainAnalysisFailed ? "已结束" : "完成",
+        message: `${mainAnalysisFailed ? "失败兜底耗时 " : "总耗时 "}${(totalDurationMs / 1000).toFixed(1)}s${topLabel}`,
       });
     }
-    report = { ...report, timings: finalTimings, totalDurationMs };
-    await writeJson(path.join(projectDir, "analysis-result.json"), { project: updatedProject, nodes, report });
-    await writeJson(path.join(projectDir, "timings.json"), { totalDurationMs, timings: finalTimings });
-    // main 端直接落盘 SQLite,避免依赖 renderer 走 ProgressScreen 才能同步。
-    // 与 renderer 端 setNodesForProject/setReportForProject 的 IPC 写是幂等的(INSERT OR UPDATE)。
+    const tokenUsage = tokenLedger.snapshot();
+    report = { ...report, timings: finalTimings, totalDurationMs, tokenUsage };
+    // 写到 per-analysis 目录
+    const analysisDir = getAnalysisDir(project.id, analysisId);
+    await fs.mkdir(analysisDir, { recursive: true });
+    await writeJson(path.join(analysisDir, "analysis-result.json"), { analysisId, project: updatedProject, nodes, report });
+    await writeJson(path.join(analysisDir, "timings.json"), { totalDurationMs, timings: finalTimings });
+    await writeJson(path.join(analysisDir, "token-usage.json"), tokenUsage);
     try {
       const db = getDb();
+      const now = new Date().toISOString();
+      const finalStatus = mainAnalysisFailed ? "failed" : "completed";
+      const resultJson = JSON.stringify({ nodes, report });
+      const tokenUsageJson = tokenUsage ? JSON.stringify(tokenUsage) : null;
       db.prepare(
-        "INSERT INTO projects (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
-      ).run(updatedProject.id, JSON.stringify(updatedProject), Date.now());
-      db.prepare(
-        "INSERT INTO analysis_nodes (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data",
-      ).run(project.id, JSON.stringify(nodes));
-      db.prepare(
-        "INSERT INTO analysis_reports (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data",
-      ).run(project.id, JSON.stringify(report));
+        "UPDATE analyses SET status = ?, result = ?, token_usage = ?, duration_ms = ?, error_message = ?, completed_at = ? WHERE id = ?"
+      ).run(
+        finalStatus, resultJson, tokenUsageJson, totalDurationMs,
+        mainAnalysisFailed ? "主分析失败" : null,
+        Date.now(), analysisId,
+      );
+      db.prepare("UPDATE videos SET status = ?, thumbnail_url = COALESCE(?, thumbnail_url), title = COALESCE(?, title), updated_at = ? WHERE id = ?")
+        .run(finalStatus === "completed" ? "completed" : "failed", updatedProject.thumbnailUrl || null, updatedProject.videoName || null, Date.now(), updatedProject.id);
     } catch (persistError) {
-      // 不阻断返回:JSON 文件已经写了,renderer 路径仍可兜底
-      console.warn("[clipiq] main 端 SQLite 持久化失败,renderer 路径会兜底:", persistError);
+      log.warn("clipiq", "main 端 SQLite 持久化失败,JSON 会兜底:", persistError);
+      await appendPersistErrorLog(project.id, "analyzeProject finalize", persistError);
     }
-    return { project: updatedProject, nodes, report };
+    if (!mainAnalysisFailed) analysisOutcome = "ok";
+    log.info("analyze", `[analysis:${analysisId}] 分析完成, 耗时 ${formatDuration(Date.now() - analysisStartedAt)}, outcome=${analysisOutcome}`);
+    return { analysisId, project: updatedProject, nodes, report };
+  } catch (err) {
+    analysisFailureMsg = String(err?.message || err).slice(0, 300);
+    log.info("analyze", `[analysis:${analysisId}] 分析异常: ${analysisFailureMsg}`);
+    if (err && typeof err === "object") err._analysisId = analysisId;
+    throw err;
   } finally {
-    clearAnalysis(project.id);
+    const currentHandle = activeTasks.get(analysisId);
+    const takenOver = currentHandle && currentHandle !== handle;
+    log.info("analyze:lifecycle", `[analysis:${analysisId}] finally: outcome=${analysisOutcome} cancelled=${handle.cancelled} takenOverByNew=${takenOver} newAnalysisId=${takenOver ? currentHandle.analysisId : "n/a"} elapsed=${formatDuration(Date.now() - analysisStartedAt)}`);
+    if (handle.cancelled) {
+      analysisOutcome = "cancelled";
+      try {
+        const db = getDb();
+        db.prepare("UPDATE analyses SET status = 'cancelled', error_message = '用户取消了分析。', completed_at = ? WHERE id = ?")
+          .run(Date.now(), analysisId);
+        // 视频本体回到"已取消",不要停在 analyzing 也不要标失败。
+        db.prepare("UPDATE videos SET status = 'cancelled', updated_at = ? WHERE id = ?")
+          .run(Date.now(), project.id);
+      } catch { /* best-effort */ }
+    }
+    try {
+      closeCurrentStage();
+      await appendEtaSample({
+        project,
+        analysisStartedAt,
+        outcome: analysisOutcome,
+        failureMsg: analysisFailureMsg,
+        timings,
+        providers: { complexVision: complexVisionProvider, mediumText: mediumTextProvider, audio: audioProvider },
+      });
+      // 只有 ok 样本才参与学习 (失败 / 取消的 timing 偏短); 学习器自己也会过滤
+      if (analysisOutcome === "ok") {
+        try {
+          learnedBaselines = await etaLearner.updateAndSave(app.getPath("userData"));
+          const count = Object.keys(learnedBaselines.providers || {}).length;
+          if (count > 0) log.info("eta-learner", `baseline 更新, 当前 ${count} 个 provider`);
+        } catch (learnErr) {
+          log.warn("eta-learner", "学习失败:", learnErr?.message || learnErr);
+        }
+      }
+    } catch (sampleErr) {
+      log.warn("eta-samples", "写埋点失败:", sampleErr?.message || sampleErr);
+    }
+    clearTask(analysisId);
   }
+}
+
+// ETA 埋点 jsonl 落盘 helper - 每次 analyzeProject 结束 append 一行 (ok/failed/cancelled 都写)
+async function appendEtaSample({ project, analysisStartedAt, outcome, failureMsg, timings, providers }) {
+  let machine;
+  try {
+    const daemonClient = require("./daemon-client.cjs");
+    machine = await daemonClient.getHardware();
+  } catch {
+    machine = {
+      platform: process.platform, arch: process.arch,
+      cpuModel: os.cpus()?.[0]?.model || "unknown", backend: "cpu",
+      totalMemoryBytes: os.totalmem(), availableMemoryBytes: os.totalmem() - 6 * 1024 ** 3,
+    };
+  }
+  const summarizeProvider = (p) => p ? {
+    id: p.id,
+    name: p.name,
+    model: p.model,
+    endpointType: p.endpointType,
+    contextSize: p.contextSize,
+    maxOutputTokens: p.maxOutputTokens,
+    source: p.source,
+  } : null;
+  const sample = {
+    schemaVersion: 1,
+    projectId: project.id,
+    startedAt: new Date(analysisStartedAt).toISOString(),
+    totalDurationMs: Date.now() - analysisStartedAt,
+    outcome,
+    ...(failureMsg ? { failureMsg } : {}),
+    machine: {
+      platform: machine.platform,
+      arch: machine.arch,
+      cpuModel: machine.cpuModel,
+      backend: machine.backend,
+      totalMemoryGB: Math.round(machine.totalMemoryBytes / (1024 ** 3) * 10) / 10,
+      availableMemoryGB: Math.round(machine.availableMemoryBytes / (1024 ** 3) * 10) / 10,
+    },
+    project: {
+      platform: project.source?.platform || (project.source?.type === "url" ? "url" : "local"),
+      sourceType: project.source?.type,
+    },
+    providers: {
+      complexVision: summarizeProvider(providers.complexVision),
+      mediumText: summarizeProvider(providers.mediumText),
+      audio: summarizeProvider(providers.audio),
+    },
+    stages: timings,
+  };
+  const filePath = path.join(app.getPath("userData"), "eta-samples.jsonl");
+  await fs.appendFile(filePath, JSON.stringify(sample) + "\n");
 }
 
 function formatTime(sec) {
@@ -2973,6 +6671,20 @@ function formatTime(sec) {
   const m = Math.floor(safe / 60);
   const s = Math.floor(safe % 60);
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// 进度消息里"耗时/平均/已等待"的统一格式化:
+// - 小于 1s → "950ms" (毫秒, 用于很快的批次)
+// - 小于 60s → "23.6s" (一位小数, 跟现有 (ms/1000).toFixed(1) 风格一致)
+// - 大于等于 60s → "3分05秒" (中文 m分ss秒, 比 m:ss 更易读)
+function formatDuration(ms) {
+  const n = Math.max(0, Number(ms) || 0);
+  if (n < 1000) return `${Math.round(n)}ms`;
+  if (n < 60_000) return `${(n / 1000).toFixed(1)}s`;
+  const totalSec = Math.round(n / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}分${String(s).padStart(2, "0")}秒`;
 }
 
 function exportMarkdown(project, nodes, report, provider) {
@@ -3033,11 +6745,20 @@ function exportCsv(nodes) {
 }
 
 function getAppIcon() {
+  const isDev = !app.isPackaged;
+  const prefix = isDev ? "icon-dev-" : "icon-";
   const candidates = [
-    path.join(__dirname, "assets", "icon-1024.png"),
-    path.join(__dirname, "assets", "icon-512.png"),
-    path.join(__dirname, "assets", "icon-256.png"),
+    path.join(__dirname, "assets", `${prefix}1024.png`),
+    path.join(__dirname, "assets", `${prefix}512.png`),
+    path.join(__dirname, "assets", `${prefix}256.png`),
   ];
+  if (isDev) {
+    candidates.push(
+      path.join(__dirname, "assets", "icon-1024.png"),
+      path.join(__dirname, "assets", "icon-512.png"),
+      path.join(__dirname, "assets", "icon-256.png"),
+    );
+  }
   for (const p of candidates) {
     if (fsSync.existsSync(p)) {
       const img = nativeImage.createFromPath(p);
@@ -3113,15 +6834,27 @@ function rebuildTrayMenu() {
 
 function createTray() {
   if (trayInstance) return;
-  const sourcePath = path.join(__dirname, "assets", "icon-256.png");
-  let trayImg = nativeImage.createFromPath(sourcePath);
-  if (trayImg.isEmpty()) {
-    console.warn("[tray] icon-256.png 不可用,跳过托盘创建");
-    return;
+  // macOS 用模板图像(纯黑 + 镂空 alpha),系统按 menubar 主题反色,自动加载 @2x。
+  // 其他平台沿用彩色 app 图标。
+  if (process.platform === "darwin") {
+    const tplPath = path.join(__dirname, "assets", "tray-iconTemplate.png");
+    const tplImg = nativeImage.createFromPath(tplPath);
+    if (tplImg.isEmpty()) {
+      log.warn("tray", "tray-iconTemplate.png 不可用,跳过托盘创建");
+      return;
+    }
+    tplImg.setTemplateImage(true);
+    trayInstance = new Tray(tplImg);
+  } else {
+    const sourcePath = path.join(__dirname, "assets", "icon-256.png");
+    let trayImg = nativeImage.createFromPath(sourcePath);
+    if (trayImg.isEmpty()) {
+      log.warn("tray", "icon-256.png 不可用,跳过托盘创建");
+      return;
+    }
+    trayImg = trayImg.resize({ width: 16, height: 16, quality: "best" });
+    trayInstance = new Tray(trayImg);
   }
-  const size = process.platform === "darwin" ? 18 : 16;
-  trayImg = trayImg.resize({ width: size, height: size, quality: "best" });
-  trayInstance = new Tray(trayImg);
   trayInstance.setToolTip("ClipIQ");
   trayInstance.on("click", () => toggleMainWindow());
   rebuildTrayMenu();
@@ -3157,7 +6890,7 @@ function notifyIfBackground({ title, body, urgency } = {}) {
     });
     n.show();
   } catch (err) {
-    console.warn("[notify] 通知失败:", err?.message || err);
+    log.warn("notify", "通知失败:", err?.message || err);
   }
 }
 
@@ -3168,7 +6901,7 @@ async function createWindow() {
     height: 860,
     minWidth: 1080,
     minHeight: 720,
-    title: "ClipIQ · 看懂每一帧的逻辑",
+    title: app.isPackaged ? "ClipIQ · 看懂每一帧的逻辑" : "ClipIQ [DEV] · 看懂每一帧的逻辑",
     titleBarStyle: "hiddenInset",
     backgroundColor: "#0F172A",
     icon: icon || undefined,
@@ -3211,6 +6944,8 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  log.init(app.getPath("userData"));
+
   // macOS Dock 图标
   if (process.platform === "darwin" && app.dock) {
     const icon = getAppIcon();
@@ -3218,12 +6953,21 @@ app.whenReady().then(async () => {
   }
   app.setName("ClipIQ");
 
+  // 加载已学习的云端模型 TPS baseline (没文件就是空 baselines, 一切走 hardcoded fallback)
+  try {
+    learnedBaselines = await etaLearner.loadBaselines(app.getPath("userData"));
+    const count = Object.keys(learnedBaselines.providers || {}).length;
+    if (count > 0) log.info("eta-learner", `加载 ${count} 个 provider baseline`);
+  } catch (err) {
+    log.warn("eta-learner", "加载 baseline 失败:", err?.message || err);
+  }
+
   // 生产环境注入严格 CSP — dev 下 Vite HMR 需要 unsafe-eval,跳过。
   // packaged app 加载 file:// 的 dist/index.html,React 已编译为静态 JS,不需要 eval。
   if (app.isPackaged) {
     const csp = [
       "default-src 'self'",
-      "img-src 'self' data: blob: media:",
+      "img-src 'self' data: blob: media: https:",
       "media-src 'self' blob: media:",
       "style-src 'self' 'unsafe-inline'",
       "script-src 'self'",
@@ -3243,7 +6987,37 @@ app.whenReady().then(async () => {
   try {
     await initializeCacheStore();
   } catch (err) {
-    console.warn("[cache-store] 初始化失败:", err?.message || err);
+    log.warn("cache-store", "初始化失败:", err?.message || err);
+  }
+
+  // 本地 llama 接线: ctx override 解析 + openai-client 自动 acquire/release。
+  // 业务方零改动: 任何 provider.source === "local_llama" 的请求都会被 manager 调度。
+  // ctx override 解析器,供 llama:start / autoResume 使用
+  contextResolver = async (modelKey) => {
+    try {
+      const cfg = (readConfig()) || {};
+      const override = cfg?.localModelOverrides?.[modelKey]?.contextSize;
+      return Number(override) > 0 ? Number(override) : null;
+    } catch {
+      return null;
+    }
+  };
+  llamaRuntime.setContextResolver(contextResolver);
+  openaiClient.setLocalProviderAdapter((modelKey, opts) =>
+    llamaManager.acquire(modelKey, opts),
+  );
+
+  try {
+    const bridgeStatus = await extensionBridge.start(app.getPath("userData"));
+    extensionBridge.onStatusChange((s) => {
+      // 广播给所有 renderer 窗口
+      for (const win of BrowserWindow.getAllWindows()) {
+        try { win.webContents.send("extensionBridge:status", s); } catch { /* noop */ }
+      }
+    });
+    log.info("extension-bridge", `已启动 ws://${bridgeStatus.host}:${bridgeStatus.port}/agent`);
+  } catch (err) {
+    log.warn("extension-bridge", "启动失败:", err?.message || err);
   }
 
   protocol.handle("media", async (request) => {
@@ -3254,8 +7028,9 @@ app.whenReady().then(async () => {
       if (segs.length < 2) return new Response("Bad project URL", { status: 400 });
       const projectId = decodeURIComponent(segs[0]);
       const rel = segs.slice(1).map(decodeURIComponent).join(path.sep);
-      filePath = path.join(getProjectDir(projectId), rel);
-    } else if (url.host === "external") {
+      filePath = path.join(getVideoDir(projectId), rel);
+    } else if (url.host === "external" || url.host === "local") {
+      // external 与 local 都把绝对路径编码在 pathname 里(rowToVideo 用 media://local/<abs>)。
       filePath = decodeURIComponent(url.pathname.slice(1));
     } else {
       return new Response(`Unknown media host: ${url.host}`, { status: 400 });
@@ -3306,58 +7081,53 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("data:getInfo", async () => {
     const userData = app.getPath("userData");
-    const projectsDir = path.join(userData, "projects");
-    let projectCount = 0;
+    const videosDir = path.join(userData, "videos");
+    let videoCount = 0;
     let totalBytes = 0;
     try {
-      const entries = await fs.readdir(projectsDir, { withFileTypes: true });
+      const entries = await fs.readdir(videosDir, { withFileTypes: true });
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
-        projectCount += 1;
-        const projectPath = path.join(projectsDir, entry.name);
-        totalBytes += await directorySize(projectPath).catch(() => 0);
+        videoCount += 1;
+        const videoPath = path.join(videosDir, entry.name);
+        totalBytes += await directorySize(videoPath).catch(() => 0);
       }
-    } catch {
-      // projects dir not created yet
-    }
+    } catch { /* videos dir not created yet */ }
     let dbBytes = 0;
-    try {
-      dbBytes = (await fs.stat(getDbPath())).size;
-    } catch {
-      // db not created yet
-    }
-    let dbProjectCount = 0;
-    try {
-      dbProjectCount = getDb().prepare("SELECT COUNT(*) AS n FROM projects").get().n;
-    } catch {
-      // db not opened
-    }
+    try { dbBytes = (await fs.stat(getDbPath())).size; } catch { /* db not created yet */ }
     return {
       userDataPath: userData,
-      projectsPath: projectsDir,
-      configPath: getConfigPath(),
+      videosPath: videosDir,
+      configPath: cfgStore().path,
       dbPath: getDbPath(),
-      projectCount,
-      dbProjectCount,
+      videoCount,
       totalBytes,
       dbBytes,
     };
   });
 
+  ipcMain.handle("extensionBridge:getStatus", async () => {
+    return extensionBridge.getStatus();
+  });
+
+  ipcMain.handle("extensionBridge:rotateToken", async () => {
+    return { token: extensionBridge.rotateToken() };
+  });
+
   ipcMain.handle("data:openFolder", async (_event, which) => {
-    const target = which === "projects" ? path.join(app.getPath("userData"), "projects") : app.getPath("userData");
+    const target = which === "videos" ? path.join(app.getPath("userData"), "videos") : app.getPath("userData");
     await fs.mkdir(target, { recursive: true });
     await shell.openPath(target);
     return { ok: true, path: target };
   });
 
-  ipcMain.handle("data:purgeProjects", async () => {
-    const projectsDir = path.join(app.getPath("userData"), "projects");
+  ipcMain.handle("data:purgeAll", async () => {
+    const videosDir = path.join(app.getPath("userData"), "videos");
     try {
-      await fs.rm(projectsDir, { recursive: true, force: true });
-      await fs.mkdir(projectsDir, { recursive: true });
+      await fs.rm(videosDir, { recursive: true, force: true });
+      await fs.mkdir(videosDir, { recursive: true });
       const db = getDb();
-      db.exec("DELETE FROM analysis_nodes; DELETE FROM analysis_reports; DELETE FROM projects;");
+      db.exec("DELETE FROM analyses; DELETE FROM videos; DELETE FROM collection_videos; DELETE FROM collections; DELETE FROM shots; DELETE FROM methodologies;");
       return { ok: true };
     } catch (error) {
       return { ok: false, message: error?.message || String(error) };
@@ -3397,9 +7167,9 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("cache:setMaxBytes", async (_event, bytes) => {
     const next = Math.max(0, Math.floor(Number(bytes) || 0));
-    const cur = await readJson(getConfigPath(), null);
+    const cur = readConfig();
     if (cur) {
-      await writeJson(getConfigPath(), { ...cur, cacheMaxBytes: next, savedAt: new Date().toISOString() });
+      writeConfig( { ...cur, cacheMaxBytes: next, savedAt: new Date().toISOString() });
     }
     cacheStore.configure({
       dir: cacheStore.getCacheDir() || getDefaultCacheDir(),
@@ -3413,9 +7183,9 @@ app.whenReady().then(async () => {
     if (!dir) return { ok: false, message: "目录路径为空" };
     try {
       const result = await cacheStore.migrate(dir);
-      const cur = await readJson(getConfigPath(), null);
+      const cur = readConfig();
       if (cur) {
-        await writeJson(getConfigPath(), { ...cur, cacheDir: cacheStore.getCacheDir(), savedAt: new Date().toISOString() });
+        writeConfig( { ...cur, cacheDir: cacheStore.getCacheDir(), savedAt: new Date().toISOString() });
       }
       return { ok: true, cacheDir: cacheStore.getCacheDir(), mode: result.mode };
     } catch (err) {
@@ -3440,6 +7210,19 @@ app.whenReady().then(async () => {
     return { ok: true, path: target };
   });
 
+  ipcMain.handle("cache:getPolicy", async () => {
+    const cfg = readConfig();
+    return cfg?.cachePolicy || { enabled: true, stages: {} };
+  });
+
+  ipcMain.handle("cache:setPolicy", async (_event, policy) => {
+    const cur = readConfig() || {};
+    cur.cachePolicy = policy;
+    cur.savedAt = new Date().toISOString();
+    writeConfig( cur);
+    return { ok: true };
+  });
+
   ipcMain.handle("runtime:getStatus", async () => {
     const [ffmpeg, ffprobe, ytDlp] = await Promise.all([
       commandPath("ffmpeg"),
@@ -3450,15 +7233,20 @@ app.whenReady().then(async () => {
       ffmpeg,
       ffprobe,
       ytDlp,
-      ffmpegBundled: ffmpeg ? ffmpeg === bundledFfmpegPath() : false,
-      ffprobeBundled: ffprobe ? ffprobe === bundledFfprobePath() : false,
+      ffmpegBundled: isBundledToolPath(ffmpeg, bundledFfmpegPath()),
+      ffprobeBundled: isBundledToolPath(ffprobe, bundledFfprobePath()),
       ytDlpBundled: ytDlp ? ytDlp === ytDlpLocalPath() : false,
       ytDlpVersion: ytDlp ? await getYtDlpVersion(ytDlp).catch(() => null) : null,
     };
   });
 
-  // 系统资源采样: CPU% 需两次采样做差; freemem 在 macOS 偏低是 OS 缓存策略,
-  // 这里上报的"已用%" = 1 - free/total,作为粗略可视化指标,够看出"是否吃紧"。
+  // 系统资源采样。
+  //
+  // 内存口径: macOS 上 os.freemem() 只算 Pages free,完全忽略 Inactive/Cached/Compressed,
+  // 长期接近 0,1-free/total 会长期吊 100% 而无意义。这里在 darwin 上改走 vm_stat,
+  // 对齐活动监视器的 "Memory Used" = App(Anonymous - Purgeable) + Wired + Compressed,
+  // 再用 sysctl vm.swapusage 拿 swap, 综合启发出 normal/warn/critical 压力档位。
+  // 其他平台 fallback 回 Node os 原口径。
   let lastCpuSample = null;
   ipcMain.handle("system:getStats", async () => {
     const cpus = os.cpus();
@@ -3481,17 +7269,102 @@ app.whenReady().then(async () => {
     lastCpuSample = { idle, total };
 
     const totalMem = os.totalmem();
-    const freeMem = os.freemem();
-    const usedMem = Math.max(0, totalMem - freeMem);
-    const memoryPercent = totalMem > 0 ? Math.round((usedMem / totalMem) * 100) : 0;
+    let memoryUsedBytes;
+    let memoryCompressedBytes;
+    let swapUsedBytes;
+    let memoryPressure = "normal";
+
+    if (process.platform === "darwin") {
+      const mac = await sampleDarwinMemory(totalMem);
+      if (mac) {
+        memoryUsedBytes = mac.usedBytes;
+        memoryCompressedBytes = mac.compressedBytes;
+        swapUsedBytes = mac.swapUsedBytes;
+        memoryPressure = mac.pressure;
+      } else {
+        memoryUsedBytes = Math.max(0, totalMem - os.freemem());
+      }
+    } else {
+      memoryUsedBytes = Math.max(0, totalMem - os.freemem());
+      const ratio = totalMem > 0 ? memoryUsedBytes / totalMem : 0;
+      if (ratio >= 0.92) memoryPressure = "critical";
+      else if (ratio >= 0.8) memoryPressure = "warn";
+    }
+
+    const memoryPercent = totalMem > 0
+      ? Math.max(0, Math.min(100, Math.round((memoryUsedBytes / totalMem) * 100)))
+      : 0;
 
     return {
       cpuPercent,
       cpuCount: cpus.length,
       memoryPercent,
-      memoryUsedBytes: usedMem,
+      memoryUsedBytes,
       memoryTotalBytes: totalMem,
+      memoryPressure,
+      memoryCompressedBytes,
+      swapUsedBytes,
+      platform: process.platform,
     };
+  });
+
+  // 进程占用列表: electron 自身所有进程 (Browser/Renderer/GPU/Utility) + sidecar (llama/whisper)。
+  // electron 部分用 app.getAppMetrics() —— chromium 内置, percentCPUUsage 是上次调用以来的均值。
+  // sidecar 部分跑 ps 一次性快照拿 RSS 和 pcpu。
+  ipcMain.handle("system:listProcesses", async () => {
+    const metrics = app.getAppMetrics();
+    // macOS: 内存全部走 top phys_footprint (Activity Monitor 同口径), 不再用
+    //   workingSetSize ≈ ps rss (含共享内存重复算).
+    //   实测 10 个并行 spawn top 合计 ~8ms, 不影响 1.5s 轮询.
+    // 其他平台: workingSetSize 保留.
+    const isMac = process.platform === "darwin";
+    const electronProcs = await Promise.all(
+      metrics.map(async (m) => {
+        let memoryBytes = (m.memory?.workingSetSize || 0) * 1024;
+        if (isMac) {
+          const corrected = await sampleTopMemByPid(m.pid);
+          if (corrected != null) memoryBytes = corrected;
+        }
+        return {
+          pid: m.pid,
+          kind: mapElectronProcKind(m.type),
+          label: electronProcLabel(m),
+          detail: electronProcDetail(m),
+          cpuPercent: Math.round((m.cpu?.percentCPUUsage || 0) * 10) / 10,
+          memoryBytes,
+        };
+      }),
+    );
+
+    // daemon 管理推理子进程;这里只展示 daemon 本身的进程状态
+    const sidecars = [];
+    try {
+      const daemonClient = require("./daemon-client.cjs");
+      const pidPath = path.join(daemonClient.daemonStorageDir(), ".daemon.pid");
+      const pidStr = await fs.readFile(pidPath, "utf8").catch(() => "");
+      const daemonPid = parseInt(pidStr.trim(), 10);
+      if (daemonPid > 0) {
+        const stats = await samplePsByPid(daemonPid);
+        if (stats) {
+          const rt = await daemonClient.getRuntimeStatus().catch(() => null);
+          const details = [];
+          if (rt?.llm?.state === "ready" && rt.llm.modelId) details.push(`LLM: ${rt.llm.modelId}`);
+          if (rt?.whisper?.state === "ready" && rt.whisper.modelId) details.push(`Whisper: ${rt.whisper.modelId}`);
+          sidecars.push({
+            pid: daemonPid,
+            kind: "sidecar",
+            label: "ai-model-daemon",
+            detail: details.join(" · ") || undefined,
+            cpuPercent: stats.cpuPercent,
+            memoryBytes: stats.memoryBytes,
+          });
+        }
+      }
+    } catch {
+      // daemon 未运行时静默跳过
+    }
+
+    return [...electronProcs, ...sidecars];
   });
 
   ipcMain.handle("ytdlp:checkUpdate", async () => {
@@ -3499,9 +7372,17 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("ytdlp:install", async (event) => {
-    return downloadYtDlp((stage, message) => {
+    const result = await downloadYtDlp((stage, message) => {
       event.sender.send("ytdlp:progress", { stage, message });
     });
+    event.sender.send("ytdlp:update-status", {
+      installed: true,
+      installedVersion: result.installedVersion,
+      isBundled: true,
+      latestVersion: result.latestVersion,
+      updateAvailable: false,
+    });
+    return result;
   });
 
   ipcMain.handle("video:openFile", async () => {
@@ -3529,20 +7410,35 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("config:load", async () => {
-    const raw = await readJson(getConfigPath(), null);
+    const raw = readConfig();
     return migrateConfigV1ToV2(raw);
+  });
+
+  ipcMain.handle("config:getField", async (_event, key) => {
+    const cfg = readConfig();
+    return cfg?.[key] ?? null;
+  });
+
+  ipcMain.handle("config:setField", async (_event, key, value) => {
+    const cfg = (readConfig()) || {};
+    cfg[key] = value;
+    writeConfig( { ...cfg, savedAt: new Date().toISOString() });
+    return { ok: true };
   });
 
   ipcMain.handle("config:save", async (_event, config) => {
     // 落盘前再过一次 migrate,保证 builtin 永远存在 + schema 永远是 v2
-    // 合并磁盘上的 lastLlamaModelKey 等 renderer 不持有的字段,避免被覆盖
-    const cur = await readJson(getConfigPath(), null);
+    // 合并磁盘上的 lastLlamaModelKey / localModelOverrides 等 renderer 可能不持有的字段,
+    // 避免单字段更新打回时把别的字段抹掉。
+    const cur = readConfig();
     const merged = {
+      ...cur,
       ...config,
       lastLlamaModelKey: config?.lastLlamaModelKey ?? cur?.lastLlamaModelKey ?? null,
+      localModelOverrides: config?.localModelOverrides ?? cur?.localModelOverrides ?? {},
     };
     const migrated = migrateConfigV1ToV2(merged);
-    await writeJson(getConfigPath(), { ...migrated, savedAt: new Date().toISOString() });
+    writeConfig( { ...migrated, savedAt: new Date().toISOString() });
     // maxBytes 改了就同步 cache-store; cacheDir 走专门的 cache:setDir IPC, 这里不动
     try {
       const { maxBytes } = resolveCacheConfig(migrated);
@@ -3550,92 +7446,1658 @@ app.whenReady().then(async () => {
         cacheStore.configure({ dir: cacheStore.getCacheDir(), maxBytes });
       }
     } catch (err) {
-      console.warn("[cache-store] 同步 maxBytes 失败:", err?.message || err);
+      log.warn("cache-store", "同步 maxBytes 失败:", err?.message || err);
     }
     return { ok: true };
   });
 
-  ipcMain.handle("projects:list", async () => {
+  // ==================== v3 CRUD handlers ====================
+
+  // --- videos ---
+  ipcMain.handle("videos:list", async (_event, filter = {}) => {
     const db = getDb();
-    const rows = db.prepare("SELECT data FROM projects ORDER BY updated_at DESC").all();
-    return rows.map((row) => JSON.parse(row.data));
+    const conditions = [];
+    const params = [];
+    if (filter.accountId) { conditions.push("account_id = ?"); params.push(filter.accountId); }
+    if (filter.platform) { conditions.push("platform = ?"); params.push(filter.platform); }
+    if (filter.status) { conditions.push("status = ?"); params.push(filter.status); }
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
+
+    if (filter.collectionId) {
+      const sql = `SELECT v.* FROM videos v JOIN collection_videos cv ON cv.video_id = v.id WHERE cv.collection_id = ?${conditions.length > 0 ? " AND " + conditions.join(" AND ") : ""} ORDER BY cv.position, v.updated_at DESC`;
+      return db.prepare(sql).all(filter.collectionId, ...params).map(rowToVideo);
+    }
+
+    // 「其他视频」:不属于任何账号、也不在任何收藏夹的散视频。
+    if (filter.unassigned) {
+      const extra = conditions.length > 0 ? " AND " + conditions.join(" AND ") : "";
+      const sql = `SELECT * FROM videos WHERE account_id IS NULL AND id NOT IN (SELECT video_id FROM collection_videos)${extra} ORDER BY updated_at DESC`;
+      return db.prepare(sql).all(...params).map(rowToVideo);
+    }
+
+    return db.prepare(`SELECT * FROM videos${where} ORDER BY updated_at DESC`).all(...params).map(rowToVideo);
   });
 
-  ipcMain.handle("projects:upsert", async (_event, project) => {
-    if (!project?.id) throw new Error("projects:upsert 需要 project.id");
+  ipcMain.handle("videos:upsert", async (_event, video) => {
+    if (!video?.id) throw new Error("videos:upsert 需要 video.id");
     const db = getDb();
-    const parsed = project.updatedAt ? Date.parse(project.updatedAt) : NaN;
-    const updatedAt = Number.isFinite(parsed) ? parsed : Date.now();
-    db.prepare(
-      "INSERT INTO projects (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at"
-    ).run(project.id, JSON.stringify(project), updatedAt);
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO videos (id, title, source_type, source_url, play_url, platform, external_id, local_path,
+        duration_sec, width, height, orientation, thumbnail_url, account_id, status,
+        upload_date, view_count, like_count, comment_count, share_count, collect_count,
+        tags, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        title=excluded.title, source_type=excluded.source_type, source_url=excluded.source_url,
+        play_url=excluded.play_url,
+        platform=excluded.platform, external_id=excluded.external_id, local_path=excluded.local_path,
+        duration_sec=excluded.duration_sec, width=excluded.width, height=excluded.height,
+        orientation=excluded.orientation, thumbnail_url=excluded.thumbnail_url, account_id=excluded.account_id,
+        status=excluded.status, upload_date=excluded.upload_date, view_count=excluded.view_count,
+        like_count=excluded.like_count, comment_count=excluded.comment_count, share_count=excluded.share_count,
+        collect_count=excluded.collect_count, tags=excluded.tags, updated_at=excluded.updated_at
+    `).run(
+      video.id, video.title || "", video.sourceType || "local", video.sourceUrl || null,
+      video.playUrl || null,
+      video.platform || null, video.externalId || null, video.localPath || null,
+      video.durationSec || 0, video.width || 0, video.height || 0, video.orientation || "landscape",
+      video.thumbnailUrl || null, video.accountId || null, video.status || "ready",
+      video.uploadDate || null, video.viewCount ?? null, video.likeCount ?? null,
+      video.commentCount ?? null, video.shareCount ?? null, video.collectCount ?? null,
+      video.tags ? JSON.stringify(video.tags) : null,
+      Date.parse(video.createdAt) || now, now,
+    );
     return { ok: true };
   });
 
-  ipcMain.handle("projects:delete", async (_event, projectId) => {
-    if (!projectId) return { ok: false, message: "缺少 projectId" };
+  ipcMain.handle("videos:delete", async (_event, videoId) => {
+    if (!videoId) return { ok: false, message: "缺少 videoId" };
+    // 取消+清理该视频的所有活跃任务
+    for (const [aid, h] of activeTasks) {
+      if (h.videoId === videoId) { cancelTask(aid); clearTask(aid); }
+    }
     const db = getDb();
-    db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
-    db.prepare("DELETE FROM analysis_nodes WHERE project_id = ?").run(projectId);
-    db.prepare("DELETE FROM analysis_reports WHERE project_id = ?").run(projectId);
+    db.prepare("DELETE FROM videos WHERE id = ?").run(videoId);
+    try { await fs.rm(getVideoDir(videoId), { recursive: true, force: true }); } catch { /* best-effort */ }
+    return { ok: true };
+  });
+
+  // --- analyses (1:N per video, result 统一列) ---
+  ipcMain.handle("analyses:list", async (_event, videoId) => {
+    const db = getDb();
+    const rows = db.prepare(
+      "SELECT id, video_id, pipeline_id, status, options, provider_snapshot, result, token_usage, duration_ms, error_message, progress, stage, stage_index, message, heartbeat_at, started_at, completed_at, created_at FROM analyses WHERE video_id = ? ORDER BY created_at DESC"
+    ).all(videoId);
+    return rows.map(rowToAnalysis);
+  });
+
+  // 一次性列出全部分析 — 前端用单个 useQuery(["analyses"]) 订阅,避免 N+1 + 让 invalidate 真正生效。
+  // 含 result(账号摘要 / 报告页 inline 读它);本地 IPC 无网络成本,可接受整表重传。
+  ipcMain.handle("analyses:listAll", async () => {
+    const db = getDb();
+    const rows = db.prepare(
+      "SELECT id, video_id, pipeline_id, status, options, provider_snapshot, result, token_usage, duration_ms, error_message, progress, stage, stage_index, message, heartbeat_at, started_at, completed_at, created_at FROM analyses ORDER BY created_at DESC"
+    ).all();
+    return rows.map(rowToAnalysis);
+  });
+
+  ipcMain.handle("analyses:get", async (_event, analysisId) => {
+    const db = getDb();
+    const row = db.prepare("SELECT * FROM analyses WHERE id = ?").get(analysisId);
+    return row ? rowToAnalysis(row) : null;
+  });
+
+  ipcMain.handle("analyses:delete", async (_event, analysisId) => {
+    const db = getDb();
+    const row = db.prepare("SELECT video_id FROM analyses WHERE id = ?").get(analysisId);
+    if (row) {
+      db.prepare("DELETE FROM analyses WHERE id = ?").run(analysisId);
+      try { await fs.rm(getAnalysisDir(row.video_id, analysisId), { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+    return { ok: true };
+  });
+
+  ipcMain.handle("analyses:updateResult", async (_event, analysisId, result) => {
+    const db = getDb();
+    if (result == null) {
+      db.prepare("UPDATE analyses SET result = ? WHERE id = ?").run(null, analysisId);
+      return { ok: true };
+    }
+    // 合并而非覆盖:renderer 的缓存 store 分两次 partial 写 { nodes } / { report },
+    // 整列覆盖会让后写的把先写的冲掉(典型:写 report 把 nodes 抹没,下次冷加载节点全空)。
+    const row = db.prepare("SELECT result FROM analyses WHERE id = ?").get(analysisId);
+    let existing = {};
+    if (row?.result) {
+      try { existing = JSON.parse(row.result) || {}; } catch { existing = {}; }
+    }
+    const merged = { ...existing, ...result };
+    db.prepare("UPDATE analyses SET result = ? WHERE id = ?").run(JSON.stringify(merged), analysisId);
+    return { ok: true };
+  });
+
+  // --- collections ---
+  ipcMain.handle("collections:list", async () => {
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM collections ORDER BY updated_at DESC").all();
+    const collections = rows.map(rowToCollection);
+    // 回填 methodology(最新一份)+ methodologyHistory(全部,version DESC)。
+    // 镜像 accounts:list 的回填:methodology 存独立表,渲染端从这里读回,避免 upsert 丢字段。
     try {
-      await fs.rm(getProjectDir(projectId), { recursive: true, force: true });
-    } catch {
-      // best-effort
+      const methRows = db.prepare("SELECT collection_id, data, version FROM methodologies ORDER BY version DESC").all();
+      const byColl = {};
+      for (const m of methRows) {
+        if (!byColl[m.collection_id]) byColl[m.collection_id] = [];
+        try { byColl[m.collection_id].push(JSON.parse(m.data)); } catch { /* 跳过坏 JSON */ }
+      }
+      for (const c of collections) {
+        const list = byColl[c.id];
+        if (list && list.length > 0) {
+          c.methodology = list[0];
+          c.methodologyHistory = list.slice(1);
+        }
+      }
+    } catch (e) { log.warn("collections:list", "回填 methodology 失败:", e?.message || e); }
+    return collections;
+  });
+
+  ipcMain.handle("collections:upsert", async (_event, col) => {
+    if (!col?.id) throw new Error("collections:upsert 需要 id");
+    const db = getDb();
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO collections (id, name, description, kind, cover_url, filter_rules, account_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description,
+        kind=excluded.kind, cover_url=excluded.cover_url, filter_rules=excluded.filter_rules,
+        account_id=excluded.account_id, updated_at=excluded.updated_at
+    `).run(
+      col.id, col.name || "", col.description || null, col.kind || "manual",
+      col.coverUrl || null, col.filterRules ? JSON.stringify(col.filterRules) : null,
+      col.accountId || null, Date.parse(col.createdAt) || now, now,
+    );
+    return { ok: true };
+  });
+
+  ipcMain.handle("collections:delete", async (_event, collectionId) => {
+    const db = getDb();
+    db.prepare("DELETE FROM collections WHERE id = ?").run(collectionId);
+    return { ok: true };
+  });
+
+  ipcMain.handle("collections:addVideo", async (_event, collectionId, videoId) => {
+    const db = getDb();
+    const maxPos = db.prepare("SELECT MAX(position) as m FROM collection_videos WHERE collection_id = ?").get(collectionId);
+    db.prepare(
+      "INSERT OR IGNORE INTO collection_videos (collection_id, video_id, position, added_at) VALUES (?, ?, ?, ?)"
+    ).run(collectionId, videoId, (maxPos?.m ?? -1) + 1, Date.now());
+    return { ok: true };
+  });
+
+  ipcMain.handle("collections:removeVideo", async (_event, collectionId, videoId) => {
+    const db = getDb();
+    db.prepare("DELETE FROM collection_videos WHERE collection_id = ? AND video_id = ?").run(collectionId, videoId);
+    return { ok: true };
+  });
+
+  ipcMain.handle("collections:listVideos", async (_event, collectionId) => {
+    const db = getDb();
+    const rows = db.prepare(
+      "SELECT v.* FROM videos v JOIN collection_videos cv ON cv.video_id = v.id WHERE cv.collection_id = ? ORDER BY cv.position"
+    ).all(collectionId);
+    return rows.map(rowToVideo);
+  });
+
+  // --- pipelines ---
+  ipcMain.handle("pipelines:list", async () => {
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM pipelines ORDER BY builtin DESC, updated_at DESC").all();
+    return rows.map(rowToPipeline);
+  });
+
+  ipcMain.handle("pipelines:upsert", async (_event, pipeline) => {
+    if (!pipeline?.id) throw new Error("pipelines:upsert 需要 id");
+    const db = getDb();
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO pipelines (id, name, builtin, stages, slot_config, description, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name, stages=excluded.stages,
+        slot_config=excluded.slot_config, description=excluded.description, updated_at=excluded.updated_at
+    `).run(
+      pipeline.id, pipeline.name || "", pipeline.builtin ? 1 : 0,
+      JSON.stringify(pipeline.stages || []),
+      pipeline.slotConfig ? JSON.stringify(pipeline.slotConfig) : null,
+      pipeline.description || null,
+      Date.parse(pipeline.createdAt) || now, now,
+    );
+    return { ok: true };
+  });
+
+  ipcMain.handle("pipelines:delete", async (_event, pipelineId) => {
+    const db = getDb();
+    const row = db.prepare("SELECT builtin FROM pipelines WHERE id = ?").get(pipelineId);
+    if (row?.builtin) throw new Error("不能删除内置管线");
+    db.prepare("DELETE FROM pipelines WHERE id = ?").run(pipelineId);
+    return { ok: true };
+  });
+
+  // --- methodologies ---
+  ipcMain.handle("methodologies:list", async (_event, accountId) => {
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM methodologies WHERE account_id = ? ORDER BY version DESC").all(accountId);
+    return rows.map((r) => ({
+      id: r.id,
+      accountId: r.account_id,
+      version: r.version,
+      data: r.data ? JSON.parse(r.data) : null,
+      sourceVideoCount: r.source_video_count || 0,
+      createdAt: new Date(r.created_at).toISOString(),
+    }));
+  });
+
+  // --- accounts (v3: 结构化列) ---
+  ipcMain.handle("accounts:list", async () => {
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM accounts ORDER BY updated_at DESC").all();
+    const accounts = rows.map(rowToAccount);
+    // 回填 methodology(最新)+ methodologyHistory(全部)。methodology 存在独立的 methodologies 表
+    // (generateMethodology 写入),accounts 表没有这两列、upsert 会丢弃,所以读取时从 methodologies 表重建。
+    // 一次查全部再 JS 分组,避免每账号一次的 N+1。
+    try {
+      const methRows = db.prepare("SELECT account_id, data FROM methodologies ORDER BY version DESC").all();
+      const byAccount = {};
+      for (const m of methRows) {
+        if (!m.data) continue;
+        let parsed;
+        try { parsed = JSON.parse(m.data); } catch { continue; }
+        (byAccount[m.account_id] ||= []).push(parsed); // 已按 version DESC,最新在前
+      }
+      for (const a of accounts) {
+        const hist = byAccount[a.id];
+        if (hist?.length) {
+          a.methodology = hist[0];
+          a.methodologyHistory = hist.slice(0, 10);
+        }
+      }
+    } catch (e) {
+      log.warn("accounts:list", "回填 methodology 失败", e?.message || e);
+    }
+    return accounts;
+  });
+
+  ipcMain.handle("accounts:upsert", async (_event, account) => {
+    if (!account?.id) throw new Error("accounts:upsert 需要 account.id");
+    const db = getDb();
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO accounts (id, name, platform, external_id, external_url, avatar_url, bio, followers,
+        tags, fetch_range, fetch_phase, fetch_error, last_fetched_at, analysis_config, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name, platform=excluded.platform, external_id=excluded.external_id,
+        external_url=excluded.external_url, avatar_url=excluded.avatar_url, bio=excluded.bio,
+        followers=excluded.followers, tags=excluded.tags, fetch_range=excluded.fetch_range,
+        fetch_phase=excluded.fetch_phase, fetch_error=excluded.fetch_error,
+        last_fetched_at=excluded.last_fetched_at, analysis_config=excluded.analysis_config,
+        updated_at=excluded.updated_at
+    `).run(
+      account.id, account.name || "", account.platform || "unknown",
+      account.externalId || null, account.externalUrl || null,
+      account.avatarUrl || null, account.bio || null, account.followers || null,
+      account.tags ? JSON.stringify(account.tags) : null,
+      account.fetchRange || null, account.fetchPhase || "idle",
+      account.fetchError || null, account.lastFetchedAt ? Date.parse(account.lastFetchedAt) || null : null,
+      account.analysisConfig ? JSON.stringify(account.analysisConfig) : null,
+      Date.parse(account.createdAt) || now, now,
+    );
+    return { ok: true };
+  });
+
+  ipcMain.handle("accounts:delete", async (_event, accountId) => {
+    if (!accountId) return { ok: false, message: "缺少 accountId" };
+    const db = getDb();
+    db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
+    return { ok: true };
+  });
+
+  // --- studio sessions ---
+  ipcMain.handle("sessions:list", async () => {
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM studio_sessions ORDER BY updated_at DESC").all();
+    return rows.map(rowToStudioSession);
+  });
+
+  ipcMain.handle("sessions:upsert", async (_event, session) => {
+    if (!session?.id) throw new Error("sessions:upsert 需要 session.id");
+    const db = getDb();
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO studio_sessions (id, goal, target_platform, target_duration, steps, script_draft, output, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        goal=excluded.goal, target_platform=excluded.target_platform, target_duration=excluded.target_duration,
+        steps=excluded.steps, script_draft=excluded.script_draft, output=excluded.output, updated_at=excluded.updated_at
+    `).run(
+      session.id, session.goal || null, session.targetPlatform || null,
+      session.targetDurationSec || null,
+      session.steps ? JSON.stringify(session.steps) : null,
+      session.scriptDraft || null,
+      session.output ? JSON.stringify(session.output) : null,
+      Date.parse(session.createdAt) || now, now,
+    );
+    return { ok: true };
+  });
+
+  ipcMain.handle("sessions:delete", async (_event, sessionId) => {
+    if (!sessionId) return { ok: false, message: "缺少 sessionId" };
+    const db = getDb();
+    db.prepare("DELETE FROM studio_sessions WHERE id = ?").run(sessionId);
+    return { ok: true };
+  });
+
+  // --- shots ---
+  ipcMain.handle("shots:list", async (_event, videoId) => {
+    const db = getDb();
+    const where = videoId ? " WHERE video_id = ?" : "";
+    const rows = videoId
+      ? db.prepare(`SELECT * FROM shots${where} ORDER BY shot_index`).all(videoId)
+      : db.prepare("SELECT * FROM shots ORDER BY shot_index").all();
+    return rows.map(rowToShot);
+  });
+
+  ipcMain.handle("shots:setForVideo", async (_event, videoId, shots) => {
+    const db = getDb();
+    db.prepare("DELETE FROM shots WHERE video_id = ?").run(videoId);
+    const insert = db.prepare(`
+      INSERT INTO shots (id, video_id, shot_index, start_sec, end_sec, thumbnail_url, description,
+        shot_type, camera_movement, usage_tags, is_favorite, subtitle_text, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const now = Date.now();
+    for (const s of (shots || [])) {
+      insert.run(
+        s.id, videoId, s.shotIndex ?? 0, s.startSec ?? 0, s.endSec ?? 0,
+        s.thumbnailUrl || null, s.description || null, s.shotType || null,
+        s.cameraMovement || null, s.usageTags ? JSON.stringify(s.usageTags) : null,
+        s.isFavorite ? 1 : 0, s.subtitleText || null, Date.parse(s.createdAt) || now,
+      );
     }
     return { ok: true };
   });
 
-  ipcMain.handle("nodes:get", async (_event, projectId) => {
-    const db = getDb();
-    const row = db.prepare("SELECT data FROM analysis_nodes WHERE project_id = ?").get(projectId);
-    return row ? JSON.parse(row.data) : [];
+  // v2: 多策略拉取 UP 主账号信息 + 视频列表
+  // 策略: 平台 native API (头像/粉丝/简介) ∥ yt-dlp (视频列表 + 兜底元数据)
+  const fetchAccountVideosCore = async ({ url: rawInput, limit = 20, onProgress, cancelled }) => {
+    if (!rawInput || typeof rawInput !== "string") throw new Error("fetchAccountVideosCore 需要 url");
+    // 从分享文案中提取 URL
+    const extractedUrl = extractFirstUrl(rawInput) || rawInput;
+    log.info("accounts:fetch", `原始输入: ${rawInput.slice(0, 80)} → 提取URL: ${extractedUrl.slice(0, 80)}`);
+    // 短链解析 (v.douyin.com → www.douyin.com/user/...)
+    const url = await resolveDouyinShortUrl(extractedUrl);
+    const platform = detectAccountPlatform(url);
+    log.info("accounts:fetch", `解析后URL: ${url.slice(0, 120)} → 平台: ${platform}`);
+    const safeLimit = Math.max(1, Math.min(200, Number(limit) || 20));
+    const report = (progress, stage, message) => {
+      if (cancelled && cancelled()) return;
+      if (onProgress) try { onProgress({ progress, stage, message }); } catch { /* noop */ }
+    };
+    const checkCancelled = () => { if (cancelled && cancelled()) throw new Error("__cancelled__"); };
+
+    let nativeCard = null;
+    let nativeCardError = null;
+    let nativeVideos = null;
+    let nativeVideosError = null;
+    let nativeMid = null;
+    let accountSecUid = null;
+
+    report(8, "解析账号", `平台 · ${platform}`);
+    checkCancelled();
+
+    if (platform === "bilibili") {
+      nativeMid = parseBilibiliMid(url);
+      if (nativeMid) {
+        report(15, "请求 B 站接口", `card + space arc/search · mid ${nativeMid}`);
+        const cardPromise = fetchBilibiliCard(nativeMid).catch((e) => {
+          nativeCardError = `bilibili card: ${e?.message || String(e)}`;
+          return null;
+        });
+        const fetchWithRetry = async () => {
+          let lastErr = null;
+          for (let i = 0; i < 3; i++) {
+            checkCancelled();
+            try { return await fetchBilibiliSpaceVideos(nativeMid, safeLimit); }
+            catch (e) {
+              lastErr = e;
+              if (i < 2) {
+                report(20 + i * 5, "B 站接口重试", `第 ${i + 2} 次, 等待 3s`);
+                await new Promise((r) => setTimeout(r, 3000));
+              }
+            }
+          }
+          throw lastErr;
+        };
+        const videosPromise = fetchWithRetry().catch((e) => {
+          nativeVideosError = `bilibili space: ${e?.message || String(e)}`;
+          return null;
+        });
+        [nativeCard, nativeVideos] = await Promise.all([cardPromise, videosPromise]);
+      } else {
+        nativeCardError = "无法从 B 站 URL 解析出 mid (期望格式: space.bilibili.com/<UID>)";
+      }
+    }
+
+    if (platform === "douyin") {
+      let secUid = parseDouyinSecUid(url);
+      if (!secUid) {
+        report(12, "解析短链", "跟随重定向获取 sec_uid");
+        secUid = await resolveDouyinShortLink(url);
+      }
+      if (secUid) accountSecUid = secUid;
+      log.info("accounts:fetch", `抖音 secUid=${secUid ? secUid.slice(0, 20) + "..." : "(null)"} bridgeConnected=${extensionBridge.isConnected()}`);
+      if (secUid) {
+        // 并行: 拉取账号资料 + 视频列表。抖音优先走本地 DouYin_Spider sidecar:
+        // Electron 负责浏览器 cookie,sidecar 保留 a_bogus 签名 / 图集 / 评论接口能力。
+        const profilePromise = fetchDouyinUserProfile(secUid).catch((e) => {
+          nativeCardError = `douyin profile: ${e?.message || String(e)}`;
+          log.warn("accounts:fetch", `抖音资料 API 失败: ${e?.message || e}`);
+          return null;
+        });
+
+        // 优先级: DouYin_Spider sidecar → 纯 API → bridge → BrowserWindow
+        report(18, "请求抖音接口", "DouYin_Spider");
+        try {
+          const result = await fetchDouyinUserPostsViaSpider(url, safeLimit);
+          if (result && result.videos.length > 0) {
+            nativeVideos = result;
+            if (result.profile?.nickname) {
+              nativeCard = {
+                name: result.profile.nickname || null,
+                face: result.profile.avatarUrl || null,
+                sign: result.profile.signature || null,
+                fansFormatted: result.profile.followerCount > 0 ? formatFollowersCount(result.profile.followerCount) : null,
+                mid: result.profile.uid || null,
+                archiveCount: result.profile.awemeCount || 0,
+              };
+              if (result.profile.secUid) accountSecUid = result.profile.secUid;
+            }
+          }
+          log.info("accounts:fetch", `DouYin_Spider 拉取${nativeVideos ? "成功" : "无结果"}`);
+        } catch (e) {
+          nativeVideosError = `douyin spider: ${e?.message || String(e)}`;
+          log.warn("accounts:fetch", `DouYin_Spider 失败: ${e?.message || e}`);
+        }
+
+        // 判断已有结果是否足够(Spider 可能只返回一页)
+        const needMore = () => {
+          if (!nativeVideos) return true;
+          if (nativeVideos.videos.length >= safeLimit) return false;
+          if (nativeCard?.archiveCount && nativeVideos.videos.length >= nativeCard.archiveCount) return false;
+          return true;
+        };
+
+        if (needMore()) {
+          report(20, "请求抖音接口", nativeVideos ? `Spider 只拿到 ${nativeVideos.videos.length} 条, 尝试 API 补拉` : "拉取视频列表");
+          try {
+            const result = await fetchDouyinUserPostsViaApi(secUid, safeLimit);
+            if (result && result.videos.length > (nativeVideos?.videos?.length || 0)) nativeVideos = result;
+          } catch (e) {
+            const prevErr = nativeVideosError ? nativeVideosError + "; " : "";
+            nativeVideosError = prevErr + `douyin API: ${e?.message || String(e)}`;
+            log.warn("accounts:fetch", `纯 API 失败: ${e?.message || e}`);
+          }
+        }
+        log.info("accounts:fetch", `nativeVideos=${nativeVideos?.videos?.length || 0}条 nativeVideosError=${nativeVideosError || "无"} skipYtDlp=${!!nativeVideos}`);
+        if (needMore() && extensionBridge.isConnected()) {
+          report(25, "请求抖音接口", "经 Chrome 插件桥");
+          try {
+            const result = await fetchDouyinUserPosts(secUid, safeLimit);
+            if (result && result.videos.length > (nativeVideos?.videos?.length || 0)) nativeVideos = result;
+          } catch (e) {
+            const prevErr = nativeVideosError ? nativeVideosError + "; " : "";
+            nativeVideosError = prevErr + `douyin bridge: ${e?.message || String(e)}`;
+          }
+        }
+        if (needMore()) {
+          report(30, "请求抖音接口", "BrowserWindow 兜底");
+          try {
+            const result = await fetchDouyinUserPostsViaWindow(secUid, safeLimit);
+            if (result && result.videos.length > (nativeVideos?.videos?.length || 0)) nativeVideos = result;
+          } catch (e) {
+            const prevErr = nativeVideosError ? nativeVideosError + "; " : "";
+            nativeVideosError = prevErr + `douyin BrowserWindow: ${e?.message || String(e)}`;
+          }
+        }
+
+        const profile = await profilePromise;
+        if (profile && !nativeCard) {
+          nativeCard = {
+            name: profile.nickname || null,
+            face: profile.avatarUrl || null,
+            sign: profile.signature || null,
+            fansFormatted: profile.followerCount > 0 ? formatFollowersCount(profile.followerCount) : null,
+            mid: profile.uid || null,
+            archiveCount: profile.awemeCount || 0,
+          };
+          log.info("accounts:fetch", `抖音账号: ${profile.nickname} 粉丝=${profile.followerCount} 作品=${profile.awemeCount}`);
+          if (profile.secUid && !accountSecUid) accountSecUid = profile.secUid;
+        }
+      } else {
+        nativeCardError = "无法从抖音 URL 解析出 sec_user_id (支持 douyin.com/user/MS4w... 或分享短链 iesdouyin.com/share/user/MS4w...)";
+      }
+    }
+
+    checkCancelled();
+    let ytDlpParsed = null;
+    let ytDlpError = null;
+    const skipYtDlp =
+      (platform === "bilibili" && nativeCard && nativeVideos) ||
+      (platform === "douyin" && nativeVideos && nativeVideos.videos.length > 0);
+    log.info("accounts:fetch", `nativeVideos=${nativeVideos ? nativeVideos.videos.length + "条" : "null"} nativeVideosError=${nativeVideosError || "无"} skipYtDlp=${skipYtDlp}`);
+    if (!skipYtDlp) {
+      report(45, "yt-dlp 兜底", "调 yt-dlp --flat-playlist 拉视频清单");
+      try {
+        ytDlpParsed = await fetchYtDlpAccountJson(url, safeLimit);
+      } catch (e) {
+        ytDlpError = e?.message || String(e);
+      }
+    }
+
+    let videos = [];
+    let totalVideoCount = 0;
+    let accountTitle = null;
+    let accountUploader = null;
+    let accountAvatarUrl = null;
+    let accountFollowers = null;
+    let accountBio = null;
+    let accountExternalId = null;
+
+    if (ytDlpParsed) {
+      const entries = Array.isArray(ytDlpParsed.entries) ? ytDlpParsed.entries : [];
+      videos = entries.map((e) => ({
+        id: String(e.id || e.video_id || ""),
+        title: e.title || e.fulltitle || "(未命名视频)",
+        durationSec: Math.round(Number(e.duration) || 0),
+        uploadDate: e.upload_date || null,
+        viewCount: Number(e.view_count) || 0,
+        externalUrl: (typeof e.url === "string" && e.url.startsWith("http")
+          ? e.url
+          : platform === "bilibili" && e.id
+          ? `https://www.bilibili.com/video/${e.id}`
+          : platform === "youtube" && e.id
+          ? `https://www.youtube.com/watch?v=${e.id}`
+          : platform === "douyin" && e.id
+          ? `https://www.douyin.com/video/${e.id}`
+          : ""),
+        thumbnailUrl: e.thumbnail || pickBestThumbnail(e.thumbnails),
+      })).filter((v) => v.id);
+      totalVideoCount = Number(ytDlpParsed.playlist_count) || videos.length;
+      accountTitle = ytDlpParsed.title || null;
+      accountUploader = ytDlpParsed.uploader || ytDlpParsed.channel || null;
+      accountAvatarUrl = pickBestThumbnail(ytDlpParsed.thumbnails);
+      if (Number(ytDlpParsed.channel_follower_count) > 0) {
+        accountFollowers = formatFollowersCount(ytDlpParsed.channel_follower_count);
+      }
+      if (typeof ytDlpParsed.description === "string" && ytDlpParsed.description.trim()) {
+        accountBio = ytDlpParsed.description.trim().slice(0, 200);
+      }
+      accountExternalId = ytDlpParsed.channel_id || ytDlpParsed.uploader_id || null;
+    }
+
+    if (nativeVideos && nativeVideos.videos.length > 0) {
+      videos = nativeVideos.videos;
+      totalVideoCount = nativeVideos.total;
+    }
+
+    if (nativeCard) {
+      if (nativeCard.face) accountAvatarUrl = nativeCard.face;
+      if (nativeCard.fansFormatted) accountFollowers = nativeCard.fansFormatted;
+      if (nativeCard.sign) accountBio = nativeCard.sign;
+      if (nativeCard.name && !accountUploader) accountUploader = nativeCard.name;
+      if (nativeCard.mid) accountExternalId = nativeCard.mid;
+      if (nativeCard.archiveCount && nativeCard.archiveCount > totalVideoCount) {
+        totalVideoCount = nativeCard.archiveCount;
+      }
+    }
+
+    // B 站: 如果走的是 yt-dlp --flat-playlist (因 wbi 接口 412), entry 只有 id 没 title/thumbnail.
+    // 用 view API 并发补全 (匿名访客开放, 通常稳).
+    if (platform === "bilibili" && videos.length > 0) {
+      const cookie = await getBilibiliVisitorCookie().catch(() => null);
+      const needFill = videos.filter((v) => v.id && (!v.title || !v.thumbnailUrl || !v.durationSec));
+      if (needFill.length > 0) {
+        const totalNeed = needFill.length;
+        report(70, "补全 B 站元数据", `view API ×${totalNeed}`);
+        const batchSize = 8;
+        const byBvid = new Map();
+        for (let i = 0; i < needFill.length; i += batchSize) {
+          if (cancelled && cancelled()) break;
+          const slice = needFill.slice(i, i + batchSize);
+          const enriched = await Promise.all(slice.map((v) =>
+            fetchBilibiliVideoView(v.id, cookie).catch(() => null),
+          ));
+          for (const e of enriched) if (e) byBvid.set(e.bvid, e);
+          report(70 + Math.round(20 * Math.min(1, (i + batchSize) / Math.max(1, totalNeed))),
+                 "补全 B 站元数据", `${Math.min(i + batchSize, totalNeed)} / ${totalNeed}`);
+        }
+        videos = videos.map((v) => {
+          const e = byBvid.get(v.id);
+          if (!e) return v;
+          return {
+            ...v,
+            title: v.title || e.title || "(未命名视频)",
+            durationSec: v.durationSec || e.durationSec,
+            uploadDate: v.uploadDate || e.uploadDate,
+            viewCount: v.viewCount || e.viewCount,
+            thumbnailUrl: v.thumbnailUrl || e.thumbnailUrl,
+          };
+        });
+      }
+      // 保底 title
+      videos = videos.map((v) => ({ ...v, title: v.title || "(未命名视频)" }));
+    }
+
+    const noVideos = videos.length === 0;
+    const noCard = !nativeCard && !accountUploader && !accountAvatarUrl;
+    if (noVideos && noCard) {
+      const msgs = [];
+      if (ytDlpError) msgs.push(`yt-dlp: ${ytDlpError.slice(0, 220)}`);
+      if (nativeVideosError) msgs.push(nativeVideosError.slice(0, 220));
+      if (nativeCardError) msgs.push(nativeCardError.slice(0, 220));
+      if (msgs.length === 0) msgs.push("所有抓取通道都返回空");
+      throw new Error(`账号拉取失败 [${platform}]\n${msgs.join("\n")}`);
+    }
+
+    const warnings = [];
+    if (noVideos && ytDlpError) warnings.push(`视频列表抓取失败 (${ytDlpError.slice(0, 120)})`);
+    if (noVideos && nativeVideosError) {
+      const label = platform === "douyin" ? "抖音用户投稿接口" : "B 站投稿接口";
+      warnings.push(`${label}失败 (${nativeVideosError.slice(0, 120)})`);
+    }
+    if (platform === "douyin" && noVideos && !extensionBridge.isConnected()) {
+      warnings.push("抖音风控较严, 装上 Chrome 插件后大幅更稳 (设置 → 浏览器插件桥)");
+    }
+    if (platform === "douyin" && !noVideos && videos.length < safeLimit) {
+      const loginStatus = await douyinSpider.getLoginStatus().catch(() => ({ loggedIn: false }));
+      if (!loginStatus.loggedIn) {
+        warnings.push(`抖音未登录，仅拉取到 ${videos.length} 条。去设置 → 抖音账号扫码登录后可拉取全部`);
+      }
+    }
+
+    report(90, "整理元数据", `视频 ${videos.length} 条`);
+
+    return {
+      ok: true,
+      accountTitle,
+      accountUploader,
+      accountAvatarUrl,
+      accountFollowers,
+      accountBio,
+      accountExternalId,
+      accountSecUid,
+      accountPlatform: platform,
+      totalVideoCount,
+      videos,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    };
+  };
+
+  // 旧入口 (内部 still 兼容; renderer 已迁到 accounts:startFetch)
+  // (旧 accountVideos:* handlers 已删除，用 videos:list { accountId } 替代)
+
+  // ── 后台拉取驱动 ──
+  // in-flight: accountId → { url, range, stage, progress, message, cancelled, startedAt }
+  if (!global.__accountFetchInFlight) global.__accountFetchInFlight = new Map();
+  const accountFetchInFlight = global.__accountFetchInFlight;
+
+  const limitOfRange = (range) => (range === "top10" ? 10 : range === "recent20" ? 20 : 80);
+
+  const runAccountFetch = async ({ accountId, url, range }) => {
+    const state = { url, range, stage: "排队", progress: 0, message: "", cancelled: false, startedAt: Date.now() };
+    accountFetchInFlight.set(accountId, state);
+    const broadcast = (channel, payload) => broadcastToWindows(channel, payload);
+    const sendProgress = (p, stage, message) => {
+      state.stage = stage;
+      state.progress = p;
+      state.message = message || "";
+      broadcast("account:fetch:progress", { accountId, stage, progress: p, message });
+    };
+    sendProgress(0, "排队", "");
+    try {
+      const result = await fetchAccountVideosCore({
+        url,
+        limit: limitOfRange(range),
+        onProgress: ({ progress, stage, message }) => sendProgress(progress, stage, message),
+        cancelled: () => state.cancelled,
+      });
+      // v3: 把视频写入 videos 表(增量:只对新视频下载封面,已有视频只更新计数)
+      const db = getDb();
+      const now = Date.now();
+      const platform = result.accountPlatform;
+
+      // 查出该账号 DB 里已有的视频 ID,用于区分新增 vs 已有
+      const existingIds = new Set(
+        db.prepare("SELECT id FROM videos WHERE account_id = ?").all(accountId).map((r) => r.id),
+      );
+
+      const upsertVideoStmt = db.prepare(`
+        INSERT INTO videos (id, title, source_type, source_url, play_url, platform, external_id, local_path,
+          duration_sec, width, height, orientation, thumbnail_url, account_id, status,
+          upload_date, view_count, like_count, comment_count, share_count, collect_count,
+          tags, created_at, updated_at)
+        VALUES (?, ?, 'url', ?, ?, ?, ?, NULL, ?, 0, 0, 'landscape', ?, ?, 'ready', ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          title=excluded.title, source_url=excluded.source_url, play_url=excluded.play_url,
+          upload_date=excluded.upload_date, view_count=excluded.view_count, like_count=excluded.like_count,
+          comment_count=excluded.comment_count, share_count=excluded.share_count, collect_count=excluded.collect_count,
+          updated_at=excluded.updated_at
+      `);
+
+      // 增量封面下载:只对 DB 里还没有的新视频下载封面
+      const freshVideos = result.videos.filter((v) => !existingIds.has(`av-${accountId}-${v.id}`));
+      const updatedCount = result.videos.length - freshVideos.length;
+      sendProgress(95, "落库", `${freshVideos.length} 个新视频${updatedCount ? ` · ${updatedCount} 个已有更新` : ""}`);
+
+      const coverByVideoId = {};
+      if (freshVideos.length > 0) {
+        await Promise.all(freshVideos.map(async (v) => {
+          if (!v.thumbnailUrl) return;
+          const videoId = `av-${accountId}-${v.id}`;
+          const local = await downloadCoverImage(v.thumbnailUrl, videoId);
+          coverByVideoId[videoId] = local || v.thumbnailUrl;
+        }));
+      }
+
+      const newVideos = [];
+      for (const v of result.videos) {
+        const videoId = `av-${accountId}-${v.id}`;
+        const isNew = !existingIds.has(videoId);
+        upsertVideoStmt.run(
+          videoId, v.title || "", v.externalUrl || null, v.playUrl || null, platform || null, v.id || null,
+          v.durationSec || 0,
+          isNew ? (coverByVideoId[videoId] || v.thumbnailUrl || null) : null,
+          accountId,
+          v.uploadDate || null, v.viewCount ?? null, v.likeCount ?? null,
+          v.commentCount ?? null, v.shareCount ?? null, v.collectCount ?? null,
+          now, now,
+        );
+        newVideos.push(rowToVideo(db.prepare("SELECT * FROM videos WHERE id = ?").get(videoId)));
+      }
+
+      // 确保该账号有 collection, 把新视频加入
+      const collId = `col-account-${accountId}`;
+      db.prepare(`
+        INSERT OR IGNORE INTO collections (id, name, kind, account_id, created_at, updated_at)
+        VALUES (?, ?, 'account', ?, ?, ?)
+      `).run(collId, result.accountUploader || result.accountTitle || "账号视频", accountId, now, now);
+      const addColVideo = db.prepare("INSERT OR IGNORE INTO collection_videos (collection_id, video_id, position, added_at) VALUES (?, ?, ?, ?)");
+      for (let i = 0; i < newVideos.length; i++) {
+        addColVideo.run(collId, newVideos[i].id, i, now);
+      }
+
+      // 更新 Account 元数据 (v3: 结构化列)
+      let accountPatch = {};
+      try {
+        const accNow = Date.now();
+        db.prepare(`
+          UPDATE accounts SET
+            name = COALESCE(?, name), avatar_url = COALESCE(?, avatar_url),
+            followers = COALESCE(?, followers), bio = COALESCE(?, bio),
+            external_id = COALESCE(?, external_id), platform = COALESCE(?, platform),
+            total_video_count = COALESCE(?, total_video_count),
+            sec_uid = COALESCE(?, sec_uid),
+            fetch_phase = 'ready', fetch_error = NULL, last_fetched_at = ?,
+            updated_at = ?
+          WHERE id = ?
+        `).run(
+          result.accountUploader || result.accountTitle || null,
+          result.accountAvatarUrl || null,
+          result.accountFollowers || null,
+          result.accountBio || null,
+          result.accountExternalId || null,
+          result.accountPlatform || null,
+          result.totalVideoCount || null,
+          result.accountSecUid || null,
+          accNow, accNow, accountId,
+        );
+        const accRow = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId);
+        if (accRow) accountPatch = rowToAccount(accRow);
+      } catch (e) {
+        log.warn("accounts:fetch", "update Account 失败", e?.message || e);
+      }
+
+      sendProgress(100, "完成", `${newVideos.length} 条视频`);
+      broadcast("account:fetch:done", {
+        accountId,
+        videos: newVideos,
+        account: accountPatch,
+        warnings: result.warnings,
+      });
+    } catch (err) {
+      const msg = err?.message || String(err);
+      const isCancel = msg === "__cancelled__" || state.cancelled;
+      const finalMsg = isCancel ? "已取消" : msg;
+      // 写 fetchPhase=failed 到 Account
+      try {
+        const db = getDb();
+        db.prepare(`
+          UPDATE accounts SET fetch_phase = ?, fetch_error = ?, updated_at = ? WHERE id = ?
+        `).run(isCancel ? "idle" : "failed", isCancel ? null : finalMsg, Date.now(), accountId);
+      } catch { /* noop */ }
+      broadcast("account:fetch:failed", { accountId, error: finalMsg });
+    } finally {
+      accountFetchInFlight.delete(accountId);
+    }
+  };
+
+  ipcMain.handle("accounts:startFetch", async (_event, { accountId, url, range = "top10", name } = {}) => {
+    if (!accountId) throw new Error("accounts:startFetch 需要 accountId");
+    if (!url) throw new Error("accounts:startFetch 需要 url");
+    // 把 Account.fetchPhase 立即标 fetching(排队/运行都算"拉取中",卡片角标据此)
+    try {
+      const db = getDb();
+      db.prepare("UPDATE accounts SET fetch_phase = 'fetching', fetch_error = NULL, updated_at = ? WHERE id = ?")
+        .run(Date.now(), accountId);
+    } catch { /* noop */ }
+    if (!taskScheduler) {
+      // 兜底:调度器还没就绪,走旧 fire-and-forget。
+      if (accountFetchInFlight.has(accountId)) return { ok: true, accepted: false, reason: "already in flight" };
+      runAccountFetch({ accountId, url, range }).catch((err) => log.warn("accounts:startFetch", "unhandled", err?.message || err));
+      return { ok: true, accepted: true };
+    }
+    const task = taskScheduler.enqueue("account-fetch", { accountId, url, range }, {
+      refId: accountId,
+      title: name || "账号拉取",
+    });
+    return { ok: true, accepted: true, taskId: task.id, status: task.status };
   });
 
-  ipcMain.handle("nodes:set", async (_event, projectId, nodes) => {
+  ipcMain.handle("accounts:cancelFetch", async (_event, accountId) => {
+    // 先取消调度器里的任务(排队中直接移除 / 运行中经 abort → inFlight.cancelled)
+    const t = taskScheduler?.list().find((x) => x.refId === accountId && x.kind === "account-fetch" && (x.status === "queued" || x.status === "running"));
+    if (t) taskScheduler.cancel(t.id);
+    const state = accountFetchInFlight.get(accountId);
+    if (state) state.cancelled = true;
+    if (!t && !state) return { ok: true, cancelled: false };
+    return { ok: true, cancelled: true };
+  });
+
+  ipcMain.handle("accounts:listFetchInFlight", async () => {
+    const out = [];
+    for (const [accountId, state] of accountFetchInFlight) {
+      out.push({ accountId, stage: state.stage, progress: state.progress, message: state.message });
+    }
+    return out;
+  });
+
+  // ── 轻量账号信息刷新(不拉视频列表,只更新 profile + totalVideoCount) ──
+  ipcMain.handle("accounts:refreshProfile", async (_event, { accountId } = {}) => {
+    if (!accountId) throw new Error("accounts:refreshProfile requires accountId");
     const db = getDb();
+    const row = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId);
+    if (!row) return { ok: false, error: "account not found" };
+    const account = rowToAccount(row);
+    const { platform, externalUrl, externalId } = account;
+
+    let name = null, avatarUrl = null, followers = null, bio = null, totalVideoCount = null;
+    try {
+      if (platform === "bilibili") {
+        const mid = parseBilibiliMid(externalUrl) || externalId;
+        if (!mid) return { ok: false, error: "cannot parse bilibili mid", account };
+        const card = await fetchBilibiliCard(mid);
+        name = card.name;
+        avatarUrl = card.face;
+        followers = card.fansFormatted;
+        bio = card.sign;
+        totalVideoCount = card.archiveCount;
+      } else if (platform === "douyin") {
+        let secUid = account.secUid || parseDouyinSecUid(externalUrl);
+        if (!secUid) secUid = await resolveDouyinShortLink(externalUrl);
+        if (!secUid) return { ok: false, error: "cannot parse douyin sec_uid", account };
+        const profile = await fetchDouyinUserProfile(secUid);
+        name = profile.nickname;
+        avatarUrl = profile.avatarUrl;
+        followers = profile.followerCount > 0 ? formatFollowersCount(profile.followerCount) : null;
+        bio = profile.signature;
+        totalVideoCount = profile.awemeCount;
+        // 持久化 sec_uid 供后续轻量刷新复用
+        if (profile.secUid || secUid) {
+          try { db.prepare("UPDATE accounts SET sec_uid = COALESCE(sec_uid, ?) WHERE id = ?").run(profile.secUid || secUid, accountId); } catch {}
+        }
+      } else {
+        return { ok: true, account, refreshed: false };
+      }
+
+      const now = Date.now();
+      db.prepare(`
+        UPDATE accounts SET
+          name = COALESCE(?, name), avatar_url = COALESCE(?, avatar_url),
+          followers = COALESCE(?, followers), bio = COALESCE(?, bio),
+          total_video_count = COALESCE(?, total_video_count),
+          updated_at = ?
+        WHERE id = ?
+      `).run(name, avatarUrl, followers, bio, totalVideoCount, now, accountId);
+
+      const updated = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId);
+      return { ok: true, account: rowToAccount(updated), refreshed: true };
+    } catch (e) {
+      log.warn("accounts:refreshProfile", `lightweight refresh failed: ${e?.message || e}`);
+      return { ok: false, error: e?.message || String(e), account };
+    }
+  });
+
+  // ── 抖音登录态 ──
+  ipcMain.handle("douyin:openLogin", async () => douyinSpider.openLoginWindow());
+  ipcMain.handle("douyin:getLoginStatus", async () => douyinSpider.getLoginStatus());
+  ipcMain.handle("douyin:logout", async () => douyinSpider.logout());
+
+  // ── 轻量视频摘要管线 ──
+
+  async function summarizeAccountVideo(videoId, slotOverrides, customPrompt) {
+    const accountVideoId = videoId;
+    log.info("summary", `开始摘要 videoId=${videoId}`);
+    const db = getDb();
+    const videoRow = db.prepare("SELECT * FROM videos WHERE id = ?").get(videoId);
+    if (!videoRow) throw new Error("视频不存在");
+    const av = rowToVideo(videoRow);
+    av.externalUrl = av.sourceUrl;
+    av.localVideoPath = av.localPath;
+    log.info("summary", `视频: ${av.title?.slice(0, 40)} url=${av.sourceUrl?.slice(0, 60)}`);
+
+    // 已有 completed 的内容分析 → 直接返回
+    const existingAnalysis = db.prepare(
+      "SELECT id, result FROM analyses WHERE video_id = ? AND pipeline_id = 'builtin-content' AND status = 'completed' ORDER BY created_at DESC LIMIT 1"
+    ).get(videoId);
+    if (existingAnalysis?.result) {
+      log.info("summary", `已有完成的内容分析 ${existingAnalysis.id}，直接返回`);
+      const cached = JSON.parse(existingAnalysis.result);
+      emitTaskProgress(`cached-${existingAnalysis.id}`, { progress: 100, stage: "完成", message: "已有结果" });
+      return { ok: true, summary: cached };
+    }
+
+    const analysisId = `content-${videoId}-${Date.now()}`;
+    const analysisStartedAt = Date.now();
     db.prepare(
-      "INSERT INTO analysis_nodes (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
-    ).run(projectId, JSON.stringify(Array.isArray(nodes) ? nodes : []));
-    return { ok: true };
-  });
+      "INSERT INTO analyses (id, video_id, pipeline_id, status, started_at, created_at) VALUES (?, ?, 'builtin-content', 'analyzing', ?, ?)"
+    ).run(analysisId, videoId, analysisStartedAt, analysisStartedAt);
 
-  ipcMain.handle("report:get", async (_event, projectId) => {
-    const db = getDb();
-    const row = db.prepare("SELECT data FROM analysis_reports WHERE project_id = ?").get(projectId);
-    return row ? JSON.parse(row.data) : null;
-  });
+    // 注册到统一任务管理器
+    const taskHandle = registerTask(analysisId, videoId, "builtin-content");
+    const send = (progress, stage, message) => emitTaskProgress(analysisId, { progress, stage, message });
+    // 兼容: 旧 sendStatus 也通过 analysis:summary:status 发一份
+    const sendStatus = (status, extra) => {
+      broadcastToWindows("analysis:summary:status", { videoId, status, ...extra });
+    };
 
-  ipcMain.handle("report:set", async (_event, projectId, report) => {
-    const db = getDb();
-    if (report === null || report === undefined) {
-      db.prepare("DELETE FROM analysis_reports WHERE project_id = ?").run(projectId);
-    } else {
+    send(0, "内容分析", "开始");
+
+    try {
+      const checkCancel = () => { if (taskHandle.cancelled) throw new Error("__cancelled__"); };
+      const handle = taskHandle;
+
+      // 1) 下载视频
+      log.info("summary", `[1/6] 下载视频, url=${av.externalUrl?.slice(0, 80)} playUrl=${av.playUrl ? "有" : "无"}`);
+      send(5, "下载视频", "下载视频文件");
+      const artifactDir = path.join(app.getPath("userData"), "accounts", av.accountId, "videos", av.externalId);
+      await fs.mkdir(artifactDir, { recursive: true });
+      log.info("summary", `artifactDir=${artifactDir}`);
+
+      let videoPath = av.localPath || av.localVideoPath;
+      // localVideoPath 可能是 media:// URL，取 localPath 真实磁盘路径
+      if (videoPath && videoPath.startsWith("media://")) videoPath = null;
+      log.info("summary", `已有本地路径=${videoPath || "(无)"} 存在=${videoPath ? fsSync.existsSync(videoPath) : false}`);
+      if (!videoPath || !fsSync.existsSync(videoPath)) {
+        log.info("summary", "本地无缓存, 开始下载");
+        // play_addr 直连(抖音 yt-dlp 现需 fresh cookie,直连更快更稳)
+        const downloadViaPlayUrl = async () => {
+          send(10, "下载视频", "直连下载");
+          const filePath = path.join(artifactDir, `${av.externalId || "video"}.mp4`);
+          const partPath = filePath + ".part";
+          const res = await fetch(av.playUrl, {
+            headers: {
+              "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+              referer: "https://www.douyin.com/",
+              range: "bytes=0-",
+            },
+          });
+          if (!res.ok) throw new Error(`直连下载失败: HTTP ${res.status}`);
+          const { createWriteStream } = require("node:fs");
+          const { pipeline } = require("node:stream/promises");
+          const { Readable } = require("node:stream");
+          await pipeline(Readable.fromWeb(res.body), createWriteStream(partPath));
+          await fs.rename(partPath, filePath);
+          log.info("summary", `play_url 直连下载完成: ${filePath}`);
+          return filePath;
+        };
+        const runYtDlp = async () => {
+          const dl = await performUrlDownloadFlow(av.externalUrl, {
+            projectId: `summary-${accountVideoId}`,
+            mediaDir: artifactDir,
+            handle,
+            onProgress: (p, s, m) => send(5 + Math.round(p * 0.2), "下载视频", m || s),
+          });
+          return dl.filePath;
+        };
+        // 有 play_addr 直链就先直连(省掉抖音 yt-dlp 必然失败的 ~9s);否则/失败再走 yt-dlp。
+        if (av.playUrl) {
+          try {
+            videoPath = await downloadViaPlayUrl();
+          } catch (directErr) {
+            log.warn("summary", `play_url 直连失败: ${directErr?.message || directErr}, 回退 yt-dlp`);
+            videoPath = await runYtDlp();
+          }
+        } else {
+          try {
+            videoPath = await runYtDlp();
+          } catch (dlErr) {
+            log.warn("summary", `yt-dlp 下载失败且无 play_url: ${dlErr?.message || dlErr}`);
+            throw dlErr;
+          }
+        }
+      }
+      checkCancel();
+
+      // 2) 读取视频信息
+      log.info("summary", `[2/6] 读取视频信息: ${videoPath}`);
+      send(28, "内容分析", "读取视频信息");
+      const ffmpegPath = await commandPath("ffmpeg");
+      log.info("summary", `ffmpeg=${ffmpegPath || "(未安装)"}`);
+      const inspected = await inspectVideo(videoPath);
+      log.info("summary", `视频元数据: ${inspected.durationSec}s ${inspected.width}x${inspected.height} hasAudio=${inspected.hasAudio} codec=${inspected.videoCodec || "?"}`);
+      checkCancel();
+
+      // 纯音频文件(无视频流)跳过镜头检测和抽帧,直接靠字幕做文本分析
+      const hasVideoStream = inspected.width > 0 && inspected.height > 0;
+      let scenes = [];
+      let frames = [];
+      let framesDir = path.join(artifactDir, "frames");
+
+      if (!hasVideoStream) {
+        log.info("summary", "无视频流(纯音频), 跳过镜头检测和抽帧");
+        send(38, "内容分析", "纯音频文件, 跳过抽帧");
+      } else {
+        // 3) 检测镜头切换
+        log.info("summary", `[3/6] 检测镜头切换, threshold=0.3`);
+        send(32, "内容分析", "检测镜头");
+        if (ffmpegPath) {
+          scenes = await detectScenes(ffmpegPath, videoPath, 0.3, handle);
+          log.info("summary", `镜头切换检测完成: ${scenes.length} 个切点`);
+        } else {
+          log.warn("summary", "ffmpeg 不可用, 跳过镜头检测");
+        }
+        checkCancel();
+
+        // 4) 抽取关键画面 (8-12 帧)
+        const targetCount = Math.min(12, Math.max(6, scenes.length || 6));
+        log.info("summary", `[4/6] 抽取关键画面, 目标 ${targetCount} 帧 (scenes=${scenes.length})`);
+        send(38, "内容分析", "抽取关键画面");
+        const plan = planFramePlan(scenes, inspected.durationSec, targetCount);
+        await fs.mkdir(framesDir, { recursive: true });
+        const built = await buildFrames(ffmpegPath, videoPath, plan, framesDir, handle,
+          (i, total) => send(38 + Math.round((i / total) * 12), "抽帧", `抽帧 ${i + 1}/${total}`),
+        );
+        frames = built.frames;
+        log.info("summary", `抽帧完成: ${frames.length} 帧 (跳过相似 ${built.skipped || 0}), framesDir=${framesDir}`);
+      }
+      checkCancel();
+
+      // 5) 识别字幕
+      // 统一读取并补丁 config
+      let cfg = migrateConfigV1ToV2(readConfig());
+      const contentCfg = resolvePipelineConfig(cfg, "content");
+      cfg = { ...cfg, taskSlots: contentCfg.taskSlots, audioSlot: contentCfg.audioSlot };
+      if (slotOverrides) cfg = await applyAvailableSlotOverrides(cfg, slotOverrides, "content");
+
+      log.info("summary", `[5/6] 识别字幕, hasAudio=${inspected.hasAudio}`);
+      send(52, "内容分析", "识别字幕");
+      let transcript = null;
+      // 优先复用已有的 transcript 缓存
+      const transcriptCachePath = path.join(artifactDir, "transcript.json");
+      const cachedTranscript = await readJson(transcriptCachePath, null);
+      if (cachedTranscript?.text) {
+        transcript = cachedTranscript;
+        log.info("summary", `复用已有字幕缓存: ${transcript.text.length} 字, segments=${transcript.segments?.length || 0}`);
+      } else if (inspected.hasAudio) {
+        const audioProvider = resolveAudioProvider(cfg);
+        log.info("summary", `音频提供者: ${audioProvider?.id || "(null)"} type=${audioProvider?.endpointType || "?"}`);
+        if (audioProvider) {
+          const wavPath = path.join(artifactDir, "audio.wav");
+          log.info("summary", `提取音频 → ${wavPath}`);
+          await extractAudioWav(ffmpegPath, videoPath, wavPath, handle);
+          checkCancel();
+          log.info("summary", "开始语音转文字");
+          transcript = await transcribeAudio(audioProvider, wavPath, handle,
+            (p) => send(52 + Math.round(18 * (p?.progress || 0)), "识别字幕", "识别字幕"),
+          );
+          log.info("summary", `字幕识别完成: ${transcript?.text?.length || 0} 字, segments=${transcript?.segments?.length || 0}`);
+          // 写入缓存
+          if (transcript) {
+            await writeJson(transcriptCachePath, transcript).catch(() => {});
+          }
+        } else {
+          log.warn("summary", "未配置音频提供者, 跳过字幕识别");
+        }
+      }
+      checkCancel();
+
+      log.info("summary", `[5/6] 数据收集完成: ${frames.length} 帧, 字幕 ${transcript ? transcript.text?.length + "字" : "无"}`);
+
+      // 6) LLM 生成内容分析
+      log.info("summary", `[6/6] LLM 内容分析, 帧=${frames.length} 字幕=${transcript?.text?.length || 0}字`);
+      send(75, "内容分析", "LLM 内容分析");
+      const visionProvider = resolveSlotProvider(cfg, "complex_vision");
+      const textProvider = resolveSlotProvider(cfg, "medium_text");
+
+      const transcriptText = transcript?.text || transcript?.segments?.map((s) => s.text).join(" ") || "";
+      log.info("summary", `visionProvider=${visionProvider?.id || "(null)"} model=${visionProvider?.model || "?"} textProvider=${textProvider?.id || "(null)"}`);
+      const systemParts = [
+        "你是短视频内容分析师。基于关键帧画面和字幕,输出结构化内容分析 JSON。",
+        "字段说明:",
+        "- summary: 200-300 字,描述视频讲了什么、核心信息点、传达的观点或展示的内容",
+        "- topic: 1 句话,提炼核心选题/主题(如「夏季通勤穿搭搭配指南」「自驾川西环线攻略」)",
+        "- target: 1 句话,推断目标受众(如「18-30岁关注穿搭的女性用户」「有自驾需求的旅行爱好者」)",
+        "- tags: 3-5 个内容分类标签(如 穿搭、教程、探店、Vlog、美食、旅行、知识 等)",
+        "直接返回 JSON,不要 Markdown 围栏。",
+      ];
+      if (customPrompt) {
+        systemParts.push("", "用户补充的分析方向:", customPrompt);
+        log.info("summary", `customPrompt: ${customPrompt.slice(0, 100)}`);
+      }
+      const ANALYSIS_SYSTEM = systemParts.join("\n");
+
+      let analysisResult;
+
+      if (visionProvider?.baseUrl && visionProvider?.apiKeyRef && visionProvider?.model) {
+        log.info("summary", `使用视觉路径: ${visionProvider.id} model=${visionProvider.model}`);
+        const imageDataUrls = [];
+        for (const f of frames.slice(0, 10)) {
+          try {
+            const buf = await fs.readFile(f.framePath);
+            imageDataUrls.push(`data:image/jpeg;base64,${buf.toString("base64")}`);
+          } catch { /* skip broken frames */ }
+        }
+        checkCancel();
+        const transcriptPart = transcriptText ? `\n\n字幕全文:\n${transcriptText.slice(0, 3000)}` : "\n\n(该视频无字幕)";
+        const result = await callOpenAIChatCompletions(
+          visionProvider,
+          ANALYSIS_SYSTEM,
+          `视频标题: ${av.title}\n时长: ${inspected.durationSec} 秒${transcriptPart}`,
+          imageDataUrls,
+          { abortController: new AbortController() },
+        );
+        const raw = result?.raw || result?.parsed || "";
+        try {
+          analysisResult = typeof raw === "string" ? JSON.parse(raw.replace(/```json?\s*|```/g, "").trim()) : raw;
+        } catch {
+          analysisResult = { summary: typeof raw === "string" ? raw : JSON.stringify(raw), topic: "", target: "", tags: [] };
+        }
+      } else if (textProvider?.baseUrl && textProvider?.apiKeyRef && textProvider?.model) {
+        log.info("summary", `使用纯文本路径: ${textProvider.id} model=${textProvider.model}`);
+        const frameDesc = frames.map((f) => `${(f.midSec || 0).toFixed(1)}s`).join(", ");
+        const result = await openaiClient.callJsonCompletion(textProvider, {
+          systemText: ANALYSIS_SYSTEM,
+          userText: `标题: ${av.title}\n时长: ${inspected.durationSec}s\n关键帧时刻: ${frameDesc}\n字幕: ${transcriptText.slice(0, 3000) || "(无字幕)"}`,
+          temperature: 0.4,
+        });
+        analysisResult = result?.parsed || {};
+      } else {
+        throw new Error("未配置视觉或文本模型,无法生成摘要。请在设置 → 任务分配中配置。");
+      }
+
+      const frameEntries = frames.map((f) => ({
+        url: createExternalMediaUrl(f.framePath),
+        timeSec: f.midSec || 0,
+      }));
+      const transcriptSegments = transcript?.segments?.map((s) => ({
+        text: s.text || "",
+        startSec: s.start ?? s.startSec ?? 0,
+        endSec: s.end ?? s.endSec ?? 0,
+      })) || [];
+
+      const videoSummary = {
+        summary: String(analysisResult.summary || "").trim(),
+        topic: String(analysisResult.topic || "").trim(),
+        target: String(analysisResult.target || "").trim(),
+        tags: Array.isArray(analysisResult.tags) ? analysisResult.tags.map(String).slice(0, 8) : [],
+        frames: frameEntries,
+        transcript: transcriptSegments.length > 0 ? {
+          text: transcriptText,
+          segments: transcriptSegments,
+        } : null,
+        durationSec: inspected.durationSec,
+      };
+      log.info("summary", `[6/6] 内容分析完成, summary=${videoSummary.summary.length}字 topic=${videoSummary.topic} frames=${frameEntries.length} transcriptSegs=${transcriptSegments.length} tags=${videoSummary.tags.join(",")}`);
+
+      // 7) 落库 — 写入 analyses 表
       db.prepare(
-        "INSERT INTO analysis_reports (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data"
-      ).run(projectId, JSON.stringify(report));
+        "UPDATE analyses SET status = 'completed', result = ?, completed_at = ? WHERE id = ?"
+      ).run(JSON.stringify(videoSummary), Date.now(), analysisId);
+      // 更新 video 的本地路径
+      if (videoPath) {
+        db.prepare("UPDATE videos SET local_path = ?, updated_at = ? WHERE id = ?")
+          .run(videoPath, Date.now(), videoId);
+      }
+      send(100, "完成", "内容分析完成");
+      sendStatus("done", { summary: videoSummary, progress: 100 });
+      return { ok: true, summary: videoSummary };
+
+    } catch (err) {
+      const msg = err?.message || String(err);
+      const isCancel = msg === "__cancelled__" || taskHandle.cancelled;
+      db.prepare(
+        "UPDATE analyses SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?"
+      ).run(isCancel ? null : msg, Date.now(), analysisId);
+      send(0, "失败", isCancel ? "已取消" : msg);
+      sendStatus(isCancel ? "idle" : "failed", { error: isCancel ? undefined : msg });
+      if (!isCancel) throw err;
+    } finally {
+      clearTask(analysisId);
     }
-    return { ok: true };
+  }
+
+  // 入队 summary kind(fire-and-forget:沿用旧契约立即返回,完成走 onVideoSummaryStatus 事件)。
+  // dedupe 按 videoId,替代原来的 isTaskActiveForVideo 拒绝。
+  ipcMain.handle("analysis:summarize", async (_event, { videoId, slotOverrides, customPrompt } = {}) => {
+    if (!videoId) throw new Error("analysis:summarize 需要 videoId");
+    if (!taskScheduler) {
+      if (isTaskActiveForVideo(videoId, "builtin-content")) return { ok: true, accepted: false, reason: "already in flight" };
+      summarizeAccountVideo(videoId, slotOverrides || undefined, customPrompt || undefined).catch((err) => {
+        log.warn("analysis:summarize", "unhandled", err?.message || err);
+      });
+      return { ok: true, accepted: true };
+    }
+    let title = "内容分析";
+    try {
+      const row = getDb().prepare("SELECT title FROM videos WHERE id = ?").get(videoId);
+      if (row?.title) title = row.title;
+    } catch { /* noop */ }
+    const task = taskScheduler.enqueue("summary", {
+      videoId,
+      title,
+      slotOverrides: slotOverrides || undefined,
+      customPrompt: customPrompt || undefined,
+    }, { refId: videoId, title });
+    return { ok: true, accepted: true, taskId: task.id, status: task.status };
   });
 
-  ipcMain.handle("analysis:start", async (event, args) => {
-    const projectName = args?.project?.videoName || args?.project?.title || "视频";
-    const projectId = args?.project?.id;
+  ipcMain.handle("analysis:cancelSummarize", async (_event, videoId) => {
+    const t = taskScheduler?.list().find((x) => x.refId === videoId && x.kind === "summary" && (x.status === "queued" || x.status === "running"));
+    if (t) return { ok: true, cancelled: taskScheduler.cancel(t.id) };
+    return { ok: true, cancelled: cancelAnalysis(videoId) };
+  });
+
+  // v2: 跨视频 methodology LLM 汇总
+  // 输入: { accountId, videoSummaries: [{title, summary, structure, pacing, editingStyle, composition}] }
+  // 输出: AccountMethodology
+  ipcMain.handle("accounts:generateMethodology", async (_event, { accountId, accountName, videoSummaries } = {}) => {
+    const provider = await loadComplexTextProvider();
+    if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) {
+      throw new Error("未配置 complex_text 任务槽位的 LLM 供应商");
+    }
+    if (!Array.isArray(videoSummaries) || videoSummaries.length === 0) {
+      throw new Error("methodology 汇总至少需要 1 条已分析视频");
+    }
+    const lines = [`# 账号: ${accountName || "未知"}`, `# 已分析视频数: ${videoSummaries.length}`, ""];
+    videoSummaries.slice(0, 12).forEach((v, i) => {
+      lines.push(`## 视频 ${i + 1} · ${v.title || "未命名"}`);
+      if (v.summary) lines.push(`摘要: ${String(v.summary).slice(0, 400)}`);
+      if (v.structure) lines.push(`结构: ${typeof v.structure === "string" ? v.structure.slice(0, 200) : JSON.stringify(v.structure).slice(0, 300)}`);
+      if (v.pacing) lines.push(`节奏: ${String(v.pacing).slice(0, 200)}`);
+      if (v.editingStyle) lines.push(`剪辑: ${String(v.editingStyle).slice(0, 200)}`);
+      if (v.composition) lines.push(`构图: ${String(v.composition).slice(0, 200)}`);
+      lines.push("");
+    });
+    lines.push("请汇总该账号的视频方法论,输出 JSON:");
+    lines.push('{"hooks":{"summary":"开场风格画像 (1-2 句)","sampleVideoIds":[]},');
+    lines.push(' "pacing":{"summary":"节奏画像 (1-2 句)","sampleVideoIds":[]},');
+    lines.push(' "structure":{"summary":"结构模板 (1-2 句)","sampleVideoIds":[]},');
+    lines.push(' "visual":{"summary":"视觉风格 (1-2 句)","sampleVideoIds":[]}}');
     try {
-      const result = await analyzeProject(event, args);
+      const result = await openaiClient.callJsonCompletion(provider, {
+        systemText:
+          "你是视频方法论分析师。给定一位 UP 主的若干视频分析摘要,请跨视频汇总出可复用的方法论 manifest。\n" +
+          "规则:\n" +
+          "- 4 个维度都要给(hooks/pacing/structure/visual),每个维度 summary 1-2 句中文,具体可操作\n" +
+          "- sampleVideoIds 留空数组即可\n" +
+          "- 直接返回 JSON,不要 markdown 围栏,不要思考过程",
+        userText: lines.join("\n"),
+        temperature: 0.4,
+        // max_tokens 走 openai-client deriveDefaultMaxTokens (ctx 派生)
+      });
+      const parsed = result.parsed;
+      const methodology = {
+        hooks: parsed?.hooks?.summary ? { summary: String(parsed.hooks.summary), sampleVideoIds: [] } : undefined,
+        pacing: parsed?.pacing?.summary ? { summary: String(parsed.pacing.summary), sampleVideoIds: [] } : undefined,
+        structure: parsed?.structure?.summary ? { summary: String(parsed.structure.summary), sampleVideoIds: [] } : undefined,
+        visual: parsed?.visual?.summary ? { summary: String(parsed.visual.summary), sampleVideoIds: [] } : undefined,
+        generatedAt: new Date().toISOString(),
+      };
+      // v3: 写入 methodologies 表
+      if (accountId) {
+        try {
+          const db = getDb();
+          const maxVer = db.prepare("SELECT MAX(version) as v FROM methodologies WHERE account_id = ?").get(accountId);
+          const version = (maxVer?.v || 0) + 1;
+          const methId = `meth-${accountId}-${version}`;
+          db.prepare(
+            "INSERT INTO methodologies (id, account_id, version, data, source_video_count, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+          ).run(methId, accountId, version, JSON.stringify(methodology), videoSummaries.length, Date.now());
+        } catch (e) {
+          log.warn("methodology", "写入 methodologies 表失败:", e?.message || e);
+        }
+      }
+      return { ok: true, methodology };
+    } catch (err) {
+      throw new Error(`methodology LLM 失败: ${err?.message || String(err)}`);
+    }
+  });
+
+  // 收藏夹维度的「创作手册」生成执行体 — 服务端按 collectionId 聚合该集合视频的内容分析产物
+  // (summary/topic/target/tags),抽共性 + 给可复用创作方法,辅助创作。每条挂样本视频。
+  // 被任务调度器的 methodology kind 调用(见下方 registerKind / IPC 入队)。返回 { ok, methodology }。
+  async function runGenerateMethodology(collectionId) {
+    if (!collectionId) throw new Error("generateMethodology 需要 collectionId");
+    const provider = await loadComplexTextProvider();
+    if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) {
+      throw new Error("未配置 complex_text 任务槽位的 LLM 供应商");
+    }
+    const db = getDb();
+    const coll = db.prepare("SELECT id, name, account_id FROM collections WHERE id = ?").get(collectionId);
+    if (!coll) throw new Error(`收藏夹 ${collectionId} 不存在`);
+
+    // 取集合视频 + 各自最新已完成的内容分析(builtin-content)产物
+    const videoRows = db.prepare(
+      "SELECT v.id, v.title FROM videos v JOIN collection_videos cv ON cv.video_id = v.id WHERE cv.collection_id = ? ORDER BY cv.position",
+    ).all(collectionId);
+    const items = [];
+    for (const vr of videoRows) {
+      const a = db.prepare(
+        "SELECT result FROM analyses WHERE video_id = ? AND pipeline_id = 'builtin-content' AND status = 'completed' ORDER BY created_at DESC LIMIT 1",
+      ).get(vr.id);
+      if (!a?.result) continue;
+      let r;
+      try { r = JSON.parse(a.result); } catch { continue; }
+      if (!r?.summary && !r?.topic) continue;
+      items.push({ videoId: vr.id, title: vr.title || "未命名", summary: r.summary, topic: r.topic, target: r.target, tags: r.tags });
+    }
+    if (items.length === 0) throw new Error("该收藏夹至少需要 1 条已做内容分析的视频");
+
+    const lines = [`# 收藏夹: ${coll.name || "未命名"}`, `# 视频数: ${items.length}`, ""];
+    items.slice(0, 16).forEach((v, i) => {
+      lines.push(`## 视频 ${i + 1} (videoId=${v.videoId}) · ${v.title}`);
+      if (v.topic) lines.push(`选题: ${String(v.topic).slice(0, 120)}`);
+      if (v.target) lines.push(`受众: ${String(v.target).slice(0, 120)}`);
+      if (Array.isArray(v.tags) && v.tags.length) lines.push(`标签: ${v.tags.join("、")}`);
+      if (v.summary) lines.push(`内容摘要: ${String(v.summary).slice(0, 500)}`);
+      lines.push("");
+    });
+    lines.push("请输出 JSON(commonalities = 共性洞察,playbook = 可复用创作方法),格式:");
+    lines.push('{"commonalities":[{"title":"小标题","detail":"1-3 句具体描述","sampleVideoIds":["上面给的 videoId"]}],');
+    lines.push(' "playbook":[{"title":"方法名","detail":"可照做的具体步骤/公式/模板","sampleVideoIds":["videoId"]}]}');
+
+    try {
+      const result = await openaiClient.callJsonCompletion(provider, {
+        systemText:
+          "你是短视频创作教练。给定同一收藏夹里若干视频的内容摘要,请帮创作者:\n" +
+          "1) commonalities:抽取这组视频反复出现的共性 —— 选题角度、开场钩子、内容结构模板、节奏卡点、视觉/表达签名(挑真正重复出现的,3-6 条)。\n" +
+          "2) playbook:给出可直接照做的创作方法 —— 选题公式、开场钩子模板、脚本结构骨架、节奏建议、拍剪要点(具体可操作,3-6 条)。\n" +
+          "规则:\n" +
+          "- 每条 title 简短、detail 具体(忌空泛套话),用中文。\n" +
+          "- sampleVideoIds 必须从用户给的 videoId 里选 1-3 个最能代表该条的视频,不要编造 id。\n" +
+          "- 面向'怎么做出类似的视频',不是逐个拆解单条视频。\n" +
+          "- 直接返回 JSON,不要 markdown 围栏,不要思考过程。",
+        userText: lines.join("\n"),
+        temperature: 0.5,
+      });
+      const parsed = result.parsed || {};
+      const validIds = new Set(items.map((v) => v.videoId));
+      const normItems = (arr) => (Array.isArray(arr) ? arr : [])
+        .map((it) => ({
+          title: String(it?.title || "").trim(),
+          detail: String(it?.detail || "").trim(),
+          sampleVideoIds: Array.isArray(it?.sampleVideoIds) ? it.sampleVideoIds.filter((id) => validIds.has(id)) : [],
+        }))
+        .filter((it) => it.title || it.detail);
+      const methodology = {
+        commonalities: normItems(parsed.commonalities),
+        playbook: normItems(parsed.playbook),
+        generatedAt: new Date().toISOString(),
+        sourceVideoCount: items.length,
+      };
+      if (methodology.commonalities.length === 0 && methodology.playbook.length === 0) {
+        throw new Error("模型未产出有效内容");
+      }
+      // 写库:按 collection_id 存,version++;col-account 收藏夹带上 account_id(accounts:list 回填用)
+      const maxVer = db.prepare("SELECT MAX(version) AS v FROM methodologies WHERE collection_id = ?").get(collectionId);
+      const version = (maxVer?.v || 0) + 1;
+      const methId = `meth-${collectionId}-${version}`;
+      db.prepare(
+        "INSERT INTO methodologies (id, collection_id, account_id, version, data, source_video_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run(methId, collectionId, coll.account_id || null, version, JSON.stringify(methodology), items.length, Date.now());
+      return { ok: true, methodology };
+    } catch (err) {
+      throw new Error(`创作手册生成失败: ${err?.message || String(err)}`);
+    }
+  }
+
+  // IPC: 生成创作手册 → 入队 methodology 任务(并发 1、按 collectionId 去重)。
+  // await whenSettled 保留原本 { ok, methodology } 返回语义,但任务本体跑在后台调度器里:
+  // 面板可见、持久化、退出页面不丢、重启恢复。重复点击同一收藏夹被 dedupe 合并。
+  ipcMain.handle("collections:generateMethodology", async (_event, { collectionId } = {}) => {
+    if (!collectionId) throw new Error("collections:generateMethodology 需要 collectionId");
+    if (!taskScheduler) return runGenerateMethodology(collectionId); // 兜底:调度器未就绪
+    const db = getDb();
+    const coll = db.prepare("SELECT name, account_id FROM collections WHERE id = ?").get(collectionId);
+    // 任务标题:账号收藏夹露账号名,普通收藏夹露收藏夹名
+    let title = coll?.name || "创作手册";
+    if (coll?.account_id) {
+      const acc = db.prepare("SELECT name FROM accounts WHERE id = ?").get(coll.account_id);
+      if (acc?.name) title = acc.name;
+    }
+    const task = taskScheduler.enqueue("methodology", { collectionId, title }, { refId: collectionId, title });
+    return taskScheduler.whenSettled(task.id);
+  });
+
+  // v2: Studio steps LLM 生成
+  // 输入: { goal, targetDurationSec, methodologies: [{name, summary}], assets: [{name, durationSec, shotCount}] }
+  // 输出: StudioStep[]
+  ipcMain.handle("sessions:generateSteps", async (_event, { goal, targetDurationSec, methodologies, assets } = {}) => {
+    const provider = await loadComplexTextProvider();
+    if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) {
+      throw new Error("未配置 complex_text 任务槽位的 LLM 供应商");
+    }
+    if (!goal || !String(goal).trim()) throw new Error("缺少剪辑目标");
+    const totalSec = Number(targetDurationSec) || 600;
+    const lines = [];
+    lines.push(`# 剪辑目标`); lines.push(String(goal).trim()); lines.push("");
+    lines.push(`# 目标时长 (秒): ${totalSec}`); lines.push("");
+    if (Array.isArray(methodologies) && methodologies.length > 0) {
+      lines.push("# 应用的对标账号方法论");
+      methodologies.forEach((m) => lines.push(`- ${m.name}: ${m.summary || "(无摘要)"}`));
+      lines.push("");
+    }
+    if (Array.isArray(assets) && assets.length > 0) {
+      lines.push("# 可用素材池");
+      assets.forEach((a, i) => lines.push(`- 素材 ${i + 1}: ${a.name} · ${a.durationSec || 0}s · ${a.shotCount || 0} 个镜头`));
+      lines.push("");
+    }
+    lines.push("请输出 JSON,steps 数组按时间顺序排列,总时长加起来等于目标时长:");
+    lines.push('{"steps":[{"index":1,"label":"开场钩子 · 0:00-0:30","startSec":0,"endSec":30,"body":"具体剪辑指令","shotRefs":[{"assetIndex":0,"rangeStart":0,"rangeEnd":30,"note":"素材1·主播半身"}],"missing":"如果缺关键镜头描述,否则省略"}]}');
+    try {
+      const result = await openaiClient.callJsonCompletion(provider, {
+        systemText:
+          "你是视频剪辑师助理。基于剪辑目标 + 对标账号方法论 + 可用素材池,给出叙事骨架 (4-7 段)。\n" +
+          "规则:\n" +
+          "- 每段 label 形如 '开场钩子 · 0:00-0:30',包含名字 + 时间范围\n" +
+          "- startSec/endSec 必填,所有段时间连续不重叠,合计=目标时长\n" +
+          "- body 是给剪辑师的具体指令 (1-2 句),引用方法论时直接说要点\n" +
+          "- shotRefs 用 assetIndex 引用素材池序号(从 0 开始),note 形如 '素材1 · 主播半身 0:00-0:08'\n" +
+          "- 没有可用素材时 shotRefs=[],并在 missing 里描述需要补什么镜头\n" +
+          "- 直接返回 JSON,不要 markdown 围栏,不要思考过程",
+        userText: lines.join("\n"),
+        temperature: 0.5,
+        // max_tokens 走 openai-client deriveDefaultMaxTokens (ctx 派生)
+      });
+      const parsed = result.parsed;
+      const rawSteps = Array.isArray(parsed?.steps) ? parsed.steps : [];
+      const steps = rawSteps.map((s, i) => ({
+        index: Number(s.index) || i + 1,
+        label: String(s.label || `段 ${i + 1}`),
+        startSec: Math.round(Number(s.startSec) || 0),
+        endSec: Math.round(Number(s.endSec) || 0),
+        body: String(s.body || ""),
+        shotRefs: Array.isArray(s.shotRefs) ? s.shotRefs.map((r) => {
+          const idx = Number(r.assetIndex);
+          const asset = Array.isArray(assets) && Number.isInteger(idx) ? assets[idx] : null;
+          return {
+            assetProjectId: asset?.id || "",
+            rangeStart: Math.round(Number(r.rangeStart) || 0),
+            rangeEnd: Math.round(Number(r.rangeEnd) || 0),
+            note: String(r.note || (asset?.name ? `${asset.name}` : "")),
+          };
+        }) : [],
+        missing: s.missing ? String(s.missing) : undefined,
+      }));
+      return { ok: true, steps };
+    } catch (err) {
+      throw new Error(`Studio steps LLM 失败: ${err?.message || String(err)}`);
+    }
+  });
+
+  // v2: 素材自动分镜 (复用 ffprobe + ffmpeg scenedetect,不需要 LLM)
+  // 输入: { assetProjectId, filePath, durationSec }
+  // 输出: Shot[] 写入 shots 表
+  ipcMain.handle("shots:analyze", async (_event, { videoId, assetProjectId, filePath, durationSec } = {}) => {
+    const vid = videoId || assetProjectId;
+    if (!vid || !filePath) throw new Error("shots:analyze 需要 videoId + filePath");
+    const ffmpeg = await commandPath("ffmpeg");
+    if (!ffmpeg) throw new Error("未找到 ffmpeg");
+    // 用 ffmpeg scenedetect filter 输出场景切换帧时间戳
+    const total = Math.max(1, Number(durationSec) || 0);
+    let boundaries = [];
+    try {
+      const { stderr } = await new Promise((resolve) => {
+        execFile(ffmpeg, [
+          "-i", filePath,
+          "-filter:v", "select='gt(scene,0.3)',showinfo",
+          "-f", "null", "-",
+        ], { windowsHide: true, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
+          resolve({ stderr: stderr?.toString() || "" });
+        });
+      });
+      const re = /pts_time:([\d.]+)/g;
+      let m;
+      while ((m = re.exec(stderr)) !== null) {
+        const t = Number(m[1]);
+        if (Number.isFinite(t) && t > 0.5) boundaries.push(t);
+      }
+    } catch {
+      boundaries = [];
+    }
+    // 没拿到场景切换 / 太少 → fallback 按 8 秒等分
+    if (boundaries.length === 0 || total / Math.max(boundaries.length, 1) > 20) {
+      const segSec = 8;
+      const n = Math.max(1, Math.min(20, Math.ceil(total / segSec)));
+      boundaries = Array.from({ length: n - 1 }, (_, i) => (i + 1) * (total / n));
+    }
+    const cuts = [0, ...boundaries.filter((t) => t < total - 0.5), total];
+    const shots = [];
+    for (let i = 0; i < cuts.length - 1; i++) {
+      const startSec = Math.round(cuts[i] * 10) / 10;
+      const endSec = Math.round(cuts[i + 1] * 10) / 10;
+      const dur = endSec - startSec;
+      const shotType = dur < 2 ? "close" : dur < 6 ? "medium" : "wide";
+      shots.push({
+        id: `${vid}-shot-${i + 1}`,
+        videoId: vid,
+        assetProjectId: vid,
+        shotIndex: i + 1,
+        startSec,
+        endSec,
+        description: `镜头 ${i + 1} · ${formatTime(startSec)}-${formatTime(endSec)} · ${dur.toFixed(1)}s`,
+        shotType,
+        usageTags: i === 0 ? ["开场"] : i === cuts.length - 2 ? ["收束"] : ["B-roll"],
+        createdAt: new Date().toISOString(),
+      });
+    }
+    // 落库 (v3 schema)
+    const db = getDb();
+    db.prepare("DELETE FROM shots WHERE video_id = ?").run(vid);
+    const ins = db.prepare(
+      "INSERT INTO shots (id, video_id, shot_index, start_sec, end_sec, description, shot_type, usage_tags, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    );
+    const now = Date.now();
+    for (const s of shots) {
+      ins.run(s.id, vid, s.shotIndex, s.startSec, s.endSec, s.description, s.shotType,
+        s.usageTags ? JSON.stringify(s.usageTags) : null, now);
+    }
+    return { ok: true, shots };
+  });
+
+  function formatTime(sec) {
+    const s = Math.max(0, Math.round(sec));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, "0")}`;
+  }
+
+
+  // (旧 shots:list/shots:setForAsset handlers 已删除，v3 版在上方 CRUD 块注册)
+
+  const runAnalysisStart = async (event, args) => {
+    const videoId = args?.videoId || args?.project?.id;
+    log.info("analyze:lifecycle", `analysis:start videoId=${videoId} hasProject=${!!args?.project} resume=${args?.resumeAnalysisId || "-"} pipelineId=${args?.pipelineId || "?"} activeTasks=${activeTasks.size}`);
+    let videoTitle = "视频";
+    let effectiveArgs = args;
+    if (videoId && !args?.project) {
+      const db = getDb();
+      const vrow = db.prepare("SELECT * FROM videos WHERE id = ?").get(videoId);
+      if (!vrow) {
+        log.warn("analyze:lifecycle", `analysis:start: video ${videoId} 不在 DB 里`);
+        throw new Error(`视频 ${videoId} 不存在`);
+      }
+      if (vrow) {
+        const video = rowToVideo(vrow);
+        videoTitle = video.title || videoTitle;
+        effectiveArgs = {
+          ...args,
+          project: {
+            id: video.id,
+            videoName: video.title,
+            source: video.source || { type: video.sourceType === "url" ? "url" : "local_file", url: video.sourceUrl, platform: video.platform },
+            localVideoPath: video.localVideoPath || (video.localPath ? `media://local/${encodeURIComponent(video.localPath)}` : ""),
+            localFilePath: video.localPath,
+            durationSec: video.durationSec,
+            width: video.width,
+            height: video.height,
+            orientation: video.orientation,
+            thumbnailUrl: video.thumbnailUrl,
+            status: "analyzing",
+          },
+        };
+      }
+    } else {
+      videoTitle = args?.project?.videoName || args?.project?.title || videoTitle;
+    }
+    try {
+      const result = await analyzeProject(event, effectiveArgs);
       notifyIfBackground({
         title: "ClipIQ · 分析完成",
-        body: `「${projectName}」分析已完成,可以查看报告了`,
+        body: `「${videoTitle}」分析已完成,可以查看报告了`,
       });
       return result;
     } catch (err) {
-      // 用户主动取消不弹通知,失败才弹
       if (!(err instanceof AnalysisCancelledError)) {
         const msg = String(err?.message || err).slice(0, 200);
-        // 广播失败,让 attach 模式的 renderer (关窗后重开) 也能感知
-        if (projectId) {
+        const handle = getTaskForVideo(videoId);
+        const failedAnalysisId = err?._analysisId || handle?.analysisId;
+        if (handle && !handle.cancelled && handle.analysisId !== failedAnalysisId) {
+          log.warn("analyze:lifecycle", `analysis:start catch: 旧分析失败但新分析已在跑, 跳过失败广播`);
+        } else if (videoId) {
           broadcastToWindows("analysis:progress", {
-            projectId,
+            projectId: videoId,
+            videoId,
+            analysisId: failedAnalysisId,
             progress: 0,
             stage: "失败",
             message: msg,
@@ -3643,50 +9105,660 @@ app.whenReady().then(async () => {
         }
         notifyIfBackground({
           title: "ClipIQ · 分析失败",
-          body: `「${projectName}」: ${msg.slice(0, 140)}`,
+          body: `「${videoTitle}」: ${msg.slice(0, 140)}`,
           urgency: "critical",
         });
       }
       throw err;
     }
+  };
+
+  // ── 实例化通用后台任务调度器 + 注册 kind ──
+  // analysis / summary 退化成 kind 的 runner;runAnalysisStart / summarizeAccountVideo
+  // 当执行体复用,activeTasks 的 abort/子进程/进度仍是 runner 内部机制。
+  // 取消:scheduler 收到 cancel → abort signal → 这里转调 cancelAnalysis(videoId)
+  //   触发底层 analyzeProject 抛 AnalysisCancelledError,runner promise reject → scheduler 标 cancelled。
+  {
+    const tasksRepo = createTasksRepo(getDb());
+    taskScheduler = createTaskScheduler({
+      now: () => Date.now(),
+      genId: () => require("crypto").randomUUID(),
+      persist: (t) => { try { tasksRepo.upsert(t); } catch (err) { log.warn("task-queue", "persist 失败:", err?.message || err); } },
+      removePersisted: (id) => { try { tasksRepo.remove(id); } catch { /* noop */ } },
+      emit: (e) => {
+        if (e.type === "task") broadcastToWindows("taskqueue:update", e.task);
+        else broadcastToWindows("taskqueue:removed", { id: e.id });
+      },
+    });
+    taskScheduler.registerKind("analysis", {
+      concurrency: TASK_CONCURRENCY.analysis,
+      dedupeKey: (p) => `analysis:${p.videoId}`,
+      title: (p) => p.title || "结构拆解",
+      run: (task, ctx) => {
+        ctx.signal.addEventListener("abort", () => { cancelAnalysis(task.payload.videoId); });
+        return runAnalysisStart(null, {
+          videoId: task.payload.videoId,
+          pipelineId: task.payload.pipelineId || "builtin-pipeline",
+          options: task.payload.options,
+          resumeAnalysisId: task.payload.resumeAnalysisId,
+        });
+      },
+    });
+    taskScheduler.registerKind("summary", {
+      concurrency: TASK_CONCURRENCY.summary,
+      dedupeKey: (p) => `summary:${p.videoId}`,
+      title: (p) => p.title || "内容分析",
+      run: (task, ctx) => {
+        ctx.signal.addEventListener("abort", () => { cancelAnalysis(task.payload.videoId); });
+        return summarizeAccountVideo(task.payload.videoId, task.payload.slotOverrides, task.payload.customPrompt);
+      },
+    });
+    // 账号拉取:runAccountFetch 本体不动(仍发 account:fetch:* 事件、维护 accountFetchInFlight,
+    // 账号卡片角标 / listFetchInFlight 全部照旧),调度器只在其上加并发上限 + 排队可见 + 面板取消。
+    // abort → 置 inFlight.cancelled,复用 runAccountFetch 内部的取消检查点。
+    taskScheduler.registerKind("account-fetch", {
+      concurrency: TASK_CONCURRENCY["account-fetch"],
+      dedupeKey: (p) => `account-fetch:${p.accountId}`,
+      title: (p) => p.title || "账号拉取",
+      run: (task, ctx) => {
+        ctx.signal.addEventListener("abort", () => {
+          const s = accountFetchInFlight.get(task.payload.accountId);
+          if (s) s.cancelled = true;
+        });
+        return runAccountFetch({ accountId: task.payload.accountId, url: task.payload.url, range: task.payload.range });
+      },
+    });
+    // 创作手册生成:并发 1(走 complex_text 槽位,跟内容分析共用上游,串行更稳),按 collectionId 去重。
+    // 纯 LLM 调用、无中途取消检查点;abort 当前不打断已发出的请求(任务被标 cancelled,结果丢弃)。
+    taskScheduler.registerKind("methodology", {
+      concurrency: TASK_CONCURRENCY.methodology,
+      dedupeKey: (p) => `methodology:${p.collectionId}`,
+      title: (p) => p.title || "创作手册",
+      run: (task) => runGenerateMethodology(task.payload.collectionId),
+    });
+    // 重启恢复:running → interrupted,queued 重新调度起跑。
+    try { taskScheduler.hydrate(tasksRepo.list()); } catch (err) { log.warn("task-queue", "hydrate 失败:", err?.message || err); }
+  }
+
+  // analysis:start → 入队 analysis kind,await 任务跑完(保持原本"await 拿分析结果"的 IPC 语义,
+  // useStartAnalysis 依赖 .then(analysis => analysis.id/result))。排队期间这个 promise 挂起。
+  ipcMain.handle("analysis:start", (event, args) => {
+    const videoId = args?.videoId || args?.project?.id;
+    if (!videoId || !taskScheduler) return runAnalysisStart(event, args); // 兜底
+    let title = args?.project?.videoName || args?.project?.title || "结构拆解";
+    if (title === "结构拆解") {
+      try {
+        const row = getDb().prepare("SELECT title FROM videos WHERE id = ?").get(videoId);
+        if (row?.title) title = row.title;
+      } catch { /* noop */ }
+    }
+    const task = taskScheduler.enqueue("analysis", {
+      videoId,
+      pipelineId: args?.pipelineId || "builtin-pipeline",
+      options: args?.options,
+      resumeAnalysisId: args?.resumeAnalysisId,
+      title,
+    }, { refId: videoId, title });
+    return taskScheduler.whenSettled(task.id);
   });
 
-  ipcMain.handle("analysis:cancel", async (_event, projectId) => {
-    return { cancelled: cancelAnalysis(projectId) };
+  // 续跑被中断的分析:复用同一 analysisId + 磁盘 checkpoint,从上次停的阶段接着跑。
+  ipcMain.handle("analysis:resume", async (event, analysisId) => {
+    if (!analysisId) throw new Error("analysis:resume 需要 analysisId");
+    const db = getDb();
+    const row = db.prepare("SELECT id, video_id, pipeline_id, status, options FROM analyses WHERE id = ?").get(analysisId);
+    if (!row) throw new Error(`分析记录 ${analysisId} 不存在`);
+    if (row.status === "analyzing" && isTaskActiveForVideo(row.video_id, "builtin-pipeline")) {
+      // 已经在跑(比如只是关了又开窗口),不重复发起。
+      return { resumed: false, alreadyRunning: true, analysisId };
+    }
+    const options = row.options ? JSON.parse(row.options) : undefined;
+    if (taskScheduler) {
+      let title = "结构拆解";
+      try {
+        const videoRow = db.prepare("SELECT title FROM videos WHERE id = ?").get(row.video_id);
+        if (videoRow?.title) title = videoRow.title;
+      } catch { /* noop */ }
+      const task = taskScheduler.enqueue("analysis", {
+        videoId: row.video_id,
+        pipelineId: row.pipeline_id || "builtin-pipeline",
+        options,
+        resumeAnalysisId: analysisId,
+        title,
+      }, { refId: row.video_id, title });
+      await taskScheduler.whenSettled(task.id);
+    } else {
+      await runAnalysisStart(event, {
+        videoId: row.video_id,
+        pipelineId: row.pipeline_id || "builtin-pipeline",
+        options,
+        resumeAnalysisId: analysisId,
+      });
+    }
+    return { resumed: true, analysisId };
   });
 
-  ipcMain.handle("analysis:isActive", async (_event, projectId) => {
-    return activeAnalyses.has(projectId);
+  ipcMain.handle("analysis:cancel", async (_event, videoId) => {
+    const t = taskScheduler?.list().find((x) => x.refId === videoId && x.kind === "analysis" && (x.status === "queued" || x.status === "running"));
+    if (t) return { cancelled: taskScheduler.cancel(t.id) };
+    return { cancelled: cancelAnalysis(videoId) };
   });
 
-  ipcMain.handle("analysis:getLastProgress", async (_event, projectId) => {
-    const handle = activeAnalyses.get(projectId);
+  ipcMain.handle("analysis:isActive", async (_event, videoId) => {
+    // 只查结构拆解管线是否在跑（不同管线可以并行）
+    return isTaskActiveForVideo(videoId, "builtin-pipeline");
+  });
+
+  ipcMain.handle("analysis:getLastProgress", async (_event, videoId) => {
+    const handle = getTaskForVideo(videoId);
     return handle?.lastProgress || null;
   });
 
-  ipcMain.handle("project:export", async (_event, { project, nodes, report, provider, format }) => {
+  ipcMain.handle("analysis:getLastBudget", async (_event, videoId) => {
+    const handle = getTaskForVideo(videoId);
+    return handle?.budget || null;
+  });
+
+  // 统一任务管理 IPC
+  ipcMain.handle("task:list", async () => {
+    const tasks = [];
+    for (const [analysisId, h] of activeTasks) {
+      tasks.push({
+        analysisId,
+        videoId: h.videoId,
+        pipelineId: h.pipelineId,
+        cancelled: h.cancelled,
+        startedAt: h.startedAt,
+        lastProgress: h.lastProgress,
+      });
+    }
+    return tasks;
+  });
+
+  ipcMain.handle("task:cancel", async (_event, analysisId) => {
+    return { cancelled: cancelTask(analysisId) };
+  });
+
+  // ── 通用任务队列 IPC(渲染端 tasks store 的单一数据源)──
+  ipcMain.handle("taskqueue:list", async () => (taskScheduler ? taskScheduler.list() : []));
+  ipcMain.handle("taskqueue:cancel", async (_event, id) => ({ cancelled: taskScheduler ? taskScheduler.cancel(id) : false }));
+  ipcMain.handle("taskqueue:remove", async (_event, id) => ({ removed: taskScheduler ? taskScheduler.remove(id) : false }));
+
+  ipcMain.handle("video:export", async (_event, { video, analysis, format }) => {
+    const title = video?.title || "video-analysis";
+    const nodes = analysis?.result?.nodes || [];
+    const report = analysis?.result?.report || analysis?.result || {};
+    const provider = analysis?.providerSnapshot || null;
+    const safeName = path.parse(title).name || "video-analysis";
+
+    // JSON 导出剥离本地资源路径(framePath / media:// / localPath)
+    const stripNodes = (ns) => ns.map((n) => {
+      const c = { ...n };
+      delete c.thumbnailUrl;
+      delete c.representativeFrames;
+      if (Array.isArray(c.framesInShot)) c.framesInShot = c.framesInShot.length;
+      return c;
+    });
+    const stripFrames = (fs) => fs.map((f) => {
+      const c = { ...f };
+      delete c.url;
+      return c;
+    });
+    const stripVideo = (v) => {
+      const c = { ...v };
+      delete c.localPath;
+      if (c.thumbnailUrl?.startsWith("media://")) delete c.thumbnailUrl;
+      return c;
+    };
+
+    // ZIP:分析 JSON(路径重写) + 帧截图 + 封面
+    if (format === "zip") {
+      const defaultPath = path.join(app.getPath("documents"), `${safeName}-分析导出.zip`);
+      const result = await dialog.showSaveDialog({
+        title: "导出拉片结果",
+        defaultPath,
+        filters: [{ name: "ZIP", extensions: ["zip"] }],
+      });
+      if (result.canceled || !result.filePath) return { canceled: true };
+
+      const output = fsSync.createWriteStream(result.filePath);
+      const archive = archiver("zip", { zlib: { level: 6 } });
+      const closed = new Promise((resolve, reject) => {
+        output.on("close", resolve);
+        output.on("error", reject);
+        archive.on("error", reject);
+        archive.on("warning", (err) => { if (err.code === "ENOENT") log.warn("export", "归档警告:", err?.message); else reject(err); });
+      });
+      archive.pipe(output);
+
+      // 分析结果:clone + 收集帧 + 重写路径(传完整 result 以覆盖 content/pipeline 两种管线)
+      const fullResult = analysis?.result || {};
+      const analysisClone = JSON.parse(JSON.stringify({ ...fullResult, provider, exportedAt: new Date().toISOString() }));
+      const frameFiles = collectFramesAndRewritePaths(analysisClone, "frames");
+      let frameCount = 0;
+      for (const [diskPath, zipPath] of frameFiles) {
+        try {
+          await fs.access(diskPath);
+          archive.file(diskPath, { name: zipPath });
+          frameCount++;
+        } catch { /* 帧文件已删,跳过 */ }
+      }
+
+      // 视频信息:重写资源路径
+      const videoClone = { ...video };
+      delete videoClone.localPath;
+      if (videoClone.thumbnailUrl?.startsWith("media://")) {
+        const coverDisk = resolveMediaUrl(videoClone.thumbnailUrl);
+        if (coverDisk) {
+          try {
+            await fs.access(coverDisk);
+            const coverName = path.basename(coverDisk);
+            archive.file(coverDisk, { name: coverName });
+            videoClone.thumbnailUrl = coverName;
+          } catch { delete videoClone.thumbnailUrl; }
+        } else {
+          delete videoClone.thumbnailUrl;
+        }
+      }
+
+      archive.append(JSON.stringify({ video: videoClone, ...analysisClone }, null, 2), { name: "analysis.json" });
+      await archive.finalize();
+      await closed;
+      return { canceled: false, filePath: result.filePath };
+    }
+
+    // 纯文本格式:JSON(剥离资源) / CSV / Markdown
     const extension = format === "json" ? "json" : format === "csv" ? "csv" : "md";
-    const defaultPath = path.join(
-      app.getPath("documents"),
-      `${path.parse(project.videoName || "video-analysis").name || "video-analysis"}-analysis.${extension}`
-    );
+    const defaultPath = path.join(app.getPath("documents"), `${safeName}-analysis.${extension}`);
     const result = await dialog.showSaveDialog({
       title: "导出拉片结果",
       defaultPath,
-      filters: [
-        { name: format.toUpperCase(), extensions: [extension] },
-      ],
+      filters: [{ name: format.toUpperCase(), extensions: [extension] }],
     });
     if (result.canceled || !result.filePath) return { canceled: true };
 
+    const fullResult = analysis?.result || {};
+    const strippedResult = { ...fullResult };
+    if (Array.isArray(strippedResult.frames)) strippedResult.frames = stripFrames(strippedResult.frames);
+    if (strippedResult.nodes) strippedResult.nodes = stripNodes(strippedResult.nodes);
     const content =
       format === "json"
-        ? JSON.stringify({ project, nodes, report, provider, exportedAt: new Date().toISOString() }, null, 2)
+        ? JSON.stringify({ video: stripVideo(video), ...strippedResult, provider, exportedAt: new Date().toISOString() }, null, 2)
         : format === "csv"
           ? exportCsv(nodes)
-          : exportMarkdown(project, nodes, report, provider);
+          : exportMarkdown(video, nodes, report, provider);
     await fs.writeFile(result.filePath, content, "utf8");
     return { canceled: false, filePath: result.filePath };
+  });
+
+  // --- 导出资源处理 helpers ---
+
+  // 纯 JSON 导出:剥离本地资源路径(framePath / media:// / localPath),只保留文本数据
+  function stripResourceFieldsForExport(bundle) {
+    const clone = JSON.parse(JSON.stringify(bundle));
+    for (const item of clone.videos || []) {
+      if (item.video) {
+        delete item.video.localPath;
+        if (item.video.thumbnailUrl?.startsWith("media://")) delete item.video.thumbnailUrl;
+      }
+      for (const a of item.analyses || []) {
+        if (!a.result) continue;
+        // builtin-content: result.frames[].url
+        if (Array.isArray(a.result.frames)) {
+          for (const f of a.result.frames) { delete f.url; }
+        }
+        // builtin-pipeline: nodes + shotContexts
+        if (a.result.nodes) {
+          for (const node of a.result.nodes) {
+            delete node.thumbnailUrl;
+            delete node.representativeFrames;
+            if (Array.isArray(node.framesInShot)) node.framesInShot = node.framesInShot.length;
+          }
+        }
+        const shotContexts = a.result.report?.shotContexts || a.result.shotContexts;
+        if (Array.isArray(shotContexts)) {
+          for (const shot of shotContexts) {
+            delete shot.frames;
+            delete shot.representativeFrames;
+          }
+        }
+      }
+    }
+    return clone;
+  }
+
+  // 解析 media:// URL 为磁盘绝对路径
+  function resolveMediaUrl(url) {
+    if (!url || !url.startsWith("media://")) return null;
+    // media://external/{encodedAbsPath}
+    const extMatch = url.match(/^media:\/\/external\/(.+)$/);
+    if (extMatch) return decodeURIComponent(extMatch[1]);
+    // media://project/{videoId}/{rel}
+    const projMatch = url.match(/^media:\/\/project\/([^/]+)\/(.+)$/);
+    if (projMatch) {
+      const videoId = decodeURIComponent(projMatch[1]);
+      const rel = projMatch[2].split("/").map(decodeURIComponent).join(path.sep);
+      return path.join(getVideoDir(videoId), rel);
+    }
+    return null;
+  }
+
+  // ZIP 导出:遍历分析结果中的帧引用,收集磁盘文件 + 重写为 ZIP 内相对路径。
+  // 支持两种管线:
+  //   builtin-content: result.frames[].url (media://external/...)
+  //   builtin-pipeline: nodes[].representativeFrames/framesInShot + report.shotContexts[].frames
+  function collectFramesAndRewritePaths(analysisResult, framesPrefix) {
+    const frameFiles = new Map();
+    if (!analysisResult) return frameFiles;
+
+    // 通用:从 framePath(绝对路径)收集 + 重写
+    const rewrite = (f) => {
+      if (!f?.framePath) return;
+      const basename = path.basename(f.framePath);
+      const zipRel = `${framesPrefix}/${basename}`;
+      if (!frameFiles.has(f.framePath)) frameFiles.set(f.framePath, zipRel);
+      f.framePath = zipRel;
+      if (f.thumbnailUrl) f.thumbnailUrl = zipRel;
+    };
+
+    // 通用:从 media:// URL 解析磁盘路径 + 收集 + 返回 zipRel
+    const resolveAndCollect = (mediaUrl) => {
+      const diskPath = resolveMediaUrl(mediaUrl);
+      if (!diskPath) return null;
+      const basename = path.basename(diskPath);
+      const zipRel = `${framesPrefix}/${basename}`;
+      if (!frameFiles.has(diskPath)) frameFiles.set(diskPath, zipRel);
+      return zipRel;
+    };
+
+    // builtin-content: result.frames[].url
+    if (Array.isArray(analysisResult.frames)) {
+      for (const f of analysisResult.frames) {
+        if (!f?.url?.startsWith("media://")) continue;
+        const zipRel = resolveAndCollect(f.url);
+        if (zipRel) f.url = zipRel;
+      }
+    }
+
+    // builtin-pipeline: nodes
+    if (analysisResult.nodes) {
+      for (const node of analysisResult.nodes) {
+        if (Array.isArray(node.representativeFrames)) node.representativeFrames.forEach(rewrite);
+        if (Array.isArray(node.framesInShot)) node.framesInShot.forEach(rewrite);
+        if (node.thumbnailUrl && node.representativeFrames?.[0]?.framePath) {
+          node.thumbnailUrl = node.representativeFrames[0].framePath;
+        } else if (node.thumbnailUrl?.startsWith("media://")) {
+          const zipRel = resolveAndCollect(node.thumbnailUrl);
+          node.thumbnailUrl = zipRel || undefined;
+          if (!zipRel) delete node.thumbnailUrl;
+        } else if (node.thumbnailUrl) {
+          delete node.thumbnailUrl;
+        }
+      }
+    }
+
+    // builtin-pipeline: report.shotContexts
+    const shotContexts = analysisResult.report?.shotContexts || analysisResult.shotContexts;
+    if (Array.isArray(shotContexts)) {
+      for (const shot of shotContexts) {
+        if (Array.isArray(shot.frames)) shot.frames.forEach(rewrite);
+        if (Array.isArray(shot.representativeFrames)) shot.representativeFrames.forEach(rewrite);
+      }
+    }
+    return frameFiles;
+  }
+
+  // 批量导出:整个账号 / 整个收藏夹下所有视频的所有分析。
+  // 一个视频有多份分析(内容分析 / 结构拆解…)就各导一份(按 pipeline 区分)。
+  // format=json 出单个 JSON(不含资源路径);format=zip 出压缩包(含帧截图,可选含原视频)。
+  ipcMain.handle("export:bundle", async (_event, { scope, id, format, includeMedia } = {}) => {
+    const db = getDb();
+    if (scope !== "account" && scope !== "collection") throw new Error("export:bundle 需要 scope=account|collection");
+    if (!id) throw new Error("export:bundle 需要 id");
+
+    // 方法论(创作手册):账号挂在它 col-account 收藏夹;收藏夹按自身 id。version DESC。
+    const loadMethodology = (collectionId) => {
+      try {
+        const rows = db
+          .prepare("SELECT data FROM methodologies WHERE collection_id = ? ORDER BY version DESC")
+          .all(collectionId)
+          .map((r) => { try { return JSON.parse(r.data); } catch { return null; } })
+          .filter(Boolean);
+        return { methodology: rows[0] || null, methodologyHistory: rows.slice(1) };
+      } catch { return { methodology: null, methodologyHistory: [] }; }
+    };
+
+    // 1) 解析范围实体(账号信息 / 收藏夹信息)+ 方法论嵌入 + 视频列表
+    let scopeName = id;
+    let entity = null; // account / collection 实体
+    let videos = [];
+    if (scope === "account") {
+      const accRow = db.prepare("SELECT * FROM accounts WHERE id = ?").get(id);
+      if (!accRow) throw new Error("未找到账号");
+      scopeName = accRow.name || id;
+      const meth = loadMethodology(`col-account-${id}`);
+      entity = { ...rowToAccount(accRow), ...meth };
+      videos = db
+        .prepare("SELECT * FROM videos WHERE account_id = ? ORDER BY upload_date DESC, created_at DESC")
+        .all(id)
+        .map(rowToVideo);
+    } else {
+      const colRow = db.prepare("SELECT * FROM collections WHERE id = ?").get(id);
+      if (!colRow) throw new Error("未找到收藏夹");
+      scopeName = colRow.name || id;
+      const c = rowToCollection(colRow);
+      const meth = loadMethodology(id);
+      // 收藏夹只带名称 + 简介(+ 方法论),不含账号信息
+      entity = { id: c.id, name: c.name, description: c.description, ...meth };
+      videos = db
+        .prepare(
+          "SELECT v.* FROM videos v JOIN collection_videos cv ON cv.video_id = v.id WHERE cv.collection_id = ? ORDER BY cv.position",
+        )
+        .all(id)
+        .map(rowToVideo);
+    }
+
+    // 2) pipeline_id → 可读名(内容分析 / 结构拆解)
+    const pipeName = {};
+    for (const p of db.prepare("SELECT id, name FROM pipelines").all()) pipeName[p.id] = p.name;
+
+    // 3) 每个视频:每个 pipeline 只取「最新且成功」的一份(内容分析 + 结构分析各一)。
+    //    限定 status='completed' → 最新那次若失败/取消/中断,自动回退到上一个成功的。
+    const analysisCols =
+      "SELECT id, video_id, pipeline_id, status, options, provider_snapshot, result, token_usage, duration_ms, error_message, started_at, completed_at, created_at FROM analyses WHERE video_id = ? AND status = 'completed' AND result IS NOT NULL ORDER BY created_at DESC";
+    let analysisCount = 0;
+    const items = videos.map((v) => {
+      const seenPipe = new Set();
+      const analyses = db
+        .prepare(analysisCols)
+        .all(v.id)
+        .map(rowToAnalysis)
+        .filter((a) => { // ORDER BY created_at DESC → 每个 pipeline 第一条即最新,后续历史份丢弃
+          if (seenPipe.has(a.pipelineId)) return false;
+          seenPipe.add(a.pipelineId);
+          return true;
+        })
+        .map((a) => ({
+          analysisId: a.id,
+          pipelineId: a.pipelineId,
+          pipelineName: pipeName[a.pipelineId] || a.pipelineId,
+          status: a.status,
+          options: a.options,
+          providerSnapshot: a.providerSnapshot,
+          tokenUsage: a.tokenUsage,
+          durationMs: a.durationMs,
+          startedAt: a.startedAt,
+          completedAt: a.completedAt,
+          result: a.result,
+        }));
+      analysisCount += analyses.length;
+      return { video: v, analyses };
+    });
+
+    const bundle = {
+      app: "ClipIQ",
+      exportedAt: new Date().toISOString(),
+      scope: { type: scope, id, name: scopeName },
+      [scope]: entity, // account: {...} 或 collection: {...},方法论已嵌入
+      videoCount: videos.length,
+      analysisCount,
+      videos: items,
+    };
+
+    // 文件名清洗:去掉路径非法字符,空则回退
+    const safe = (s, fallback) => {
+      const t = String(s || "").replace(/[\/\\:*?"<>| -]/g, "").replace(/\s+/g, " ").trim().slice(0, 80);
+      return t || fallback;
+    };
+    const baseName = safe(scopeName, scope === "account" ? "account" : "collection");
+
+    if (format === "json") {
+      const defaultPath = path.join(app.getPath("documents"), `${baseName}-分析导出.json`);
+      const result = await dialog.showSaveDialog({
+        title: "导出分析结果",
+        defaultPath,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (result.canceled || !result.filePath) return { canceled: true };
+      await fs.writeFile(result.filePath, JSON.stringify(stripResourceFieldsForExport(bundle), null, 2), "utf8");
+      return { canceled: false, filePath: result.filePath, videoCount: videos.length, analysisCount };
+    }
+
+    // zip — 用 archiver 流式写盘(边压边写,不把整包/原视频读进内存,带视频也不会 OOM)
+    const suffix = includeMedia ? "分析导出-含视频" : "分析导出";
+    const defaultPath = path.join(app.getPath("documents"), `${baseName}-${suffix}.zip`);
+    const result = await dialog.showSaveDialog({
+      title: "导出分析结果",
+      defaultPath,
+      filters: [{ name: "ZIP", extensions: ["zip"] }],
+    });
+    if (result.canceled || !result.filePath) return { canceled: true };
+
+    const output = fsSync.createWriteStream(result.filePath);
+    const archive = archiver("zip", { zlib: { level: 6 } });
+    const closed = new Promise((resolve, reject) => {
+      output.on("close", resolve);
+      output.on("error", reject);
+      archive.on("error", reject);
+      archive.on("warning", (err) => { if (err.code === "ENOENT") log.warn("export", "归档警告:", err?.message); else reject(err); });
+    });
+    archive.pipe(output);
+
+    // 账号 / 收藏夹信息(含已存信息 + 嵌入的方法论)
+    archive.append(JSON.stringify(entity, null, 2), { name: scope === "account" ? "账号信息.json" : "收藏夹信息.json" });
+
+    const usedFolders = new Set();
+    const manifestVideos = [];
+    let mediaIncludedCount = 0;
+    let mediaMissingCount = 0;
+    let totalFrameFiles = 0;
+    for (const it of items) {
+      let folder = safe(it.video.title, it.video.id.slice(0, 8));
+      if (usedFolders.has(folder)) folder = `${folder}-${it.video.id.slice(0, 6)}`;
+      usedFolders.add(folder);
+      const dir = `videos/${folder}`;
+
+      // 每份分析:clone → 收集帧文件 → 重写路径
+      const usedFiles = {};
+      const allFrameFiles = new Map();
+      const analysisEntries = [];
+      for (const a of it.analyses) {
+        const base = safe(a.pipelineName, "分析");
+        usedFiles[base] = (usedFiles[base] || 0) + 1;
+        const fname = usedFiles[base] > 1 ? `${base}-${a.analysisId.slice(0, 8)}` : base;
+        const clone = JSON.parse(JSON.stringify(a));
+        const frameFiles = collectFramesAndRewritePaths(clone.result, `${fname}-frames`);
+        for (const [disk, zip] of frameFiles) {
+          if (!allFrameFiles.has(disk)) allFrameFiles.set(disk, `${dir}/${zip}`);
+        }
+        analysisEntries.push({ clone, fname });
+      }
+
+      // 帧截图打包(去重,文件缺失跳过)
+      for (const [diskPath, zipPath] of allFrameFiles) {
+        try {
+          await fs.access(diskPath);
+          archive.file(diskPath, { name: zipPath });
+          totalFrameFiles++;
+        } catch { /* 帧文件已删,跳过 */ }
+      }
+
+      // video.json:重写资源路径
+      const videoClone = JSON.parse(JSON.stringify(it.video));
+      if (videoClone.thumbnailUrl?.startsWith("media://")) {
+        const coverDisk = resolveMediaUrl(videoClone.thumbnailUrl);
+        if (coverDisk) {
+          try {
+            await fs.access(coverDisk);
+            const coverName = path.basename(coverDisk);
+            archive.file(coverDisk, { name: `${dir}/${coverName}` });
+            videoClone.thumbnailUrl = coverName;
+          } catch { delete videoClone.thumbnailUrl; }
+        } else {
+          delete videoClone.thumbnailUrl;
+        }
+      }
+
+      // 原视频
+      let mediaIncluded = false;
+      if (includeMedia && it.video.localPath) {
+        try {
+          await fs.access(it.video.localPath);
+          const ext = path.extname(it.video.localPath) || ".mp4";
+          const mediaName = `原视频${ext}`;
+          archive.file(it.video.localPath, { name: `${dir}/${mediaName}` });
+          videoClone.localPath = mediaName;
+          mediaIncluded = true;
+          mediaIncludedCount++;
+        } catch {
+          delete videoClone.localPath;
+          mediaMissingCount++;
+        }
+      } else {
+        delete videoClone.localPath;
+      }
+
+      archive.append(JSON.stringify(videoClone, null, 2), { name: `${dir}/video.json` });
+      for (const { clone, fname } of analysisEntries) {
+        archive.append(JSON.stringify(clone, null, 2), { name: `${dir}/${fname}.json` });
+      }
+
+      manifestVideos.push({
+        videoId: it.video.id,
+        title: it.video.title,
+        platform: it.video.platform,
+        mediaIncluded,
+        frameCount: allFrameFiles.size,
+        analyses: it.analyses.map((a) => ({ analysisId: a.analysisId, pipelineName: a.pipelineName })),
+      });
+    }
+
+    const manifest = {
+      app: "ClipIQ",
+      exportedAt: bundle.exportedAt,
+      scope: bundle.scope,
+      videoCount: videos.length,
+      analysisCount,
+      hasMethodology: !!entity?.methodology,
+      mediaIncluded: !!includeMedia,
+      mediaFileCount: mediaIncludedCount,
+      mediaMissingCount,
+      frameFileCount: totalFrameFiles,
+      videos: manifestVideos,
+    };
+    archive.append(JSON.stringify(manifest, null, 2), { name: "manifest.json" });
+
+    await archive.finalize();
+    await closed;
+    return {
+      canceled: false,
+      filePath: result.filePath,
+      videoCount: videos.length,
+      analysisCount,
+      mediaFileCount: mediaIncludedCount,
+      mediaMissingCount,
+      frameFileCount: totalFrameFiles,
+    };
   });
 
   ipcMain.handle("provider:testConnection", async (_event, provider) => {
@@ -3695,7 +9767,7 @@ app.whenReady().then(async () => {
       provider?.endpointType === "local_whisper_wasm" ||
       provider?.source === "local_whisper"
     ) {
-      const modelId = normalizeWhisperCppModelId(
+      const modelId = normalizeWhisperModelId(
         provider.localWhisperModel || provider.model,
       );
       try {
@@ -3794,28 +9866,73 @@ app.whenReady().then(async () => {
     }
   });
 
-  ipcMain.handle("video:downloadUrl", async (_event, rawInput) => {
+  // ---- URL 拉取共用底座 ------------------------------------------------
+  // 解析 yt-dlp stdout 里的进度行,形如 "[download]  35.4% of 12.34MiB at  500KiB/s ETA 00:10"
+  function parseYtDlpProgressLine(line) {
+    const m = line.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
+    return m ? parseFloat(m[1]) : null;
+  }
+
+  // spawn yt-dlp + 解析进度,handle 用来支持 cancelAnalysis 的 SIGTERM kill。
+  // onProgress(pct 0-100, line) 在每条新的百分比行触发。
+  function runYtDlpWithProgress(ytDlpBin, args, handle, onProgress) {
+    return new Promise((resolve, reject) => {
+      const child = spawn(ytDlpBin, args, { windowsHide: true });
+      if (handle) handle.children.add(child);
+      let stderr = "";
+      let lastPct = -1;
+      const consume = (chunk) => {
+        const text = chunk.toString("utf8");
+        for (const line of text.split(/\r?\n|\r/)) {
+          if (!line) continue;
+          const pct = parseYtDlpProgressLine(line);
+          if (pct != null && Math.abs(pct - lastPct) >= 0.5) {
+            lastPct = pct;
+            try { onProgress?.(pct, line.trim()); } catch { /* swallow */ }
+          }
+        }
+      };
+      child.stdout?.on("data", consume);
+      child.stderr?.on("data", (chunk) => { stderr += chunk.toString("utf8"); consume(chunk); });
+      child.on("error", (err) => {
+        if (handle) handle.children.delete(child);
+        reject(err);
+      });
+      child.on("close", (code) => {
+        if (handle) handle.children.delete(child);
+        if (handle?.cancelled) return reject(new AnalysisCancelledError());
+        if (code === 0) return resolve();
+        const err = new Error(stderr.slice(-2000).trim() || `yt-dlp 退出码 ${code}`);
+        err.stderr = stderr;
+        reject(err);
+      });
+    });
+  }
+
+  // URL 拉取核心流程:解析 URL → 查 cache → (cache 命中走快路径 / miss 跑 yt-dlp) →
+  // 读 info.json → inspectVideo → 生成项目标题 → 写 cache。返回 DownloadedVideo。
+  // onProgress(pct 0-100, stage, message) 在每个里程碑触发,sync 路径传 null 即可。
+  async function performUrlDownloadFlow(rawInput, { projectId, mediaDir, handle, onProgress }) {
     const ytDlp = await commandPath("yt-dlp");
     if (!ytDlp) {
       throw new Error("未找到 yt-dlp，无法通过链接拉取视频。请先安装 yt-dlp，或改用本地视频。");
     }
 
-    // 抖音/小红书等平台的分享文案是「中文 + URL + 时间戳 + 口令」混排,
-    // 用户经常整段粘贴。这里提取首个 http(s) URL,允许整段输入。
     const urlMatch = String(rawInput || "").match(/https?:\/\/[^\s'"<>，。、）]+/);
     const url = urlMatch ? urlMatch[0].replace(/[.,;)]+$/, "") : "";
     if (!url) {
       throw new Error("未从输入中识别到视频链接,请确认粘贴的内容里包含 http(s):// 开头的链接。");
     }
 
+    onProgress?.(2, "下载视频", "解析链接");
+
     const cache = await readUrlCache();
     const cached = cache[url];
     if (cached?.filePath) {
       try {
         await fs.access(cached.filePath);
+        onProgress?.(85, "下载视频", "已有本地文件，跳过下载。");
         const inspected = await inspectVideo(cached.filePath);
-        // 老 cache (无 title) 懒迁移: 命中时补一次, 写回 cache。
-        // 若磁盘上还有 .info.json 也读一下, 给 LLM 多一份证据。
         let title = cached.title;
         if (!title) {
           let ytdlpInfo = cached.ytdlpInfo || null;
@@ -3829,22 +9946,27 @@ app.whenReady().then(async () => {
                 description: j.description,
                 uploader: j.uploader || j.channel || j.creator,
               };
-            } catch {
-              // 老缓存没有 info.json: 仅用 rawInput
-            }
+            } catch { /* 老缓存没有 info.json */ }
           }
+          onProgress?.(92, "下载视频", "生成标题");
           const mp = await loadMediumTextProvider();
-          title = await generateProjectTitle(mp, { rawInput, url, ytdlpInfo });
+          const titleResult = await generateProjectTitle(mp, { rawInput, url, ytdlpInfo });
+          title = titleResult?.title || null;
           if (title) {
             cache[url] = { ...cached, title, ytdlpInfo: ytdlpInfo || cached.ytdlpInfo };
             await writeUrlCache(cache);
           }
         }
+        const vid = projectId || `proj-url-${Date.now()}`;
+        const cachedCover = (await downloadCoverImage(cached.ytdlpInfo?.thumbnail, vid))
+          || (await extractFirstFrameCover(cached.filePath, vid));
         return {
-          projectId: `proj-url-${Date.now()}`,
+          videoId: vid,
+          projectId: vid,
           platform: inferPlatform(url),
           ...inspected,
           title: title || null,
+          thumbnailUrl: cachedCover || null,
           fromCache: true,
         };
       } catch {
@@ -3853,34 +9975,49 @@ app.whenReady().then(async () => {
       }
     }
 
-    const projectId = `proj-url-${Date.now()}`;
-    const mediaDir = path.join(app.getPath("userData"), "projects", projectId, "media");
-    await fs.mkdir(mediaDir, { recursive: true });
+    const useProjectId = projectId || `proj-url-${Date.now()}`;
+    const useMediaDir = mediaDir || path.join(getVideoDir(useProjectId), "media");
+    await fs.mkdir(useMediaDir, { recursive: true });
 
-    const outputPattern = path.join(mediaDir, "%(extractor)s_%(id)s.%(ext)s");
+    const outputPattern = path.join(useMediaDir, "%(extractor)s_%(id)s.%(ext)s");
+    const ffmpegForYtdlp = bundledFfmpegPath();
+    const ytdlpArgs = [
+      "--no-playlist",
+      "--restrict-filenames",
+      "--write-info-json",
+      "--newline",
+      "--progress",
+      ...(ffmpegForYtdlp ? ["--ffmpeg-location", path.dirname(ffmpegForYtdlp)] : []),
+      "-o", outputPattern,
+      url,
+    ];
+
+    onProgress?.(5, "下载视频", "启动 yt-dlp");
     try {
-      // --write-info-json 让 yt-dlp 把视频元数据 (title/description/uploader/upload_date 等)
-      // 落到 <basename>.info.json, 后面解析出来喂给 medium_text 生成项目标题。
-      await run(ytDlp, [
-        "--no-playlist",
-        "--restrict-filenames",
-        "--write-info-json",
-        "-o", outputPattern,
-        url,
-      ]);
+      // 有 onProgress 走 streaming spawn(解析百分比);没有则用旧的一次性 run(更轻)。
+      if (onProgress) {
+        await runYtDlpWithProgress(ytDlp, ytdlpArgs, handle, (pct, line) => {
+          // yt-dlp 0-100 映射到 5-85,留 15% 给 inspect / 生成标题 / cache 写入。
+          const mapped = Math.min(85, Math.max(5, Math.round(5 + pct * 0.8)));
+          onProgress(mapped, "下载视频", line.slice(0, 160));
+        });
+      } else {
+        await run(ytDlp, ytdlpArgs, {}, handle);
+      }
     } catch (error) {
+      if (error instanceof AnalysisCancelledError) throw error;
       const detail = String(error.stderr || error.stdout || error.message || error).trim();
       throw new Error(detail || "yt-dlp 下载失败");
     }
 
-    // 只挑视频文件 (排除 .info.json / .description / .live_chat.json 等附件)
+    onProgress?.(88, "下载视频", "扫描产物");
     const VIDEO_EXTS = new Set([".mp4", ".mkv", ".webm", ".mov", ".m4v", ".flv", ".avi"]);
-    const files = await fs.readdir(mediaDir);
+    const files = await fs.readdir(useMediaDir);
     const candidates = await Promise.all(
       files
         .filter((f) => VIDEO_EXTS.has(path.extname(f).toLowerCase()))
         .map(async (file) => {
-          const filePath = path.join(mediaDir, file);
+          const filePath = path.join(useMediaDir, file);
           const stat = await fs.stat(filePath);
           return { filePath, mtimeMs: stat.mtimeMs };
         })
@@ -3888,7 +10025,6 @@ app.whenReady().then(async () => {
     const latest = candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
     if (!latest) throw new Error("yt-dlp 执行完成，但没有生成视频文件。");
 
-    // 读 .info.json 拿平台 metadata (失败不阻断, 文件可能因为平台限制没拿到)
     let ytdlpInfo = null;
     const infoJsonPath = latest.filePath.replace(/\.[^.]+$/, ".info.json");
     try {
@@ -3900,14 +10036,20 @@ app.whenReady().then(async () => {
         uploader: j.uploader || j.channel || j.creator,
         uploadDate: j.upload_date,
         duration: j.duration,
+        thumbnail: j.thumbnail || pickBestThumbnail(j.thumbnails),
       };
-    } catch {
-      // info.json 缺失 / 损坏: 让 medium_text 仅用 rawInput
-    }
+    } catch { /* info.json 缺失 */ }
 
+    onProgress?.(92, "下载视频", "读取视频信息");
     const inspected = await inspectVideo(latest.filePath);
+    // 封面:优先下远程封面,没有则抽视频第一帧。落本地避免远程 URL 过期。
+    onProgress?.(94, "下载视频", "保存封面");
+    let thumbnailUrl = await downloadCoverImage(ytdlpInfo?.thumbnail, useProjectId);
+    if (!thumbnailUrl) thumbnailUrl = await extractFirstFrameCover(latest.filePath, useProjectId);
+    onProgress?.(96, "下载视频", "生成标题");
     const mp = await loadMediumTextProvider();
-    const title = await generateProjectTitle(mp, { rawInput, url, ytdlpInfo });
+    const titleResult = await generateProjectTitle(mp, { rawInput, url, ytdlpInfo });
+    const title = titleResult?.title || null;
     cache[url] = {
       filePath: latest.filePath,
       savedAt: Date.now(),
@@ -3915,110 +10057,258 @@ app.whenReady().then(async () => {
       ytdlpInfo: ytdlpInfo || undefined,
     };
     await writeUrlCache(cache);
+    onProgress?.(100, "下载完成", "");
     return {
-      projectId,
+      videoId: useProjectId,
+      projectId: useProjectId,
       platform: inferPlatform(url),
       ...inspected,
       title: title || null,
+      thumbnailUrl: thumbnailUrl || null,
       fromCache: false,
     };
+  }
+
+  // 阻塞版本:整段 await 完才返回 DownloadedVideo。AccountScreen 仍在用。
+  ipcMain.handle("video:downloadUrl", async (_event, rawInput) => {
+    return performUrlDownloadFlow(rawInput, {
+      projectId: null,
+      mediaDir: null,
+      handle: null,
+      onProgress: null,
+    });
   });
 
-  await llamaRuntime.init();
-  await whisperCppRuntime.init();
+  // 异步版本:同步 return { projectId, url, platform },下载在后台进行,
+  // 进度通过 analysis:progress 广播,完成 / 失败通过 download:complete 广播。
+  ipcMain.handle("video:downloadUrlAsync", async (_event, rawInput) => {
+    const urlMatch = String(rawInput || "").match(/https?:\/\/[^\s'"<>，。、）]+/);
+    const url = urlMatch ? urlMatch[0].replace(/[.,;)]+$/, "") : "";
+    if (!url) {
+      throw new Error("未从输入中识别到视频链接,请确认粘贴的内容里包含 http(s):// 开头的链接。");
+    }
+    const ytDlp = await commandPath("yt-dlp");
+    if (!ytDlp) {
+      throw new Error("未找到 yt-dlp，无法通过链接拉取视频。请先安装 yt-dlp，或改用本地视频。");
+    }
+
+    const videoId = `proj-url-${Date.now()}`;
+    const mediaDir = path.join(getVideoDir(videoId), "media");
+    await fs.mkdir(mediaDir, { recursive: true });
+
+    const handle = registerAnalysis(videoId);
+    const emitProgress = (progress, stage, message) => {
+      if (handle.cancelled) return;
+      const scaled = Math.min(2, Math.round(progress * 0.02));
+      const payload = { projectId: videoId, videoId, progress: scaled, stage, message: message || "", stageIndex: 0 };
+      handle.lastProgress = payload;
+      handle.lastProgressAt = Date.now();
+      broadcastToWindows("analysis:progress", payload);
+    };
+
+    emitProgress(0, "下载视频", "排队中");
+
+    (async () => {
+      try {
+        const video = await performUrlDownloadFlow(rawInput, {
+          projectId: videoId,
+          mediaDir,
+          handle,
+          onProgress: emitProgress,
+        });
+        broadcastToWindows("download:complete", { videoId, success: true, video });
+      } catch (err) {
+        if (err instanceof AnalysisCancelledError) {
+          broadcastToWindows("download:complete", { videoId, success: false, cancelled: true, error: "已取消" });
+        } else {
+          const msg = err instanceof Error ? err.message : String(err);
+          emitProgress(0, "失败", msg);
+          broadcastToWindows("download:complete", { videoId, success: false, error: msg });
+        }
+      } finally {
+        clearAnalysis(videoId);
+      }
+    })();
+
+    return { videoId, url, platform: inferPlatform(url) };
+  });
+
+  // daemon 管理推理运行时,确保连接就绪
+  try {
+    const daemonClient = require("./daemon-client.cjs");
+    await daemonClient.ensureDaemon();
+  } catch (err) {
+    log.warn("clipiq", "daemon 初始化失败:", err?.message || err);
+  }
+
+  // 从 config 读 localModelOverrides[*].contextSize → { modelKey: ctx } 给 annotateManifest 用
+  // 让 fit/memPercent 反映用户实际调过的 ctx 值, 不是 manifest 默认。
+  async function readCtxOverrides() {
+    try {
+      const cfg = (readConfig()) || {};
+      const overrides = cfg.localModelOverrides || {};
+      const out = {};
+      for (const [k, v] of Object.entries(overrides)) {
+        const ctx = Number(v?.contextSize);
+        if (ctx > 0) out[k] = ctx;
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  }
 
   // listModels 与 listManifest 共用同一映射,差别只在不带 machine 字段
   ipcMain.handle("llama:listModels", async () => {
-    const machineDetect = require("./machine-detect.cjs");
-    const machine = machineDetect.detectMachine();
-    const annotated = machineDetect.annotateManifest(llamaRuntime.getManifest(), machine);
-    const installed = await llamaRuntime.listModels();
-    const installedMap = Object.fromEntries(installed.map((m) => [m.key, m]));
-    return Object.values(annotated)
-      .map((entry) => {
-        const inst = installedMap[entry.key] || {};
-        return localLlamaEntryToDescriptor({
-          ...entry,
-          downloaded: !!inst.downloaded,
-          llmBytes: inst.llmBytes || 0,
-          mmprojBytes: inst.mmprojBytes || 0,
-        });
-      })
+    const daemonClient = require("./daemon-client.cjs");
+    const ctxOverrides = await readCtxOverrides();
+    const { models } = await daemonClient.getRecommendedModels("clipiq", ctxOverrides);
+    return (models || [])
+      .map((dm) => localLlamaEntryToDescriptor(daemonModelToLlamaEntry(dm)))
       .filter(Boolean);
   });
 
-  ipcMain.handle("llama:getStatus", async () => llamaRuntime.getStatus());
+  ipcMain.handle("llama:getStatus", async () => {
+    const daemonClient = require("./daemon-client.cjs");
+    try {
+      const rt = await daemonClient.getRuntimeStatus();
+      return {
+        binaryPath: rt.binaries?.llamaServer?.path || null,
+        binaryFound: !!rt.binaries?.llamaServer?.available,
+        running: rt.llm?.state === "ready",
+        status: rt.llm?.state || "idle",
+        modelKey: rt.llm?.modelId || null,
+        port: rt.llm?.port || null,
+        contextSize: rt.llm?.contextSize || 0,
+        startedAt: rt.llm?.startedAt ? new Date(rt.llm.startedAt).getTime() : 0,
+        lastError: rt.llm?.error || null,
+        recentLogs: [],
+      };
+    } catch (err) {
+      return {
+        binaryPath: null, binaryFound: false, running: false, status: "error",
+        modelKey: null, port: null, contextSize: 0, startedAt: 0,
+        lastError: err.message, recentLogs: [],
+      };
+    }
+  });
 
-  // 返回 ModelDescriptor[] + 机器规格. annotated manifest 合并 downloaded 状态后投影成统一 schema
+  ipcMain.handle("llama:recomputeFit", async (_evt, { modelKey, contextSize }) => {
+    const daemonClient = require("./daemon-client.cjs");
+    return daemonClient.recomputeFit(modelKey, contextSize);
+  });
+
   ipcMain.handle("llama:listManifest", async () => {
-    const machineDetect = require("./machine-detect.cjs");
-    const machine = machineDetect.detectMachine();
-    const manifest = llamaRuntime.getManifest();
-    const annotated = machineDetect.annotateManifest(manifest, machine);
-    const installed = await llamaRuntime.listModels();
-    const installedMap = Object.fromEntries(installed.map((m) => [m.key, m]));
-    const descriptors = Object.values(annotated)
-      .map((entry) => {
-        const inst = installedMap[entry.key] || {};
-        return localLlamaEntryToDescriptor({
-          ...entry,
-          downloaded: !!inst.downloaded,
-          llmBytes: inst.llmBytes || 0,
-          mmprojBytes: inst.mmprojBytes || 0,
-        });
-      })
+    const daemonClient = require("./daemon-client.cjs");
+    const ctxOverrides = await readCtxOverrides();
+    const { machine, models } = await daemonClient.getRecommendedModels("clipiq", ctxOverrides);
+    const descriptors = (models || [])
+      .map((dm) => localLlamaEntryToDescriptor(daemonModelToLlamaEntry(dm)))
       .filter(Boolean);
     return { machine, models: descriptors };
   });
 
   ipcMain.handle("llama:ensureBinary", async (event) => {
-    const path = await llamaRuntime.ensureLlamaServer((progress) => {
+    const daemonClient = require("./daemon-client.cjs");
+    const result = await daemonClient.downloadBinary("llama-server", (progress) => {
       event.sender.send("llama:progress", { scope: "binary", ...progress });
     });
-    return { ok: true, binaryPath: path };
+    const bins = await daemonClient.getBinariesStatus();
+    return { ok: true, binaryPath: bins?.llamaServer?.path || "" };
   });
 
   ipcMain.handle("llama:ensureModel", async (event, modelKey) => {
-    const mirror = await getLocalModelMirror();
-    return llamaRuntime.ensureModel(modelKey, (progress) => {
+    const daemonClient = require("./daemon-client.cjs");
+    return daemonClient.downloadModel(modelKey, (progress) => {
       event.sender.send("llama:progress", { scope: "model", modelKey, ...progress });
-    }, { mirror });
-  });
-
-  ipcMain.handle("llama:start", async (event, modelKey) => {
-    const result = await llamaRuntime.start(modelKey, {
-      onLog: (entry) => {
-        if (!event.sender.isDestroyed()) {
-          event.sender.send("llama:log", entry);
-        }
-      },
     });
-    // 持久化最近一次启动的模型,下次开应用时自动恢复
-    persistLastLlamaModelKey(modelKey).catch((e) =>
-      console.warn("[clipiq] 持久化 lastLlamaModelKey 失败:", e),
-    );
-    return result;
   });
 
-  ipcMain.handle("llama:stop", async () => llamaRuntime.stop());
+  ipcMain.handle("llama:start", async (_event, modelKey) => {
+    const daemonClient = require("./daemon-client.cjs");
+    const ctx = contextResolver ? await contextResolver(modelKey) : 0;
+    const result = await daemonClient.startLLM(modelKey, { contextSize: ctx || 0 });
+    persistLastLlamaModelKey(modelKey).catch((e) =>
+      log.warn("clipiq", "持久化 lastLlamaModelKey 失败:", e),
+    );
+    return {
+      ok: true,
+      port: result.port || 0,
+      contextSize: result.contextSize || ctx || 0,
+      reused: result.state === "ready",
+    };
+  });
+
+  ipcMain.handle("llama:stop", async () => {
+    const daemonClient = require("./daemon-client.cjs");
+    await daemonClient.stopLLM();
+    return { ok: true };
+  });
+
+  ipcMain.handle("llama:cancelDownload", async (_event, modelKey) => {
+    const daemonClient = require("./daemon-client.cjs");
+    return daemonClient.cancelDownload(modelKey);
+  });
 
   ipcMain.handle("llama:selfTest", async (_event, payload) => {
-    return llamaRuntime.selfTest(payload || {});
+    const daemonClient = require("./daemon-client.cjs");
+    const rt = await daemonClient.getRuntimeStatus();
+    if (rt.llm?.state !== "ready" || !rt.llm?.port) {
+      throw new Error("本地推理服务未就绪,请先启动模型");
+    }
+    return llamaRuntime.selfTest({ ...payload, port: rt.llm.port, modelKey: rt.llm.modelId });
   });
 
-  // whisper.cpp runtime IPC ----------------------------------------------------
+  // whisper runtime IPC (由 ai-model-daemon 管理) ---------------------------------
   ipcMain.handle("whisperCpp:listModels", async () => {
-    const raws = await whisperCppRuntime.listModels();
-    return raws.map((e) => localWhisperEntryToDescriptor(e)).filter(Boolean);
+    const daemonClient = require("./daemon-client.cjs");
+    const allModels = await daemonClient.listModels();
+    const whisperModels = (allModels || []).filter((dm) =>
+      dm.runtimeKind === "whisper" || (dm.id && dm.id.startsWith("whisper-")),
+    );
+    return whisperModels.map((dm) => {
+      const ready = dm.ready || (dm.files || []).every((f) => f.ready);
+      const totalBytes = (dm.files || []).reduce((sum, f) => sum + (f.bytes || 0), 0);
+      return localWhisperEntryToDescriptor({
+        key: dm.id,
+        name: dm.name || dm.id,
+        description: dm.desc || "",
+        approxBytes: totalBytes,
+        downloaded: ready,
+        downloadedBytes: ready ? totalBytes : 0,
+      });
+    }).filter(Boolean);
   });
 
-  ipcMain.handle("whisperCpp:getStatus", async () => whisperCppRuntime.getStatus());
+  ipcMain.handle("whisperCpp:getStatus", async () => {
+    const daemonClient = require("./daemon-client.cjs");
+    try {
+      const rt = await daemonClient.getRuntimeStatus();
+      return {
+        binaryPath: rt.binaries?.whisperServer?.path || null,
+        binaryFound: !!rt.binaries?.whisperServer?.available,
+        running: rt.whisper?.state === "ready",
+        status: rt.whisper?.state || "idle",
+        modelKey: rt.whisper?.modelId || null,
+        port: rt.whisper?.port || null,
+        startedAt: rt.whisper?.startedAt ? new Date(rt.whisper.startedAt).getTime() : 0,
+        lastError: rt.whisper?.error || null,
+        recentLogs: [],
+      };
+    } catch (err) {
+      return {
+        binaryPath: null, binaryFound: false, running: false, status: "error",
+        modelKey: null, port: null, startedAt: 0,
+        lastError: err.message, recentLogs: [],
+      };
+    }
+  });
 
   ipcMain.handle("whisperCpp:ensureModel", async (event, modelKey) => {
-    const mirror = await getLocalModelMirror();
-    return whisperCppRuntime.ensureModel(modelKey, (progress) => {
+    const daemonClient = require("./daemon-client.cjs");
+    return daemonClient.downloadModel(modelKey, (progress) => {
       event.sender.send("whisperCpp:progress", { scope: "model", modelKey, ...progress });
-    }, { mirror });
+    });
   });
 
   ipcMain.handle("mirror:get", async () => {
@@ -4030,17 +10320,108 @@ app.whenReady().then(async () => {
     return { ok: true, mirror: saved };
   });
 
-  ipcMain.handle("whisperCpp:start", async (event, modelKey) => {
-    return whisperCppRuntime.start(modelKey, {
-      onLog: (entry) => {
-        if (!event.sender.isDestroyed()) {
-          event.sender.send("whisperCpp:log", entry);
-        }
-      },
-    });
+  ipcMain.handle("whisperCpp:start", async (_event, modelKey) => {
+    const daemonClient = require("./daemon-client.cjs");
+    // 先确保 whisper-server 二进制就绪
+    const bins = await daemonClient.getBinariesStatus();
+    if (!bins?.whisperServer?.available) {
+      await daemonClient.downloadBinary("whisper-server", () => {});
+    }
+    const result = await daemonClient.startWhisper(modelKey);
+    return { ok: true, port: result.port || 0, reused: result.state === "ready" };
   });
 
-  ipcMain.handle("whisperCpp:stop", async () => whisperCppRuntime.stop());
+  ipcMain.handle("whisperCpp:stop", async () => {
+    const daemonClient = require("./daemon-client.cjs");
+    await daemonClient.stopWhisper();
+    return { ok: true };
+  });
+
+  ipcMain.handle("whisperCpp:cancelDownload", async (_event, modelKey) => {
+    const daemonClient = require("./daemon-client.cjs");
+    return daemonClient.cancelDownload(modelKey);
+  });
+
+  // 诊断: 读 eta-samples.jsonl, 返回历史分析执行记录 (含 timing/token/provider 信息)
+  ipcMain.handle("diagnostics:getAnalysisSamples", async () => {
+    const filePath = path.join(app.getPath("userData"), "eta-samples.jsonl");
+    try {
+      const raw = await fs.readFile(filePath, "utf-8");
+      const lines = raw.trim().split("\n").filter(Boolean);
+      const samples = [];
+      for (const line of lines) {
+        try { samples.push(JSON.parse(line)); } catch { /* skip malformed */ }
+      }
+      return { ok: true, samples };
+    } catch (err) {
+      if (err?.code === "ENOENT") return { ok: true, samples: [] };
+      return { ok: false, error: err?.message || String(err), samples: [] };
+    }
+  });
+
+  // 诊断: 按 analysisId 读 token-usage.json
+  ipcMain.handle("diagnostics:getTokenUsage", async (_event, analysisId) => {
+    const db = getDb();
+    const row = db.prepare("SELECT video_id FROM analyses WHERE id = ?").get(analysisId);
+    if (!row) return { ok: true, data: null };
+    const analysisDir = getAnalysisDir(row.video_id, analysisId);
+    try {
+      return { ok: true, data: await readJson(path.join(analysisDir, "token-usage.json"), null) };
+    } catch {
+      return { ok: true, data: null };
+    }
+  });
+
+  ipcMain.handle("diagnostics:getFramesCheckpoint", async (_event, projectId) => {
+    const projectDir = getVideoDir(projectId);
+    try {
+      return { ok: true, data: await readJson(path.join(projectDir, "frames-checkpoint.json"), null) };
+    } catch {
+      return { ok: true, data: null };
+    }
+  });
+
+  ipcMain.handle("diagnostics:getTranscript", async (_event, projectId) => {
+    const projectDir = getVideoDir(projectId);
+    try {
+      return { ok: true, data: await readJson(path.join(projectDir, "artifacts", "transcript.json"), null) };
+    } catch {
+      return { ok: true, data: null };
+    }
+  });
+
+  ipcMain.handle("diagnostics:deleteSample", async (_event, projectId, startedAt) => {
+    const filePath = path.join(app.getPath("userData"), "eta-samples.jsonl");
+    try {
+      const raw = await fs.readFile(filePath, "utf-8");
+      const lines = raw.trim().split("\n").filter(Boolean);
+      const kept = [];
+      let removed = 0;
+      for (const line of lines) {
+        try {
+          const obj = JSON.parse(line);
+          if (obj.projectId === projectId && obj.startedAt === startedAt) { removed++; continue; }
+        } catch { /* keep malformed lines as-is */ }
+        kept.push(line);
+      }
+      await fs.writeFile(filePath, kept.length > 0 ? kept.join("\n") + "\n" : "");
+      return { ok: true, removed };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err), removed: 0 };
+    }
+  });
+
+  ipcMain.handle("diagnostics:clearAllSamples", async () => {
+    const filePath = path.join(app.getPath("userData"), "eta-samples.jsonl");
+    try {
+      await fs.writeFile(filePath, "");
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
+  });
+
+  assertIpcContract(); // 所有 ipcMain.handle 已注册,校验 manifest 无遗漏
 
   await createWindow();
   createTray();
@@ -4061,8 +10442,8 @@ app.whenReady().then(async () => {
 });
 
 async function persistLastLlamaModelKey(modelKey) {
-  const cur = (await readJson(getConfigPath(), null)) || {};
-  await writeJson(getConfigPath(), {
+  const cur = (readConfig()) || {};
+  writeConfig( {
     ...cur,
     lastLlamaModelKey: modelKey || null,
     savedAt: new Date().toISOString(),
@@ -4070,14 +10451,14 @@ async function persistLastLlamaModelKey(modelKey) {
 }
 
 async function getLocalModelMirror() {
-  const cfg = (await readJson(getConfigPath(), null)) || {};
+  const cfg = (readConfig()) || {};
   return cfg.localModelMirror === "modelscope" ? "modelscope" : "hf-mirror";
 }
 
 async function persistLocalModelMirror(value) {
   const next = value === "modelscope" ? "modelscope" : "hf-mirror";
-  const cur = (await readJson(getConfigPath(), null)) || {};
-  await writeJson(getConfigPath(), {
+  const cur = (readConfig()) || {};
+  writeConfig( {
     ...cur,
     localModelMirror: next,
     savedAt: new Date().toISOString(),
@@ -4086,37 +10467,25 @@ async function persistLocalModelMirror(value) {
 }
 
 function scheduleLlamaAutoResume() {
-  // 不阻塞主流程,稍微延迟一点让窗口先呈现给用户
   setTimeout(async () => {
     try {
-      const cfg = await readJson(getConfigPath(), null);
+      const daemonClient = require("./daemon-client.cjs");
+      const cfg = readConfig();
       const lastKey = cfg?.lastLlamaModelKey;
       if (!lastKey) return;
-      const status = llamaRuntime.getStatus();
-      if (!status.binaryFound) {
-        console.log("[clipiq] llama auto-resume 跳过:推理引擎未安装");
+      const bins = await daemonClient.getBinariesStatus();
+      if (!bins?.llamaServer?.available) {
+        log.info("clipiq", "llama auto-resume 跳过:推理引擎未安装");
         return;
       }
-      const models = await llamaRuntime.listModels();
-      const target = models.find((m) => m.key === lastKey);
-      if (!target) {
-        console.log(`[clipiq] llama auto-resume 跳过:未知模型 ${lastKey}`);
+      const modelStatus = await daemonClient.getModelStatus(lastKey);
+      if (!modelStatus || !modelStatus.ready) {
+        log.info("clipiq", `llama auto-resume 跳过:模型 ${lastKey} 未就绪`);
         return;
       }
-      if (!target.downloaded) {
-        console.log(`[clipiq] llama auto-resume 跳过:模型 ${lastKey} 未下载完成`);
-        return;
-      }
-      console.log(`[clipiq] llama auto-resume: 启动 ${lastKey}`);
-      await llamaRuntime.start(lastKey, {
-        onLog: (entry) => {
-          // 自启动期间日志只走主进程 stdout,不打扰 renderer
-          if (entry.channel === "stderr" && /error|fatal/i.test(entry.line)) {
-            console.warn("[llama auto-resume]", entry.line);
-          }
-        },
-      });
-      // 通知 renderer 更新状态卡片(如果已打开 Settings 本地推理 section)
+      log.info("clipiq", `llama auto-resume: 启动 ${lastKey}`);
+      const ctx = contextResolver ? await contextResolver(lastKey) : 0;
+      await daemonClient.startLLM(lastKey, { contextSize: ctx || 0 });
       const win = BrowserWindow.getAllWindows()[0];
       if (win && !win.isDestroyed()) {
         win.webContents.send("llama:progress", {
@@ -4126,9 +10495,9 @@ function scheduleLlamaAutoResume() {
           message: `自动恢复模型 ${lastKey}`,
         });
       }
-      console.log(`[clipiq] llama auto-resume 完成`);
+      log.info("clipiq", "llama auto-resume 完成");
     } catch (error) {
-      console.warn(`[clipiq] llama auto-resume 失败: ${error?.message || error}`);
+      log.warn("clipiq", `llama auto-resume 失败: ${error?.message || error}`);
     }
   }, 1500);
 }
@@ -4156,9 +10525,9 @@ let _cleanedUp = false;
 function cleanupSidecars(reason) {
   if (_cleanedUp) return;
   _cleanedUp = true;
-  try { console.log(`[clipiq] cleanupSidecars: ${reason}`); } catch {}
-  try { llamaRuntime.shutdownSync(); } catch {}
-  try { whisperCppRuntime.shutdownSync(); } catch {}
+  try { log.info("clipiq", `cleanupSidecars: ${reason}`); } catch {}
+  // daemon 管理推理进程;这里只注销客户端
+  try { require("./daemon-client.cjs").shutdownSync(); } catch {}
 }
 app.on("before-quit", () => {
   isQuitting = true;

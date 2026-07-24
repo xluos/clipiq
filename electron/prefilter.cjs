@@ -9,6 +9,7 @@
 // - 每帧 30s 硬超时,失败的帧标 salience=5 中性值,不阻塞整体流程
 
 const fs = require("node:fs/promises");
+const log = require("./logger.cjs");
 
 const SCENE_TYPES = [
   "outdoor", "indoor", "transition", "text_card",
@@ -98,7 +99,7 @@ function sanitizeTag(raw) {
   return { sceneType, subject, hasText, salience, isEmpty, signature, caption };
 }
 
-async function tagOneFrame(port, imagePath, modelKey, signal) {
+async function tagOneFrame(baseUrl, apiKey, imagePath, modelKey, signal) {
   const buf = await fs.readFile(imagePath);
   const dataUrl = `data:image/jpeg;base64,${buf.toString("base64")}`;
   const body = {
@@ -126,9 +127,12 @@ async function tagOneFrame(port, imagePath, modelKey, signal) {
       json_schema: { name: "prefilter_tag", strict: true, schema: PREFILTER_SCHEMA },
     },
   };
-  const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+  const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+    },
     body: JSON.stringify(body),
     signal,
   });
@@ -149,66 +153,104 @@ async function tagOneFrame(port, imagePath, modelKey, signal) {
 // onProgress(i, total, tag) 每帧完成时回调。
 // cache (可选): { lookup(frame): Promise<{ tag, meta } | null>, store(frame, tag, meta): Promise<void> }
 //   注入由 main.cjs 构造的缓存器, 命中时直接复用 tag, 不调 llama-server。
-async function tagFrames(frames, { port, modelKey, perFrameTimeoutMs = 30_000, onProgress, cache } = {}) {
-  if (!port) throw new Error("prefilter: 缺少本地 server 端口");
-  const out = [];
-  let totalTokens = 0;
-  let cacheHits = 0;
-  const startedAt = Date.now();
-  for (let i = 0; i < frames.length; i++) {
-    const f = frames[i];
-    const t0 = Date.now();
-    let tag;
-    let usage = null;
-    let error = null;
-    let fromCache = false;
+// acquireSlot (必填): (modelKey, opts) => Promise<slot>。
+//   main.cjs 注入 llamaManager.acquire。整个 tagFrames 期间持有一个 slot,
+//   保证中间不被其他阶段切换模型;完成或异常时统一 release。
+async function tagFrames(frames, {
+  modelKey,
+  acquireSlot,
+  perFrameTimeoutMs = 30_000,
+  onProgress,
+  cache,
+  analysisId,
+  abortSignal,
+} = {}) {
+  if (!modelKey) throw new Error("prefilter: 缺少 modelKey");
+  if (typeof acquireSlot !== "function") throw new Error("prefilter: 缺少 acquireSlot 回调");
+  const tag = analysisId ? `[analysis:${analysisId}]` : "";
+  log.info("prefilter", `${tag} 开始打标 ${frames.length} 帧, model=${modelKey}`);
+  const slot = await acquireSlot(modelKey);
+  try {
+    const out = [];
+    let totalTokens = 0;
+    let totalPromptTokens = 0;
+    let totalCompletionTokens = 0;
+    let cacheHits = 0;
+    const startedAt = Date.now();
+    for (let i = 0; i < frames.length; i++) {
+      if (abortSignal?.aborted) throw new Error("cancelled");
+      const f = frames[i];
+      const t0 = Date.now();
+      let tag;
+      let usage = null;
+      let error = null;
+      let fromCache = false;
 
-    if (cache) {
-      try {
-        const hit = await cache.lookup(f);
-        if (hit?.tag) {
-          tag = hit.tag;
-          fromCache = true;
-          cacheHits += 1;
-        }
-      } catch {
-        // 缓存读失败 → 静默走 LLM 路径
-      }
-    }
-
-    if (!fromCache) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), perFrameTimeoutMs);
-      try {
-        const result = await tagOneFrame(port, f.prefilterFramePath || f.framePath, modelKey, controller.signal);
-        tag = result.tag;
-        usage = result.usage;
-        if (usage?.total_tokens) totalTokens += usage.total_tokens;
-      } catch (e) {
-        error = e instanceof Error ? e.message : String(e);
-        tag = neutralTag(error);
-      } finally {
-        clearTimeout(timer);
-      }
-      if (cache && !error) {
+      if (cache) {
         try {
-          await cache.store(f, tag, { modelKey, tokensUsed: usage?.total_tokens || 0 });
+          const hit = await cache.lookup(f);
+          if (hit?.tag) {
+            tag = hit.tag;
+            fromCache = true;
+            cacheHits += 1;
+          }
         } catch {
-          // 写缓存失败不阻塞
+          // 缓存读失败 → 静默走 LLM 路径
         }
       }
-    }
 
-    const elapsedMs = Date.now() - t0;
-    out.push({ ...f, prefilterTag: tag, prefilterElapsedMs: elapsedMs, prefilterError: error, prefilterFromCache: fromCache });
-    if (onProgress) onProgress(i, frames.length, tag, elapsedMs, fromCache);
+      if (!fromCache) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), perFrameTimeoutMs);
+        // 外部取消 → 也 abort 当前帧的请求
+        const onAbort = () => controller.abort();
+        abortSignal?.addEventListener("abort", onAbort, { once: true });
+        try {
+          const result = await tagOneFrame(
+            slot.baseUrl,
+            slot.apiKey,
+            f.prefilterFramePath || f.framePath,
+            modelKey,
+            controller.signal,
+          );
+          tag = result.tag;
+          usage = result.usage;
+          if (usage?.total_tokens) totalTokens += usage.total_tokens;
+          if (usage?.prompt_tokens) totalPromptTokens += usage.prompt_tokens;
+          if (usage?.completion_tokens) totalCompletionTokens += usage.completion_tokens;
+        } catch (e) {
+          if (abortSignal?.aborted) throw new Error("cancelled");
+          error = e instanceof Error ? e.message : String(e);
+          tag = neutralTag(error);
+        } finally {
+          clearTimeout(timer);
+          abortSignal?.removeEventListener("abort", onAbort);
+        }
+        if (cache && !error) {
+          try {
+            await cache.store(f, tag, { modelKey, tokensUsed: usage?.total_tokens || 0 });
+          } catch {
+            // 写缓存失败不阻塞
+          }
+        }
+      }
+
+      const elapsedMs = Date.now() - t0;
+      out.push({ ...f, prefilterTag: tag, prefilterElapsedMs: elapsedMs, prefilterError: error, prefilterFromCache: fromCache });
+      if (onProgress) onProgress(i, frames.length, tag, elapsedMs, fromCache);
+    }
+    log.info("prefilter", `${tag} 打标完成 ${out.length} 帧, 耗时 ${Date.now() - startedAt}ms, cacheHits=${cacheHits}`);
+    return {
+      frames: out,
+      totalElapsedMs: Date.now() - startedAt,
+      totalTokens,
+      totalPromptTokens,
+      totalCompletionTokens,
+      cacheHits,
+    };
+  } finally {
+    slot.release();
   }
-  return {
-    frames: out,
-    totalElapsedMs: Date.now() - startedAt,
-    totalTokens,
-    cacheHits,
-  };
 }
 
 // 相似度: 共字符比例。短文本(3-5 汉字)够用。
@@ -303,4 +345,8 @@ module.exports = {
   refineByTags,
   signatureSimilarity,
   SCENE_TYPES,
+  // 纯函数,导出仅供单测 (sanitize/parse 逻辑易回归)
+  sanitizeTag,
+  extractJsonFromText,
+  neutralTag,
 };

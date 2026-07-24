@@ -11,26 +11,28 @@
 // main.cjs 会回退到旧的 detectGenreLightweight 路径。
 
 const { callJsonCompletion } = require("./openai-client.cjs");
+const log = require("./logger.cjs");
 
 async function callMediumText(provider, systemText, userText, schema, signal) {
   if (!provider?.baseUrl || !provider?.apiKeyRef || !provider?.model) {
     throw new Error("medium_text provider 配置不全");
   }
   // 走 openai-client 统一入口, 自动按 endpointType 分流 chat/completions vs responses
-  const parsed = await callJsonCompletion(provider, {
+  // 返回 { parsed, usage, model }, 上游需要 usage 做 token 记账。
+  // max_tokens 走 openai-client deriveDefaultMaxTokens (ctx*0.25 clamp [1500,16000]),
+  // 不再 hardcode 6000。settings 里 ctx slider 调大自动跟着大。
+  const result = await callJsonCompletion(provider, {
     systemText,
     userText,
     temperature: 0.3,
-    maxTokens: provider.maxOutputTokens ?? 6000,
-    maxOutputTokens: provider.maxOutputTokens ?? 6000,
     signal,
   });
-  if (!parsed) {
+  if (!result.parsed) {
     throw new Error(
       `summarizer 解析失败 (raw text 为空或不是合法 JSON; endpoint=${provider.endpointType})`,
     );
   }
-  return parsed;
+  return result;
 }
 
 function buildSummarySchema(allowedGenres) {
@@ -125,15 +127,15 @@ async function summarizeVideo({
   ].join("\n");
 
   try {
-    const parsed = await callMediumText(
+    const callResult = await callMediumText(
       provider,
       systemText,
       userText,
       schema,
       handle?.abortController?.signal,
     );
-    // eslint-disable-next-line no-console
-    console.log("[summarizer] LLM raw keys:", Object.keys(parsed || {}), "summaryLen:", String(parsed?.globalSummary || "").length, "genre:", parsed?.detectedGenre);
+    const parsed = callResult.parsed;
+    log.info("summarizer", "LLM raw keys:", Object.keys(parsed || {}), "summaryLen:", String(parsed?.globalSummary || "").length, "genre:", parsed?.detectedGenre);
     // genre 不在 catalog 里 (用 json_object 没强约束 enum) → 兜底到 other,
     // 而不是整段 return null 让 globalSummary 也丢掉。
     const rawGenre = String(parsed?.detectedGenre || "").trim().toLowerCase();
@@ -143,8 +145,7 @@ async function summarizeVideo({
       typeof parsed?.globalSummary === "string" ? parsed.globalSummary.trim() : "";
     // 只要有 globalSummary 或 detectedGenre 就视作成功 (放宽: 不再强求 structureHint)
     if (!globalSummary && !rawGenre) {
-      // eslint-disable-next-line no-console
-      console.warn("[summarizer] parsed 看不出 globalSummary/detectedGenre:", JSON.stringify(parsed).slice(0, 300));
+      log.warn("summarizer", "parsed 看不出 globalSummary/detectedGenre:", JSON.stringify(parsed).slice(0, 300));
       return null;
     }
     return {
@@ -152,11 +153,12 @@ async function summarizeVideo({
       detectedGenre: genre,
       genreConfidence: Number.isFinite(conf) ? Math.max(0, Math.min(1, conf)) : 0.5,
       structureHint: parsed.structureHint || null,
+      usage: callResult.usage,
+      echoedModel: callResult.model,
     };
   } catch (error) {
     if (handle?.cancelled) throw error;
-    // eslint-disable-next-line no-console
-    console.warn("[summarizer] 全局聚合失败:", error?.message || error);
+    log.warn("summarizer", "全局聚合失败:", error?.message || error);
     return null;
   }
 }

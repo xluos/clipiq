@@ -11,6 +11,7 @@
 //   - LLM 失败一律返回 neutral 兜底, 不阻断主流程
 
 const { callJsonCompletion } = require("./openai-client.cjs");
+const log = require("./logger.cjs");
 
 const FIXED_BUCKET_SEC = 5;
 const SAMPLES_PER_WINDOW = 6;        // 喂 LLM 时每桶最多这些条
@@ -146,16 +147,16 @@ async function callBatch(provider, batch, abortSignal) {
     "windows 数组要包含上面所有桶的评分,index 与桶号对应。",
   ].join("\n");
 
-  const parsed = await callJsonCompletion(provider, {
+  // max_tokens 走 openai-client deriveDefaultMaxTokens (ctx 派生, 无上限),
+  // 不再 hardcode 3000。
+  const result = await callJsonCompletion(provider, {
     systemText:
       "你在帮一个视频拉片工具评弹幕情绪。只返回 JSON,不要 markdown 围栏,不要解释过程。",
     userText,
     temperature: 0.2,
-    maxTokens: provider.maxOutputTokens ?? 3000,
-    maxOutputTokens: provider.maxOutputTokens ?? 3000,
     signal: abortSignal,
   });
-  return parsed;
+  return result; // { parsed, usage, model }
 }
 
 // ---- 主入口 -----------------------------------------------------------------
@@ -182,8 +183,11 @@ async function aggregateEmotions({
     .filter(({ b }) => b.messages.length > 0);
 
   if (needLLM.length === 0 || !provider?.apiKeyRef) {
-    return { windows, summary: "" };
+    return { windows, summary: "", usage: null, echoedModel: null };
   }
+
+  const usageAgg = { promptTokens: 0, completionTokens: 0, totalTokens: 0, callCount: 0 };
+  let echoedModel = null;
 
   let done = 0;
   for (let offset = 0; offset < needLLM.length; offset += BATCH_SIZE) {
@@ -215,7 +219,17 @@ async function aggregateEmotions({
 
     try {
       if (!parsed) {
-        parsed = await callBatch(provider, batch, handle?.abortController?.signal);
+        const callResult = await callBatch(provider, batch, handle?.abortController?.signal);
+        parsed = callResult.parsed;
+        if (callResult.usage) {
+          usageAgg.promptTokens += callResult.usage.promptTokens;
+          usageAgg.completionTokens += callResult.usage.completionTokens;
+          usageAgg.totalTokens += callResult.usage.totalTokens;
+          usageAgg.callCount += 1;
+        } else {
+          usageAgg.callCount += 1;
+        }
+        if (callResult.model) echoedModel = callResult.model;
       }
       const arr = Array.isArray(parsed?.windows) ? parsed.windows : [];
       for (const item of arr) {
@@ -245,7 +259,7 @@ async function aggregateEmotions({
       }
     } catch (err) {
       // 这一批失败保持 neutral, 继续下一批
-      console.warn("[danmaku-emotion] batch failed:", err?.message || err);
+      log.warn("danmaku-emotion", "batch failed:", err?.message || err);
     }
 
     done += slice.length;
@@ -276,7 +290,12 @@ async function aggregateEmotions({
     else summary = `观众${labelOf(sorted[0].axis)},伴随${labelOf(sorted[1].axis)}。`;
   }
 
-  return { windows, summary };
+  return {
+    windows,
+    summary,
+    usage: usageAgg.callCount > 0 ? usageAgg : null,
+    echoedModel,
+  };
 }
 
 // ---- 挂到节点上 -------------------------------------------------------------

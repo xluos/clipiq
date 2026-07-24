@@ -121,25 +121,31 @@ const LONG_CONTEXT_REGEX = /(?:^|[-_])(128k|200k|256k|1m|long(?:-?context)?)(?:[
 // audio:whisper / asr / transcribe / speech / stt
 const AUDIO_REGEX = /(?:whisper|asr|transcribe|speech|stt(?:[-_]|$))/i;
 
+// ModelDescriptor.capabilities 的 enum。没匹到任何 modality 时回落 "text"。
+export type ModelCapability =
+  | "vision"
+  | "audio_transcription"
+  | "reasoning"
+  | "fast"
+  | "long_context"
+  | "text";
+
 // 把 "OpenAI/gpt-5.4" / "azure/gpt-4o" 这种命名空间前缀剥掉,转 lowercase
 // cherry 内部叫 getLowerBaseModelName,语义一致.
-function getLowerBaseModelName(rawId, separator = "/") {
+function getLowerBaseModelName(rawId: string, separator = "/"): string {
   const lower = String(rawId || "").toLowerCase();
   const idx = lower.lastIndexOf(separator);
   return idx >= 0 ? lower.slice(idx + 1) : lower;
 }
 
-// 用 ModelDescriptor.capabilities 的 enum:
-// "vision" | "audio_transcription" | "reasoning" | "fast" | "long_context" | "text"
-// 没匹到任何 modality 时回落 "text".
-function inferCapabilitiesFromRemoteId(rawId) {
+function inferCapabilitiesFromRemoteId(rawId: string): ModelCapability[] {
   const id = getLowerBaseModelName(rawId);
   if (!id) return ["text"];
 
   // embedding / rerank 模型不该有任何 modality
   if (EMBEDDING_REGEX.test(id) || RERANK_REGEX.test(id)) return [];
 
-  const caps = new Set();
+  const caps = new Set<ModelCapability>();
   if (VISION_REGEX.test(id)) caps.add("vision");
   if (AUDIO_REGEX.test(id)) caps.add("audio_transcription");
   if (REASONING_REGEX.test(id)) caps.add("reasoning");
@@ -149,7 +155,7 @@ function inferCapabilitiesFromRemoteId(rawId) {
   return Array.from(caps);
 }
 
-module.exports = {
+export {
   VISION_REGEX,
   REASONING_REGEX,
   EMBEDDING_REGEX,

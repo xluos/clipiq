@@ -1,14 +1,16 @@
 import { useApp } from "../AppContext";
 import {
   Plus, ArrowUp, ChevronDown, Link as LinkIcon, FileVideo,
-  CheckCircle2, Clock, XCircle, Trash2, Film, Loader2, AlertTriangle, Sparkles,
-  Upload,
+  CheckCircle2, Clock, XCircle, Trash2, Film, Loader2, AlertTriangle, Sparkles, RefreshCw,
+  Upload, BarChart3, Folder, UserSquare, Wand2, ChevronRight,
 } from "lucide-react";
 import { type ChangeEvent, type DragEvent, type FunctionComponent, type KeyboardEvent, type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { InspectedVideo } from "../electron-api";
 import { BrandLogo } from "../components/BrandLogo";
 import { useConfirm } from "../components/ConfirmDialog";
-import type { AnalysisOptions, Project, ProjectSource, VideoGenre } from "../types";
+import type { AnalysisOptions, SlotAssignment, SlotOverrides, TaskSlotKey, ModelProvider, Video, ProjectSource, VideoGenre } from "../types";
+import { PipelineRow, type PipelineStage, type SlotMeta } from "../components/PipelineSlotPicker";
+import { useSidecarReadiness } from "../hooks/useSidecarReadiness";
 
 type PresetKey = "quick" | "standard" | "deep" | "custom";
 
@@ -118,7 +120,7 @@ function projectSourceLabel(source: ProjectSource): string {
 }
 
 export function HomeScreen() {
-  const { setCurrentScreen, projects, setActiveProjectId, setProjects, removeProject } = useApp();
+  const { setCurrentScreen, goModule, projects, setActiveProjectId, setProjects, removeProject, startAnalysisForProject, setPendingSlotOverrides, providers } = useApp();
   const confirm = useConfirm();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -135,19 +137,23 @@ export function HomeScreen() {
   const [manualGenre, setManualGenre] = useState<VideoGenre | "auto">("auto");
   const [presetOpen, setPresetOpen] = useState(false);
   const presetRef = useRef<HTMLDivElement>(null);
+  const [modelConfigOpen, setModelConfigOpen] = useState(false);
+  const modelConfigRef = useRef<HTMLDivElement>(null);
+  const [pendingOverrides, setPendingOverrides] = useState<SlotOverrides | undefined>(undefined);
 
   const currentPreset = matchPreset({ mode, density, focus });
   const presetMeta = PRESETS.find(p => p.key === currentPreset);
   const presetLabel = presetMeta?.title ?? "自定义";
 
   useEffect(() => {
-    if (!presetOpen) return;
+    if (!presetOpen && !modelConfigOpen) return;
     const onDown = (e: globalThis.MouseEvent) => {
-      if (presetRef.current && !presetRef.current.contains(e.target as Node)) setPresetOpen(false);
+      if (presetOpen && presetRef.current && !presetRef.current.contains(e.target as Node)) setPresetOpen(false);
+      if (modelConfigOpen && modelConfigRef.current && !modelConfigRef.current.contains(e.target as Node)) setModelConfigOpen(false);
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
-  }, [presetOpen]);
+  }, [presetOpen, modelConfigOpen]);
 
   const pickPreset = (preset: PresetDef) => {
     setMode(preset.options.mode);
@@ -155,29 +161,51 @@ export function HomeScreen() {
     setFocus(preset.options.focus);
   };
 
-  const analysisOptions: AnalysisOptions = { mode, density, focus, manualGenre };
 
   const source = useMemo(() => detectSource(inputValue), [inputValue]);
   const canSubmit = source.kind === "url" || source.kind === "file";
 
-  const { inProgress, completed, broken, all } = useMemo(() => {
-    const sorted = [...projects].sort(
-      (a, b) =>
-        new Date(b.updatedAt || b.createdAt || 0).getTime() -
-        new Date(a.updatedAt || a.createdAt || 0).getTime(),
-    );
-    const inProgress: Project[] = [];
-    const completed: Project[] = [];
-    const broken: Project[] = [];
-    for (const p of sorted) {
-      if (p.status === "completed") completed.push(p);
-      else if (p.status === "failed" || p.status === "download_failed") broken.push(p);
-      else inProgress.push(p);
-    }
-    return { inProgress, completed, broken, all: sorted };
-  }, [projects]);
+  const { analysesByVideo } = useApp();
 
-  const visibleProjects = useMemo(() => {
+  // 首页展示结构拆解分析记录（builtin-pipeline），按视频去重取最新
+  type AnalysisEntry = { analysis: import("../types").Analysis; video: Video };
+  const { inProgress, completed, broken, all } = useMemo(() => {
+    const entries: AnalysisEntry[] = [];
+    const seen = new Set<string>();
+    // 遍历所有视频的分析记录
+    for (const video of projects) {
+      const analyses = analysesByVideo[video.id] || [];
+      const pipelineAnalyses = analyses.filter((a) => a.pipelineId === "builtin-pipeline");
+      if (pipelineAnalyses.length === 0) {
+        // 进行中 / 已中断的视频(分析记录可能还没加载到)也合成占位条目展示。
+        if (video.status === "analyzing" || video.status === "downloading" || video.status === "interrupted") {
+          const synthStatus = video.status === "interrupted" ? "interrupted" : "analyzing";
+          entries.push({ analysis: { id: "", videoId: video.id, pipelineId: "builtin-pipeline", status: synthStatus, startedAt: video.updatedAt, createdAt: video.updatedAt } as any, video });
+          seen.add(video.id);
+        }
+        continue;
+      }
+      const latest = pipelineAnalyses[0];
+      if (!seen.has(video.id)) {
+        entries.push({ analysis: latest, video });
+        seen.add(video.id);
+      }
+    }
+    entries.sort((a, b) => new Date(b.analysis.createdAt || 0).getTime() - new Date(a.analysis.createdAt || 0).getTime());
+
+    const inProgress: AnalysisEntry[] = [];
+    const completed: AnalysisEntry[] = [];
+    const broken: AnalysisEntry[] = [];
+    for (const e of entries) {
+      if (e.analysis.status === "completed") completed.push(e);
+      else if (e.analysis.status === "failed") broken.push(e);
+      else if (e.analysis.status === "cancelled") { /* 取消:只进“全部”,不算进行中也不算失败 */ }
+      else inProgress.push(e);
+    }
+    return { inProgress, completed, broken, all: entries };
+  }, [projects, analysesByVideo]);
+
+  const visibleEntries = useMemo(() => {
     switch (tab) {
       case "inProgress": return inProgress;
       case "completed": return completed;
@@ -190,11 +218,26 @@ export function HomeScreen() {
     setProjects(prev => prev.map(p => p.id === projectId ? { ...p, thumbnailUrl: dataUrl } : p));
   };
 
-  const goToProject = (proj: Project) => {
-    setActiveProjectId(proj.id);
-    if (proj.status === "completed") setCurrentScreen("workspace");
-    else if (proj.status === "analyzing" || proj.status === "downloading") setCurrentScreen("progress");
-    else setCurrentScreen("prepare");
+  const goToProject = (proj: Video) => {
+    if (proj.status === "completed") {
+      setActiveProjectId(proj.id);
+      setCurrentScreen("workspace");
+      return;
+    }
+    if (proj.status === "analyzing" || proj.status === "downloading") {
+      setActiveProjectId(proj.id);
+      setCurrentScreen("progress");
+      return;
+    }
+    // failed / download_failed: 跳 progress 屏让用户先看错误,再点重试,不再自动重跑。
+    if (proj.status === "failed" || proj.status === "download_failed") {
+      setActiveProjectId(proj.id);
+      setCurrentScreen("progress");
+      return;
+    }
+    // not_analyzed: 直接跑
+    if (pendingOverrides) setPendingSlotOverrides((prev) => ({ ...prev, [proj.id]: pendingOverrides }));
+    startAnalysisForProject(proj.id);
   };
 
   const addInspectedProject = (video: InspectedVideo) => {
@@ -202,7 +245,10 @@ export function HomeScreen() {
     const now = new Date().toISOString();
     setProjects(prev => [{
       id: newProjectId,
+      title: video.filename,
+      sourceType: "local" as const,
       source: { type: "local_file", originalPath: video.filePath },
+      localPath: video.filePath,
       localVideoPath: video.mediaUrl,
       localFilePath: video.filePath,
       videoName: video.filename,
@@ -210,13 +256,12 @@ export function HomeScreen() {
       width: video.width,
       height: video.height,
       orientation: video.orientation,
-      status: "analyzing",
-      analysisOptions,
+      status: "analyzing" as const,
       createdAt: now,
       updatedAt: now,
     }, ...prev]);
-    setActiveProjectId(newProjectId);
-    setCurrentScreen("progress");
+    // 发起分析(发起方直接调 IPC);startAnalysisForProject 会切 activeVideo 并跳进度屏。
+    startAnalysisForProject(newProjectId);
   };
 
   const handleFilePicker = async () => {
@@ -251,8 +296,7 @@ export function HomeScreen() {
         width: videoEl.videoWidth,
         height: videoEl.videoHeight,
         orientation: videoEl.videoWidth > videoEl.videoHeight ? "landscape" : videoEl.videoWidth < videoEl.videoHeight ? "portrait" : "square",
-        status: "analyzing",
-        analysisOptions,
+        status: "analyzing" as const,
         createdAt: now,
         updatedAt: now,
       }, ...prev]);
@@ -291,29 +335,27 @@ export function HomeScreen() {
         setStatus("failed");
         return;
       }
-      const video = await window.videoAnalyzer.downloadVideo(targetUrl);
-      const displayTitle = video.title || video.filename;
+      // 异步下载:同步拿到 projectId,立刻创建 status="downloading" 项目并跳进度屏。
+      // 真实视频元数据由 onDownloadComplete 事件回填(AppContext 顶层订阅)。
+      const handle = await window.videoAnalyzer.downloadVideoAsync(targetUrl);
       const now = new Date().toISOString();
       setProjects(prev => [{
-        id: video.projectId,
-        source: { type: "url", url: targetUrl, platform: video.platform },
-        localVideoPath: video.mediaUrl,
-        localFilePath: video.filePath,
-        videoName: displayTitle,
-        titleAutoGenerated: !!video.title,
-        durationSec: video.durationSec,
-        width: video.width,
-        height: video.height,
-        orientation: video.orientation,
-        status: "analyzing",
-        analysisOptions,
+        id: handle.videoId,
+        source: { type: "url", url: targetUrl, platform: handle.platform },
+        localVideoPath: "",
+        videoName: targetUrl,
+        durationSec: 0,
+        width: 0,
+        height: 0,
+        orientation: "landscape" as const,
+        status: "downloading" as const,
         createdAt: now,
         updatedAt: now,
       }, ...prev]);
-      setActiveProjectId(video.projectId);
+      setActiveProjectId(handle.videoId);
       setStatus("idle");
       setInputValue("");
-      window.setTimeout(() => setCurrentScreen("progress"), 300);
+      setCurrentScreen("progress");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setStatus("failed");
@@ -332,16 +374,25 @@ export function HomeScreen() {
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   };
 
-  const handleDelete = async (event: MouseEvent<HTMLButtonElement>, projectId: string) => {
+  const { setActiveAnalysisId, refreshAnalyses } = useApp();
+
+  const handleDeleteAnalysis = async (event: MouseEvent<HTMLButtonElement>, analysisId: string) => {
     event.stopPropagation();
     const ok = await confirm({
-      title: "删除项目",
-      description: "确定要删除这个项目吗?分析结果会一同删除。",
+      title: "删除分析记录",
+      description: "只删除这条分析记录，视频本体不受影响。",
       confirmLabel: "删除",
       destructive: true,
     });
     if (!ok) return;
-    removeProject(projectId);
+    if (window.videoAnalyzer) {
+      await window.videoAnalyzer.deleteAnalysis(analysisId).catch(() => {});
+    }
+    // 刷新分析列表
+    // 简单做法：重新加载所有视频的分析
+    for (const v of projects) {
+      refreshAnalyses(v.id);
+    }
   };
 
   const handleDragEnter = (event: DragEvent<HTMLElement>) => {
@@ -394,8 +445,7 @@ export function HomeScreen() {
         width: videoEl.videoWidth,
         height: videoEl.videoHeight,
         orientation: videoEl.videoWidth > videoEl.videoHeight ? "landscape" : videoEl.videoWidth < videoEl.videoHeight ? "portrait" : "square",
-        status: "analyzing",
-        analysisOptions,
+        status: "analyzing" as const,
         createdAt: now,
         updatedAt: now,
       }, ...prev]);
@@ -419,27 +469,45 @@ export function HomeScreen() {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      <div className="max-w-4xl mx-auto px-8 pt-12 pb-24 space-y-10">
+      <div className="max-w-4xl mx-auto px-14 pt-10 pb-16 space-y-7">
 
-        {/* Header */}
-        <header className="flex items-center gap-4 select-none">
-          <BrandLogo size={56} className="shrink-0" />
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">ClipIQ</h1>
-            <p className="text-xs font-mono text-slate-500 dark:text-slate-500 tracking-wider uppercase mt-1">视频内容洞察</p>
+        {/* Brand header — editorial */}
+        <header className="select-none">
+          <div className="text-[10.5px] font-mono tracking-[0.14em] uppercase text-slate-500 dark:text-slate-400 mb-2">
+            CLIPIQ · 创作者剪辑助手
           </div>
+          <h1 className="text-[28px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 leading-tight">
+            从哪里开始?
+          </h1>
+          <p className="text-[15px] text-slate-600 dark:text-slate-400 mt-2.5 max-w-xl">
+            分析一条视频,或者进其它三个模块继续上次的工作。
+          </p>
         </header>
 
-        {/* Hero block */}
+        {/* Featured — analysis launcher with embedded composer */}
         <section className="space-y-3">
-          <div>
-            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">新建项目</h2>
-            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">粘贴链接、拖入文件,或输入本地路径。</p>
-          </div>
+          <div className="rounded-[14px] border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] p-5">
+            <div className="flex items-start gap-4 mb-3.5">
+              <div className="w-[38px] h-[38px] rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 grid place-items-center shrink-0">
+                <BarChart3 className="w-[18px] h-[18px]" strokeWidth={1.5} />
+              </div>
+              <div className="flex-1">
+                <div className="flex items-baseline gap-2.5">
+                  <h2 className="text-[17px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">分析一条视频</h2>
+                  <span className="text-[10.5px] font-mono tracking-wider text-slate-500 dark:text-slate-400">
+                    · {all.length} 条已有项目
+                    {inProgress.length > 0 ? ` · ${inProgress.length} 条正在跑` : ""}
+                  </span>
+                </div>
+                <p className="text-[12.5px] text-slate-600 dark:text-slate-400 mt-1">
+                  粘贴 B 站链接、拖入本地视频,或输入本地路径。Cmd + Enter 直接开跑。
+                </p>
+              </div>
+            </div>
 
           {/* Composer */}
           <div
-            className={`rounded-[18px] border bg-white dark:bg-[#14151a] p-1 transition-all ${composerStateClass}`}
+            className={`rounded-[14px] border bg-white dark:bg-[#14151a] p-1 transition-all ${composerStateClass}`}
           >
             <div className="flex items-center gap-2 px-3 pt-3 pb-1">
               <button
@@ -498,6 +566,30 @@ export function HomeScreen() {
                     />
                   )}
                 </div>
+                <div ref={modelConfigRef} className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setModelConfigOpen((o) => !o)}
+                    className={`inline-flex items-center gap-1 h-[30px] px-2.5 rounded-full border text-[12px] whitespace-nowrap transition-colors ${
+                      modelConfigOpen || pendingOverrides
+                        ? "border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300"
+                        : "border-slate-200 dark:border-slate-800 bg-white dark:bg-[#1c1e24] text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-[#222530]"
+                    }`}
+                    title="指定本次分析使用的模型"
+                  >
+                    <Wand2 className="w-3 h-3" />
+                    {pendingOverrides ? "已配置" : "高级"}
+                    <ChevronDown className={`w-3 h-3 opacity-60 transition-transform ${modelConfigOpen ? "rotate-180" : ""}`} />
+                  </button>
+                  {modelConfigOpen && (
+                    <ModelSlotPopover
+                      providers={providers}
+                      initial={pendingOverrides}
+                      onApply={(ov) => { setPendingOverrides(ov); setModelConfigOpen(false); }}
+                      onClose={() => setModelConfigOpen(false)}
+                    />
+                  )}
+                </div>
               </div>
               <button
                 type="button"
@@ -510,6 +602,7 @@ export function HomeScreen() {
               </button>
             </div>
           </div>
+          </div>{/* end hero card */}
 
           {!window.videoAnalyzer && (
             <div className="flex justify-end text-[11px] font-mono uppercase tracking-wider text-amber-600 dark:text-amber-400 px-1">
@@ -525,7 +618,29 @@ export function HomeScreen() {
           )}
         </section>
 
-        {/* Projects table */}
+        {/* Other 3 modules — equal launcher cards */}
+        <section className="grid grid-cols-3 gap-2.5">
+          <ModuleLaunchCard
+            icon={<Folder className="w-3.5 h-3.5" strokeWidth={1.5} />}
+            label="上传素材入库"
+            desc="把拍摄素材自动分镜,建可检索的镜头索引。"
+            onClick={() => goModule("library")}
+          />
+          <ModuleLaunchCard
+            icon={<UserSquare className="w-3.5 h-3.5" strokeWidth={1.5} />}
+            label="账号分析"
+            desc="输入 UP 主链接,批量分析热门视频,汇总方法论。"
+            onClick={() => goModule("account")}
+          />
+          <ModuleLaunchCard
+            icon={<Wand2 className="w-3.5 h-3.5" strokeWidth={1.5} />}
+            label="新建剪辑会话"
+            desc="从目标出发,结合素材库与方法论生成剪辑思路。"
+            onClick={() => goModule("studio")}
+          />
+        </section>
+
+        {/* Recent projects */}
         {projects.length > 0 ? (
           <section>
             <div className="flex items-center justify-between mb-3">
@@ -543,7 +658,7 @@ export function HomeScreen() {
             </div>
             <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] overflow-hidden">
               {/* Header row */}
-              <div className="hidden md:grid grid-cols-[80px_1fr_72px_120px_88px_36px] gap-4 items-center px-3 py-2 border-b border-slate-200 dark:border-slate-800 text-[10.5px] font-mono uppercase tracking-wider text-slate-400 dark:text-slate-500">
+              <div className="hidden md:grid grid-cols-[80px_1fr_72px_120px_88px_72px] gap-4 items-center px-3 py-2 border-b border-slate-200 dark:border-slate-800 text-[10.5px] font-mono uppercase tracking-wider text-slate-400 dark:text-slate-500">
                 <span />
                 <span>项目</span>
                 <span>时长</span>
@@ -551,21 +666,34 @@ export function HomeScreen() {
                 <span>状态</span>
                 <span />
               </div>
-              {visibleProjects.length === 0 ? (
+              {visibleEntries.length === 0 ? (
                 <div className="text-center py-12 text-sm text-slate-400 dark:text-slate-500">
-                  {tab === "inProgress" && "暂无进行中项目"}
-                  {tab === "completed" && "暂无已完成项目"}
-                  {tab === "broken" && "暂无失败项目"}
-                  {tab === "all" && "暂无项目"}
+                  {tab === "inProgress" && "暂无进行中的分析"}
+                  {tab === "completed" && "暂无已完成的分析"}
+                  {tab === "broken" && "暂无失败的分析"}
+                  {tab === "all" && "暂无分析记录，粘贴链接或拖入视频开始"}
                 </div>
               ) : (
                 <div className="divide-y divide-slate-100 dark:divide-slate-900">
-                  {visibleProjects.map(proj => (
+                  {visibleEntries.map(({ analysis, video: proj }) => (
                     <ProjectRow
-                      key={proj.id}
+                      key={analysis.id || proj.id}
                       project={proj}
-                      onOpen={() => goToProject(proj)}
-                      onDelete={(e) => handleDelete(e, proj.id)}
+                      onOpen={() => {
+                        setActiveProjectId(proj.id);
+                        if (analysis.id && analysis.status === "completed") {
+                          setActiveAnalysisId(analysis.id);
+                          // 结构拆解完成 → 先到工作台(节点时间轴),不是直接报告页。
+                          setCurrentScreen("workspace");
+                        } else {
+                          setCurrentScreen("progress");
+                        }
+                      }}
+                      onDelete={(e) => handleDeleteAnalysis(e, analysis.id)}
+                      onReanalyze={(e) => {
+                        e.stopPropagation();
+                        startAnalysisForProject(proj.id);
+                      }}
                       onThumbnailReady={(dataUrl) => setThumbnail(proj.id, dataUrl)}
                     />
                   ))}
@@ -594,9 +722,33 @@ export function HomeScreen() {
           </div>
         </div>
       )}
+
     </main>
   );
 }
+
+const ModuleLaunchCard: FunctionComponent<{
+  icon: ReactNode;
+  label: string;
+  desc: string;
+  onClick: () => void;
+}> = ({ icon, label, desc, onClick }) => {
+  return (
+    <button
+      onClick={onClick}
+      className="text-left p-4 bg-white dark:bg-[#14151a] border border-slate-200 dark:border-slate-800 rounded-xl hover:border-slate-300 dark:hover:border-slate-700 transition-colors group"
+    >
+      <div className="flex items-center gap-2.5 mb-2.5">
+        <div className="w-7 h-7 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 grid place-items-center shrink-0">
+          {icon}
+        </div>
+        <h3 className="text-[13.5px] font-semibold tracking-tight text-slate-900 dark:text-slate-100 flex-1">{label}</h3>
+        <ChevronRight className="w-3 h-3 text-slate-400 dark:text-slate-500 group-hover:text-slate-700 dark:group-hover:text-slate-300 transition-colors" strokeWidth={1.5} />
+      </div>
+      <p className="text-[12.5px] text-slate-600 dark:text-slate-400 leading-relaxed">{desc}</p>
+    </button>
+  );
+};
 
 function SegmentedTabs({
   tab, onChange, counts,
@@ -676,13 +828,14 @@ function SourceChip({ source, status }: { source: SourceState; status: "idle" | 
 }
 
 type ProjectRowProps = {
-  project: Project;
+  project: Video;
   onOpen: () => void;
   onDelete: (e: MouseEvent<HTMLButtonElement>) => void;
+  onReanalyze: (e: MouseEvent<HTMLButtonElement>) => void;
   onThumbnailReady: (dataUrl: string) => void;
 };
 
-const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDelete, onThumbnailReady }) => {
+const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDelete, onReanalyze, onThumbnailReady }) => {
   const platformLabel = projectSourceLabel(project.source);
   const resolution = formatResolution(project.width, project.height);
   const [thumb, setThumb] = useState<string | null>(project.thumbnailUrl ?? null);
@@ -690,13 +843,13 @@ const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDel
 
   useEffect(() => {
     if (thumb || captureAttemptedRef.current) return;
-    if (!project.localVideoPath) return;
+    if (!project.localPath) return;
     captureAttemptedRef.current = true;
     const video = document.createElement("video");
     video.muted = true;
     video.crossOrigin = "anonymous";
     video.preload = "metadata";
-    video.src = project.localVideoPath;
+    video.src = project.localPath;
     const cleanup = () => {
       video.removeAttribute("src");
       video.load();
@@ -732,16 +885,16 @@ const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDel
     };
     video.onerror = cleanup;
     return cleanup;
-  }, [project.localVideoPath, thumb, onThumbnailReady]);
+  }, [project.localPath, thumb, onThumbnailReady]);
 
   return (
     <div
       onClick={onOpen}
-      className="group grid grid-cols-[80px_1fr_72px_120px_88px_36px] gap-4 items-center px-3 py-2.5 cursor-pointer transition-colors hover:bg-slate-50 dark:hover:bg-[#1c1e24]"
+      className="group grid grid-cols-[80px_1fr_72px_120px_88px_72px] gap-4 items-center px-3 py-2.5 cursor-pointer transition-colors hover:bg-slate-50 dark:hover:bg-[#1c1e24]"
     >
       <div className="w-[80px] h-[48px] rounded-md relative overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-[#1c1e24]">
         {thumb ? (
-          <img src={thumb} alt={project.videoName} className="absolute inset-0 h-full w-full object-cover" />
+          <img src={thumb} alt={project.title} className="absolute inset-0 h-full w-full object-cover" />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center text-slate-400 dark:text-slate-600">
             <Film className="h-4 w-4" />
@@ -749,7 +902,7 @@ const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDel
         )}
       </div>
       <div className="min-w-0">
-        <div className="font-medium text-[13.5px] text-slate-900 dark:text-slate-100 truncate">{project.videoName}</div>
+        <div className="font-medium text-[13.5px] text-slate-900 dark:text-slate-100 truncate">{project.title}</div>
         <div className="flex items-center gap-2 text-[11px] font-mono uppercase tracking-wide text-slate-500 dark:text-slate-500 mt-0.5">
           {resolution && <span>{resolution}</span>}
           {resolution && <span className="text-slate-300 dark:text-slate-700">·</span>}
@@ -765,19 +918,31 @@ const ProjectRow: FunctionComponent<ProjectRowProps> = ({ project, onOpen, onDel
       <div>
         <StatusBadge status={project.status} />
       </div>
-      <button
-        type="button"
-        onClick={onDelete}
-        title="删除项目"
-        className="h-7 w-7 grid place-items-center rounded-md text-slate-400 opacity-0 group-hover:opacity-100 hover:bg-rose-50 hover:text-rose-500 dark:hover:bg-rose-950/40 dark:hover:text-rose-400 transition-all"
-      >
-        <Trash2 className="h-3.5 w-3.5" />
-      </button>
+      <div className="flex items-center justify-end gap-1">
+        {project.status === "completed" && (
+          <button
+            type="button"
+            onClick={onReanalyze}
+            title="重新分析"
+            className="h-7 w-7 grid place-items-center rounded-md text-slate-400 opacity-0 group-hover:opacity-100 hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-indigo-950/40 dark:hover:text-indigo-300 transition-all"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onDelete}
+          title="删除项目"
+          className="h-7 w-7 grid place-items-center rounded-md text-slate-400 opacity-0 group-hover:opacity-100 hover:bg-rose-50 hover:text-rose-500 dark:hover:bg-rose-950/40 dark:hover:text-rose-400 transition-all"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
     </div>
   );
 };
 
-function StatusBadge({ status }: { status: Project["status"] }) {
+function StatusBadge({ status }: { status: Video["status"] }) {
   const base = "inline-flex items-center gap-1 h-5 px-1.5 rounded text-[10.5px] font-mono uppercase tracking-wider";
   switch (status) {
     case "completed":
@@ -797,12 +962,97 @@ function StatusBadge({ status }: { status: Project["status"] }) {
       return <span className={`${base} bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-400`}>
         <XCircle className="w-3 h-3" /> 失败
       </span>;
+    case "cancelled":
+      return <span className={`${base} bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400`}>
+        <XCircle className="w-3 h-3" /> 已取消
+      </span>;
+    case "interrupted":
+      return <span className={`${base} bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400`}>
+        <Clock className="w-3 h-3" /> 已中断
+      </span>;
     case "not_analyzed":
     default:
       return <span className={`${base} bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400`}>
         <Clock className="w-3 h-3" /> 待开始
       </span>;
   }
+}
+
+const POPOVER_STAGES: PipelineStage[] = [
+  { num: "01", title: "抽帧初筛", badges: ["simple · vision"], desc: "初筛打标", slot: "simple_vision" },
+  { num: "02", title: "字幕识别", badges: ["audio"], desc: "提取台词", slot: "__audio__" },
+  { num: "03", title: "镜头合并", badges: ["medium · text"], desc: "合并+聚合", slot: "medium_text" },
+  { num: "04", title: "主分析", badges: ["complex · vision"], desc: "拉片打标", slot: "complex_vision", isKey: true },
+];
+
+const POPOVER_METAS: Record<string, SlotMeta> = {
+  simple_vision: { key: "simple_vision", label: "简单·视觉", difficulty: "simple", axis: "vision", hint: "", used: true },
+  medium_text: { key: "medium_text", label: "中等·文本", difficulty: "medium", axis: "text", hint: "", used: true },
+  complex_vision: { key: "complex_vision", label: "复杂·视觉", difficulty: "complex", axis: "vision", hint: "", used: true },
+  __audio__: { key: "__audio__" as unknown as TaskSlotKey, label: "字幕识别", difficulty: "simple", axis: "text", hint: "", used: true },
+};
+
+function ModelSlotPopover({ providers, initial, onApply, onClose }: {
+  providers: ModelProvider[];
+  initial?: SlotOverrides;
+  onApply: (ov: SlotOverrides | undefined) => void;
+  onClose: () => void;
+}) {
+  const { getPipelineSlot } = useApp();
+  const { readyLocalIds, readyWhisperIds } = useSidecarReadiness();
+  const [local, setLocal] = useState<Record<string, SlotAssignment>>(() => {
+    const init: Record<string, SlotAssignment> = {};
+    for (const s of POPOVER_STAGES) {
+      if (s.slot === "__audio__") init.__audio__ = (initial?.audio !== undefined ? initial.audio : getPipelineSlot("pipeline", "__audio__"));
+      else init[s.slot] = ((initial as any)?.[s.slot] !== undefined ? (initial as any)[s.slot] : getPipelineSlot("pipeline", s.slot as TaskSlotKey));
+    }
+    return init;
+  });
+
+  const handleApply = () => {
+    const overrides: SlotOverrides = {};
+    for (const s of POPOVER_STAGES) {
+      const key = s.slot === "__audio__" ? "audio" : s.slot;
+      const orig = s.slot === "__audio__" ? getPipelineSlot("pipeline", "__audio__") : getPipelineSlot("pipeline", s.slot as TaskSlotKey);
+      const cur = local[s.slot === "__audio__" ? "__audio__" : s.slot];
+      if (JSON.stringify(cur) !== JSON.stringify(orig)) (overrides as any)[key] = cur;
+    }
+    onApply(Object.keys(overrides).length > 0 ? overrides : undefined);
+  };
+
+  return (
+    <div
+      className="absolute z-30 top-full mt-2 right-0 w-[520px] rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#14151a] shadow-lg shadow-slate-900/5 dark:shadow-black/40 p-3 space-y-1"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="text-[10.5px] font-mono uppercase tracking-wider text-slate-500 mb-1">模型配置 · 本次生效</div>
+      {POPOVER_STAGES.map((stage, idx) => {
+        const isAudio = stage.slot === "__audio__";
+        const slotKey = isAudio ? "__audio__" : stage.slot;
+        return (
+          <PipelineRow
+            key={slotKey}
+            stage={stage}
+            isFirst={idx === 0}
+            providers={providers}
+            meta={POPOVER_METAS[slotKey]}
+            assignment={local[slotKey]}
+            onChange={(a) => setLocal((prev) => ({ ...prev, [slotKey]: a }))}
+            audioMode={isAudio}
+            readyLocalIds={readyLocalIds}
+            readyWhisperIds={readyWhisperIds}
+            compact
+          />
+        );
+      })}
+      <div className="flex justify-between items-center pt-2 border-t border-slate-100 dark:border-slate-800">
+        <span className="text-[10.5px] text-slate-400">不修改的项使用全局默认值</span>
+        <button onClick={handleApply} className="h-7 px-3 rounded-md text-[12px] font-medium bg-indigo-600 hover:bg-indigo-700 text-white">
+          应用
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function PresetPopover({
