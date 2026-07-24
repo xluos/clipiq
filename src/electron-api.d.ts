@@ -86,6 +86,27 @@ export type EditReplacementCandidate = {
   qualityScore: number;
 };
 
+export type EditPackageExportWarning = {
+  code:
+    | "PREVIEW_NOT_INCLUDED"
+    | "VOICEOVER_NOT_SYNTHESIZED"
+    | "OVERLAY_RESOURCE_NOT_PORTABLE";
+  message: string;
+  itemId?: string;
+};
+
+export type EditPackageExportResult = {
+  cancelled: false;
+  packagePath: string;
+  manifestPath: string;
+  planPath: string;
+  captionsPath?: string;
+  previewPath?: string;
+  fileCount: number;
+  totalBytes: number;
+  warnings: EditPackageExportWarning[];
+};
+
 export type RuntimeStatus = {
   ffmpeg: string | null;
   ffprobe: string | null;
@@ -480,6 +501,10 @@ declare global {
         taskId?: string;
         preview: EditPlanPreview;
       }>;
+      exportEditPlanPackage: (payload: {
+        planId: string;
+        destinationDirectory?: string;
+      }) => Promise<EditPackageExportResult | { cancelled: true }>;
       listEditFeedbackEvents: (filter: {
         sessionId?: string;
         planId?: string;

@@ -4,7 +4,11 @@
 
 import { type FunctionComponent, useEffect, useMemo, useState } from "react";
 import { useApp } from "../AppContext";
-import type { EditPlanPreview, EditReplacementCandidate } from "../electron-api";
+import type {
+  EditPackageExportResult,
+  EditPlanPreview,
+  EditReplacementCandidate,
+} from "../electron-api";
 import { useTaskQueueStore } from "../stores/tasks";
 import type {
   AppLocation,
@@ -199,6 +203,9 @@ function StudioEditorScreen() {
   const [replacementCandidates, setReplacementCandidates] = useState<
     Record<string, EditReplacementCandidate[]>
   >({});
+  const [exportingPackage, setExportingPackage] = useState(false);
+  const [exportResult, setExportResult] = useState<EditPackageExportResult | null>(null);
+  const [exportError, setExportError] = useState("");
   const [renderingPreview, setRenderingPreview] = useState(false);
   const [subtitleMode, setSubtitleMode] = useState<"burn" | "external">("burn");
   const tasksById = useTaskQueueStore((state) => state.tasksById);
@@ -382,6 +389,25 @@ function StudioEditorScreen() {
     }
   };
 
+  const exportPackage = async () => {
+    const planId = currentPlan?.id || session?.currentEditPlanId;
+    if (!planId || !window.videoAnalyzer?.exportEditPlanPackage) {
+      setExportError("当前环境不能导出素材包");
+      return;
+    }
+    setExportError("");
+    setExportResult(null);
+    setExportingPackage(true);
+    try {
+      const result = await window.videoAnalyzer.exportEditPlanPackage({ planId });
+      if (!result.cancelled) setExportResult(result);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setExportingPackage(false);
+    }
+  };
+
   if (!session) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center bg-slate-50 dark:bg-[#0A0A0B] gap-4">
@@ -439,9 +465,13 @@ function StudioEditorScreen() {
           <RefreshCw className={`w-3 h-3 ${generating ? "animate-spin" : ""}`} strokeWidth={1.5} />
           {generating ? "LLM 生成中…" : "重新生成"}
         </button>
-        <button className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] bg-indigo-600 hover:bg-indigo-700 text-white">
+        <button
+          onClick={exportPackage}
+          disabled={!currentPlan || exportingPackage}
+          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white"
+        >
           <Download className="w-3 h-3" strokeWidth={1.5} />
-          导出脚本
+          {exportingPackage ? "导出中…" : "导出素材包"}
         </button>
       </header>
 
@@ -628,6 +658,26 @@ function StudioEditorScreen() {
           {editError && (
             <div className="mb-3 rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-[12px] text-amber-700 dark:text-amber-300">
               {editError}
+            </div>
+          )}
+          {exportResult && (
+            <div className="mb-3 rounded-md border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/30 px-3 py-2">
+              <div className="text-[12px] text-emerald-800 dark:text-emerald-200">
+                素材包已导出 · {exportResult.fileCount} 个文件
+              </div>
+              <div className="mt-1 text-[10.5px] font-mono text-emerald-700 dark:text-emerald-300 break-all">
+                {exportResult.packagePath}
+              </div>
+              {exportResult.warnings.map((warning) => (
+                <div key={`${warning.code}-${warning.itemId || ""}`} className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
+                  {warning.message}
+                </div>
+              ))}
+            </div>
+          )}
+          {exportError && (
+            <div className="mb-3 rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-[12px] text-amber-700 dark:text-amber-300">
+              {exportError}
             </div>
           )}
 

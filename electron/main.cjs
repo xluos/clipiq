@@ -85,6 +85,7 @@ const {
 const { compileEditPlan } = require("./editing/edit-plan-compiler");
 const { applyEditPlanFeedback } = require("./editing/edit-plan-feedback");
 const { renderEditPlanProxy } = require("./editing/proxy-renderer");
+const { exportEditPlanPackage } = require("./editing/exporters/package-exporter");
 const ElectronStore = require("electron-store");
 
 let _cfgStore = null;
@@ -7913,6 +7914,34 @@ app.whenReady().then(async () => {
     });
     const preview = await taskScheduler.whenSettled(task.id);
     return { ok: true, taskId: task.id, preview };
+  });
+
+  ipcMain.handle("editPlans:exportPackage", async (_event, payload = {}) => {
+    const planId = String(payload.planId || "").trim();
+    if (!planId) throw new Error("导出素材包需要 planId");
+    const plan = getEditPlanRepository().get(planId);
+    if (!plan) throw new Error(`EditPlan 不存在: ${planId}`);
+    let destinationDirectory = typeof payload.destinationDirectory === "string"
+      ? payload.destinationDirectory.trim()
+      : "";
+    if (!destinationDirectory) {
+      const result = await dialog.showOpenDialog({
+        title: "选择素材包导出位置",
+        properties: ["openDirectory", "createDirectory"],
+      });
+      if (result.canceled || !result.filePaths?.[0]) return { cancelled: true };
+      destinationDirectory = result.filePaths[0];
+    }
+    const manifestPath = getEditPreviewManifestPath(planId);
+    const previewManifest = manifestPath
+      ? await readJson(manifestPath, null)
+      : null;
+    const preview = await previewManifestForRenderer(previewManifest);
+    const exported = await exportEditPlanPackage(plan, {
+      destinationDirectory,
+      previewPath: preview?.outputPath,
+    });
+    return { cancelled: false, ...exported };
   });
 
   ipcMain.handle("editPlans:generate", async (_event, payload = {}) => {

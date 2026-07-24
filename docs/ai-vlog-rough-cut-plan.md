@@ -576,14 +576,18 @@ Spike 通过条件：
 
 降级产物：
 
+- [x] 在剪映真机 Spike 未通过时，原子导出不覆盖已有目录的可移植素材包。
+- [x] 素材包内 `EditPlan` 使用相对路径，并为每个文件记录 SHA-256、大小和引用项。
+- [x] 缺少已合成旁白、模板贴图或代理预览时生成明确 warning，不伪造资源。
+
 ```text
 export-package/
 ├── edit-plan.json
 ├── manifest.json
 ├── captions.srt
-├── voiceover.wav
-├── music/
 ├── media/
+├── audio/
+├── overlays/
 └── preview.mp4
 ```
 
