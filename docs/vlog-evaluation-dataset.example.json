@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "id": "weekend-vlog-real-v1",
+  "title": "周末生活记录固定集",
+  "materials": [
+    {
+      "key": "camp-wide",
+      "file": "中文 素材/01 营地全景.mp4",
+      "durationSec": 60,
+      "orientation": "landscape",
+      "eventKey": "camp-arrival",
+      "shotRoles": ["wide"],
+      "traits": ["blurry", "multi_person"],
+      "identities": [
+        {
+          "id": "owner-wide",
+          "personKey": "owner",
+          "startSec": 5,
+          "endSec": 25,
+          "focusBounds": {
+            "x": 0.1,
+            "y": 0.15,
+            "width": 0.2,
+            "height": 0.3
+          },
+          "conditions": ["outfit_change"]
+        }
+      ]
+    },
+    {
+      "key": "camp-person",
+      "file": "中文 素材/02 人物抵达.mp4",
+      "durationSec": 60,
+      "orientation": "landscape",
+      "eventKey": "camp-arrival",
+      "shotRoles": ["person"],
+      "traits": ["shaky", "back_view"],
+      "identities": [
+        {
+          "id": "owner-person",
+          "personKey": "owner",
+          "startSec": 8,
+          "endSec": 28,
+          "conditions": ["side_face"]
+        }
+      ]
+    },
+    {
+      "key": "camp-action",
+      "file": "中文 素材/03 搭建动作.mp4",
+      "durationSec": 60,
+      "orientation": "landscape",
+      "eventKey": "camp-arrival",
+      "shotRoles": ["action"],
+      "traits": ["duplicate", "occlusion"],
+      "identities": [
+        {
+          "id": "owner-action",
+          "personKey": "owner",
+          "startSec": 4,
+          "endSec": 35,
+          "conditions": ["lighting_change"]
+        }
+      ]
+    },
+    {
+      "key": "camp-detail",
+      "file": "中文 素材/04 装备细节.mp4",
+      "durationSec": 60,
+      "orientation": "landscape",
+      "eventKey": "camp-arrival",
+      "shotRoles": ["detail"],
+      "traits": ["silent", "lookalike_negative"],
+      "identities": [
+        {
+          "id": "friend-detail",
+          "personKey": "friend",
+          "startSec": 12,
+          "endSec": 22
+        }
+      ]
+    },
+    {
+      "key": "camp-reaction",
+      "file": "中文 素材/05 抵达反应.mp4",
+      "durationSec": 60,
+      "orientation": "landscape",
+      "eventKey": "camp-arrival",
+      "shotRoles": ["reaction"],
+      "traits": ["noisy", "voice_over"],
+      "identities": [
+        {
+          "id": "friend-reaction",
+          "personKey": "friend",
+          "startSec": 10,
+          "endSec": 30
+        }
+      ]
+    },
+    {
+      "key": "portrait-06",
+      "file": "竖屏素材/06 出发.mp4",
+      "durationSec": 60,
+      "orientation": "portrait",
+      "eventKey": "departure",
+      "shotRoles": ["action"],
+      "traits": [],
+      "identities": []
+    },
+    {
+      "key": "portrait-07",
+      "file": "竖屏素材/07 路上.mp4",
+      "durationSec": 60,
+      "orientation": "portrait",
+      "eventKey": "journey",
+      "shotRoles": ["wide"],
+      "traits": [],
+      "identities": []
+    },
+    {
+      "key": "portrait-08",
+      "file": "竖屏素材/08 做饭.mp4",
+      "durationSec": 60,
+      "orientation": "portrait",
+      "eventKey": "cooking",
+      "shotRoles": ["detail"],
+      "traits": [],
+      "identities": []
+    },
+    {
+      "key": "portrait-09",
+      "file": "竖屏素材/09 对话.mp4",
+      "durationSec": 60,
+      "orientation": "portrait",
+      "eventKey": "conversation",
+      "shotRoles": ["person"],
+      "traits": [],
+      "identities": []
+    },
+    {
+      "key": "portrait-10",
+      "file": "竖屏素材/10 收尾.mp4",
+      "durationSec": 60,
+      "orientation": "portrait",
+      "eventKey": "ending",
+      "shotRoles": ["reaction"],
+      "traits": [],
+      "identities": []
+    }
+  ]
+}

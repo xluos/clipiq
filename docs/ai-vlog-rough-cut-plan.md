@@ -672,6 +672,7 @@ export-package/
 - [x] Studio 显示语义覆盖、字幕粒度、人物一致性和说话人分离状态。
 - [x] 将 Shot 内分析节点规范化为可追溯事件时间段；Planner 区分 `event@segment` 和 `event@shot`，验证见 [`event-semantic-quality-validation.md`](./event-semantic-quality-validation.md)。
 - [x] 建立程序化 Vlog 质量评估器，覆盖候选/时间越界、预览和剪映尝试、人物 pair 指标及编辑反馈；未实测项保持 `null`。
+- [x] 建立仓库外真人固定集的 manifest、FFprobe 校验和身份真值转换；真实素材未到位时不伪造评估结果，见 [`vlog-evaluation-dataset.md`](./vlog-evaluation-dataset.md)。
 
 ## 11. 首个可交付 MVP
 
@@ -706,6 +707,14 @@ MVP 可以暂缓：
 - 同一人物至少出现在 3 条不同素材中，并包含换衣、侧脸和光照变化。
 - 包含多人同框、背影、遮挡、画外音和不同人物外观相似的负样本。
 - 素材总时长建议 10～30 分钟。
+
+固定集契约和校验命令：
+
+```bash
+npm run vlog:validate-dataset -- /absolute/path/to/dataset/manifest.json
+```
+
+manifest 示例、路径规则和人物真值映射见 [`vlog-evaluation-dataset.md`](./vlog-evaluation-dataset.md)。真人视频及人物标注保存在仓库外；当前只完成契约和自动校验，真实固定集仍待建立。
 
 每次迭代固定评估：
 
@@ -844,5 +853,6 @@ electron/
 - [ ] 保留当前工作区中与本计划无关的未跟踪图标文件。
 - [x] 先完成 M0 数据迁移设计，再动 Studio 生成逻辑。
 - [ ] 建立一套固定 Vlog 测试素材。
+- [x] 固定素材 manifest、真实文件探测与人物真值转换可重复执行。
 - [ ] 确认首个目标剪映版本及其安装环境。
 - [ ] M4 通过前，不将某个第三方草稿库写死为正式依赖。

@@ -16,6 +16,7 @@
     "test": "vitest run",
     "pretest:watch": "node scripts/clean-electron-ts-js.cjs",
     "test:watch": "vitest",
+    "vlog:validate-dataset": "tsx scripts/validate-vlog-evaluation-dataset.ts",
     "dist": "npm run build && node scripts/build-daemon.cjs && electron-builder",
     "dist:mac": "npm run build && node scripts/build-daemon.cjs --mac && electron-builder --mac",
     "dist:win": "npm run build && node scripts/build-daemon.cjs --win && electron-builder --win",
