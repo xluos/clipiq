@@ -727,6 +727,53 @@ export type Shot = {
   createdAt?: string;
 };
 
+export type PersonStatus = "auto" | "confirmed" | "merged";
+
+export type Person = {
+  id: string;
+  displayName?: string;
+  representativeThumbnailUrl?: string;
+  status: PersonStatus;
+  mergedIntoPersonId?: string;
+  appearanceCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type PersonAppearance = {
+  id: string;
+  personId?: string;
+  videoId: string;
+  shotId?: string;
+  trackId: string;
+  startSec: number;
+  endSec: number;
+  confidence: number;
+  identityConfidence?: number;
+  thumbnailUrl?: string;
+  source: "face_track" | "manual";
+  manualLocked?: boolean;
+  speakingConfidence?: number;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type SpeakerTrack = {
+  id: string;
+  videoId: string;
+  shotId?: string;
+  speakerId: string;
+  personId?: string;
+  startSec: number;
+  endSec: number;
+  confidence: number;
+  linkConfidence?: number;
+  transcriptText?: string;
+  manualLocked?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
 // 对标账号 (UP 主)
 export type AccountPlatform = "bilibili" | "douyin" | "xiaohongshu" | "youtube" | "tiktok" | "unknown";
 

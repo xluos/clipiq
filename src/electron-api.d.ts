@@ -15,8 +15,11 @@ import type {
   Methodology,
   ModelDescriptor,
   ModelProvider,
+  Person,
+  PersonAppearance,
   Pipeline,
   Shot,
+  SpeakerTrack,
   StudioSession,
   Video,
   VideoRole,
@@ -392,6 +395,24 @@ declare global {
       // shots
       listShots: (videoId?: string) => Promise<Shot[]>;
       setShotsForVideo: (videoId: string, shots: Shot[]) => Promise<{ ok: true }>;
+
+      // 人物 / 说话人证据
+      listPeople: () => Promise<Person[]>;
+      listPersonAppearances: (videoId?: string) => Promise<PersonAppearance[]>;
+      listSpeakerTracks: (videoId?: string) => Promise<SpeakerTrack[]>;
+      renamePerson: (personId: string, displayName?: string) => Promise<Person>;
+      mergePeople: (
+        sourcePersonId: string,
+        targetPersonId: string,
+      ) => Promise<{ ok: true }>;
+      splitPersonAppearance: (
+        appearanceId: string,
+        person: Person,
+      ) => Promise<Person>;
+      linkSpeakerTrackPerson: (
+        speakerTrackId: string,
+        personId?: string,
+      ) => Promise<SpeakerTrack>;
 
       // 后台拉取
       startAccountFetch: (payload: { accountId: string; url: string; range: AccountFetchRange; name?: string }) => Promise<{ ok: true; accepted: boolean; reason?: string; taskId?: string; status?: QueueTaskStatus }>;

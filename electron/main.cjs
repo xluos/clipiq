@@ -63,6 +63,10 @@ const {
   createShotRepository,
   migrateShotSchema,
 } = require("./repositories/shot-repository");
+const {
+  createIdentityRepository,
+  migrateIdentitySchema,
+} = require("./repositories/identity-repository");
 const { buildShotsFromAnalysis } = require("./editing/analysis-shot-sync");
 const ElectronStore = require("electron-store");
 
@@ -1358,6 +1362,7 @@ function getDb() {
   migrateVideoRole(db);
   migrateStudioSessionSchema(db);
   migrateShotSchema(db);
+  migrateIdentitySchema(db);
 
   // (methodologies 旧 schema 已在上方建表前弃掉重建,不再做数据迁移)
 
@@ -1428,6 +1433,12 @@ let _shotRepository = null;
 function getShotRepository() {
   if (!_shotRepository) _shotRepository = createShotRepository(getDb());
   return _shotRepository;
+}
+
+let _identityRepository = null;
+function getIdentityRepository() {
+  if (!_identityRepository) _identityRepository = createIdentityRepository(getDb());
+  return _identityRepository;
 }
 
 // ── tasks 表读写(task-queue 调度器的持久层)──
@@ -7722,6 +7733,36 @@ app.whenReady().then(async () => {
   ipcMain.handle("shots:setForVideo", async (_event, videoId, shots) => {
     getShotRepository().replaceForVideo(videoId, shots || []);
     return { ok: true };
+  });
+
+  // --- identity evidence ---
+  ipcMain.handle("people:list", async () => {
+    return getIdentityRepository().listPeople();
+  });
+
+  ipcMain.handle("people:listAppearances", async (_event, videoId) => {
+    return getIdentityRepository().listAppearances(videoId);
+  });
+
+  ipcMain.handle("people:listSpeakerTracks", async (_event, videoId) => {
+    return getIdentityRepository().listSpeakerTracks(videoId);
+  });
+
+  ipcMain.handle("people:rename", async (_event, personId, displayName) => {
+    return getIdentityRepository().renamePerson(personId, displayName);
+  });
+
+  ipcMain.handle("people:merge", async (_event, sourcePersonId, targetPersonId) => {
+    getIdentityRepository().mergePeople(sourcePersonId, targetPersonId);
+    return { ok: true };
+  });
+
+  ipcMain.handle("people:splitAppearance", async (_event, appearanceId, person) => {
+    return getIdentityRepository().splitAppearance(appearanceId, person);
+  });
+
+  ipcMain.handle("people:linkSpeakerTrack", async (_event, speakerTrackId, personId) => {
+    return getIdentityRepository().linkSpeakerTrack(speakerTrackId, personId);
   });
 
   // v2: 多策略拉取 UP 主账号信息 + 视频列表

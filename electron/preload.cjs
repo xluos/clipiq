@@ -92,6 +92,15 @@ const CHANNELS = [
   { method: "setShotsForVideo", channel: "shots:setForVideo", kind: "invoke" },
   { method: "analyzeVideoShots", channel: "shots:analyze", kind: "invoke" },
 
+  // ── 人物 / 说话人证据 ──
+  { method: "listPeople", channel: "people:list", kind: "invoke" },
+  { method: "listPersonAppearances", channel: "people:listAppearances", kind: "invoke" },
+  { method: "listSpeakerTracks", channel: "people:listSpeakerTracks", kind: "invoke" },
+  { method: "renamePerson", channel: "people:rename", kind: "invoke" },
+  { method: "mergePeople", channel: "people:merge", kind: "invoke" },
+  { method: "splitPersonAppearance", channel: "people:splitAppearance", kind: "invoke" },
+  { method: "linkSpeakerTrackPerson", channel: "people:linkSpeakerTrack", kind: "invoke" },
+
   // ── 分析 ──
   { method: "analyzeVideo", channel: "analysis:start", kind: "invoke" },
   { method: "resumeAnalysis", channel: "analysis:resume", kind: "invoke" },

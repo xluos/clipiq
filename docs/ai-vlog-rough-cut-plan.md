@@ -1,6 +1,6 @@
 # ClipIQ AI Vlog 粗剪迭代计划
 
-> 状态：实施中（M0-1、M0-2 已完成）
+> 状态：实施中（M0-1、M0-2 已完成，M0-3 地基进行中）
 > 适用分支基线：`feature/v2`  
 > 建议实施分支：`feature/ai-vlog-rough-cut`  
 > 更新日期：2026-07-24
@@ -432,11 +432,14 @@ type PersonAppearance = {
 
 任务：
 
-- [ ] 验证当前 Whisper 后端的词级时间戳能力；不支持时保留 segment 级精度并显式标记。
-- [ ] 评估本地说话人分离后端，产出独立 `speakerId`，不与人物 ID 强绑定。
+- [x] 验证当前 Whisper 后端的词级时间戳能力；不支持时保留 segment 级精度并显式标记。
+- [x] 评估现有 Whisper 的说话人分离能力，确认当前不能产出通用多人 `speakerId`。
+- [ ] 接入独立本地说话人分离后端，产出 `speakerId`，不与人物 ID 强绑定。
+- [x] 建立 `people / person_appearances / speaker_tracks / person_identity_events / person_identity_constraints` 本地数据层。
+- [x] 建立保守的跨素材人物原型匹配策略；阈值由具体模型和固定测试集标定。
 - [ ] 新增单素材人脸检测与连续跟踪，保存 `person_appearances`。
 - [ ] 新增本地人脸特征与跨素材聚类，生成稳定 `personId`。
-- [ ] 支持人物命名、合并、拆分；人工调整可重复应用到后续素材。
+- [ ] 在人物管理 UI 支持命名、合并、拆分；后端人工锁定与重分析保留已完成。
 - [ ] Candidate Builder 可按人物、事件、对白和时间范围检索真实 Shot。
 
 验收：
