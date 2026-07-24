@@ -672,7 +672,7 @@ export-package/
 - [x] 节拍检测和卡点：Studio 已接入本地 BGM 选择、FFmpeg PCM 解码、`energy-onset-v1` 节拍网格和置信度降级；用户逐个确认后，以不超过 5% 的轻微变速将硬切精确落到节拍，每次生成可撤销的 `EditPlan revision`。验证见 [`audio-beat-analysis-validation.md`](./audio-beat-analysis-validation.md)。
 - [x] 基于人物焦点的横竖屏智能重构图；多人无法完整容纳或无可靠焦点时降级为留边。
 - [ ] 情绪段落驱动的 BGM 切换。
-- [ ] 字幕关键词高亮。
+- [x] 字幕关键词高亮：词级时间与镜头事件语义共同生成可追溯 `CaptionCue.highlights`，ASS 代理烧录显示强调色；句级字幕、人工改文和无 libass 环境均有明确降级，验证见 [`caption-keyword-highlight-validation.md`](./caption-keyword-highlight-validation.md)。
 - [ ] 贴纸和花字模板。
 - [ ] 多版本粗剪对比。
 - [x] FCPXML 1.10 粗剪时间线导出：素材包内生成 `timeline.fcpxml`，保留视频裁切、排序、恒定变速和有文件的音轨；字幕、贴图、人物裁切及未验证转场均显式降级，验证见 [`fcpxml-export-validation.md`](./fcpxml-export-validation.md)。

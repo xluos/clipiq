@@ -154,6 +154,22 @@ describe("EditPlan 结构化反馈", () => {
     expect(trimmedVideo.items[0].evidence?.alignedSegments?.at(0)?.startUs).toBe(0);
     expect(trimmedVideo.items[0].evidence?.alignedSegments?.at(-1)?.endUs)
       .toBe(2_000_000);
+    const trimmedCaptions = trimmed.tracks.find((track) => track.kind === "caption");
+    if (trimmedCaptions?.kind !== "caption") throw new Error("fixture");
+    trimmedCaptions.items[0].wordTimings = [{
+      text: trimmedCaptions.items[0].text,
+      startUs: trimmedCaptions.items[0].startUs,
+      endUs: trimmedCaptions.items[0].endUs,
+    }];
+    trimmedCaptions.items[0].highlights = [{
+      text: trimmedCaptions.items[0].text,
+      startOffset: 0,
+      endOffset: trimmedCaptions.items[0].text.length,
+      startUs: trimmedCaptions.items[0].startUs,
+      endUs: trimmedCaptions.items[0].endUs,
+      reason: "event_keyword",
+      confidence: 0.9,
+    }];
 
     const editedCaption = applyEditPlanFeedback(trimmed, {
       type: "update_caption",
@@ -166,6 +182,8 @@ describe("EditPlan 结构化反馈", () => {
     });
     const editedCues = editedCaption.tracks.find((track) => track.kind === "caption");
     expect(editedCues?.items[0].text).toBe("人工修改后的字幕");
+    expect(editedCues?.items[0].wordTimings).toBeUndefined();
+    expect(editedCues?.items[0].highlights).toBeUndefined();
 
     const editedVideo = editedCaption.tracks.find((track) => track.kind === "video");
     if (editedVideo?.kind !== "video") throw new Error("fixture");

@@ -1021,6 +1021,15 @@ export type CaptionCue = {
     confidence?: number;
     speakerId?: string;
   }>;
+  highlights?: Array<{
+    text: string;
+    startOffset: number;
+    endOffset: number;
+    startUs: number;
+    endUs: number;
+    reason: "event_keyword" | "number";
+    confidence: number;
+  }>;
 };
 
 export type AudioClip = {

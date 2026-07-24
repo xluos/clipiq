@@ -279,6 +279,43 @@ function validateCaption(target: IssueTarget, cue: CaptionCue, path: string): vo
       add(target, "error", "WORD_OUTSIDE_CAPTION", "词级时间超出了字幕范围。", wordPath);
     }
   }
+  let previousHighlightEnd = 0;
+  for (const [index, highlight] of (cue.highlights || []).entries()) {
+    const highlightPath = `${path}.highlights[${index}]`;
+    if (
+      !Number.isSafeInteger(highlight.startOffset)
+      || !Number.isSafeInteger(highlight.endOffset)
+      || highlight.startOffset < previousHighlightEnd
+      || highlight.endOffset <= highlight.startOffset
+      || highlight.endOffset > cue.text.length
+    ) {
+      add(target, "error", "INVALID_CAPTION_HIGHLIGHT_RANGE", "字幕高亮文字范围无效或重叠。", highlightPath);
+      continue;
+    }
+    if (cue.text.slice(highlight.startOffset, highlight.endOffset) !== highlight.text) {
+      add(target, "error", "CAPTION_HIGHLIGHT_TEXT_MISMATCH", "字幕高亮文字与字幕内容不一致。", highlightPath);
+    }
+    if (
+      !validateTimeRange(
+        target,
+        highlight.startUs,
+        highlight.endUs,
+        `${highlightPath}.time`,
+      )
+      || (rangeValid
+        && (highlight.startUs < cue.startUs || highlight.endUs > cue.endUs))
+    ) {
+      add(target, "error", "CAPTION_HIGHLIGHT_TIME_INVALID", "字幕高亮时间超出了字幕范围。", highlightPath);
+    }
+    if (
+      !Number.isFinite(highlight.confidence)
+      || highlight.confidence < 0
+      || highlight.confidence > 1
+    ) {
+      add(target, "error", "CAPTION_HIGHLIGHT_CONFIDENCE_INVALID", "字幕高亮置信度必须在 0 到 1 之间。", `${highlightPath}.confidence`);
+    }
+    previousHighlightEnd = highlight.endOffset;
+  }
 }
 
 function validateBeatAnalysis(

@@ -10,6 +10,7 @@ import {
   refreshBeatSyncSuggestions,
 } from "./audio-beat-analysis";
 import { clipVideoEvidenceToRange } from "./aligned-evidence";
+import { captionCueFromEvidenceSegment } from "./caption-highlights";
 import {
   validateEditPlan,
   type EditPlanValidationOptions,
@@ -34,26 +35,9 @@ function getVideoTrack(plan: EditPlan) {
 
 function captionCuesFromClip(clip: VideoClip): CaptionCue[] {
   return (clip.evidence?.subtitleSegments || [])
-    .filter((segment) =>
-      segment.text.trim()
-      && segment.endUs > segment.startUs
-      && segment.startUs < clip.sourceOutUs
-      && segment.endUs > clip.sourceInUs)
-    .map((segment, index) => {
-      const sourceStartUs = Math.max(clip.sourceInUs, segment.startUs);
-      const sourceEndUs = Math.min(clip.sourceOutUs, segment.endUs);
-      return {
-        id: `${clip.id}-caption-${index + 1}`,
-        startUs: clip.timelineInUs
-          + Math.round((sourceStartUs - clip.sourceInUs) / clip.speed),
-        endUs: clip.timelineInUs
-          + Math.round((sourceEndUs - clip.sourceInUs) / clip.speed),
-        text: segment.text.trim(),
-        styleId: "proxy-default",
-        sourceClipId: clip.id,
-        sourceStartUs,
-        sourceEndUs,
-      };
+    .flatMap((segment, index) => {
+      const cue = captionCueFromEvidenceSegment(clip, segment, index);
+      return cue ? [cue] : [];
     });
 }
 
@@ -179,8 +163,24 @@ function reflowPlan(plan: EditPlan): void {
         cue.sourceEndUs ?? clip.sourceOutUs,
       );
       if (sourceEndUs <= sourceStartUs) return [];
+      const evidenceSegment = (clip.evidence?.subtitleSegments || []).find((segment) =>
+        segment.text.trim() === cue.text.trim()
+        && segment.startUs < sourceEndUs
+        && segment.endUs > sourceStartUs);
+      const rebuilt = evidenceSegment
+        ? captionCueFromEvidenceSegment(clip, evidenceSegment, 0, {
+          id: cue.id,
+          styleId: cue.styleId,
+        })
+        : null;
       return [{
         ...cue,
+        ...(rebuilt
+          ? {
+            wordTimings: rebuilt.wordTimings,
+            highlights: rebuilt.highlights,
+          }
+          : {}),
         sourceStartUs,
         sourceEndUs,
         startUs: clip.timelineInUs
@@ -302,6 +302,8 @@ export function applyEditPlanFeedback(
       const text = action.text.trim();
       if (!text) throw new Error("字幕文本不能为空");
       cue.text = text;
+      delete cue.wordTimings;
+      delete cue.highlights;
       break;
     }
     case "set_music": {

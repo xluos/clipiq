@@ -18,6 +18,7 @@ import {
 } from "./edit-plan-validator";
 import { hasUsableWordTimings } from "./transcript-evidence";
 import { personAwareCrop } from "./smart-reframe";
+import { captionCueFromEvidenceSegment } from "./caption-highlights";
 
 export type PlannerCandidateSelection = {
   candidateId: string;
@@ -540,33 +541,10 @@ export function compileEditPlan(
     durationUs: 0,
   }));
   const captions: CaptionCue[] = clips.flatMap((clip) =>
-    (clip.evidence?.subtitleSegments || []).map((segment, index) => ({
-      id: `${clip.id}-caption-${index + 1}`,
-      startUs: clip.timelineInUs
-        + Math.round((segment.startUs - clip.sourceInUs) / clip.speed),
-      endUs: clip.timelineInUs
-        + Math.round((segment.endUs - clip.sourceInUs) / clip.speed),
-      text: segment.text,
-      styleId: "proxy-default",
-      sourceClipId: clip.id,
-      sourceStartUs: segment.startUs,
-      sourceEndUs: segment.endUs,
-      ...(segment.words?.length
-        ? {
-          wordTimings: segment.words.map((word) => ({
-            text: word.text,
-            startUs: clip.timelineInUs
-              + Math.round((word.startUs - clip.sourceInUs) / clip.speed),
-            endUs: clip.timelineInUs
-              + Math.round((word.endUs - clip.sourceInUs) / clip.speed),
-            ...(word.speakerId ? { speakerId: word.speakerId } : {}),
-            ...(Number.isFinite(word.confidence)
-              ? { confidence: Number(word.confidence) }
-              : {}),
-          })),
-        }
-        : {}),
-    })));
+    (clip.evidence?.subtitleSegments || []).flatMap((segment, index) => {
+      const cue = captionCueFromEvidenceSegment(clip, segment, index);
+      return cue ? [cue] : [];
+    }));
   const voiceovers = (options.voiceovers || []).flatMap((voiceover, index) => {
     const anchorIndex = clips.findIndex((clip) =>
       clip.candidateId === voiceover.afterCandidateId);

@@ -6,6 +6,7 @@ import {
   collectProxyCaptions,
   collectProxyWarnings,
   proxyVideoSpecForCanvas,
+  serializeAss,
   serializeSrt,
 } from "../electron/editing/proxy-renderer";
 import { validateEditPlan } from "../electron/editing/edit-plan-validator";
@@ -153,6 +154,67 @@ describe("代理字幕", () => {
     ]);
     expect(serializeSrt(cues)).toContain("00:00:00,500 --> 00:00:01,500");
     expect(serializeSrt(cues)).toContain("第二句");
+  });
+
+  it("ASS 烧录字幕只给已标注关键词着色，外挂 SRT 保持纯文本", () => {
+    const cues = [{
+      id: "caption-highlight",
+      startUs: 500_000,
+      endUs: 1_500_000,
+      text: "整理装备",
+      styleId: "proxy-default",
+      highlights: [{
+        text: "装备",
+        startOffset: 2,
+        endOffset: 4,
+        startUs: 900_000,
+        endUs: 1_400_000,
+        reason: "event_keyword" as const,
+        confidence: 0.9,
+      }],
+    }];
+    const ass = serializeAss(cues, { width: 720, height: 1280 });
+
+    expect(ass).toContain(
+      "Dialogue: 0,0:00:00.50,0:00:01.50,Default,,0,0,0,,整理{\\c&H00E5464F&\\b1}装备{\\r}",
+    );
+    expect(serializeSrt(cues)).toContain("整理装备");
+    expect(serializeSrt(cues)).not.toContain("\\c&");
+  });
+
+  it("旧计划有词级时间但没有 highlights 时按镜头事件补齐", () => {
+    const currentPlan = plan();
+    const video = currentPlan.tracks[0];
+    if (video.kind !== "video") throw new Error("fixture");
+    video.items[0].evidence = {
+      eventSummary: "人物整理露营装备",
+    };
+    currentPlan.tracks.push({
+      id: "caption-track",
+      kind: "caption",
+      items: [{
+        id: "caption-old",
+        startUs: 200_000,
+        endUs: 1_200_000,
+        text: "先整理装备",
+        styleId: "proxy-default",
+        sourceClipId: video.items[0].id,
+        wordTimings: [
+          { text: "先", startUs: 200_000, endUs: 400_000 },
+          { text: "整理装备", startUs: 400_000, endUs: 1_200_000 },
+        ],
+      }],
+    });
+
+    expect(collectProxyCaptions(currentPlan)[0].highlights).toEqual([
+      expect.objectContaining({
+        text: "整理装备",
+        startOffset: 1,
+        endOffset: 5,
+        startUs: 400_000,
+        endUs: 1_200_000,
+      }),
+    ]);
   });
 });
 

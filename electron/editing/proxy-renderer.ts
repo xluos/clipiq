@@ -9,8 +9,14 @@ import type {
   EditTransition,
   VideoClip,
 } from "../../src/types";
+import {
+  captionCueFromEvidenceSegment,
+  captionEventSummaries,
+  deriveCaptionHighlights,
+} from "./caption-highlights";
 
 const US_PER_SECOND = 1_000_000;
+const PROXY_RENDERER_VERSION = 2;
 
 export type ProxySubtitleMode = "external" | "burn" | "none";
 
@@ -152,29 +158,27 @@ export function collectProxyWarnings(plan: EditPlan): string[] {
 export function collectProxyCaptions(plan: EditPlan): CaptionCue[] {
   const explicit = explicitCaptions(plan);
   if (explicit.length > 0) {
+    const clipById = new Map(videoTrack(plan).map((clip) => [clip.id, clip]));
     return explicit
       .filter((cue) => cue.text.trim() && cue.endUs > cue.startUs)
+      .map((cue) => {
+        if (cue.highlights?.length || !cue.sourceClipId) return cue;
+        const clip = clipById.get(cue.sourceClipId);
+        if (!clip) return cue;
+        const highlights = deriveCaptionHighlights(
+          cue,
+          captionEventSummaries(clip),
+        );
+        return highlights.length > 0 ? { ...cue, highlights } : cue;
+      })
       .sort((a, b) => a.startUs - b.startUs || a.id.localeCompare(b.id));
   }
 
   const generated: CaptionCue[] = [];
   for (const clip of videoTrack(plan)) {
     for (const [index, segment] of (clip.evidence?.subtitleSegments || []).entries()) {
-      const sourceStartUs = Math.max(clip.sourceInUs, segment.startUs);
-      const sourceEndUs = Math.min(clip.sourceOutUs, segment.endUs);
-      if (sourceEndUs <= sourceStartUs || !segment.text.trim()) continue;
-      const startUs = clip.timelineInUs
-        + Math.round((sourceStartUs - clip.sourceInUs) / clip.speed);
-      const endUs = clip.timelineInUs
-        + Math.round((sourceEndUs - clip.sourceInUs) / clip.speed);
-      if (endUs <= startUs) continue;
-      generated.push({
-        id: `${clip.id}-caption-${index + 1}`,
-        startUs,
-        endUs,
-        text: segment.text.trim(),
-        styleId: "proxy-default",
-      });
+      const cue = captionCueFromEvidenceSegment(clip, segment, index);
+      if (cue) generated.push(cue);
     }
   }
   return generated.sort((a, b) => a.startUs - b.startUs || a.id.localeCompare(b.id));
@@ -196,6 +200,73 @@ export function serializeSrt(cues: CaptionCue[]): string {
     cue.text.replace(/\r?\n/g, " "),
     "",
   ].join("\n")).join("\n");
+}
+
+function assTimestamp(timeUs: number): string {
+  const totalCentiseconds = Math.max(0, Math.round(timeUs / 10_000));
+  const hours = Math.floor(totalCentiseconds / 360_000);
+  const minutes = Math.floor((totalCentiseconds % 360_000) / 6_000);
+  const seconds = Math.floor((totalCentiseconds % 6_000) / 100);
+  const centiseconds = totalCentiseconds % 100;
+  return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}`;
+}
+
+function escapeAssText(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/\{/g, "\\{")
+    .replace(/\}/g, "\\}")
+    .replace(/\r?\n/g, "\\N");
+}
+
+function highlightedAssText(cue: CaptionCue): string {
+  const highlights = [...(cue.highlights || [])]
+    .filter((highlight) =>
+      highlight.startOffset >= 0
+      && highlight.endOffset > highlight.startOffset
+      && highlight.endOffset <= cue.text.length)
+    .sort((left, right) => left.startOffset - right.startOffset);
+  if (highlights.length === 0) return escapeAssText(cue.text);
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const highlight of highlights) {
+    if (highlight.startOffset < cursor) continue;
+    parts.push(escapeAssText(cue.text.slice(cursor, highlight.startOffset)));
+    parts.push(
+      "{\\c&H00E5464F&\\b1}",
+      escapeAssText(cue.text.slice(highlight.startOffset, highlight.endOffset)),
+      "{\\r}",
+    );
+    cursor = highlight.endOffset;
+  }
+  parts.push(escapeAssText(cue.text.slice(cursor)));
+  return parts.join("");
+}
+
+export function serializeAss(
+  cues: CaptionCue[],
+  spec: Pick<ProxyVideoSpec, "width" | "height">,
+): string {
+  const fontSize = Math.max(28, Math.round(spec.height * 0.034));
+  const marginV = Math.max(32, Math.round(spec.height * 0.045));
+  return [
+    "[Script Info]",
+    "ScriptType: v4.00+",
+    `PlayResX: ${spec.width}`,
+    `PlayResY: ${spec.height}`,
+    "WrapStyle: 2",
+    "ScaledBorderAndShadow: yes",
+    "",
+    "[V4+ Styles]",
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+    `Style: Default,PingFang SC,${fontSize},&H00FFFFFF,&H00FFFFFF,&H80000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,36,36,${marginV},1`,
+    "",
+    "[Events]",
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ...cues.map((cue) =>
+      `Dialogue: 0,${assTimestamp(cue.startUs)},${assTimestamp(cue.endUs)},Default,,0,0,0,,${highlightedAssText(cue)}`),
+    "",
+  ].join("\n");
 }
 
 function cropFilter(clip: VideoClip): string | null {
@@ -463,21 +534,10 @@ function buildBurnSubtitleArgs(
   spec: ProxyVideoSpec,
 ): string[] {
   const escaped = escapeSubtitleFilterPath(captionsPath);
-  const style = [
-    "FontName=PingFang SC",
-    "FontSize=22",
-    "PrimaryColour=&H00FFFFFF",
-    "OutlineColour=&H80000000",
-    "BorderStyle=1",
-    "Outline=1",
-    "Shadow=0",
-    "MarginV=36",
-    "Alignment=2",
-  ].join(",");
   return [
     "-y",
     "-i", inputPath,
-    "-vf", `subtitles=filename='${escaped}':force_style='${style}'`,
+    "-vf", `subtitles=filename='${escaped}'`,
     "-map", "0:v:0",
     "-map", "0:a:0",
     "-c:v", spec.videoCodec,
@@ -623,12 +683,13 @@ export async function renderEditPlanProxy(
     fingerprints,
     subtitleMode,
     spec,
-    rendererVersion: 1,
+    rendererVersion: PROXY_RENDERER_VERSION,
   });
   const outputDir = path.join(options.outputRoot, plan.id);
   const outputPath = path.join(outputDir, `preview-${renderDigest.slice(0, 16)}.mp4`);
   const manifestPath = path.join(outputDir, "preview.json");
   const captionsPath = path.join(outputDir, `captions-${renderDigest.slice(0, 16)}.srt`);
+  const burnCaptionsPath = path.join(outputDir, `captions-${renderDigest.slice(0, 16)}.ass`);
   await fs.mkdir(outputDir, { recursive: true });
   await fs.mkdir(options.cacheRoot, { recursive: true });
 
@@ -685,7 +746,7 @@ export async function renderEditPlanProxy(
       clip,
       fingerprint,
       spec,
-      rendererVersion: 1,
+      rendererVersion: PROXY_RENDERER_VERSION,
     });
     const segmentPath = path.join(options.cacheRoot, `${segmentDigest}.mp4`);
     segmentPaths.push(segmentPath);
@@ -728,13 +789,22 @@ export async function renderEditPlanProxy(
   if (subtitleMode !== "none" && cues.length > 0) {
     await fs.writeFile(captionsPath, serializeSrt(cues), "utf8");
   }
+  if (subtitleMode === "burn" && cues.length > 0) {
+    await fs.writeFile(burnCaptionsPath, serializeAss(cues, spec), "utf8");
+  }
 
   const workPrefix = path.join(outputDir, `.preview-${renderDigest.slice(0, 16)}`);
   const assembledPath = `${workPrefix}-assembled.mp4`;
   const mixedPath = `${workPrefix}-mixed.mp4`;
   const burnedPath = `${workPrefix}-subtitled.mp4`;
   const concatPath = `${workPrefix}.ffconcat`;
-  const temporaryPaths = [assembledPath, mixedPath, burnedPath, concatPath];
+  const temporaryPaths = [
+    assembledPath,
+    mixedPath,
+    burnedPath,
+    concatPath,
+    burnCaptionsPath,
+  ];
   let completed = false;
   try {
     let currentPath = assembledPath;
@@ -815,7 +885,7 @@ export async function renderEditPlanProxy(
       try {
         await runProcess(
           options.ffmpegPath,
-          buildBurnSubtitleArgs(currentPath, captionsPath, burnedPath, spec),
+          buildBurnSubtitleArgs(currentPath, burnCaptionsPath, burnedPath, spec),
           {
             signal: options.signal,
             expectedDurationUs: plan.actualDurationUs,

@@ -266,8 +266,23 @@ describe("EditPlan 确定性编译", () => {
           { text: "先把", startUs: 200_000, endUs: 600_000, speakerId: "speaker-1" },
           { text: "装备整理好", startUs: 600_000, endUs: 1_400_000, speakerId: "speaker-1" },
         ],
+        highlights: [{
+          text: "装备整理好",
+          startOffset: 2,
+          endOffset: 7,
+          startUs: 600_000,
+          endUs: 1_400_000,
+          reason: "event_keyword",
+        }],
       }],
     });
+    const invalidHighlightPlan = structuredClone(plan);
+    const invalidCaptions = invalidHighlightPlan.tracks.find((track) =>
+      track.kind === "caption");
+    if (invalidCaptions?.kind !== "caption") throw new Error("测试期望字幕轨道");
+    invalidCaptions.items[0].highlights![0].text = "错误文字";
+    expect(validateEditPlan(invalidHighlightPlan).errors.map((issue) => issue.code))
+      .toContain("CAPTION_HIGHLIGHT_TEXT_MISMATCH");
   });
 
   it("候选集外引用和重复引用会产生可解释错误，不猜测时间", () => {
