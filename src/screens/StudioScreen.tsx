@@ -2,8 +2,10 @@
 // list: 剪辑会话卡片列表 (目标 / 应用方法论 / 引用素材 / 状态 badge)
 // editor: 三栏布局 (输入设置 / 推荐输出 / 引用面板)
 
-import { type FunctionComponent, useMemo, useState } from "react";
+import { type FunctionComponent, useEffect, useMemo, useState } from "react";
 import { useApp } from "../AppContext";
+import type { EditPlanPreview } from "../electron-api";
+import { useTaskQueueStore } from "../stores/tasks";
 import type { AppLocation, EditPlan, StudioSession, StudioStep } from "../types";
 import {
   Wand2,
@@ -16,6 +18,8 @@ import {
   AlertTriangle,
   FileText,
   Check,
+  Play,
+  Square,
 } from "lucide-react";
 
 export function StudioScreen() {
@@ -176,10 +180,36 @@ function StudioEditorScreen() {
   const [usedAssetIds, setUsedAssetIds] = useState<string[]>(session?.usedAssetIds || []);
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState("");
+  const [preview, setPreview] = useState<EditPlanPreview | null>(null);
+  const [previewError, setPreviewError] = useState("");
+  const [renderingPreview, setRenderingPreview] = useState(false);
+  const [subtitleMode, setSubtitleMode] = useState<"burn" | "external">("burn");
+  const tasksById = useTaskQueueStore((state) => state.tasksById);
 
   const assetProjects = useMemo(() => projects.filter((p) => p.videoRole === "asset"), [projects]);
+  const previewTask = useMemo(() => {
+    if (!session?.currentEditPlanId) return undefined;
+    return Object.values(tasksById)
+      .filter((task) =>
+        task.kind === "edit-preview" && task.refId === session.currentEditPlanId)
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+  }, [session?.currentEditPlanId, tasksById]);
 
   const backToList: AppLocation = { module: "studio", screen: "list" };
+
+  useEffect(() => {
+    let disposed = false;
+    setPreview(null);
+    setPreviewError("");
+    const planId = session?.currentEditPlanId;
+    if (!planId || !window.videoAnalyzer?.getEditPlanPreview) return () => { disposed = true; };
+    window.videoAnalyzer.getEditPlanPreview(planId)
+      .then((value) => {
+        if (!disposed) setPreview(value);
+      })
+      .catch(() => {});
+    return () => { disposed = true; };
+  }, [session?.currentEditPlanId]);
 
   const save = (patch: Partial<StudioSession> = {}) => {
     if (!session) return;
@@ -216,6 +246,8 @@ function StudioEditorScreen() {
         methodologyIds: appliedMethodologies,
       });
       const steps = editPlanToStudioSteps(result.plan, assetProjects);
+      setPreview(null);
+      setPreviewError("");
       upsertSession({
         ...session,
         goal: goalDraft,
@@ -234,6 +266,36 @@ function StudioEditorScreen() {
     } finally {
       setGenerating(false);
     }
+  };
+
+  const renderPreview = async () => {
+    const planId = session?.currentEditPlanId;
+    if (!planId) {
+      setPreviewError("先生成真实粗剪方案");
+      return;
+    }
+    if (!window.videoAnalyzer?.renderEditPlanPreview) {
+      setPreviewError("浏览器预览环境不能运行 FFmpeg");
+      return;
+    }
+    setPreviewError("");
+    setRenderingPreview(true);
+    try {
+      const result = await window.videoAnalyzer.renderEditPlanPreview({
+        planId,
+        subtitleMode,
+      });
+      setPreview(result.preview);
+    } catch (error) {
+      setPreviewError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRenderingPreview(false);
+    }
+  };
+
+  const cancelPreview = async () => {
+    if (!previewTask || !window.videoAnalyzer?.cancelQueueTask) return;
+    await window.videoAnalyzer.cancelQueueTask(previewTask.id);
   };
 
   if (!session) {
@@ -382,6 +444,87 @@ function StudioEditorScreen() {
             <div className="mb-3 rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-[12px] text-amber-700 dark:text-amber-300">
               {genError}
             </div>
+          )}
+          {session.currentEditPlanId && (
+            <section className="mb-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 overflow-hidden">
+              {preview ? (
+                <video
+                  key={preview.mediaUrl}
+                  controls
+                  preload="metadata"
+                  src={preview.mediaUrl}
+                  className="w-full h-[360px] object-contain bg-slate-950"
+                />
+              ) : (
+                <div className="h-[320px] flex items-center justify-center bg-slate-100 dark:bg-slate-950">
+                  <Play className="w-7 h-7 text-slate-400" strokeWidth={1.5} />
+                </div>
+              )}
+              <div className="px-3.5 py-3 border-t border-slate-200 dark:border-slate-800">
+                <div className="flex items-center gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[12.5px] font-medium text-slate-900 dark:text-slate-100">
+                      {preview ? "低清代理预览" : "代理预览尚未生成"}
+                    </div>
+                    <div className="mt-0.5 text-[10.5px] font-mono text-slate-500 dark:text-slate-400">
+                      {preview
+                        ? `${preview.width}×${preview.height} · ${preview.fps} fps · 缓存命中 ${preview.cacheHits}`
+                        : "H.264 · AAC · 720p"}
+                    </div>
+                  </div>
+                  <select
+                    value={subtitleMode}
+                    onChange={(event) => setSubtitleMode(event.target.value as "burn" | "external")}
+                    disabled={renderingPreview}
+                    className="h-8 px-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-[11.5px] text-slate-700 dark:text-slate-300"
+                  >
+                    <option value="burn">烧录字幕</option>
+                    <option value="external">外挂 SRT</option>
+                  </select>
+                  {previewTask?.status === "running" || previewTask?.status === "queued" ? (
+                    <button
+                      onClick={cancelPreview}
+                      className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-slate-300 dark:border-slate-700 text-[12px] text-slate-700 dark:text-slate-300"
+                    >
+                      <Square className="w-3 h-3" strokeWidth={1.5} />
+                      取消
+                    </button>
+                  ) : (
+                    <button
+                      onClick={renderPreview}
+                      disabled={renderingPreview}
+                      className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-[12px]"
+                    >
+                      <Play className="w-3 h-3" strokeWidth={1.5} />
+                      {preview ? "重新生成" : "生成预览"}
+                    </button>
+                  )}
+                </div>
+                {(previewTask?.status === "running" || previewTask?.status === "queued") && (
+                  <div className="mt-2.5">
+                    <div className="h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                      <div
+                        className="h-full bg-indigo-600 transition-[width]"
+                        style={{ width: `${Math.max(2, previewTask.progress)}%` }}
+                      />
+                    </div>
+                    <div className="mt-1 text-[10.5px] font-mono text-slate-500 dark:text-slate-400">
+                      {previewTask.stage}{previewTask.message ? ` · ${previewTask.message}` : ""}
+                    </div>
+                  </div>
+                )}
+                {previewError && (
+                  <div className="mt-2 text-[11.5px] text-amber-700 dark:text-amber-300">
+                    {previewError}
+                  </div>
+                )}
+                {preview?.warnings?.map((warning) => (
+                  <div key={warning} className="mt-2 text-[11.5px] text-amber-700 dark:text-amber-300">
+                    {warning}
+                  </div>
+                ))}
+              </div>
+            </section>
           )}
 
           {steps.length === 0 ? (

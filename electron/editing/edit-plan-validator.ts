@@ -180,6 +180,7 @@ export function validateEditPlan(
   const seenTrackIds = new Set<string>();
   const seenItemIds = new Set<string>();
   const videoClips: VideoClip[] = [];
+  const videoClipDurationUs = new Map<string, number>();
   let computedDurationUs = 0;
 
   for (const [trackIndex, track] of (plan.tracks || []).entries()) {
@@ -190,6 +191,7 @@ export function validateEditPlan(
     seenTrackIds.add(track.id);
 
     let previousEndUs = 0;
+    let previousVideoClip: VideoClip | undefined;
     for (const [itemIndex, item] of (track.items || []).entries()) {
       const itemPath = `${trackPath}.items[${itemIndex}]`;
       if (!item.id || seenItemIds.has(item.id)) {
@@ -203,12 +205,43 @@ export function validateEditPlan(
         const endUs = validIntegerTime(clip.timelineInUs)
           ? clip.timelineInUs + durationUs
           : previousEndUs;
+        const previousClip = previousVideoClip;
         if (clip.timelineInUs < previousEndUs) {
-          add(target, "error", "VIDEO_TRACK_OVERLAP", "同一视频轨道上的片段发生重叠。", itemPath);
+          const overlapUs = previousEndUs - clip.timelineInUs;
+          const boundary = previousClip
+            ? (plan.transitions || []).find((transition) =>
+              transition.fromClipId === previousClip.id
+              && transition.toClipId === clip.id)
+            : undefined;
+          if (
+            !boundary
+            || boundary.type === "cut"
+            || boundary.durationUs !== overlapUs
+          ) {
+            add(
+              target,
+              "error",
+              "VIDEO_TRACK_OVERLAP",
+              "视频片段重叠必须与相邻叠化转场时长一致。",
+              itemPath,
+              { overlapUs },
+            );
+          }
+        } else if (previousClip && clip.timelineInUs > previousEndUs) {
+          add(
+            target,
+            "error",
+            "VIDEO_TRACK_GAP",
+            "视频轨道存在空白时间，代理预览无法确定画面内容。",
+            itemPath,
+            { gapUs: clip.timelineInUs - previousEndUs },
+          );
         }
         previousEndUs = Math.max(previousEndUs, endUs);
         computedDurationUs = Math.max(computedDurationUs, endUs);
         videoClips.push(clip);
+        videoClipDurationUs.set(clip.id, durationUs);
+        previousVideoClip = clip;
       } else if (track.kind === "caption") {
         validateCaption(target, item as CaptionCue, itemPath);
       } else if (track.kind === "audio") {
@@ -253,6 +286,38 @@ export function validateEditPlan(
       add(target, "error", "INVALID_TRANSITION_DURATION", "转场时长必须是非负整数微秒。", `${path}.durationUs`);
     } else if (transition.type === "cut" && transition.durationUs !== 0) {
       add(target, "error", "CUT_HAS_DURATION", "硬切转场时长必须为 0。", `${path}.durationUs`);
+    } else if (transition.type !== "cut") {
+      if (transition.durationUs <= 0) {
+        add(target, "error", "TRANSITION_HAS_NO_DURATION", "非硬切转场必须有正时长。", `${path}.durationUs`);
+      } else if (fromIndex != null && toIndex != null) {
+        const fromClip = videoClips[fromIndex];
+        const toClip = videoClips[toIndex];
+        const fromDurationUs = videoClipDurationUs.get(fromClip.id) || 0;
+        const toDurationUs = videoClipDurationUs.get(toClip.id) || 0;
+        if (transition.durationUs * 2 > Math.min(fromDurationUs, toDurationUs)) {
+          add(
+            target,
+            "error",
+            "TRANSITION_TOO_LONG",
+            "转场时长不能超过任一相邻片段时长的一半。",
+            `${path}.durationUs`,
+          );
+        }
+        const expectedTimelineInUs = fromClip.timelineInUs + fromDurationUs - transition.durationUs;
+        if (toClip.timelineInUs !== expectedTimelineInUs) {
+          add(
+            target,
+            "error",
+            "TRANSITION_TIMELINE_MISMATCH",
+            "叠化转场必须由相邻片段按转场时长重叠。",
+            path,
+            {
+              expectedTimelineInUs,
+              actualTimelineInUs: toClip.timelineInUs,
+            },
+          );
+        }
+      }
     }
   }
 

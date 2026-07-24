@@ -53,6 +53,26 @@ export type QueueTask = {
   finishedAt: number | null;
 };
 
+export type EditPlanPreview = {
+  version: 1;
+  planId: string;
+  planVersion: number;
+  renderDigest: string;
+  outputPath: string;
+  mediaUrl: string;
+  captionsPath?: string;
+  captionsUrl?: string;
+  durationUs: number;
+  width: number;
+  height: number;
+  fps: number;
+  subtitleMode: "external" | "burn" | "none";
+  cacheHits: number;
+  renderedSegments: number;
+  warnings?: string[];
+  createdAt: number;
+};
+
 export type RuntimeStatus = {
   ffmpeg: string | null;
   ffprobe: string | null;
@@ -437,6 +457,15 @@ declare global {
         plan: EditPlan;
         candidateCount: number;
         rejectedCount: number;
+      }>;
+      getEditPlanPreview: (planId: string) => Promise<EditPlanPreview | null>;
+      renderEditPlanPreview: (payload: {
+        planId: string;
+        subtitleMode?: "external" | "burn" | "none";
+      }) => Promise<{
+        ok: true;
+        taskId?: string;
+        preview: EditPlanPreview;
       }>;
 
       // 后台拉取

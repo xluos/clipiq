@@ -79,6 +79,7 @@ const {
   VLOG_PLANNER_OUTPUT_SCHEMA,
 } = require("./editing/vlog-planner");
 const { compileEditPlan } = require("./editing/edit-plan-compiler");
+const { renderEditPlanProxy } = require("./editing/proxy-renderer");
 const ElectronStore = require("electron-store");
 
 let _cfgStore = null;
@@ -577,7 +578,13 @@ let taskScheduler = null;
 // 每个 kind 的并发上限(可调)。analysis / summary 串行排队 —— 即用户要的"只能同时跑
 // 一个,其余排队";本地 llama 单例 + ai-model 服务自身也有并发队列,这里不必放开。
 // 以后想让云端分析并行,把对应值调大即可。
-const TASK_CONCURRENCY = { analysis: 1, summary: 1, "account-fetch": 2, methodology: 1 };
+const TASK_CONCURRENCY = {
+  analysis: 1,
+  summary: 1,
+  "account-fetch": 2,
+  methodology: 1,
+  "edit-preview": 1,
+};
 
 let learnedBaselines = { providers: {} };
 
@@ -7784,6 +7791,62 @@ app.whenReady().then(async () => {
   });
 
   // --- edit plans ---
+  const getEditPreviewRoot = () => path.join(app.getPath("userData"), "editing");
+  const safeEditPreviewPlanId = (planId) => {
+    const value = String(planId || "").trim();
+    return /^[A-Za-z0-9._-]+$/.test(value) ? value : null;
+  };
+  const getEditPreviewManifestPath = (planId) => {
+    const safePlanId = safeEditPreviewPlanId(planId);
+    return safePlanId
+      ? path.join(getEditPreviewRoot(), safePlanId, "preview.json")
+      : null;
+  };
+  const previewManifestForRenderer = async (manifest) => {
+    if (!manifest?.outputPath || !fsSync.existsSync(manifest.outputPath)) return null;
+    const previewRoot = `${path.resolve(getEditPreviewRoot())}${path.sep}`;
+    const outputPath = path.resolve(manifest.outputPath);
+    if (!outputPath.startsWith(previewRoot)) return null;
+    const captionsPath = manifest.captionsPath
+      ? path.resolve(manifest.captionsPath)
+      : null;
+    if (captionsPath && !captionsPath.startsWith(previewRoot)) return null;
+    return {
+      ...manifest,
+      outputPath,
+      mediaUrl: createExternalMediaUrl(outputPath),
+      ...(captionsPath && fsSync.existsSync(captionsPath)
+        ? { captionsPath, captionsUrl: createExternalMediaUrl(captionsPath) }
+        : {}),
+    };
+  };
+  const runEditPreview = async (task, ctx) => {
+    const planId = String(task.payload.planId || "").trim();
+    if (!planId) throw new Error("生成代理预览需要 planId");
+    const plan = getEditPlanRepository().get(planId);
+    if (!plan) throw new Error(`EditPlan 不存在: ${planId}`);
+    if (!plan.validation?.valid) throw new Error("EditPlan 未通过校验，不能生成代理预览");
+    const [ffmpegPath, ffprobePath] = await Promise.all([
+      commandPath("ffmpeg"),
+      commandPath("ffprobe"),
+    ]);
+    if (!ffmpegPath || !ffprobePath) {
+      throw new Error("未检测到 ffmpeg/ffprobe，无法生成代理预览");
+    }
+    const manifest = await renderEditPlanProxy(plan, {
+      ffmpegPath,
+      ffprobePath,
+      outputRoot: getEditPreviewRoot(),
+      cacheRoot: path.join(app.getPath("userData"), "cache", "editing", "proxy-segments"),
+      subtitleMode: task.payload.subtitleMode || "external",
+      signal: ctx.signal,
+      onProgress: ctx.onProgress,
+      registerChild: ctx.registerChild,
+    });
+    getEditPlanRepository().save({ ...plan, status: "rendered" });
+    return previewManifestForRenderer(manifest);
+  };
+
   ipcMain.handle("editPlans:list", async (_event, sessionId) => {
     return getEditPlanRepository().list(sessionId);
   });
@@ -7799,6 +7862,43 @@ app.whenReady().then(async () => {
 
   ipcMain.handle("editPlans:delete", async (_event, planId) => {
     return { ok: true, deleted: getEditPlanRepository().delete(planId) };
+  });
+
+  ipcMain.handle("editPlans:getPreview", async (_event, planId) => {
+    const manifestPath = getEditPreviewManifestPath(planId);
+    if (!manifestPath) return null;
+    const manifest = await readJson(manifestPath, null);
+    return previewManifestForRenderer(manifest);
+  });
+
+  ipcMain.handle("editPlans:renderPreview", async (_event, payload = {}) => {
+    const planId = String(payload.planId || "").trim();
+    if (!planId) throw new Error("生成代理预览需要 planId");
+    const subtitleMode = ["external", "burn", "none"].includes(payload.subtitleMode)
+      ? payload.subtitleMode
+      : "external";
+    if (!taskScheduler) {
+      const preview = await runEditPreview(
+        { payload: { planId, subtitleMode } },
+        {
+          signal: new AbortController().signal,
+          onProgress: () => {},
+          registerChild: () => {},
+        },
+      );
+      return { ok: true, preview };
+    }
+    const task = taskScheduler.enqueue("edit-preview", {
+      planId,
+      subtitleMode,
+      title: "粗剪代理预览",
+    }, {
+      refId: planId,
+      title: "粗剪代理预览",
+      dedupeKey: `edit-preview:${planId}:${subtitleMode}`,
+    });
+    const preview = await taskScheduler.whenSettled(task.id);
+    return { ok: true, taskId: task.id, preview };
   });
 
   ipcMain.handle("editPlans:generate", async (_event, payload = {}) => {
@@ -9243,6 +9343,12 @@ app.whenReady().then(async () => {
       dedupeKey: (p) => `methodology:${p.collectionId}`,
       title: (p) => p.title || "创作手册",
       run: (task) => runGenerateMethodology(task.payload.collectionId),
+    });
+    taskScheduler.registerKind("edit-preview", {
+      concurrency: TASK_CONCURRENCY["edit-preview"],
+      dedupeKey: (p) => `edit-preview:${p.planId}:${p.subtitleMode || "external"}`,
+      title: (p) => p.title || "粗剪代理预览",
+      run: runEditPreview,
     });
     // 重启恢复:running → interrupted,queued 重新调度起跑。
     try { taskScheduler.hydrate(tasksRepo.list()); } catch (err) { log.warn("task-queue", "hydrate 失败:", err?.message || err); }

@@ -106,6 +106,8 @@ const CHANNELS = [
   { method: "saveEditPlan", channel: "editPlans:save", kind: "invoke" },
   { method: "deleteEditPlan", channel: "editPlans:delete", kind: "invoke" },
   { method: "generateEditPlan", channel: "editPlans:generate", kind: "invoke" },
+  { method: "getEditPlanPreview", channel: "editPlans:getPreview", kind: "invoke" },
+  { method: "renderEditPlanPreview", channel: "editPlans:renderPreview", kind: "invoke" },
 
   // ── 分析 ──
   { method: "analyzeVideo", channel: "analysis:start", kind: "invoke" },
