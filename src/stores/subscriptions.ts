@@ -24,6 +24,7 @@ export function initIpcSubscriptions(queryClient: QueryClient): () => void {
   // useApp 用 useQuery 订阅了 ["analyses"] / ["videos", {}],invalidate 会真正 refetch + 自动重渲染。
   const invalidateAnalyses = () => queryClient.invalidateQueries({ queryKey: ["analyses"] });
   const invalidateVideos = () => queryClient.invalidateQueries({ queryKey: ["videos"] });
+  const invalidateShots = () => queryClient.invalidateQueries({ queryKey: ["shots"] });
   // 每个 analysisId 首次出现时刷一次 analyses,让新建的 analyzing 行进入列表(任务队列/进度页才看得到)。
   const seenAnalysisIds = new Set<string>();
   const refreshOnceFor = (analysisId?: string) => {
@@ -42,6 +43,7 @@ export function initIpcSubscriptions(queryClient: QueryClient): () => void {
         useProgressStore.getState().clearProgress(evt.analysisId);
         invalidateAnalyses();
         invalidateVideos();
+        invalidateShots();
       } else {
         useProgressStore.getState().setProgress(evt.analysisId, evt);
         refreshOnceFor(evt.analysisId);
@@ -60,6 +62,7 @@ export function initIpcSubscriptions(queryClient: QueryClient): () => void {
         // 终态:刷新 analyses + videos,让列表/任务队列从"进行中"挪走。
         invalidateAnalyses();
         invalidateVideos();
+        invalidateShots();
       } else {
         refreshOnceFor(evt.analysisId);
       }

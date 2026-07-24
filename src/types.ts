@@ -694,6 +694,18 @@ export function locationToLegacyScreen(loc: AppLocation): ScreenState {
 /** @deprecated v3: videos 表不再区分 kind */
 export type ProjectKind = "analysis" | "asset" | "account_video";
 
+export type ShotTranscriptSegment = {
+  startSec: number;
+  endSec: number;
+  text: string;
+  speakerId?: string;
+  words?: Array<{
+    text: string;
+    startSec: number;
+    endSec: number;
+  }>;
+};
+
 // 单个镜头(Shot)— 素材分镜后的最小单位
 export type Shot = {
   id: string;
@@ -704,11 +716,14 @@ export type Shot = {
   endSec: number;
   thumbnailUrl?: string;
   description: string;             // 自动镜头描述
-  shotType?: "wide" | "medium" | "close" | "extreme-close" | "establishing";
+  shotType?: string;
   cameraMovement?: string;
   usageTags: string[];             // 用户/LLM 标的用途标签: ["开场","转场","B-roll"]
   isFavorite?: boolean;
   subtitleText?: string;
+  subtitleSegments?: ShotTranscriptSegment[];
+  transcriptGranularity?: "segment" | "word";
+  audioSummary?: string;
   createdAt?: string;
 };
 

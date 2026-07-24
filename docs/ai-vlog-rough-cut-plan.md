@@ -1,6 +1,6 @@
 # ClipIQ AI Vlog 粗剪迭代计划
 
-> 状态：待实施  
+> 状态：实施中（M0-1、M0-2 已完成）
 > 适用分支基线：`feature/v2`  
 > 建议实施分支：`feature/ai-vlog-rough-cut`  
 > 更新日期：2026-07-24
@@ -213,6 +213,9 @@ export type EditTransition = {
 - `edit_plans`：保存内部方案、版本、校验结果和渲染状态。
 - `edit_feedback_events`：保存用户对粗剪做出的删减、替换、裁切和重排。
 - `export_jobs`：保存剪映或其他格式的导出状态、目标版本、产物路径和错误。
+- `people`：素材库级人物实体，只保存内部 ID、可选名称、代表图和聚类状态。
+- `person_appearances`：人物在某个视频、Shot 和精确时间范围内的出现记录。
+- `speaker_tracks`：音频说话人轨迹。与人物实体分开保存，只有在视听证据充分时才关联。
 
 `studio_sessions` 继续负责创作目标、素材和方法论上下文；`edit_plans` 负责可执行时间线。二者不要混为同一份 JSON。
 
@@ -263,6 +266,67 @@ export type EditTransition = {
 
 首期不要追求一次分析覆盖所有特征。允许采用“便宜规则先筛选，候选镜头再用视觉模型精排”的两阶段方式。
 
+### 7.3 时间对齐证据与人物一致性
+
+当前能力基线：
+
+- Whisper 已返回分段级 `start / end / text`，可以回答某个时间范围内有哪些字幕。
+- 当前没有词级时间戳，也没有说话人分离；分段边界是 ASR 估计值，不应宣称逐字帧精确。
+- `ShotContext` 已有镜头起止时间、字幕分段、内容描述和代表帧。
+- 当前没有结构化人物实体、人脸轨迹或跨素材身份聚类，不能可靠判断多个素材中是否为同一个人。
+
+写入 `shots` 的剪辑证据至少包含：
+
+```ts
+type ShotTranscriptSegment = {
+  startSec: number;
+  endSec: number;
+  text: string;
+  speakerId?: string;
+  words?: Array<{
+    text: string;
+    startSec: number;
+    endSec: number;
+  }>;
+};
+
+type TranscriptEvidence = {
+  granularity: "segment" | "word";
+  segments: ShotTranscriptSegment[];
+};
+
+type PersonAppearance = {
+  id: string;
+  personId?: string;       // 未达到跨素材合并阈值时保持为空
+  videoId: string;
+  shotId: string;
+  trackId: string;         // 单素材内连续跟踪 ID
+  startSec: number;
+  endSec: number;
+  confidence: number;
+  thumbnailUrl?: string;
+  speakingConfidence?: number;
+};
+```
+
+人物识别分三层，不能让视觉 LLM 直接决定“这是同一个人”：
+
+1. 单素材内做人脸检测和连续跟踪，生成 `trackId` 和出现时间范围。
+2. 对清晰人脸生成本地特征向量，在素材库范围聚类为稳定 `personId`。
+3. 低置信度候选保持未归并，允许用户命名、合并和拆分人物；人工决策优先于自动聚类。
+
+说话人身份与出镜人物身份分开处理：
+
+- 音频 diarization 先产生独立 `speakerId`。
+- 只有口型活动、同时间出镜和声纹等证据达到阈值时，才把 `speakerId` 关联到 `personId`。
+- 画外音、背影、遮挡和多人同框场景允许保持未知，不能强行匹配。
+
+隐私与降级：
+
+- 人脸特征默认只保存在本机，不上传给通用视觉模型。
+- 无清晰人脸时，只做单素材内的服装/身体轨迹辅助，不用于跨素材自动合并。
+- 不确定身份以多个匿名人物保留；“少合并”优先于把不同人物误并为同一个人。
+
 ## 8. LLM 剪辑规划契约
 
 模型输入必须包含真实候选镜头，至少提供：
@@ -276,6 +340,8 @@ export type EditTransition = {
 - 精彩度
 - 叙事角色
 - 对白摘要
+- 精确字幕分段
+- `personId` / 人物出现区间（存在且置信度足够时）
 - 事件或场景簇
 - 缩略图或代表帧（视觉模型场景）
 
@@ -348,17 +414,38 @@ export type EditTransition = {
 
 任务：
 
-- [ ] 明确 v3 素材归属：优先使用素材收藏夹或显式 `video_role`，不再通过 `account_id` 推导。
-- [ ] 修复 Library 和 Studio 重启后素材消失问题。
-- [ ] 扩展 `studio_sessions` 持久化契约，保存素材、方法论、缺失镜头等完整上下文。
-- [ ] 将完整分析产生的真实镜头语义写入或同步到 `shots`。
-- [ ] 为数据库 migration、row mapper 和 upsert 补测试。
+- [x] 明确 v3 素材归属：优先使用素材收藏夹或显式 `video_role`，不再通过 `account_id` 推导。
+- [x] 修复 Library 和 Studio 重启后素材消失问题。
+- [x] 扩展 `studio_sessions` 持久化契约，保存素材、方法论、缺失镜头等完整上下文。
+- [x] 将完整分析产生的真实镜头语义写入或同步到 `shots`。
+- [x] 在 `shots` 保留原始字幕分段时间、音频摘要和镜头事件描述，不再只存拼接文本。
+- [x] 为数据库 migration、row mapper 和 upsert 补测试。
 
 验收：
 
 - 素材导入后重启应用仍在素材库和 Studio 可见。
 - Studio 保存后重启，选择的素材、方法论、步骤和缺失镜头不丢。
 - 每个被用于剪辑的 Shot 都能追溯到真实视频和时间范围。
+- 每个有对白的 Shot 能读回原始字幕分段及其起止时间。
+
+### M0-3：时序证据与人物身份地基
+
+任务：
+
+- [ ] 验证当前 Whisper 后端的词级时间戳能力；不支持时保留 segment 级精度并显式标记。
+- [ ] 评估本地说话人分离后端，产出独立 `speakerId`，不与人物 ID 强绑定。
+- [ ] 新增单素材人脸检测与连续跟踪，保存 `person_appearances`。
+- [ ] 新增本地人脸特征与跨素材聚类，生成稳定 `personId`。
+- [ ] 支持人物命名、合并、拆分；人工调整可重复应用到后续素材。
+- [ ] Candidate Builder 可按人物、事件、对白和时间范围检索真实 Shot。
+
+验收：
+
+- 同一素材中，同一人物跨多个相邻镜头保持一致 `trackId`。
+- 固定测试素材中，同一人物跨视频可归到同一 `personId`；不同人物不发生错误自动合并。
+- 多人同框、背影、遮挡和画外音可以保持未知，不因缺证据被强行关联。
+- 任一人物出现记录都能回到 `videoId / shotId / startSec / endSec` 和代表图。
+- Planner 输入只使用达到置信度阈值或经人工确认的人物身份。
 
 ### M1：真实候选与剪辑规划
 
@@ -540,6 +627,8 @@ MVP 可以暂缓：
 - 同一事件包含全景、人物、动作、细节、反应镜头。
 - 包含模糊、抖动、重复、无声、强噪声等负样本。
 - 包含中文路径、空格路径、横竖屏混合。
+- 同一人物至少出现在 3 条不同素材中，并包含换衣、侧脸和光照变化。
+- 包含多人同框、背影、遮挡、画外音和不同人物外观相似的负样本。
 - 素材总时长建议 10～30 分钟。
 
 每次迭代固定评估：
@@ -550,6 +639,9 @@ MVP 可以暂缓：
 - 时间越界率：目标 `0%`
 - 预览成功率：目标 `100%`
 - 剪映草稿可打开率：通过 Spike 后目标 `100%`
+- 字幕分段时间越界率：目标 `0%`
+- 人物错误自动合并数：固定测试集目标 `0`
+- 跨素材同人物召回率：单独记录，不以降低错误合并为代价追求高召回
 
 粗剪质量：
 
@@ -620,6 +712,7 @@ src/
 electron/
 ├── editing/
 │   ├── candidate-builder.ts
+│   ├── analysis-shot-sync.ts
 │   ├── vlog-planner.ts
 │   ├── edit-plan-compiler.ts
 │   ├── edit-plan-validator.ts
@@ -628,6 +721,10 @@ electron/
 │       ├── exporter.ts
 │       ├── jianying-exporter.ts
 │       └── package-exporter.ts
+├── identity/
+│   ├── face-tracker.ts
+│   ├── person-clusterer.ts
+│   └── speaker-linker.ts
 └── migrations/
     └── ...
 ```
@@ -646,21 +743,21 @@ electron/
 
 1. `M0-1`：素材归属和 Studio 持久化修复。
 2. `M0-2`：分析结果到 `shots` 的统一同步。
-3. `M1-1`：`EditPlan` schema、编译器和校验器。
-4. `M1-2`：真实 Shot 候选和 Vlog planner。
-5. `M2`：FFmpeg 代理预览。
-6. `M3`：ClipIQ 内结构化粗剪反馈。
-7. `M4`：剪映兼容性 Spike。
-8. `M5`：正式剪映导出器。
+3. `M0-3`：时序证据、人物轨迹和跨素材身份地基。
+4. `M1-1`：`EditPlan` schema、编译器和校验器。
+5. `M1-2`：真实 Shot 候选和 Vlog planner。
+6. `M2`：FFmpeg 代理预览。
+7. `M3`：ClipIQ 内结构化粗剪反馈。
+8. `M4`：剪映兼容性 Spike。
+9. `M5`：正式剪映导出器。
 
 每个 PR 独立迁移、独立测试、可独立回滚。不要在同一 PR 同时修改素材数据模型、LLM prompt、FFmpeg 渲染和剪映草稿格式。
 
 ## 16. 开工检查清单
 
-- [ ] 从 `feature/v2` 创建 `feature/ai-vlog-rough-cut`。
+- [x] 从 `feature/v2` 创建 `feature/ai-vlog-rough-cut`。
 - [ ] 保留当前工作区中与本计划无关的未跟踪图标文件。
-- [ ] 先完成 M0 数据迁移设计，再动 Studio 生成逻辑。
+- [x] 先完成 M0 数据迁移设计，再动 Studio 生成逻辑。
 - [ ] 建立一套固定 Vlog 测试素材。
 - [ ] 确认首个目标剪映版本及其安装环境。
 - [ ] M4 通过前，不将某个第三方草稿库写死为正式依赖。
-

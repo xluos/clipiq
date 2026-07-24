@@ -55,6 +55,7 @@ describe("subscriptions: task:progress", () => {
     expect(useProgressStore.getState().progressByAnalysis.a1).toBeUndefined();
     expect(spy).toHaveBeenCalledWith({ queryKey: ["analyses"] });
     expect(spy).toHaveBeenCalledWith({ queryKey: ["videos"] });
+    expect(spy).toHaveBeenCalledWith({ queryKey: ["shots"] });
   });
 
   it("无 analysisId 的事件被忽略", () => {
@@ -68,6 +69,7 @@ describe("subscriptions: analysis:progress 终态", () => {
     const spy = vi.spyOn(qc, "invalidateQueries");
     fake.fire("analysis", { analysisId: "a1", projectId: "v1", progress: 100, stage: "完成", stageIndex: 9 });
     expect(spy).toHaveBeenCalledWith({ queryKey: ["analyses"] });
+    expect(spy).toHaveBeenCalledWith({ queryKey: ["shots"] });
     expect(useProgressStore.getState().pipelineByAnalysis.a1.stages[9].status).toBe("done");
   });
 });
