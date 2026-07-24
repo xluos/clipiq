@@ -147,6 +147,64 @@ function validateCaption(target: IssueTarget, cue: CaptionCue, path: string): vo
   }
 }
 
+function validateBeatAnalysis(
+  target: IssueTarget,
+  analysis: NonNullable<AudioClip["beatAnalysis"]>,
+  path: string,
+): void {
+  const rangeValid = validateTimeRange(
+    target,
+    analysis.analyzedStartUs,
+    analysis.analyzedEndUs,
+    `${path}.range`,
+  );
+  if (analysis.algorithmVersion !== "energy-onset-v1") {
+    add(target, "error", "UNSUPPORTED_BEAT_ALGORITHM", "不支持的节拍分析算法版本。", `${path}.algorithmVersion`);
+  }
+  if (!["usable", "low_confidence", "insufficient_audio"].includes(analysis.status)) {
+    add(target, "error", "INVALID_BEAT_STATUS", "节拍分析状态无效。", `${path}.status`);
+  }
+  if (!Number.isSafeInteger(analysis.sampleRate) || analysis.sampleRate < 8_000) {
+    add(target, "error", "INVALID_BEAT_SAMPLE_RATE", "节拍分析采样率无效。", `${path}.sampleRate`);
+  }
+  if (
+    !Number.isFinite(analysis.confidence)
+    || analysis.confidence < 0
+    || analysis.confidence > 1
+  ) {
+    add(target, "error", "INVALID_BEAT_CONFIDENCE", "节拍置信度必须在 0 到 1 之间。", `${path}.confidence`);
+  }
+  const beatTimesUs = Array.isArray(analysis.beatTimesUs) ? analysis.beatTimesUs : [];
+  if (!Array.isArray(analysis.beatTimesUs)) {
+    add(target, "error", "INVALID_BEAT_TIMES", "节拍点必须是数组。", `${path}.beatTimesUs`);
+  }
+  if (
+    analysis.status === "usable"
+    && (!(Number.isFinite(analysis.bpm) && Number(analysis.bpm) > 0)
+      || beatTimesUs.length < 2)
+  ) {
+    add(target, "error", "INCOMPLETE_USABLE_BEAT_GRID", "可用节拍必须包含 BPM 和至少两个节拍点。", path);
+  }
+  let previousBeatUs = -1;
+  for (const [index, beatTimeUs] of beatTimesUs.entries()) {
+    const beatPath = `${path}.beatTimesUs[${index}]`;
+    if (!validIntegerTime(beatTimeUs)) {
+      add(target, "error", "INVALID_BEAT_TIME", "节拍点必须是非负整数微秒。", beatPath);
+      continue;
+    }
+    if (beatTimeUs <= previousBeatUs) {
+      add(target, "error", "UNSORTED_BEAT_TIMES", "节拍点必须严格递增。", beatPath);
+    }
+    if (
+      rangeValid
+      && (beatTimeUs < analysis.analyzedStartUs || beatTimeUs > analysis.analyzedEndUs)
+    ) {
+      add(target, "error", "BEAT_OUTSIDE_ANALYSIS", "节拍点超出了分析范围。", beatPath);
+    }
+    previousBeatUs = beatTimeUs;
+  }
+}
+
 export function validateEditPlan(
   plan: EditPlan,
   options: EditPlanValidationOptions = {},
@@ -262,6 +320,9 @@ export function validateEditPlan(
           add(target, "error", "AUDIO_TIMELINE_NOT_INTEGER_US", "音频位置必须是非负整数微秒。", `${itemPath}.timelineInUs`);
         }
         validateTimeRange(target, audio.sourceInUs, audio.sourceOutUs, `${itemPath}.source`);
+        if (audio.beatAnalysis) {
+          validateBeatAnalysis(target, audio.beatAnalysis, `${itemPath}.beatAnalysis`);
+        }
       } else if (track.kind === "overlay") {
         const overlay = item as OverlayItem;
         validateTimeRange(target, overlay.startUs, overlay.endUs, itemPath);

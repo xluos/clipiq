@@ -987,6 +987,28 @@ export type AudioClip = {
     enabled: boolean;
     targetVolume: number;
   };
+  beatAnalysis?: AudioBeatAnalysis;
+};
+
+export type AudioBeatAnalysis = {
+  algorithmVersion: "energy-onset-v1";
+  status: "usable" | "low_confidence" | "insufficient_audio";
+  sampleRate: number;
+  analyzedStartUs: number;
+  analyzedEndUs: number;
+  bpm?: number;
+  confidence: number;
+  beatTimesUs: number[];
+  reason?: string;
+};
+
+export type BeatSyncSuggestion = {
+  fromClipId: string;
+  toClipId: string;
+  boundaryTimeUs: number;
+  beatTimeUs: number;
+  offsetUs: number;
+  confidence: number;
 };
 
 export type OverlayItem = {
