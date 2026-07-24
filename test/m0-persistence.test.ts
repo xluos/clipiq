@@ -119,6 +119,7 @@ describe("M0-1 videos.video_role", () => {
       width: 1920,
       height: 1080,
       orientation: "landscape",
+      accountId: "account-1",
       videoRole: "asset",
       status: "ready",
       tags: ["露营"],
@@ -126,12 +127,25 @@ describe("M0-1 videos.video_role", () => {
       updatedAt: now,
     });
     repository.upsert({ id: "custom-material", title: "露营素材 01" });
+    repository.upsert({
+      id: "custom-material",
+      localPath: "/tmp/camp-vertical.mov",
+      durationSec: 13,
+      width: 1080,
+      height: 1920,
+      orientation: "portrait",
+    });
 
     const restored = repository.get("custom-material");
     expect(restored).toMatchObject({
       id: "custom-material",
       title: "露营素材 01",
-      localPath: "/tmp/camp.mov",
+      localPath: "/tmp/camp-vertical.mov",
+      durationSec: 13,
+      width: 1080,
+      height: 1920,
+      orientation: "portrait",
+      accountId: "account-1",
       videoRole: "asset",
       kind: "asset",
       tags: ["露营"],

@@ -467,6 +467,7 @@ type VideoClipEvidenceSegment = {
 
 - [x] 明确 v3 素材归属：优先使用素材收藏夹或显式 `video_role`，不再通过 `account_id` 推导。
 - [x] 修复 Library 和 Studio 重启后素材消失问题。
+- [x] 内容分析与完整分析结束时将 FFprobe 的时长、宽高和方向通过 video repo 完整回写，避免账号竖屏素材重启后回落成默认横屏。
 - [x] 扩展 `studio_sessions` 持久化契约，保存素材、方法论、缺失镜头等完整上下文。
 - [x] 将完整分析产生的真实镜头语义写入或同步到 `shots`。
 - [x] 在 `shots` 保留原始字幕分段时间、音频摘要和镜头事件描述，不再只存拼接文本。

@@ -7025,8 +7025,19 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
         mainAnalysisFailed ? "主分析失败" : null,
         Date.now(), analysisId,
       );
-      db.prepare("UPDATE videos SET status = ?, thumbnail_url = COALESCE(?, thumbnail_url), title = COALESCE(?, title), updated_at = ? WHERE id = ?")
-        .run(finalStatus === "completed" ? "completed" : "failed", updatedProject.thumbnailUrl || null, updatedProject.videoName || null, Date.now(), updatedProject.id);
+      getVideoRepository().upsert({
+        id: updatedProject.id,
+        status: finalStatus === "completed" ? "completed" : "failed",
+        localPath: inputPath,
+        durationSec: updatedProject.durationSec,
+        width: updatedProject.width,
+        height: updatedProject.height,
+        orientation: updatedProject.orientation,
+        ...(updatedProject.thumbnailUrl
+          ? { thumbnailUrl: updatedProject.thumbnailUrl }
+          : {}),
+        ...(updatedProject.videoName ? { title: updatedProject.videoName } : {}),
+      });
       if (syncedShots.length > 0) {
         getShotRepository().replaceForVideo(project.id, syncedShots, { preserveFavorites: true });
         log.info("shots:sync", `[analysis:${analysisId}] 已同步 ${syncedShots.length} 个真实镜头到 shots`);
@@ -9899,10 +9910,17 @@ app.whenReady().then(async () => {
       db.prepare(
         "UPDATE analyses SET status = 'completed', result = ?, completed_at = ? WHERE id = ?"
       ).run(JSON.stringify(videoSummary), Date.now(), analysisId);
-      // 更新 video 的本地路径
+      // 内容分析已经读过真实文件，必须把完整媒体元数据写回。
+      // 只写 local_path 会让 width/height 继续为 0，重启后 orientation 回落成默认横屏。
       if (videoPath) {
-        db.prepare("UPDATE videos SET local_path = ?, updated_at = ? WHERE id = ?")
-          .run(videoPath, Date.now(), videoId);
+        getVideoRepository().upsert({
+          id: videoId,
+          localPath: videoPath,
+          durationSec: inspected.durationSec,
+          width: inspected.width,
+          height: inspected.height,
+          orientation: inspected.orientation,
+        });
       }
       send(100, "完成", "内容分析完成");
       sendStatus("done", { summary: videoSummary, progress: 100 });
