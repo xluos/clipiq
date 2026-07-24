@@ -72,6 +72,13 @@ const {
   migrateEditPlanSchema,
 } = require("./repositories/edit-plan-repository");
 const { buildShotsFromAnalysis } = require("./editing/analysis-shot-sync");
+const { buildVlogCandidates } = require("./editing/candidate-builder");
+const {
+  buildVlogPlannerPrompt,
+  parseVlogPlannerOutput,
+  VLOG_PLANNER_OUTPUT_SCHEMA,
+} = require("./editing/vlog-planner");
+const { compileEditPlan } = require("./editing/edit-plan-compiler");
 const ElectronStore = require("electron-store");
 
 let _cfgStore = null;
@@ -7794,6 +7801,173 @@ app.whenReady().then(async () => {
     return { ok: true, deleted: getEditPlanRepository().delete(planId) };
   });
 
+  ipcMain.handle("editPlans:generate", async (_event, payload = {}) => {
+    const sessionId = String(payload.sessionId || "").trim();
+    if (!sessionId) throw new Error("生成粗剪需要 sessionId");
+    const session = getStudioSessionRepository().get(sessionId);
+    if (!session) throw new Error(`Studio 会话不存在: ${sessionId}`);
+
+    const goal = String(payload.goal || session.goal || "").trim();
+    if (!goal) throw new Error("生成粗剪需要剪辑目标");
+    const targetDurationSec = Number(payload.targetDurationSec ?? session.targetDurationSec);
+    if (!(Number.isFinite(targetDurationSec) && targetDurationSec > 0)) {
+      throw new Error("生成粗剪需要有效目标时长");
+    }
+    const targetDurationUs = Math.round(targetDurationSec * 1_000_000);
+    const identityConfidence = payload.minimumIdentityConfidence == null
+      ? undefined
+      : Number(payload.minimumIdentityConfidence);
+    if (
+      identityConfidence != null
+      && !(Number.isFinite(identityConfidence) && identityConfidence >= 0 && identityConfidence <= 1)
+    ) {
+      throw new Error("人物身份置信度阈值必须在 0 到 1 之间");
+    }
+    const videoIds = [...new Set(
+      (Array.isArray(payload.videoIds) && payload.videoIds.length
+        ? payload.videoIds
+        : session.usedAssetIds || [])
+        .map(String)
+        .filter(Boolean),
+    )];
+    if (videoIds.length === 0) throw new Error("Studio 会话没有选择素材");
+
+    const allVideos = getVideoRepository().list({});
+    const videos = allVideos.filter((video) => videoIds.includes(video.id));
+    const shots = getShotRepository().list()
+      .filter((shot) => videoIds.includes(shot.videoId || shot.assetProjectId));
+    const appearances = getIdentityRepository().listAppearances()
+      .filter((appearance) => videoIds.includes(appearance.videoId));
+    const speakerTracks = getIdentityRepository().listSpeakerTracks()
+      .filter((track) => videoIds.includes(track.videoId));
+    const candidateResult = buildVlogCandidates(
+      shots,
+      videos,
+      appearances,
+      speakerTracks,
+      {
+        videoIds,
+        maximumCandidates: Math.max(1, Math.min(200, Number(payload.maximumCandidates) || 80)),
+        minimumIdentityConfidence: identityConfidence,
+      },
+    );
+    if (candidateResult.candidates.length === 0) {
+      const reasons = [...new Set(candidateResult.rejected.map((item) => item.message))];
+      throw new Error(`没有可执行的真实 Shot 候选${reasons.length ? `: ${reasons.join("；")}` : ""}`);
+    }
+
+    const requestedMethodologyIds = [...new Set(
+      (Array.isArray(payload.methodologyIds) && payload.methodologyIds.length
+        ? payload.methodologyIds
+        : session.appliedMethodologies || [])
+        .map(String)
+        .filter(Boolean),
+    )];
+    const methodologyIds = [];
+    const methodologySummaries = [];
+    for (const ref of requestedMethodologyIds) {
+      const row = getDb().prepare(`
+        SELECT * FROM methodologies
+        WHERE id = ? OR account_id = ?
+        ORDER BY version DESC
+        LIMIT 1
+      `).get(ref, ref);
+      if (!row?.data) continue;
+      try {
+        const data = JSON.parse(row.data);
+        methodologyIds.push(row.id);
+        const items = [
+          ...(Array.isArray(data.commonalities) ? data.commonalities : []),
+          ...(Array.isArray(data.playbook) ? data.playbook : []),
+        ].slice(0, 12);
+        const summary = items
+          .map((item) => [item?.title, item?.detail].filter(Boolean).join(": "))
+          .filter(Boolean)
+          .join("；");
+        methodologySummaries.push(summary || JSON.stringify(data).slice(0, 1600));
+      } catch {
+        // 损坏的方法论不进入 Planner。
+      }
+    }
+
+    const provider = await loadComplexTextProvider();
+    const isLocalProvider = provider?.source === "local_llama";
+    if (
+      !provider?.model
+      || (!isLocalProvider && (!provider.apiKeyRef || !provider.baseUrl))
+    ) {
+      throw new Error("未配置 complex_text 任务槽位的 LLM 供应商");
+    }
+    const prompt = buildVlogPlannerPrompt({
+      goal,
+      targetDurationUs,
+      candidates: candidateResult.candidates,
+      methodologySummaries,
+    });
+    const result = await openaiClient.callJsonCompletion(provider, {
+      ...prompt,
+      temperature: 0.2,
+      responseFormat: {
+        type: "json_schema",
+        json_schema: {
+          name: "vlog_edit_plan",
+          strict: false,
+          schema: VLOG_PLANNER_OUTPUT_SCHEMA,
+        },
+      },
+    });
+    const plannerResult = parseVlogPlannerOutput(
+      result.parsed,
+      candidateResult.candidates,
+    );
+    if (plannerResult.errors.length > 0) {
+      throw new Error(`Vlog Planner 输出无效: ${plannerResult.errors.join("；")}`);
+    }
+
+    const shotById = new Map(shots.map((shot) => [shot.id, shot]));
+    const planId = `edit-${require("node:crypto").randomUUID()}`;
+    const sources = candidateResult.candidates
+      .map((candidate) => {
+        const shot = shotById.get(candidate.shotId);
+        return shot ? {
+          shot,
+          videoId: candidate.videoId,
+          sourcePath: candidate.sourcePath,
+          appearances,
+          speakerTracks,
+        } : null;
+      })
+      .filter(Boolean);
+    const plan = compileEditPlan(plannerResult.selections, sources, {
+      planId,
+      sessionId,
+      targetDurationUs,
+      canvas: payload.canvas || { width: 1080, height: 1920, fps: 30 },
+      goal,
+      methodologyIds,
+      generatedAt: Date.now(),
+      plannerProvider: provider.id,
+      plannerModel: result.model || provider.model,
+      maxClipDurationUs: Math.round(
+        Math.max(1, Number(payload.maxClipDurationSec) || 12) * 1_000_000,
+      ),
+      minimumIdentityConfidence: identityConfidence,
+      sourceExists: (sourcePath) => fsSync.existsSync(sourcePath),
+    });
+    getEditPlanRepository().save(plan);
+    if (!plan.validation.valid) {
+      throw new Error(
+        `EditPlan 校验失败 (${plan.id}): ${plan.validation.errors.map((issue) => issue.message).join("；")}`,
+      );
+    }
+    return {
+      ok: true,
+      plan,
+      candidateCount: candidateResult.candidates.length,
+      rejectedCount: candidateResult.rejected.length,
+    };
+  });
+
   // v2: 多策略拉取 UP 主账号信息 + 视频列表
   // 策略: 平台 native API (头像/粉丝/简介) ∥ yt-dlp (视频列表 + 兜底元数据)
   const fetchAccountVideosCore = async ({ url: rawInput, limit = 20, onProgress, cancelled }) => {
@@ -8865,72 +9039,6 @@ app.whenReady().then(async () => {
     }
     const task = taskScheduler.enqueue("methodology", { collectionId, title }, { refId: collectionId, title });
     return taskScheduler.whenSettled(task.id);
-  });
-
-  // v2: Studio steps LLM 生成
-  // 输入: { goal, targetDurationSec, methodologies: [{name, summary}], assets: [{name, durationSec, shotCount}] }
-  // 输出: StudioStep[]
-  ipcMain.handle("sessions:generateSteps", async (_event, { goal, targetDurationSec, methodologies, assets } = {}) => {
-    const provider = await loadComplexTextProvider();
-    if (!provider?.apiKeyRef || !provider?.baseUrl || !provider?.model) {
-      throw new Error("未配置 complex_text 任务槽位的 LLM 供应商");
-    }
-    if (!goal || !String(goal).trim()) throw new Error("缺少剪辑目标");
-    const totalSec = Number(targetDurationSec) || 600;
-    const lines = [];
-    lines.push(`# 剪辑目标`); lines.push(String(goal).trim()); lines.push("");
-    lines.push(`# 目标时长 (秒): ${totalSec}`); lines.push("");
-    if (Array.isArray(methodologies) && methodologies.length > 0) {
-      lines.push("# 应用的对标账号方法论");
-      methodologies.forEach((m) => lines.push(`- ${m.name}: ${m.summary || "(无摘要)"}`));
-      lines.push("");
-    }
-    if (Array.isArray(assets) && assets.length > 0) {
-      lines.push("# 可用素材池");
-      assets.forEach((a, i) => lines.push(`- 素材 ${i + 1}: ${a.name} · ${a.durationSec || 0}s · ${a.shotCount || 0} 个镜头`));
-      lines.push("");
-    }
-    lines.push("请输出 JSON,steps 数组按时间顺序排列,总时长加起来等于目标时长:");
-    lines.push('{"steps":[{"index":1,"label":"开场钩子 · 0:00-0:30","startSec":0,"endSec":30,"body":"具体剪辑指令","shotRefs":[{"assetIndex":0,"rangeStart":0,"rangeEnd":30,"note":"素材1·主播半身"}],"missing":"如果缺关键镜头描述,否则省略"}]}');
-    try {
-      const result = await openaiClient.callJsonCompletion(provider, {
-        systemText:
-          "你是视频剪辑师助理。基于剪辑目标 + 对标账号方法论 + 可用素材池,给出叙事骨架 (4-7 段)。\n" +
-          "规则:\n" +
-          "- 每段 label 形如 '开场钩子 · 0:00-0:30',包含名字 + 时间范围\n" +
-          "- startSec/endSec 必填,所有段时间连续不重叠,合计=目标时长\n" +
-          "- body 是给剪辑师的具体指令 (1-2 句),引用方法论时直接说要点\n" +
-          "- shotRefs 用 assetIndex 引用素材池序号(从 0 开始),note 形如 '素材1 · 主播半身 0:00-0:08'\n" +
-          "- 没有可用素材时 shotRefs=[],并在 missing 里描述需要补什么镜头\n" +
-          "- 直接返回 JSON,不要 markdown 围栏,不要思考过程",
-        userText: lines.join("\n"),
-        temperature: 0.5,
-        // max_tokens 走 openai-client deriveDefaultMaxTokens (ctx 派生)
-      });
-      const parsed = result.parsed;
-      const rawSteps = Array.isArray(parsed?.steps) ? parsed.steps : [];
-      const steps = rawSteps.map((s, i) => ({
-        index: Number(s.index) || i + 1,
-        label: String(s.label || `段 ${i + 1}`),
-        startSec: Math.round(Number(s.startSec) || 0),
-        endSec: Math.round(Number(s.endSec) || 0),
-        body: String(s.body || ""),
-        shotRefs: Array.isArray(s.shotRefs) ? s.shotRefs.map((r) => {
-          const idx = Number(r.assetIndex);
-          const asset = Array.isArray(assets) && Number.isInteger(idx) ? assets[idx] : null;
-          return {
-            assetProjectId: asset?.id || "",
-            rangeStart: Math.round(Number(r.rangeStart) || 0),
-            rangeEnd: Math.round(Number(r.rangeEnd) || 0),
-            note: String(r.note || (asset?.name ? `${asset.name}` : "")),
-          };
-        }) : [],
-        missing: s.missing ? String(s.missing) : undefined,
-      }));
-      return { ok: true, steps };
-    } catch (err) {
-      throw new Error(`Studio steps LLM 失败: ${err?.message || String(err)}`);
-    }
   });
 
   // v2: 素材自动分镜 (复用 ffprobe + ffmpeg scenedetect,不需要 LLM)

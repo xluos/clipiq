@@ -85,7 +85,6 @@ const CHANNELS = [
   { method: "listSessions", channel: "sessions:list", kind: "invoke" },
   { method: "upsertSession", channel: "sessions:upsert", kind: "invoke" },
   { method: "deleteSession", channel: "sessions:delete", kind: "invoke" },
-  { method: "generateStudioSteps", channel: "sessions:generateSteps", kind: "invoke" },
 
   // ── shots ──
   { method: "listShots", channel: "shots:list", kind: "invoke" },
@@ -106,6 +105,7 @@ const CHANNELS = [
   { method: "getEditPlan", channel: "editPlans:get", kind: "invoke" },
   { method: "saveEditPlan", channel: "editPlans:save", kind: "invoke" },
   { method: "deleteEditPlan", channel: "editPlans:delete", kind: "invoke" },
+  { method: "generateEditPlan", channel: "editPlans:generate", kind: "invoke" },
 
   // ── 分析 ──
   { method: "analyzeVideo", channel: "analysis:start", kind: "invoke" },

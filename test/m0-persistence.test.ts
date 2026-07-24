@@ -168,6 +168,7 @@ describe("M0-1 studio_sessions", () => {
       usedAssetIds: ["asset-1"],
       steps,
       missingShots: ["营地远景"],
+      currentEditPlanId: "edit-plan-1",
       output: { kind: "draft" },
       createdAt: now,
       updatedAt: now,
@@ -182,6 +183,7 @@ describe("M0-1 studio_sessions", () => {
       usedAssetIds: ["asset-1"],
       steps,
       missingShots: ["营地远景"],
+      currentEditPlanId: "edit-plan-1",
       output: { kind: "draft" },
     });
   });

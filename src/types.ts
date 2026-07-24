@@ -1194,6 +1194,7 @@ export type StudioSession = {
   steps?: StudioStep[];
   scriptDraft?: string;
   missingShots?: string[];
+  currentEditPlanId?: string;
   output?: StudioSessionOutput;
   createdAt?: string;
   updatedAt?: string;

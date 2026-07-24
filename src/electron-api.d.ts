@@ -422,6 +422,22 @@ declare global {
       deleteEditPlan: (
         planId: string,
       ) => Promise<{ ok: true; deleted: boolean }>;
+      generateEditPlan: (payload: {
+        sessionId: string;
+        goal?: string;
+        targetDurationSec?: number;
+        videoIds?: string[];
+        methodologyIds?: string[];
+        maximumCandidates?: number;
+        minimumIdentityConfidence?: number;
+        maxClipDurationSec?: number;
+        canvas?: EditPlan["canvas"];
+      }) => Promise<{
+        ok: true;
+        plan: EditPlan;
+        candidateCount: number;
+        rejectedCount: number;
+      }>;
 
       // 后台拉取
       startAccountFetch: (payload: { accountId: string; url: string; range: AccountFetchRange; name?: string }) => Promise<{ ok: true; accepted: boolean; reason?: string; taskId?: string; status?: QueueTaskStatus }>;
@@ -478,12 +494,6 @@ declare global {
       generateCollectionMethodology: (payload: { collectionId: string }) => Promise<{ ok: true; methodology: import("./types").CollectionMethodology }>;
 
       // studio
-      generateStudioSteps: (payload: {
-        goal: string;
-        targetDurationSec: number;
-        methodologies?: Array<{ name: string; summary: string }>;
-        assets?: Array<{ id: string; name: string; durationSec: number; shotCount: number }>;
-      }) => Promise<{ ok: true; steps: import("./types").StudioStep[] }>;
       analyzeVideoShots: (payload: { videoId: string; filePath: string; durationSec: number }) => Promise<{
         ok: true;
         shots: Shot[];

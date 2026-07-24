@@ -4,7 +4,7 @@
 
 import { type FunctionComponent, useMemo, useState } from "react";
 import { useApp } from "../AppContext";
-import type { AppLocation, StudioSession, StudioStep } from "../types";
+import type { AppLocation, EditPlan, StudioSession, StudioStep } from "../types";
 import {
   Wand2,
   Scissors,
@@ -204,31 +204,18 @@ function StudioEditorScreen() {
     setGenError("");
     setGenerating(true);
     const totalSec = parseDuration(duration);
-    const usedAssets = assetProjects.filter((p) => usedAssetIds.includes(p.id));
-    const selectedMethods = accounts.filter((a) => appliedMethodologies.includes(a.id));
     try {
-      let steps;
-      // 优先调 LLM,失败 fallback 到本地启发式
-      if (window.videoAnalyzer?.generateStudioSteps) {
-        const result = await window.videoAnalyzer.generateStudioSteps({
-          goal: goalDraft,
-          targetDurationSec: totalSec,
-          methodologies: selectedMethods.map((a) => ({
-            name: a.name,
-            summary: [a.methodology?.hooks?.summary, a.methodology?.pacing?.summary, a.methodology?.structure?.summary, a.methodology?.visual?.summary]
-              .filter(Boolean).join(" / ") || "(该账号尚未生成方法论)",
-          })),
-          assets: usedAssets.map((p) => ({
-            id: p.id,
-            name: p.title,
-            durationSec: p.durationSec,
-            shotCount: p.shots?.length ?? 0,
-          })),
-        });
-        steps = result.steps;
-      } else {
-        steps = generateDraftSteps(goalDraft, totalSec, accounts, assetProjects, appliedMethodologies, usedAssetIds);
+      if (!window.videoAnalyzer?.generateEditPlan) {
+        throw new Error("浏览器预览环境不能生成真实粗剪");
       }
+      const result = await window.videoAnalyzer.generateEditPlan({
+        sessionId: session.id,
+        goal: goalDraft,
+        targetDurationSec: totalSec,
+        videoIds: usedAssetIds,
+        methodologyIds: appliedMethodologies,
+      });
+      const steps = editPlanToStudioSteps(result.plan, assetProjects);
       upsertSession({
         ...session,
         goal: goalDraft,
@@ -238,27 +225,15 @@ function StudioEditorScreen() {
         usedAssetIds,
         steps,
         missingShots: collectMissingShots(steps),
+        currentEditPlanId: result.plan.id,
         output: { kind: "draft" },
         updatedAt: new Date().toISOString(),
       });
     } catch (e) {
-      // LLM 失败 → fallback 启发式
-      const fallbackSteps = generateDraftSteps(goalDraft, totalSec, accounts, assetProjects, appliedMethodologies, usedAssetIds);
-      upsertSession({
-        ...session,
-        goal: goalDraft,
-        targetPlatform: platform,
-        targetDurationSec: totalSec,
-        appliedMethodologies,
-        usedAssetIds,
-        steps: fallbackSteps,
-        missingShots: collectMissingShots(fallbackSteps),
-        output: { kind: "idea" },
-        updatedAt: new Date().toISOString(),
-      });
-      setGenError(`LLM 失败,使用启发式 fallback: ${e instanceof Error ? e.message : String(e)}`);
+      setGenError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGenerating(false);
     }
-    setGenerating(false);
   };
 
   if (!session) {
@@ -595,60 +570,53 @@ function collectMissingShots(steps: StudioStep[]): string[] {
     .filter((value): value is string => Boolean(value));
 }
 
+function editPlanToStudioSteps(
+  plan: EditPlan,
+  assets: ReturnType<typeof useApp>["projects"],
+): StudioStep[] {
+  const videoTrack = plan.tracks.find((track) => track.kind === "video");
+  if (!videoTrack || videoTrack.kind !== "video") return [];
+  const durationWarning = plan.validation.warnings
+    .find((issue) => issue.code === "TARGET_DURATION_MISS");
+
+  return videoTrack.items.map((clip, index) => {
+    const durationUs = Math.round((clip.sourceOutUs - clip.sourceInUs) / clip.speed);
+    const startSec = clip.timelineInUs / 1_000_000;
+    const endSec = (clip.timelineInUs + durationUs) / 1_000_000;
+    const asset = assets.find((item) => item.id === clip.videoId);
+    const subtitle = clip.evidence?.subtitleSegments
+      ?.map((segment) => segment.text)
+      .filter(Boolean)
+      .join(" ");
+    const body = [
+      clip.evidence?.eventSummary,
+      subtitle ? `对白：${subtitle}` : undefined,
+    ].filter(Boolean).join(" · ") || clip.selectionReason;
+
+    return {
+      index: index + 1,
+      label: `${clip.selectionReason} · ${formatTimeShort(startSec)}-${formatTimeShort(endSec)}`,
+      startSec,
+      endSec,
+      body,
+      shotRefs: [{
+        assetProjectId: clip.videoId,
+        shotId: clip.shotId,
+        rangeStart: clip.sourceInUs / 1_000_000,
+        rangeEnd: clip.sourceOutUs / 1_000_000,
+        note: `${asset?.title || clip.videoId} · ${clip.evidence?.eventSummary || clip.shotId}`,
+      }],
+      ...(durationWarning && index === videoTrack.items.length - 1
+        ? { missing: "有效素材不足，粗剪时长未达到目标" }
+        : {}),
+    };
+  });
+}
+
 function formatTimeShort(sec?: number): string {
-  if (!sec) return "—";
+  if (sec == null) return "—";
   const s = Math.max(0, Math.round(sec));
   const m = Math.floor(s / 60);
   const r = s % 60;
   return `${m}:${String(r).padStart(2, "0")}`;
-}
-
-// 极简版剪辑思路生成: 把目标时长按典型 6 段比例拆,每段套上手头有的素材引用 + 标记缺失
-function generateDraftSteps(
-  goal: string,
-  totalSec: number,
-  accounts: ReturnType<typeof useApp>["accounts"],
-  assets: ReturnType<typeof useApp>["projects"],
-  appliedMethodologies: string[],
-  usedAssetIds: string[],
-): StudioStep[] {
-  const segments = [
-    { label: "开场钩子", weight: 0.05 },
-    { label: "问题陈述", weight: 0.1 },
-    { label: "一手实验", weight: 0.35 },
-    { label: "解释",     weight: 0.2 },
-    { label: "反向论证", weight: 0.18 },
-    { label: "收束",     weight: 0.12 },
-  ];
-  const total = totalSec || 600;
-  const usedAssets = assets.filter((a) => usedAssetIds.includes(a.id));
-  const goalShort = goal.split("\n")[0].slice(0, 24);
-  let cursor = 0;
-  return segments.map((seg, i) => {
-    const dur = Math.round(total * seg.weight);
-    const startSec = cursor;
-    const endSec = cursor + dur;
-    cursor = endSec;
-    const refAsset = usedAssets[i % Math.max(1, usedAssets.length)];
-    const shotRefs = refAsset ? [{
-      assetProjectId: refAsset.id,
-      rangeStart: startSec,
-      rangeEnd: endSec,
-      note: `${refAsset.videoName} · ${formatTimeShort(startSec)}-${formatTimeShort(endSec)}`,
-    }] : [];
-    const missing = usedAssets.length === 0
-      ? "暂无引用素材,需要从素材库添加"
-      : i === 2 ? "示波器读数 close-up,以及充电曲线动画" : undefined;
-    return {
-      index: i + 1,
-      label: `${seg.label} · ${formatTimeShort(startSec)} - ${formatTimeShort(endSec)}`,
-      startSec,
-      endSec,
-      body: i === 0
-        ? `用「${goalShort || "目标"}」相关的反常识结论开场,${appliedMethodologies.length > 0 ? `参考 ${accounts.find(a => a.id === appliedMethodologies[0])?.name || "对标账号"} 的冷开场套路。` : "建议先在账号分析里选一个对标账号应用其方法论。"}`
-        : `${seg.label}段 (${dur} 秒)。${appliedMethodologies.length > 0 ? "套用所选方法论。" : ""}`,
-      shotRefs,
-      missing,
-    };
-  });
 }

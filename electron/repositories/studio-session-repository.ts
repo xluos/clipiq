@@ -32,6 +32,7 @@ export function migrateStudioSessionSchema(db: DatabaseSync): void {
     "applied_methodologies TEXT",
     "used_asset_ids TEXT",
     "missing_shots TEXT",
+    "current_edit_plan_id TEXT",
   ]) {
     try {
       db.exec(`ALTER TABLE studio_sessions ADD COLUMN ${column}`);
@@ -53,6 +54,7 @@ export function rowToStudioSession(row: StudioSessionRow): StudioSession {
     steps: parseJson<StudioSession["steps"]>(row.steps),
     scriptDraft: row.script_draft || undefined,
     missingShots: parseJson<string[]>(row.missing_shots),
+    currentEditPlanId: row.current_edit_plan_id || undefined,
     output: parseJson<StudioSession["output"]>(row.output),
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
@@ -68,9 +70,9 @@ export function createStudioSessionRepository(db: DatabaseSync) {
     INSERT INTO studio_sessions (
       id, goal, target_platform, target_duration, main_shot_ratio,
       applied_methodologies, used_asset_ids, steps, script_draft, missing_shots,
-      output, created_at, updated_at
+      current_edit_plan_id, output, created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       goal=excluded.goal,
       target_platform=excluded.target_platform,
@@ -81,6 +83,7 @@ export function createStudioSessionRepository(db: DatabaseSync) {
       steps=excluded.steps,
       script_draft=excluded.script_draft,
       missing_shots=excluded.missing_shots,
+      current_edit_plan_id=excluded.current_edit_plan_id,
       output=excluded.output,
       updated_at=excluded.updated_at
   `);
@@ -112,6 +115,7 @@ export function createStudioSessionRepository(db: DatabaseSync) {
         merged.steps ? JSON.stringify(merged.steps) : null,
         merged.scriptDraft ?? null,
         merged.missingShots ? JSON.stringify(merged.missingShots) : null,
+        merged.currentEditPlanId ?? null,
         merged.output ? JSON.stringify(merged.output) : null,
         Date.parse(merged.createdAt || "") || now,
         now,
