@@ -527,6 +527,8 @@ type PersonAppearance = {
 
 ### M4：剪映兼容性 Spike
 
+当前 Spike 记录见 [`jianying-compatibility-spike.md`](./jianying-compatibility-spike.md)。2026-07-24 已完成候选工具审计和中文/空格路径下的草稿结构验证；开发机未安装剪映，真机打开、重启重开和手工导出仍阻塞。
+
 在正式接入前，用目标机器和目标剪映版本验证以下固定用例：
 
 1. 两段视频裁切、排序并打开草稿。
