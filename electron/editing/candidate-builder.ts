@@ -378,6 +378,7 @@ export function buildVlogCandidates(
           ? {}
           : { identityConfidence: appearance.identityConfidence }),
         ...(appearance.manualLocked ? { manualConfirmed: true } : {}),
+        ...(appearance.focusBounds ? { focusBounds: appearance.focusBounds } : {}),
       }];
     });
     const timedSpeakerTracks = speakerTracks.flatMap((track) => {

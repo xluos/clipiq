@@ -785,6 +785,12 @@ export type PersonAppearance = {
   confidence: number;
   identityConfidence?: number;
   thumbnailUrl?: string;
+  focusBounds?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
   source: "face_track" | "manual";
   manualLocked?: boolean;
   speakingConfidence?: number;
@@ -896,6 +902,12 @@ export type VideoClipPersonEvidence = {
   detectionConfidence: number;
   identityConfidence?: number;
   manualConfirmed?: boolean;
+  focusBounds?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
 };
 
 export type VideoClipSpeakerEvidence = {

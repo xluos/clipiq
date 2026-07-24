@@ -56,6 +56,8 @@ describe("EditPlan 确定性编译", () => {
         }),
         videoId: "video-1",
         sourcePath: "/videos/video-1.mp4",
+        sourceWidth: 1920,
+        sourceHeight: 1080,
         appearances: [
           {
             id: "appearance-high",
@@ -66,6 +68,7 @@ describe("EditPlan 确定性编译", () => {
             endSec: 4,
             confidence: 0.95,
             identityConfidence: 0.91,
+            focusBounds: { x: 0.72, y: 0.2, width: 0.12, height: 0.3 },
             source: "face_track" as const,
           },
           {
@@ -147,11 +150,23 @@ describe("EditPlan 确定性编译", () => {
           sourceInUs: 0,
           sourceOutUs: 4_000_000,
           timelineInUs: 0,
+          crop: {
+            x: 1192,
+            y: 0,
+            width: 606,
+            height: 1080,
+          },
           selectionReason: "交代准备过程",
           evidence: {
             eventSummary: "人物整理露营装备",
             personIds: ["person-a"],
             speakerIds: ["speaker-1"],
+            personAppearances: expect.arrayContaining([
+              expect.objectContaining({
+                appearanceId: "appearance-high",
+                focusBounds: { x: 0.72, y: 0.2, width: 0.12, height: 0.3 },
+              }),
+            ]),
             subtitleSegments: [{
               startUs: 200_000,
               endUs: 1_400_000,

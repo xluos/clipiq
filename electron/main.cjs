@@ -8502,14 +8502,18 @@ app.whenReady().then(async () => {
     }
 
     const shotById = new Map(shots.map((shot) => [shot.id, shot]));
+    const videoById = new Map(videos.map((video) => [video.id, video]));
     const planId = `edit-${require("node:crypto").randomUUID()}`;
     const sources = candidateResult.candidates
       .map((candidate) => {
         const shot = shotById.get(candidate.shotId);
+        const video = videoById.get(candidate.videoId);
         return shot ? {
           shot,
           videoId: candidate.videoId,
           sourcePath: candidate.sourcePath,
+          sourceWidth: video?.width,
+          sourceHeight: video?.height,
           appearances,
           speakerTracks,
         } : null;
@@ -8646,6 +8650,8 @@ app.whenReady().then(async () => {
         shot,
         videoId,
         sourcePath,
+        sourceWidth: video.width,
+        sourceHeight: video.height,
         appearances: getIdentityRepository().listAppearances(videoId),
         speakerTracks: getIdentityRepository().listSpeakerTracks(videoId),
       }], {

@@ -296,6 +296,27 @@ function segmentTrackByShot(track: FaceTrack): FaceTrackObservation[][] {
   return segments;
 }
 
+function focusBoundsForObservations(
+  observations: FaceTrackObservation[],
+): FaceBoundingBox | undefined {
+  if (observations.length === 0) return undefined;
+  const left = Math.min(...observations.map((observation) => observation.bbox.x));
+  const top = Math.min(...observations.map((observation) => observation.bbox.y));
+  const right = Math.max(...observations.map(
+    (observation) => observation.bbox.x + observation.bbox.width,
+  ));
+  const bottom = Math.max(...observations.map(
+    (observation) => observation.bbox.y + observation.bbox.height,
+  ));
+  if (![left, top, right, bottom].every(Number.isFinite)) return undefined;
+  return {
+    x: Math.max(0, left),
+    y: Math.max(0, top),
+    width: Math.min(1, right) - Math.max(0, left),
+    height: Math.min(1, bottom) - Math.max(0, top),
+  };
+}
+
 export function buildFaceTrackAppearances(tracks: FaceTrack[]): FaceTrackAppearance[] {
   return tracks.flatMap((track) =>
     segmentTrackByShot(track).map((observations, segmentIndex) => {
@@ -315,6 +336,7 @@ export function buildFaceTrackAppearances(tracks: FaceTrack[]): FaceTrackAppeara
         thumbnailUrl: [...observations]
           .filter((observation) => observation.thumbnailUrl)
           .sort((a, b) => b.quality - a.quality || a.timeSec - b.timeSec)[0]?.thumbnailUrl,
+        focusBounds: focusBoundsForObservations(observations),
         source: "face_track",
         embedding: track.prototypeEmbedding,
         embeddingModel: track.embeddingModel,

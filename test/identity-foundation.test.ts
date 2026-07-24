@@ -49,6 +49,7 @@ describe("人物身份 repository", () => {
         embeddingModel: "test-face-v1",
         embeddingQuality: 0.88,
         embedding: [0.1, 0.2, 0.3],
+        focusBounds: { x: 0.2, y: 0.1, width: 0.3, height: 0.4 },
       }],
       speakerTracks: [{
         id: "speaker-track-1",
@@ -97,6 +98,7 @@ describe("人物身份 repository", () => {
         id: "appearance-1",
         personId: "person-b",
         manualLocked: true,
+        focusBounds: { x: 0.2, y: 0.1, width: 0.3, height: 0.4 },
       }),
     ]);
     expect(repository.listSpeakerTracks("video-1")).toEqual([

@@ -107,7 +107,13 @@ describe("单素材人脸轨迹", () => {
       trackId: "video-a:face-track-1",
       startSec: 0,
       endSec: 1.2,
+      focusBounds: {
+        x: 0.1,
+        y: 0.2,
+        height: 0.3,
+      },
     }]);
+    expect(appearances[0].focusBounds?.width).toBeCloseTo(0.24);
     expect(appearances[0]).not.toHaveProperty("personId");
   });
 

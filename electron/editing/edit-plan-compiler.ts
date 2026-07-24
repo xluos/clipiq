@@ -15,6 +15,7 @@ import {
   type ShotValidationSource,
 } from "./edit-plan-validator";
 import { hasUsableWordTimings } from "./transcript-evidence";
+import { personAwareCrop } from "./smart-reframe";
 
 export type PlannerShotSelection = {
   shotId: string;
@@ -26,6 +27,8 @@ export type EditPlanShotSource = {
   shot: Shot;
   videoId: string;
   sourcePath: string;
+  sourceWidth?: number;
+  sourceHeight?: number;
   appearances?: PersonAppearance[];
   speakerTracks?: SpeakerTrack[];
 };
@@ -76,6 +79,18 @@ function stablePlannerDigest(
         sourcePath: source.sourcePath,
         startSec: source.shot.startSec,
         endSec: source.shot.endSec,
+        sourceWidth: source.sourceWidth,
+        sourceHeight: source.sourceHeight,
+        focusEvidence: (source.appearances || [])
+          .filter((appearance) => appearance.focusBounds)
+          .map((appearance) => ({
+            id: appearance.id,
+            videoId: appearance.videoId,
+            startSec: appearance.startSec,
+            endSec: appearance.endSec,
+            focusBounds: appearance.focusBounds,
+          }))
+          .sort((a, b) => a.id.localeCompare(b.id)),
       }))
       .sort((a, b) => a.shotId.localeCompare(b.shotId)),
   };
@@ -212,6 +227,7 @@ function buildEvidence(
         ? {}
         : { identityConfidence: appearance.identityConfidence }),
       ...(appearance.manualLocked ? { manualConfirmed: true } : {}),
+      ...(appearance.focusBounds ? { focusBounds: appearance.focusBounds } : {}),
     }];
   });
   const timedSpeakerTracks = (source.speakerTracks || []).flatMap((track) => {
@@ -347,6 +363,16 @@ export function compileEditPlan(
     if (durationUs <= 0) continue;
 
     const sourceOutUs = shotStartUs + durationUs;
+    const clipAppearances = (source.appearances || []).filter((appearance) => (
+      appearance.videoId === source.videoId
+      && overlaps(shotStartUs, sourceOutUs, appearance.startSec, appearance.endSec)
+    ));
+    const crop = personAwareCrop({
+      sourceWidth: source.sourceWidth,
+      sourceHeight: source.sourceHeight,
+      canvas: options.canvas,
+      appearances: clipAppearances,
+    });
     clips.push({
       id: `${options.planId}-video-${clips.length + 1}`,
       shotId: selection.shotId,
@@ -357,6 +383,7 @@ export function compileEditPlan(
       timelineInUs: timelineUs,
       speed: 1,
       volume: 1,
+      ...(crop ? { crop } : {}),
       selectionReason: selection.intent,
       confidence: selection.confidence,
       evidence: buildEvidence(

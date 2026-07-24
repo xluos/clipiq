@@ -57,6 +57,24 @@ function rowToPerson(row: Row): Person {
 }
 
 function rowToAppearance(row: Row): PersonAppearance {
+  const focusValues = [
+    row.focus_x,
+    row.focus_y,
+    row.focus_width,
+    row.focus_height,
+  ].map(Number);
+  const focusBounds = focusValues.every(Number.isFinite)
+    && focusValues[0] >= 0
+    && focusValues[1] >= 0
+    && focusValues[2] > 0
+    && focusValues[3] > 0
+      ? {
+        x: focusValues[0],
+        y: focusValues[1],
+        width: focusValues[2],
+        height: focusValues[3],
+      }
+      : undefined;
   return {
     id: row.id,
     personId: row.person_id || undefined,
@@ -70,6 +88,7 @@ function rowToAppearance(row: Row): PersonAppearance {
       ? undefined
       : Number(row.identity_confidence),
     thumbnailUrl: row.thumbnail_url || undefined,
+    focusBounds,
     source: row.source || "face_track",
     manualLocked: Boolean(row.manual_locked),
     speakingConfidence: row.speaking_confidence == null
@@ -121,6 +140,10 @@ export function migrateIdentitySchema(db: DatabaseSync): void {
       confidence REAL NOT NULL DEFAULT 0,
       identity_confidence REAL,
       thumbnail_url TEXT,
+      focus_x REAL,
+      focus_y REAL,
+      focus_width REAL,
+      focus_height REAL,
       source TEXT NOT NULL DEFAULT 'face_track',
       manual_locked INTEGER NOT NULL DEFAULT 0,
       speaking_confidence REAL,
@@ -184,6 +207,13 @@ export function migrateIdentitySchema(db: DatabaseSync): void {
   } catch {
     // 已迁移。
   }
+  for (const column of ["focus_x", "focus_y", "focus_width", "focus_height"]) {
+    try {
+      db.exec(`ALTER TABLE person_appearances ADD COLUMN ${column} REAL`);
+    } catch {
+      // 已迁移。
+    }
+  }
 }
 
 export function createIdentityRepository(db: DatabaseSync) {
@@ -214,9 +244,9 @@ export function createIdentityRepository(db: DatabaseSync) {
     INSERT INTO person_appearances (
       id, person_id, video_id, shot_id, track_id, start_sec, end_sec,
       confidence, identity_confidence, thumbnail_url, source, manual_locked,
-      speaking_confidence, embedding_model, embedding_quality,
-      face_embedding, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      speaking_confidence, embedding_model, embedding_quality, focus_x, focus_y,
+      focus_width, focus_height, face_embedding, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertSpeakerStatement = db.prepare(`
     INSERT INTO speaker_tracks (
@@ -414,6 +444,10 @@ export function createIdentityRepository(db: DatabaseSync) {
             appearance.speakingConfidence ?? null,
             appearance.embeddingModel || null,
             appearance.embeddingQuality ?? null,
+            appearance.focusBounds?.x ?? null,
+            appearance.focusBounds?.y ?? null,
+            appearance.focusBounds?.width ?? null,
+            appearance.focusBounds?.height ?? null,
             encodeEmbedding(appearance.embedding),
             Date.parse(appearance.createdAt || "") || now,
             now,

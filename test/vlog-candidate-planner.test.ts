@@ -68,6 +68,7 @@ describe("Vlog Candidate Builder", () => {
         endSec: 4,
         confidence: 0.95,
         identityConfidence: 0.92,
+        focusBounds: { x: 0.2, y: 0.1, width: 0.3, height: 0.4 },
         source: "face_track",
       },
       {
@@ -157,6 +158,7 @@ describe("Vlog Candidate Builder", () => {
           expect.objectContaining({
             trackId: "track-a",
             personId: "person-a",
+            focusBounds: { x: 0.2, y: 0.1, width: 0.3, height: 0.4 },
           }),
           expect.objectContaining({
             trackId: "track-b",
