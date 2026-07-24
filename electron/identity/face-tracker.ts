@@ -20,6 +20,7 @@ export type FaceTrackObservation = {
   frameId: string;
   detectionId: string;
   timeSec: number;
+  evidenceStartSec: number;
   evidenceEndSec: number;
   shotId?: string;
   thumbnailUrl?: string;
@@ -167,6 +168,12 @@ function observationFromDetection(
     return null;
   }
   const explicitEnd = frame.evidenceEndSec;
+  const explicitStart = frame.evidenceStartSec;
+  const evidenceStartSec = Number.isFinite(explicitStart)
+    && Number(explicitStart) >= 0
+    && Number(explicitStart) <= frame.timeSec
+      ? Number(explicitStart)
+      : frame.timeSec;
   const evidenceEndSec = Number.isFinite(explicitEnd) && Number(explicitEnd) > frame.timeSec
     ? Number(explicitEnd)
     : frame.timeSec + policy.minimumEvidenceDurationSec;
@@ -182,6 +189,7 @@ function observationFromDetection(
     frameId: frame.frameId,
     detectionId: detection.detectionId,
     timeSec: frame.timeSec,
+    evidenceStartSec,
     evidenceEndSec,
     shotId: frame.shotId,
     thumbnailUrl: frame.thumbnailUrl,
@@ -297,7 +305,7 @@ export function buildFaceTrackAppearances(tracks: FaceTrack[]): FaceTrackAppeara
         videoId: track.videoId,
         shotId: first.shotId,
         trackId: track.trackId,
-        startSec: first.timeSec,
+        startSec: first.evidenceStartSec,
         endSec: last.evidenceEndSec,
         confidence: observations.reduce(
           (sum, observation) => sum + observation.confidence,

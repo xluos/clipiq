@@ -41,6 +41,7 @@ export type FaceAnalysisFrame = {
   videoId: string;
   frameId: string;
   timeSec: number;
+  evidenceStartSec?: number;
   evidenceEndSec?: number;
   shotId?: string;
   imagePath: string;

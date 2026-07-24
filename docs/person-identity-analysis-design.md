@@ -21,14 +21,16 @@
 - Planner 对低置信度人物身份的过滤。
 - Provider 契约、模型许可门禁和确定性单素材轨迹构建器。
 - 人物分析编排器；Provider 未就绪或返回越界结果时不覆盖旧证据。
+- YuNet 2023 + ONNX Runtime Node 本地检测，输出人脸框、5 个关键点和质量分。
+- 按真实 Shot 生成 1 秒证据窗口，长素材最多 900 帧并记录降采样。
+- 同一 Shot 内按空间连续性生成匿名轨迹，并原子写入 `person_appearances`。
 
 尚未具备：
 
-- 可随 ClipIQ 发布的本地人脸检测运行时。
 - 经过授权并用固定测试集标定的人脸特征模型。
 - 通用多人说话人分离。
 
-因此当前生产分析不能宣称已经识别了具体人物；没有可靠向量时只保留匿名轨迹。
+因此当前生产分析已经能回答“这个时间范围画面里有几条匿名人物轨迹”，但不能宣称已经识别了具体人物；没有可靠向量时只保留匿名轨迹。
 
 ## 分层管线
 
@@ -82,11 +84,13 @@ Provider 必须显式声明：
 
 ### 检测
 
-第一候选是 [OpenCV Zoo 的 YuNet](https://github.com/opencv/opencv_zoo/blob/main/models/face_detection_yunet/README.md)。其目录明确采用 MIT License；它只负责人脸框和关键点，不负责跨素材身份。接入前还需决定：
+当前检测后端采用 [OpenCV Zoo 的 YuNet 2023](https://github.com/opencv/opencv_zoo/blob/main/models/face_detection_yunet/README.md)。其目录明确采用 MIT License；它只负责人脸框和关键点，不负责跨素材身份。
 
-- 使用 [ONNX Runtime Node](https://onnxruntime.ai/docs/get-started/with-javascript/node.html) 实现 Electron 原生推理，或随应用打包独立 sidecar。
-- 模型文件的版本、校验和、下载/升级策略。
-- Apple Silicon、Intel Mac 和 Windows 的性能基线。
+- Electron main 通过 [ONNX Runtime Node](https://onnxruntime.ai/docs/get-started/with-javascript/node.html) 做本地 CPU 推理。
+- 模型由 `ai-model-daemon` 按需下载和校验，不在 ClipIQ 中重复维护模型目录。
+- 固定 640 输入采用保持宽高比的 letterbox，后处理对齐 OpenCV `FaceDetectorYN` 的解码规则。
+- macOS arm64 已用 OpenCV Lena 样本完成真实推理与三帧连续轨迹落库；Intel Mac 和 Windows 仍需打包验收。
+- 本机三帧热运行约 240 ms；实际素材性能以抽帧开销和帧数为主，长素材通过 900 帧上限降级。
 
 ### 身份向量
 

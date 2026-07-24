@@ -1,6 +1,6 @@
 # ClipIQ AI Vlog 粗剪迭代计划
 
-> 状态：实施中（M0-1、M0-2、M1、M2 已完成，M0-3 检测后端待接入）
+> 状态：实施中（M0-1、M0-2、M1、M2 已完成，M0-3 本地检测已接入，跨素材身份与说话人分离待完成）
 > 适用分支基线：`feature/v2`  
 > 建议实施分支：`feature/ai-vlog-rough-cut`  
 > 更新日期：2026-07-24
@@ -443,7 +443,7 @@ type PersonAppearance = {
 - [x] 建立可插拔人脸分析 Provider 契约和生产模型许可门禁。
 - [x] 建立确定性单素材轨迹构建器；无向量时不跨 Shot 猜测同一人物。
 - [x] 建立人物分析编排器；Provider 未就绪或异常时不覆盖旧人物证据。
-- [ ] 新增单素材人脸检测与连续跟踪，保存 `person_appearances`。
+- [x] 新增 YuNet 单素材人脸检测与连续跟踪，按 1 秒证据窗口保存 `person_appearances`；长素材最多 900 帧并显式降采样。
 - [ ] 新增本地人脸特征与跨素材聚类，生成稳定 `personId`。
 - [ ] 在人物管理 UI 支持命名、合并、拆分；后端人工锁定与重分析保留已完成。
 - [ ] Candidate Builder 可按人物、事件、对白和时间范围检索真实 Shot。
@@ -747,8 +747,10 @@ electron/
 ├── identity/
 │   ├── face-analysis-provider.ts
 │   ├── face-tracker.ts
+│   ├── person-frame-sampler.ts
 │   ├── person-analysis-pipeline.ts
 │   ├── person-clusterer.ts
+│   ├── yunet-provider.ts
 │   └── speaker-linker.ts
 └── migrations/
     └── ...

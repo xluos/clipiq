@@ -482,6 +482,19 @@ export type AnalysisReport = {
     segmentCount?: number;
     textPreview?: string;
   } | null;
+  personAnalysis?: {
+    status: "completed" | "unavailable";
+    videoId: string;
+    analyzedFrameCount: number;
+    trackCount: number;
+    appearanceCount: number;
+    embeddingTrackCount: number;
+    modelId?: string;
+    sampledFrameCount: number;
+    sampleIntervalSec: number;
+    downsampled: boolean;
+    reason?: string;
+  };
   pipelineVersion?: string;
   schemaVersion?: string;
   generatedAt?: string;

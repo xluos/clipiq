@@ -99,6 +99,8 @@ export async function runPersonAppearanceAnalysis(
       || analysis.frame.videoId !== videoId
       || analysis.frame.imagePath !== requested.imagePath
       || analysis.frame.timeSec !== requested.timeSec
+      || analysis.frame.evidenceStartSec !== requested.evidenceStartSec
+      || analysis.frame.evidenceEndSec !== requested.evidenceEndSec
     ) {
       throw new Error(`人脸 Provider 返回了越界或被篡改的帧: ${analysis.frame.frameId}`);
     }

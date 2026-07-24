@@ -18,6 +18,7 @@ function frame(
       videoId: "video-a",
       frameId: `frame-${timeSec}`,
       timeSec,
+      evidenceStartSec: timeSec,
       evidenceEndSec: timeSec + 0.2,
       shotId,
       imagePath: `/frames/${timeSec}.jpg`,
@@ -184,5 +185,17 @@ describe("单素材人脸轨迹", () => {
     analysis.frame.timeSec = Number.NaN;
 
     expect(buildFaceTracks([analysis])).toEqual([]);
+  });
+
+  it("落库区间使用采样证据窗口，不把抽帧中点误当开始时间", () => {
+    const analysis = frame(1.5, "shot-a", [face("a-1", 0.1)]);
+    analysis.frame.evidenceStartSec = 1;
+    analysis.frame.evidenceEndSec = 2;
+    const appearances = buildFaceTrackAppearances(buildFaceTracks([analysis]));
+
+    expect(appearances[0]).toMatchObject({
+      startSec: 1,
+      endSec: 2,
+    });
   });
 });

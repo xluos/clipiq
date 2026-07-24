@@ -65,7 +65,33 @@ function ffprobeDirsToRemove(arch) {
   return dirs;
 }
 
-async function pruneAsar(resourcesDir, arch) {
+async function pruneOnnxRuntime(rootDir, platform, arch) {
+  const binRoot = path.join(
+    rootDir,
+    "node_modules",
+    "onnxruntime-node",
+    "bin",
+    "napi-v3",
+  );
+  if (!(await pathExists(binRoot))) return;
+  const platforms = await fs.readdir(binRoot, { withFileTypes: true });
+  for (const entry of platforms) {
+    if (!entry.isDirectory()) continue;
+    const platformDir = path.join(binRoot, entry.name);
+    if (entry.name !== platform) {
+      await removePath(platformDir);
+      continue;
+    }
+    const architectures = await fs.readdir(platformDir, { withFileTypes: true });
+    for (const architecture of architectures) {
+      if (architecture.isDirectory() && architecture.name !== arch) {
+        await removePath(path.join(platformDir, architecture.name));
+      }
+    }
+  }
+}
+
+async function pruneAsar(resourcesDir, platform, arch) {
   const asarPath = path.join(resourcesDir, "app.asar");
   if (!(await pathExists(asarPath))) return;
 
@@ -73,12 +99,15 @@ async function pruneAsar(resourcesDir, arch) {
   const nextAsar = `${asarPath}.next`;
   try {
     await asar.extractAll(asarPath, tmpDir);
-    await patchBinaryWrappers(tmpDir, arch);
-    for (const rel of ffprobeDirsToRemove(arch)) {
-      await removePath(path.join(tmpDir, rel));
+    await pruneOnnxRuntime(tmpDir, platform, arch);
+    if (platform === "darwin") {
+      await patchBinaryWrappers(tmpDir, arch);
+      for (const rel of ffprobeDirsToRemove(arch)) {
+        await removePath(path.join(tmpDir, rel));
+      }
+      await removePath(path.join(tmpDir, "node_modules", "ffprobe-static", "bin"));
+      await removePath(path.join(tmpDir, "node_modules", "@ffmpeg-installer", `darwin-${arch}`, "ffmpeg"));
     }
-    await removePath(path.join(tmpDir, "node_modules", "ffprobe-static", "bin"));
-    await removePath(path.join(tmpDir, "node_modules", "@ffmpeg-installer", `darwin-${arch}`, "ffmpeg"));
     await fs.rm(nextAsar, { force: true });
     await asar.createPackage(tmpDir, nextAsar);
     await fs.rename(nextAsar, asarPath);
@@ -141,8 +170,10 @@ module.exports = {
   }
 }
 
-async function pruneUnpacked(resourcesDir, arch) {
+async function pruneUnpacked(resourcesDir, platform, arch) {
   const unpackedDir = path.join(resourcesDir, "app.asar.unpacked");
+  await pruneOnnxRuntime(unpackedDir, platform, arch);
+  if (platform !== "darwin") return;
   for (const rel of ffprobeDirsToRemove(arch)) {
     await removePath(path.join(unpackedDir, rel));
   }
@@ -218,13 +249,18 @@ async function pruneElectronFramework(appPath) {
 }
 
 module.exports = async function afterPack(context) {
-  if (context.electronPlatformName !== "darwin") return;
-  const appPath = await findAppPath(context.appOutDir);
-  const resourcesDir = path.join(appPath, "Contents", "Resources");
+  const platform = context.electronPlatformName;
   const arch = archName(context);
-  console.log(`[after-pack-prune] pruning ${appPath} arch=${arch}`);
-  await pruneAsar(resourcesDir, arch);
-  await pruneUnpacked(resourcesDir, arch);
+  const appPath = platform === "darwin"
+    ? await findAppPath(context.appOutDir)
+    : null;
+  const resourcesDir = appPath
+    ? path.join(appPath, "Contents", "Resources")
+    : path.join(context.appOutDir, "resources");
+  console.log(`[after-pack-prune] pruning ${resourcesDir} platform=${platform} arch=${arch}`);
+  await pruneAsar(resourcesDir, platform, arch);
+  await pruneUnpacked(resourcesDir, platform, arch);
+  if (platform !== "darwin" || !appPath) return;
   await pruneSpider(resourcesDir);
   await pruneElectronFramework(appPath);
 };

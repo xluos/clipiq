@@ -90,6 +90,15 @@ const {
   buildAnalysisEvidenceQualityReport,
 } = require("./editing/analysis-evidence-quality");
 const {
+  buildPersonFrameSamplePlan,
+} = require("./identity/person-frame-sampler");
+const {
+  runPersonAppearanceAnalysis,
+} = require("./identity/person-analysis-pipeline");
+const {
+  YuNetFaceAnalysisProvider,
+} = require("./identity/yunet-provider");
+const {
   normalizeTranscriptSegments,
 } = require("./transcribe/transcript-normalizer.cjs");
 const ElectronStore = require("electron-store");
@@ -3337,6 +3346,130 @@ async function extractFrame(ffmpeg, inputPath, outputPath, second, width = 420, 
   ], {}, handle);
 }
 
+async function resolveYuNetModelPath(onProgress) {
+  const daemonClient = require("./daemon-client.cjs");
+  const modelId = "yunet";
+  const status = await daemonClient.getModelStatus(modelId);
+  if (!status) throw new Error("ai-model-daemon 未提供 YuNet 模型");
+
+  if (!status.ready) {
+    await daemonClient.downloadModel(modelId, (progress) => {
+      onProgress?.(progress);
+    });
+  }
+  const paths = await daemonClient.getModelPaths(modelId);
+  const modelPath = paths?.default || Object.values(paths || {})[0];
+  if (!modelPath || !fsSync.existsSync(modelPath)) {
+    throw new Error("YuNet 模型下载完成后仍未找到模型文件");
+  }
+  return modelPath;
+}
+
+async function runLocalPersonAppearanceAnalysis({
+  videoId,
+  analysisId,
+  shots,
+  ffmpeg,
+  inputPath,
+  artifactDir,
+  handle,
+  send,
+}) {
+  const samplePlan = buildPersonFrameSamplePlan(shots);
+  if (samplePlan.samples.length === 0) {
+    return {
+      status: "unavailable",
+      videoId,
+      analyzedFrameCount: 0,
+      trackCount: 0,
+      appearanceCount: 0,
+      embeddingTrackCount: 0,
+      sampledFrameCount: 0,
+      sampleIntervalSec: samplePlan.intervalSec,
+      downsampled: false,
+      reason: "没有可用于人物分析的真实 Shot",
+    };
+  }
+
+  send(97, "人物分析", "正在准备本地人脸检测模型。");
+  const modelPath = await resolveYuNetModelPath((progress) => {
+    const percent = Number(progress?.percent);
+    const progressText = Number.isFinite(percent)
+      ? ` · ${Math.round(percent)}%`
+      : "";
+    send(97, "人物分析", `正在下载 YuNet 人脸检测模型${progressText}`);
+  });
+  const provider = new YuNetFaceAnalysisProvider({ modelPath });
+  const readiness = await provider.getReadiness();
+  if (readiness.ready === false) {
+    return {
+      status: "unavailable",
+      videoId,
+      analyzedFrameCount: 0,
+      trackCount: 0,
+      appearanceCount: 0,
+      embeddingTrackCount: 0,
+      sampledFrameCount: 0,
+      sampleIntervalSec: samplePlan.intervalSec,
+      downsampled: samplePlan.downsampled,
+      reason: readiness.reason,
+    };
+  }
+
+  const frameDir = path.join(artifactDir, `person-frames-${analysisId}`);
+  await fs.mkdir(frameDir, { recursive: true });
+  const analysisFrames = [];
+  const batchSize = 4;
+  for (let offset = 0; offset < samplePlan.samples.length; offset += batchSize) {
+    ensureNotCancelled(handle);
+    const batch = samplePlan.samples.slice(offset, offset + batchSize);
+    const extracted = await Promise.all(batch.map(async (sample) => {
+      const ordinal = sample.sampleIndex + 1;
+      const framePath = path.join(
+        frameDir,
+        `face-${String(ordinal).padStart(4, "0")}.jpg`,
+      );
+      await extractFrame(ffmpeg, inputPath, framePath, sample.timeSec, 640, handle, 4);
+      return {
+        videoId,
+        frameId: `${videoId}-person-frame-${ordinal}`,
+        timeSec: sample.timeSec,
+        evidenceStartSec: sample.evidenceStartSec,
+        evidenceEndSec: sample.evidenceEndSec,
+        shotId: sample.shotId,
+        imagePath: framePath,
+        thumbnailUrl: createVideoMediaUrl(videoId, framePath),
+      };
+    }));
+    analysisFrames.push(...extracted);
+    const done = Math.min(offset + batch.length, samplePlan.samples.length);
+    send(
+      97,
+      "人物分析",
+      `已抽取 ${done}/${samplePlan.samples.length} 张人物分析帧`,
+    );
+  }
+
+  send(98, "人物分析", `正在检测 ${analysisFrames.length} 张画面中的人物。`);
+  const result = await runPersonAppearanceAnalysis({
+    videoId,
+    frames: analysisFrames,
+    provider,
+    repository: getIdentityRepository(),
+    usePolicy: { environment: "production" },
+    trackPolicy: {
+      maxGapSec: Math.max(1.5, samplePlan.intervalSec * 1.6),
+    },
+  });
+  return {
+    ...result,
+    modelId: provider.descriptor.models[0].id,
+    sampledFrameCount: analysisFrames.length,
+    sampleIntervalSec: samplePlan.intervalSec,
+    downsampled: samplePlan.downsampled,
+  };
+}
+
 // 把远程封面下载到 videos/<videoId>/cover.<ext>,返回可离线播放的 media:// URL;失败返回 null。
 // 远程封面(尤其抖音 p*-pc-sign 签名 URL)会过期,落到本地后封面就不会再"破"。
 async function downloadCoverImage(remoteUrl, videoId) {
@@ -6544,6 +6677,56 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
       }
     }
 
+    const syncedShots = mainAnalysisFailed
+      ? []
+      : buildShotsFromAnalysis(project.id, { nodes, report });
+    if (!mainAnalysisFailed && syncedShots.length > 0) {
+      try {
+        const personAnalysis = await runLocalPersonAppearanceAnalysis({
+          videoId: project.id,
+          analysisId,
+          shots: syncedShots,
+          ffmpeg,
+          inputPath,
+          artifactDir,
+          handle,
+          send,
+        });
+        report = { ...report, personAnalysis };
+        if (personAnalysis.status === "completed") {
+          send(
+            98,
+            "人物分析完成",
+            `${personAnalysis.trackCount} 条匿名人物轨迹 · ${personAnalysis.appearanceCount} 个出镜区间`,
+          );
+        } else {
+          send(98, "人物分析不可用", personAnalysis.reason || "本次未生成人物证据");
+        }
+      } catch (error) {
+        if (error instanceof AnalysisCancelledError || error?.name === "AbortError") {
+          throw new AnalysisCancelledError();
+        }
+        const reason = error?.message || String(error);
+        report = {
+          ...report,
+          personAnalysis: {
+            status: "unavailable",
+            videoId: project.id,
+            analyzedFrameCount: 0,
+            trackCount: 0,
+            appearanceCount: 0,
+            embeddingTrackCount: 0,
+            sampledFrameCount: 0,
+            sampleIntervalSec: 0,
+            downsampled: false,
+            reason,
+          },
+        };
+        send(98, "人物分析不可用", `${reason}（不影响其他分析结果）`);
+        log.warn("identity:yunet", `[analysis:${analysisId}] 人物分析降级: ${reason}`);
+      }
+    }
+
     // 封面优先级:已有封面 > 视频第一帧。不再用分析关键帧。
     // 已有封面若是会过期的远程 URL,顺手下到本地;都没有则抽视频第一帧。
     let coverUrl = project.thumbnailUrl || null;
@@ -6577,9 +6760,6 @@ async function analyzeProject(event, { project, provider: _legacyProvider, audio
     const topLabel = top ? ` · 最耗时 ${top.stage} ${(top.durationMs / 1000).toFixed(1)}s` : "";
     const tokenUsage = tokenLedger.snapshot();
     report = { ...report, timings: finalTimings, totalDurationMs, tokenUsage };
-    const syncedShots = mainAnalysisFailed
-      ? []
-      : buildShotsFromAnalysis(project.id, { nodes, report });
     // 写到 per-analysis 目录
     const analysisDir = getAnalysisDir(project.id, analysisId);
     await fs.mkdir(analysisDir, { recursive: true });
