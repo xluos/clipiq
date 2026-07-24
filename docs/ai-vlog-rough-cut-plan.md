@@ -649,6 +649,7 @@ Spike 通过条件：
 ```text
 export-package/
 ├── edit-plan.json
+├── timeline.fcpxml
 ├── manifest.json
 ├── captions.srt
 ├── media/
@@ -674,7 +675,7 @@ export-package/
 - [ ] 字幕关键词高亮。
 - [ ] 贴纸和花字模板。
 - [ ] 多版本粗剪对比。
-- [ ] FCPXML 或 DaVinci 导出。
+- [x] FCPXML 1.10 粗剪时间线导出：素材包内生成 `timeline.fcpxml`，保留视频裁切、排序、恒定变速和有文件的音轨；字幕、贴图、人物裁切及未验证转场均显式降级，验证见 [`fcpxml-export-validation.md`](./fcpxml-export-validation.md)。
 - [x] 将词级字幕（存在时）、人物出镜区间和说话人区间完整传入候选，并以连续对齐时间片写入 `EditPlan`。
 - [x] 为每次 Planner 输入生成并持久化分析证据质量报告，缺失能力不伪装为可用。
 - [x] Studio 显示语义覆盖、字幕粒度、人物一致性和说话人分离状态。

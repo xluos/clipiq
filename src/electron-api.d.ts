@@ -94,7 +94,14 @@ export type EditPackageExportWarning = {
   code:
     | "PREVIEW_NOT_INCLUDED"
     | "VOICEOVER_NOT_SYNTHESIZED"
-    | "OVERLAY_RESOURCE_NOT_PORTABLE";
+    | "OVERLAY_RESOURCE_NOT_PORTABLE"
+    | "FCPXML_TRANSITION_DOWNGRADED"
+    | "FCPXML_CROP_NOT_INCLUDED"
+    | "FCPXML_TRANSFORM_NOT_INCLUDED"
+    | "FCPXML_AUDIO_MIX_PARTIAL"
+    | "FCPXML_OVERLAY_NOT_INCLUDED"
+    | "FCPXML_CAPTIONS_AS_SRT"
+    | "FCPXML_AUDIO_NOT_INCLUDED";
   message: string;
   itemId?: string;
 };
@@ -104,6 +111,7 @@ export type EditPackageExportResult = {
   packagePath: string;
   manifestPath: string;
   planPath: string;
+  fcpxmlPath: string;
   captionsPath?: string;
   previewPath?: string;
   fileCount: number;

@@ -189,6 +189,10 @@ describe("EditPlan 素材包导出", () => {
     expect(overlayTrack?.items[0].assetPath).toMatch(/^overlays\//);
     expect(serialized).not.toContain(path.dirname(previewPath));
     expect(result.previewPath).toBe(path.join(result.packagePath, "preview.mp4"));
+    expect(result.fcpxmlPath).toBe(path.join(result.packagePath, "timeline.fcpxml"));
+    expect(await readFile(result.fcpxmlPath, "utf8")).toContain(
+      '<fcpxml version="1.10">',
+    );
     expect(await readFile(result.captionsPath!, "utf8")).toContain(
       "00:00:00,123 --> 00:00:01,456\n第一行\n第二行",
     );
@@ -199,11 +203,14 @@ describe("EditPlan 素材包导出", () => {
       "preview",
       "caption",
       "plan",
+      "fcpxml",
     ]));
     expect(manifest.files.every((file) => /^[a-f0-9]{64}$/.test(file.sha256))).toBe(true);
     expect(manifest.warnings.map((warning) => warning.code)).toEqual(expect.arrayContaining([
       "VOICEOVER_NOT_SYNTHESIZED",
       "OVERLAY_RESOURCE_NOT_PORTABLE",
+      "FCPXML_OVERLAY_NOT_INCLUDED",
+      "FCPXML_CAPTIONS_AS_SRT",
     ]));
   });
 

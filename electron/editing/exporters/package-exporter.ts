@@ -18,9 +18,10 @@ import type {
   CaptionCue,
   EditPlan,
 } from "../../../src/types";
+import { renderEditPlanFcpxml } from "./fcpxml-exporter";
 
 export type EditPackageFile = {
-  kind: "video" | "audio" | "overlay" | "preview" | "caption" | "plan";
+  kind: "video" | "audio" | "overlay" | "preview" | "caption" | "plan" | "fcpxml";
   relativePath: string;
   originalName: string;
   bytes: number;
@@ -32,7 +33,14 @@ export type EditPackageWarning = {
   code:
     | "PREVIEW_NOT_INCLUDED"
     | "VOICEOVER_NOT_SYNTHESIZED"
-    | "OVERLAY_RESOURCE_NOT_PORTABLE";
+    | "OVERLAY_RESOURCE_NOT_PORTABLE"
+    | "FCPXML_TRANSITION_DOWNGRADED"
+    | "FCPXML_CROP_NOT_INCLUDED"
+    | "FCPXML_TRANSFORM_NOT_INCLUDED"
+    | "FCPXML_AUDIO_MIX_PARTIAL"
+    | "FCPXML_OVERLAY_NOT_INCLUDED"
+    | "FCPXML_CAPTIONS_AS_SRT"
+    | "FCPXML_AUDIO_NOT_INCLUDED";
   message: string;
   itemId?: string;
 };
@@ -55,6 +63,7 @@ export type EditPackageExportResult = {
   packagePath: string;
   manifestPath: string;
   planPath: string;
+  fcpxmlPath: string;
   captionsPath?: string;
   previewPath?: string;
   fileCount: number;
@@ -322,6 +331,20 @@ export async function exportEditPlanPackage(
     }
 
     const portablePlan = replacePortablePaths(plan, relativePathBySource);
+    const fcpxmlPath = "timeline.fcpxml";
+    const fcpxml = renderEditPlanFcpxml(portablePlan, { packagePath });
+    warnings.push(...fcpxml.warnings);
+    await writeFile(path.join(tempPath, fcpxmlPath), fcpxml.xml, "utf8");
+    const fcpxmlInfo = await stat(path.join(tempPath, fcpxmlPath));
+    files.push({
+      kind: "fcpxml",
+      relativePath: fcpxmlPath,
+      originalName: "timeline.fcpxml",
+      bytes: fcpxmlInfo.size,
+      sha256: await sha256File(path.join(tempPath, fcpxmlPath)),
+      refs: fcpxml.refs,
+    });
+
     const planPath = "edit-plan.json";
     await writeFile(
       path.join(tempPath, planPath),
@@ -362,6 +385,7 @@ export async function exportEditPlanPackage(
       packagePath,
       manifestPath: path.join(packagePath, "manifest.json"),
       planPath: path.join(packagePath, planPath),
+      fcpxmlPath: path.join(packagePath, fcpxmlPath),
       ...(captionsPath ? { captionsPath: path.join(packagePath, captionsPath) } : {}),
       ...(options.previewPath
         && relativePathBySource.has(`preview:${path.resolve(options.previewPath)}`)
