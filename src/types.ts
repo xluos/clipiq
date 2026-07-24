@@ -832,6 +832,9 @@ export type CaptionCue = {
   endUs: number;
   text: string;
   styleId: string;
+  sourceClipId?: string;
+  sourceStartUs?: number;
+  sourceEndUs?: number;
   wordTimings?: Array<{
     text: string;
     startUs: number;
@@ -887,6 +890,8 @@ export type EditTransition = {
 export type EditPlan = {
   id: string;
   version: 1;
+  revision?: number;
+  parentPlanId?: string;
   sessionId: string;
   status: "draft" | "validated" | "rendered" | "exported";
   canvas: {
@@ -913,6 +918,33 @@ export type EditPlan = {
     warnings: EditPlanIssue[];
     errors: EditPlanIssue[];
   };
+};
+
+export type EditFeedbackAction =
+  | { type: "restore_plan"; targetPlanId: string }
+  | { type: "keep_clip"; clipId: string }
+  | { type: "delete_clip"; clipId: string }
+  | { type: "move_clip"; clipId: string; toIndex: number }
+  | { type: "trim_clip"; clipId: string; sourceInUs: number; sourceOutUs: number }
+  | { type: "replace_clip"; clipId: string; replacementShotId: string; intent?: string }
+  | { type: "update_caption"; cueId: string; text: string }
+  | {
+    type: "set_transition";
+    fromClipId: string;
+    toClipId: string;
+    transitionType: EditTransition["type"];
+    durationUs: number;
+  };
+
+export type EditFeedbackEvent = {
+  id: string;
+  sessionId: string;
+  planId: string;
+  resultingPlanId: string;
+  action: EditFeedbackAction;
+  beforeRevision: number;
+  afterRevision: number;
+  createdAt: number;
 };
 
 // 对标账号 (UP 主)

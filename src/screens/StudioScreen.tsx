@@ -4,9 +4,15 @@
 
 import { type FunctionComponent, useEffect, useMemo, useState } from "react";
 import { useApp } from "../AppContext";
-import type { EditPlanPreview } from "../electron-api";
+import type { EditPlanPreview, EditReplacementCandidate } from "../electron-api";
 import { useTaskQueueStore } from "../stores/tasks";
-import type { AppLocation, EditPlan, StudioSession, StudioStep } from "../types";
+import type {
+  AppLocation,
+  EditFeedbackAction,
+  EditPlan,
+  StudioSession,
+  StudioStep,
+} from "../types";
 import {
   Wand2,
   Scissors,
@@ -20,6 +26,10 @@ import {
   Check,
   Play,
   Square,
+  ArrowDown,
+  ArrowUp,
+  Captions,
+  Trash2,
 } from "lucide-react";
 
 export function StudioScreen() {
@@ -181,7 +191,14 @@ function StudioEditorScreen() {
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState("");
   const [preview, setPreview] = useState<EditPlanPreview | null>(null);
+  const [currentPlan, setCurrentPlan] = useState<EditPlan | null>(null);
   const [previewError, setPreviewError] = useState("");
+  const [editError, setEditError] = useState("");
+  const [editingAction, setEditingAction] = useState("");
+  const [replacingClipId, setReplacingClipId] = useState("");
+  const [replacementCandidates, setReplacementCandidates] = useState<
+    Record<string, EditReplacementCandidate[]>
+  >({});
   const [renderingPreview, setRenderingPreview] = useState(false);
   const [subtitleMode, setSubtitleMode] = useState<"burn" | "external">("burn");
   const tasksById = useTaskQueueStore((state) => state.tasksById);
@@ -200,12 +217,19 @@ function StudioEditorScreen() {
   useEffect(() => {
     let disposed = false;
     setPreview(null);
+    setCurrentPlan(null);
     setPreviewError("");
     const planId = session?.currentEditPlanId;
-    if (!planId || !window.videoAnalyzer?.getEditPlanPreview) return () => { disposed = true; };
-    window.videoAnalyzer.getEditPlanPreview(planId)
-      .then((value) => {
-        if (!disposed) setPreview(value);
+    const api = window.videoAnalyzer;
+    if (!planId || !api) return () => { disposed = true; };
+    Promise.all([
+      api.getEditPlan?.(planId) || Promise.resolve(null),
+      api.getEditPlanPreview?.(planId) || Promise.resolve(null),
+    ])
+      .then(([plan, previewValue]) => {
+        if (disposed) return;
+        setCurrentPlan(plan);
+        setPreview(previewValue);
       })
       .catch(() => {});
     return () => { disposed = true; };
@@ -246,6 +270,7 @@ function StudioEditorScreen() {
         methodologyIds: appliedMethodologies,
       });
       const steps = editPlanToStudioSteps(result.plan, assetProjects);
+      setCurrentPlan(result.plan);
       setPreview(null);
       setPreviewError("");
       upsertSession({
@@ -298,6 +323,65 @@ function StudioEditorScreen() {
     await window.videoAnalyzer.cancelQueueTask(previewTask.id);
   };
 
+  const applyFeedback = async (action: EditFeedbackAction) => {
+    const planId = currentPlan?.id || session?.currentEditPlanId;
+    if (!planId || !window.videoAnalyzer?.applyEditPlanFeedback || !session) {
+      setEditError("当前环境不能保存粗剪调整");
+      return;
+    }
+    setEditError("");
+    setEditingAction(action.type);
+    try {
+      const result = await window.videoAnalyzer.applyEditPlanFeedback({
+        planId,
+        action,
+      });
+      const steps = editPlanToStudioSteps(result.plan, assetProjects);
+      setCurrentPlan(result.plan);
+      setPreview(null);
+      setReplacingClipId("");
+      setReplacementCandidates({});
+      upsertSession({
+        ...session,
+        steps,
+        missingShots: collectMissingShots(steps),
+        currentEditPlanId: result.plan.id,
+        output: { kind: "draft" },
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      setEditError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setEditingAction("");
+    }
+  };
+
+  const showReplacementCandidates = async (clipId: string) => {
+    if (!currentPlan || !window.videoAnalyzer?.listEditReplacementCandidates) {
+      setEditError("当前环境不能加载替换镜头");
+      return;
+    }
+    setEditError("");
+    setReplacingClipId(clipId);
+    if (replacementCandidates[clipId]) return;
+    setEditingAction("load_replacements");
+    try {
+      const candidates = await window.videoAnalyzer.listEditReplacementCandidates({
+        planId: currentPlan.id,
+        clipId,
+      });
+      setReplacementCandidates((current) => ({
+        ...current,
+        [clipId]: candidates,
+      }));
+    } catch (error) {
+      setEditError(error instanceof Error ? error.message : String(error));
+      setReplacingClipId("");
+    } finally {
+      setEditingAction("");
+    }
+  };
+
   if (!session) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center bg-slate-50 dark:bg-[#0A0A0B] gap-4">
@@ -313,6 +397,8 @@ function StudioEditorScreen() {
   }
 
   const steps = session.steps || [];
+  const currentVideoTrack = currentPlan?.tracks.find((track) => track.kind === "video");
+  const currentCaptionTrack = currentPlan?.tracks.find((track) => track.kind === "caption");
 
   return (
     <div className="flex-1 flex flex-col bg-slate-50 dark:bg-[#0A0A0B] overflow-hidden">
@@ -332,6 +418,19 @@ function StudioEditorScreen() {
           {(session.output?.kind || "idea").toUpperCase()}
         </span>
         <div className="flex-1" />
+        {currentPlan?.parentPlanId && (
+          <button
+            onClick={() => applyFeedback({
+              type: "restore_plan",
+              targetPlanId: currentPlan.parentPlanId as string,
+            })}
+            disabled={Boolean(editingAction)}
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[12.5px] text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
+          >
+            <ArrowLeft className="w-3 h-3" strokeWidth={1.5} />
+            撤销上一步
+          </button>
+        )}
         <button
           onClick={regenerateSteps}
           disabled={generating}
@@ -526,6 +625,11 @@ function StudioEditorScreen() {
               </div>
             </section>
           )}
+          {editError && (
+            <div className="mb-3 rounded-md border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-[12px] text-amber-700 dark:text-amber-300">
+              {editError}
+            </div>
+          )}
 
           {steps.length === 0 ? (
             <div className="border border-dashed border-slate-300 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-900/30 px-8 py-12 text-center">
@@ -594,6 +698,164 @@ function StudioEditorScreen() {
                         </div>
                       )}
                     </div>
+                    {currentVideoTrack?.kind === "video" && currentVideoTrack.items[i] && (
+                      <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                        <button
+                          onClick={() => applyFeedback({
+                            type: "keep_clip",
+                            clipId: currentVideoTrack.items[i].id,
+                          })}
+                          disabled={Boolean(editingAction)}
+                          className="h-7 px-2 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-600 dark:text-slate-300 disabled:opacity-50"
+                        >
+                          保留
+                        </button>
+                        <button
+                          onClick={() => applyFeedback({
+                            type: "move_clip",
+                            clipId: currentVideoTrack.items[i].id,
+                            toIndex: i - 1,
+                          })}
+                          disabled={Boolean(editingAction) || i === 0}
+                          aria-label="镜头上移"
+                          className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 disabled:opacity-30"
+                        >
+                          <ArrowUp className="w-3 h-3" strokeWidth={1.5} />
+                        </button>
+                        <button
+                          onClick={() => applyFeedback({
+                            type: "move_clip",
+                            clipId: currentVideoTrack.items[i].id,
+                            toIndex: i + 1,
+                          })}
+                          disabled={Boolean(editingAction) || i === currentVideoTrack.items.length - 1}
+                          aria-label="镜头下移"
+                          className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 disabled:opacity-30"
+                        >
+                          <ArrowDown className="w-3 h-3" strokeWidth={1.5} />
+                        </button>
+                        <button
+                          onClick={() => {
+                            const clip = currentVideoTrack.items[i];
+                            applyFeedback({
+                              type: "trim_clip",
+                              clipId: clip.id,
+                              sourceInUs: clip.sourceInUs,
+                              sourceOutUs: clip.sourceOutUs - 500_000,
+                            });
+                          }}
+                          disabled={
+                            Boolean(editingAction)
+                            || currentVideoTrack.items[i].sourceOutUs
+                              - currentVideoTrack.items[i].sourceInUs <= 700_000
+                          }
+                          className="h-7 px-2 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-600 dark:text-slate-300 disabled:opacity-30"
+                        >
+                          缩短 0.5s
+                        </button>
+                        <button
+                          onClick={() => showReplacementCandidates(currentVideoTrack.items[i].id)}
+                          disabled={Boolean(editingAction)}
+                          className="h-7 px-2 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-600 dark:text-slate-300 disabled:opacity-50"
+                        >
+                          替换
+                        </button>
+                        {i > 0 && (
+                          <button
+                            onClick={() => {
+                              const left = currentVideoTrack.items[i - 1];
+                              const right = currentVideoTrack.items[i];
+                              const transition = currentPlan?.transitions.find((item) =>
+                                item.fromClipId === left.id && item.toClipId === right.id);
+                              const enable = !transition || transition.type === "cut";
+                              applyFeedback({
+                                type: "set_transition",
+                                fromClipId: left.id,
+                                toClipId: right.id,
+                                transitionType: enable ? "dissolve" : "cut",
+                                durationUs: enable ? 300_000 : 0,
+                              });
+                            }}
+                            disabled={Boolean(editingAction)}
+                            className="h-7 px-2 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-600 dark:text-slate-300 disabled:opacity-50"
+                          >
+                            {currentPlan?.transitions.some((item) =>
+                              item.toClipId === currentVideoTrack.items[i].id && item.type !== "cut")
+                              ? "改为硬切"
+                              : "启用叠化"}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => applyFeedback({
+                            type: "delete_clip",
+                            clipId: currentVideoTrack.items[i].id,
+                          })}
+                          disabled={Boolean(editingAction) || currentVideoTrack.items.length <= 1}
+                          className="h-7 px-2 inline-flex items-center gap-1 rounded-md border border-red-200 dark:border-red-900/60 text-[11.5px] text-red-600 dark:text-red-300 disabled:opacity-30"
+                        >
+                          <Trash2 className="w-3 h-3" strokeWidth={1.5} />
+                          删除
+                        </button>
+                        {currentCaptionTrack?.kind === "caption" && (
+                          currentCaptionTrack.items
+                            .filter((cue) => cue.sourceClipId === currentVideoTrack.items[i].id)
+                            .slice(0, 1)
+                            .map((cue) => (
+                              <CaptionEditor
+                                key={`${currentPlan?.id}-${cue.id}`}
+                                initialText={cue.text}
+                                disabled={Boolean(editingAction)}
+                                onSave={(text) => applyFeedback({
+                                  type: "update_caption",
+                                  cueId: cue.id,
+                                  text,
+                                })}
+                              />
+                            ))
+                        )}
+                        {replacingClipId === currentVideoTrack.items[i].id && (
+                          <div className="basis-full mt-1 flex items-center gap-1.5">
+                            <select
+                              defaultValue=""
+                              disabled={Boolean(editingAction)}
+                              onChange={(event) => {
+                                if (!event.target.value) return;
+                                applyFeedback({
+                                  type: "replace_clip",
+                                  clipId: currentVideoTrack.items[i].id,
+                                  replacementShotId: event.target.value,
+                                  intent: "用户替换镜头",
+                                });
+                              }}
+                              className="h-8 flex-1 min-w-0 px-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-[12px] text-slate-700 dark:text-slate-200"
+                            >
+                              <option value="">
+                                {editingAction === "load_replacements"
+                                  ? "加载候选中…"
+                                  : (replacementCandidates[currentVideoTrack.items[i].id]?.length || 0) > 0
+                                    ? "选择真实 Shot"
+                                    : "没有未使用的候选 Shot"}
+                              </option>
+                              {(replacementCandidates[currentVideoTrack.items[i].id] || [])
+                                .map((candidate) => (
+                                  <option key={candidate.shotId} value={candidate.shotId}>
+                                    {candidate.description || candidate.subtitle || candidate.shotId}
+                                    {" · "}
+                                    {(candidate.startUs / 1_000_000).toFixed(1)}-
+                                    {(candidate.endUs / 1_000_000).toFixed(1)}s
+                                  </option>
+                                ))}
+                            </select>
+                            <button
+                              onClick={() => setReplacingClipId("")}
+                              className="h-8 px-2 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-600 dark:text-slate-300"
+                            >
+                              取消
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </li>
                 ))}
               </ol>
@@ -673,6 +935,56 @@ function StudioEditorScreen() {
   );
 }
 
+const CaptionEditor: FunctionComponent<{
+  initialText: string;
+  disabled: boolean;
+  onSave: (text: string) => Promise<void>;
+}> = ({ initialText, disabled, onSave }) => {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(initialText);
+
+  if (!editing) {
+    return (
+      <button
+        onClick={() => setEditing(true)}
+        disabled={disabled}
+        className="h-7 px-2 inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-600 dark:text-slate-300 disabled:opacity-50"
+      >
+        <Captions className="w-3 h-3" strokeWidth={1.5} />
+        改字幕
+      </button>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1.5 basis-full mt-1">
+      <input
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        className="h-8 flex-1 min-w-0 px-2 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-[12px] text-slate-800 dark:text-slate-200"
+      />
+      <button
+        onClick={async () => {
+          await onSave(value);
+          setEditing(false);
+        }}
+        disabled={disabled || !value.trim()}
+        className="h-8 px-2 rounded-md bg-indigo-600 text-white text-[11.5px] disabled:opacity-50"
+      >
+        保存
+      </button>
+      <button
+        onClick={() => {
+          setValue(initialText);
+          setEditing(false);
+        }}
+        className="h-8 px-2 rounded-md border border-slate-300 dark:border-slate-700 text-[11.5px] text-slate-600 dark:text-slate-300"
+      >
+        取消
+      </button>
+    </div>
+  );
+};
+
 const KVRow: FunctionComponent<{
   label: string;
   value: string;
@@ -719,6 +1031,7 @@ function editPlanToStudioSteps(
 ): StudioStep[] {
   const videoTrack = plan.tracks.find((track) => track.kind === "video");
   if (!videoTrack || videoTrack.kind !== "video") return [];
+  const captionTrack = plan.tracks.find((track) => track.kind === "caption");
   const durationWarning = plan.validation.warnings
     .find((issue) => issue.code === "TARGET_DURATION_MISS");
 
@@ -727,8 +1040,10 @@ function editPlanToStudioSteps(
     const startSec = clip.timelineInUs / 1_000_000;
     const endSec = (clip.timelineInUs + durationUs) / 1_000_000;
     const asset = assets.find((item) => item.id === clip.videoId);
-    const subtitle = clip.evidence?.subtitleSegments
-      ?.map((segment) => segment.text)
+    const subtitle = (captionTrack?.kind === "caption"
+      ? captionTrack.items.filter((cue) => cue.sourceClipId === clip.id)
+      : clip.evidence?.subtitleSegments || [])
+      .map((segment) => segment.text)
       .filter(Boolean)
       .join(" ");
     const body = [

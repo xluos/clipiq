@@ -11,6 +11,8 @@ import type {
   AppConfig,
   Collection,
   EditPlan,
+  EditFeedbackAction,
+  EditFeedbackEvent,
   LocalFitLevel,
   MachineSpecs,
   Methodology,
@@ -71,6 +73,17 @@ export type EditPlanPreview = {
   renderedSegments: number;
   warnings?: string[];
   createdAt: number;
+};
+
+export type EditReplacementCandidate = {
+  shotId: string;
+  videoId: string;
+  startUs: number;
+  endUs: number;
+  description: string;
+  subtitle: string;
+  personIds: string[];
+  qualityScore: number;
 };
 
 export type RuntimeStatus = {
@@ -467,6 +480,23 @@ declare global {
         taskId?: string;
         preview: EditPlanPreview;
       }>;
+      listEditFeedbackEvents: (filter: {
+        sessionId?: string;
+        planId?: string;
+      }) => Promise<EditFeedbackEvent[]>;
+      applyEditPlanFeedback: (payload: {
+        planId: string;
+        action: EditFeedbackAction;
+      }) => Promise<{
+        ok: true;
+        plan: EditPlan;
+        event: EditFeedbackEvent;
+      }>;
+      listEditReplacementCandidates: (payload: {
+        planId: string;
+        clipId: string;
+        limit?: number;
+      }) => Promise<EditReplacementCandidate[]>;
 
       // 后台拉取
       startAccountFetch: (payload: { accountId: string; url: string; range: AccountFetchRange; name?: string }) => Promise<{ ok: true; accepted: boolean; reason?: string; taskId?: string; status?: QueueTaskStatus }>;

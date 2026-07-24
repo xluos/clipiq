@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type {
+  CaptionCue,
   EditPlan,
   EditPlanIssue,
   PersonAppearance,
@@ -259,19 +260,40 @@ export function compileEditPlan(
     type: "cut" as const,
     durationUs: 0,
   }));
+  const captions: CaptionCue[] = clips.flatMap((clip) =>
+    (clip.evidence?.subtitleSegments || []).map((segment, index) => ({
+      id: `${clip.id}-caption-${index + 1}`,
+      startUs: clip.timelineInUs
+        + Math.round((segment.startUs - clip.sourceInUs) / clip.speed),
+      endUs: clip.timelineInUs
+        + Math.round((segment.endUs - clip.sourceInUs) / clip.speed),
+      text: segment.text,
+      styleId: "proxy-default",
+      sourceClipId: clip.id,
+      sourceStartUs: segment.startUs,
+      sourceEndUs: segment.endUs,
+    })));
   const basePlan: EditPlan = {
     id: options.planId,
     version: 1,
+    revision: 1,
     sessionId: options.sessionId,
     status: "draft",
     canvas: options.canvas,
     targetDurationUs: options.targetDurationUs,
     actualDurationUs: timelineUs,
-    tracks: [{
-      id: `${options.planId}-video-track-1`,
-      kind: "video",
-      items: clips,
-    }],
+    tracks: [
+      {
+        id: `${options.planId}-video-track-1`,
+        kind: "video",
+        items: clips,
+      },
+      ...(captions.length > 0 ? [{
+        id: `${options.planId}-caption-track-1`,
+        kind: "caption" as const,
+        items: captions,
+      }] : []),
+    ],
     transitions,
     provenance: {
       goal: options.goal,

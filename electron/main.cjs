@@ -71,6 +71,10 @@ const {
   createEditPlanRepository,
   migrateEditPlanSchema,
 } = require("./repositories/edit-plan-repository");
+const {
+  createEditFeedbackRepository,
+  migrateEditFeedbackSchema,
+} = require("./repositories/edit-feedback-repository");
 const { buildShotsFromAnalysis } = require("./editing/analysis-shot-sync");
 const { buildVlogCandidates } = require("./editing/candidate-builder");
 const {
@@ -79,6 +83,7 @@ const {
   VLOG_PLANNER_OUTPUT_SCHEMA,
 } = require("./editing/vlog-planner");
 const { compileEditPlan } = require("./editing/edit-plan-compiler");
+const { applyEditPlanFeedback } = require("./editing/edit-plan-feedback");
 const { renderEditPlanProxy } = require("./editing/proxy-renderer");
 const ElectronStore = require("electron-store");
 
@@ -1382,6 +1387,7 @@ function getDb() {
   migrateShotSchema(db);
   migrateIdentitySchema(db);
   migrateEditPlanSchema(db);
+  migrateEditFeedbackSchema(db);
 
   // (methodologies 旧 schema 已在上方建表前弃掉重建,不再做数据迁移)
 
@@ -1464,6 +1470,14 @@ let _editPlanRepository = null;
 function getEditPlanRepository() {
   if (!_editPlanRepository) _editPlanRepository = createEditPlanRepository(getDb());
   return _editPlanRepository;
+}
+
+let _editFeedbackRepository = null;
+function getEditFeedbackRepository() {
+  if (!_editFeedbackRepository) {
+    _editFeedbackRepository = createEditFeedbackRepository(getDb());
+  }
+  return _editFeedbackRepository;
 }
 
 // ── tasks 表读写(task-queue 调度器的持久层)──
@@ -8066,6 +8080,189 @@ app.whenReady().then(async () => {
       candidateCount: candidateResult.candidates.length,
       rejectedCount: candidateResult.rejected.length,
     };
+  });
+
+  ipcMain.handle("editPlans:listFeedback", async (_event, filter = {}) => {
+    if (filter.sessionId) {
+      return getEditFeedbackRepository().listForSession(String(filter.sessionId));
+    }
+    if (filter.planId) {
+      return getEditFeedbackRepository().listForPlan(String(filter.planId));
+    }
+    return [];
+  });
+
+  ipcMain.handle("editPlans:listReplacementCandidates", async (_event, payload = {}) => {
+    const planId = String(payload.planId || "").trim();
+    const clipId = String(payload.clipId || "").trim();
+    const plan = getEditPlanRepository().get(planId);
+    if (!plan) throw new Error(`EditPlan 不存在: ${planId}`);
+    const videoTrack = plan.tracks.find((track) => track.kind === "video");
+    if (
+      !clipId
+      || videoTrack?.kind !== "video"
+      || !videoTrack.items.some((clip) => clip.id === clipId)
+    ) {
+      throw new Error("待替换镜头不存在");
+    }
+    const session = getStudioSessionRepository().get(plan.sessionId);
+    const videoIds = [...new Set([
+      ...(session?.usedAssetIds || []),
+      ...videoTrack.items.map((clip) => clip.videoId),
+    ])];
+    const videos = getVideoRepository().list({})
+      .filter((video) => videoIds.includes(video.id));
+    const shots = getShotRepository().list()
+      .filter((shot) => videoIds.includes(shot.videoId || shot.assetProjectId));
+    const candidates = buildVlogCandidates(
+      shots,
+      videos,
+      getIdentityRepository().listAppearances()
+        .filter((appearance) => videoIds.includes(appearance.videoId)),
+      getIdentityRepository().listSpeakerTracks()
+        .filter((track) => videoIds.includes(track.videoId)),
+      {
+        videoIds,
+        maximumCandidates: Math.max(1, Math.min(100, Number(payload.limit) || 30)),
+        minimumIdentityConfidence: 0.8,
+      },
+    ).candidates;
+    const usedShotIds = new Set(videoTrack.items.map((clip) => clip.shotId));
+    return candidates
+      .filter((candidate) => !usedShotIds.has(candidate.shotId))
+      .map((candidate) => ({
+        shotId: candidate.shotId,
+        videoId: candidate.videoId,
+        startUs: candidate.startUs,
+        endUs: candidate.endUs,
+        description: candidate.description,
+        subtitle: candidate.subtitleSegments.map((segment) => segment.text).join(" "),
+        personIds: candidate.personIds,
+        qualityScore: candidate.qualityScore,
+      }));
+  });
+
+  ipcMain.handle("editPlans:applyFeedback", async (_event, payload = {}) => {
+    const planId = String(payload.planId || "").trim();
+    const action = payload.action;
+    if (!planId || !action?.type) throw new Error("粗剪反馈需要 planId 和 action");
+    const sourcePlan = getEditPlanRepository().get(planId);
+    if (!sourcePlan) throw new Error(`EditPlan 不存在: ${planId}`);
+    const sourceSession = getStudioSessionRepository().get(sourcePlan.sessionId);
+    if (
+      sourceSession?.currentEditPlanId
+      && sourceSession.currentEditPlanId !== sourcePlan.id
+    ) {
+      throw new Error("当前粗剪版本已更新，请刷新后再操作");
+    }
+    const newPlanId = `edit-${require("node:crypto").randomUUID()}`;
+    let replacementClip;
+
+    if (action.type === "replace_clip") {
+      const oldVideoTrack = sourcePlan.tracks.find((track) => track.kind === "video");
+      const oldClip = oldVideoTrack?.kind === "video"
+        ? oldVideoTrack.items.find((clip) => clip.id === action.clipId)
+        : null;
+      if (!oldClip) throw new Error(`待替换镜头不存在: ${action.clipId}`);
+      const shot = getShotRepository().list()
+        .find((item) => item.id === action.replacementShotId);
+      if (!shot) throw new Error(`替换 Shot 不存在: ${action.replacementShotId}`);
+      const videoId = shot.videoId || shot.assetProjectId;
+      const video = getVideoRepository().list({}).find((item) => item.id === videoId);
+      const sourcePath = video?.localPath || video?.localFilePath;
+      if (!video || !sourcePath || !fsSync.existsSync(sourcePath)) {
+        throw new Error("替换 Shot 没有可用的本地素材");
+      }
+      const compiled = compileEditPlan([{
+        shotId: shot.id,
+        intent: String(action.intent || "用户替换镜头"),
+        confidence: 1,
+      }], [{
+        shot,
+        videoId,
+        sourcePath,
+        appearances: getIdentityRepository().listAppearances(videoId),
+        speakerTracks: getIdentityRepository().listSpeakerTracks(videoId),
+      }], {
+        planId: `${newPlanId}-replacement`,
+        sessionId: sourcePlan.sessionId,
+        targetDurationUs: Math.min(
+          Math.round((shot.endSec - shot.startSec) * 1_000_000),
+          Math.round((oldClip.sourceOutUs - oldClip.sourceInUs) / oldClip.speed),
+        ),
+        canvas: sourcePlan.canvas,
+        goal: sourcePlan.provenance.goal,
+        methodologyIds: sourcePlan.provenance.methodologyIds,
+        generatedAt: Date.now(),
+        sourceExists: (candidatePath) => fsSync.existsSync(candidatePath),
+      });
+      const replacementTrack = compiled.tracks.find((track) => track.kind === "video");
+      replacementClip = replacementTrack?.kind === "video"
+        ? replacementTrack.items[0]
+        : null;
+      if (!replacementClip || !compiled.validation.valid) {
+        throw new Error("替换 Shot 无法编译为可执行片段");
+      }
+    }
+
+    const now = Date.now();
+    let nextPlan;
+    if (action.type === "restore_plan") {
+      const targetPlan = getEditPlanRepository().get(String(action.targetPlanId || ""));
+      if (!targetPlan || targetPlan.sessionId !== sourcePlan.sessionId) {
+        throw new Error("待恢复的 EditPlan 版本不存在或不属于当前会话");
+      }
+      if (!targetPlan.validation?.valid) {
+        throw new Error("待恢复的 EditPlan 版本未通过校验");
+      }
+      const missingSource = targetPlan.tracks
+        .filter((track) => track.kind === "video")
+        .flatMap((track) => track.items)
+        .find((clip) => !fsSync.existsSync(clip.sourcePath));
+      if (missingSource) throw new Error(`待恢复版本的素材不存在: ${missingSource.sourcePath}`);
+      nextPlan = {
+        ...structuredClone(targetPlan),
+        id: newPlanId,
+        parentPlanId: sourcePlan.id,
+        revision: (sourcePlan.revision || 1) + 1,
+        status: "validated",
+      };
+    } else {
+      nextPlan = applyEditPlanFeedback(sourcePlan, action, {
+        newPlanId,
+        now,
+        replacementClip,
+        sourceExists: (candidatePath) => fsSync.existsSync(candidatePath),
+      });
+    }
+    const event = {
+      id: `feedback-${require("node:crypto").randomUUID()}`,
+      sessionId: sourcePlan.sessionId,
+      planId: sourcePlan.id,
+      resultingPlanId: nextPlan.id,
+      action,
+      beforeRevision: sourcePlan.revision || 1,
+      afterRevision: nextPlan.revision || 2,
+      createdAt: now,
+    };
+    const db = getDb();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      getEditPlanRepository().save(nextPlan);
+      getEditFeedbackRepository().record(event);
+      if (sourceSession) {
+        getStudioSessionRepository().upsert({
+          ...sourceSession,
+          currentEditPlanId: nextPlan.id,
+          updatedAt: new Date(now).toISOString(),
+        });
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    return { ok: true, plan: nextPlan, event };
   });
 
   // v2: 多策略拉取 UP 主账号信息 + 视频列表

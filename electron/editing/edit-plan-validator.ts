@@ -159,6 +159,15 @@ export function validateEditPlan(
   if (plan.version !== 1) {
     add(target, "error", "UNSUPPORTED_VERSION", "不支持的 EditPlan schema 版本。", "version");
   }
+  if (
+    plan.revision != null
+    && (!Number.isSafeInteger(plan.revision) || plan.revision < 1)
+  ) {
+    add(target, "error", "INVALID_REVISION", "EditPlan revision 必须是正整数。", "revision");
+  }
+  if (plan.parentPlanId != null && !plan.parentPlanId.trim()) {
+    add(target, "error", "INVALID_PARENT_PLAN_ID", "父版本 ID 不能为空。", "parentPlanId");
+  }
   if (!plan.id) add(target, "error", "MISSING_PLAN_ID", "EditPlan 缺少 id。", "id");
   if (!plan.sessionId) add(target, "error", "MISSING_SESSION_ID", "EditPlan 缺少 sessionId。", "sessionId");
   if (
@@ -181,6 +190,7 @@ export function validateEditPlan(
   const seenItemIds = new Set<string>();
   const videoClips: VideoClip[] = [];
   const videoClipDurationUs = new Map<string, number>();
+  const captionCues: CaptionCue[] = [];
   let computedDurationUs = 0;
 
   for (const [trackIndex, track] of (plan.tracks || []).entries()) {
@@ -243,7 +253,9 @@ export function validateEditPlan(
         videoClipDurationUs.set(clip.id, durationUs);
         previousVideoClip = clip;
       } else if (track.kind === "caption") {
-        validateCaption(target, item as CaptionCue, itemPath);
+        const cue = item as CaptionCue;
+        validateCaption(target, cue, itemPath);
+        captionCues.push(cue);
       } else if (track.kind === "audio") {
         const audio = item as AudioClip;
         if (!validIntegerTime(audio.timelineInUs)) {
@@ -268,6 +280,40 @@ export function validateEditPlan(
   }
 
   const clipIndex = new Map(videoClips.map((clip, index) => [clip.id, index]));
+  const videoClipById = new Map(videoClips.map((clip) => [clip.id, clip]));
+  for (const [index, cue] of captionCues.entries()) {
+    if (!cue.sourceClipId) continue;
+    const cuePath = `captionCues[${index}]`;
+    const clip = videoClipById.get(cue.sourceClipId);
+    if (!clip) {
+      add(target, "error", "CAPTION_SOURCE_CLIP_MISSING", "字幕引用了不存在的视频片段。", cuePath);
+      continue;
+    }
+    if (
+      !validIntegerTime(cue.sourceStartUs)
+      || !validIntegerTime(cue.sourceEndUs)
+      || cue.sourceEndUs <= cue.sourceStartUs
+      || cue.sourceStartUs < clip.sourceInUs
+      || cue.sourceEndUs > clip.sourceOutUs
+    ) {
+      add(target, "error", "CAPTION_SOURCE_RANGE_INVALID", "字幕来源时间超出了视频片段。", cuePath);
+      continue;
+    }
+    const expectedStartUs = clip.timelineInUs
+      + Math.round((cue.sourceStartUs - clip.sourceInUs) / clip.speed);
+    const expectedEndUs = clip.timelineInUs
+      + Math.round((cue.sourceEndUs - clip.sourceInUs) / clip.speed);
+    if (cue.startUs !== expectedStartUs || cue.endUs !== expectedEndUs) {
+      add(
+        target,
+        "error",
+        "CAPTION_TIMELINE_MISMATCH",
+        "字幕时间与来源片段时间不一致。",
+        cuePath,
+        { expectedStartUs, expectedEndUs },
+      );
+    }
+  }
   const transitionIds = new Set<string>();
   for (const [index, transition] of (plan.transitions || []).entries()) {
     const path = `transitions[${index}]`;

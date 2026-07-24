@@ -108,6 +108,9 @@ const CHANNELS = [
   { method: "generateEditPlan", channel: "editPlans:generate", kind: "invoke" },
   { method: "getEditPlanPreview", channel: "editPlans:getPreview", kind: "invoke" },
   { method: "renderEditPlanPreview", channel: "editPlans:renderPreview", kind: "invoke" },
+  { method: "listEditFeedbackEvents", channel: "editPlans:listFeedback", kind: "invoke" },
+  { method: "applyEditPlanFeedback", channel: "editPlans:applyFeedback", kind: "invoke" },
+  { method: "listEditReplacementCandidates", channel: "editPlans:listReplacementCandidates", kind: "invoke" },
 
   // ── 分析 ──
   { method: "analyzeVideo", channel: "analysis:start", kind: "invoke" },
